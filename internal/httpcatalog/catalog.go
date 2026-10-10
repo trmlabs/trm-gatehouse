@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -52,8 +53,9 @@ type Entry struct {
 	MaxRequestBytes  int64    `json:"maxRequestBytes,omitempty"`  // default 1 MiB; git 1 GiB (a push)
 	MaxResponseBytes int64    `json:"maxResponseBytes,omitempty"` // default 32 MiB; git 4 GiB
 	// Kind "git" makes the entry a git smart-HTTP binding, and "github-api" a
-	// GitHub REST binding limited to opening pull requests and commenting on
-	// them. Paths, methods and the credential are derived from the kind; the
+	// GitHub REST binding limited to pull request work and the reads and
+	// writes its repositories grant (GitHubAPIMatch). Paths, methods and the
+	// credential are derived from the kind; the
 	// key is a GitHub App installation token minted per repository.
 	// Kind "browser-session" lets an agent's own browser use a web app as a
 	// test user; see BrowserSessionBinding.
@@ -85,6 +87,21 @@ type GitRepo struct {
 	Repo        string   `json:"repo"` // owner/name
 	Access      string   `json:"access"`
 	RefPrefixes []string `json:"refPrefixes,omitempty"`
+	// The rest apply to github-api entries only, and each is off when unset.
+	// PullRequestPrefixes are head branch names (refs/heads/ removed) of pull
+	// requests in this repository that the pool may also comment on, label,
+	// edit the body of and mark ready, besides its own (from its push
+	// prefixes). It never opens a pull request from them.
+	PullRequestPrefixes []string `json:"pullRequestPrefixes,omitempty"`
+	// Labels are the only labels the pool may add to those pull requests.
+	Labels []string `json:"labels,omitempty"`
+	// DispatchEvents are the only repository_dispatch event types the pool may
+	// send. A dispatch runs workflows from the default branch, never the pool's.
+	DispatchEvents []string `json:"dispatchEvents,omitempty"`
+	// Actions lets the pool read workflow runs, jobs, logs and artifacts;
+	// Deployments lets it read deployments and their statuses.
+	Actions     bool `json:"actions,omitempty"`
+	Deployments bool `json:"deployments,omitempty"`
 }
 
 // KeyRef locates a key in a KV version 2 secret. A new KV version rotates it.
@@ -163,20 +180,25 @@ func (c Catalog) Current() Catalog { return c }
 func (c Catalog) Pools() []Pool { return append([]Pool(nil), c.pools...) }
 
 var (
-	ErrUnlisted  = errors.New("destination not in catalog")
-	ErrMethod    = errors.New("method not allowed for destination")
-	ErrPool      = errors.New("pool not granted destination")
-	ErrReadOnly  = errors.New("repository binding is read-only")
-	repoPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$`)
-	refPattern   = regexp.MustCompile(`^refs/[A-Za-z0-9._/-]+$`)
-	dnsLabel     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	pgName       = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
-	vaultSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	placeholder  = regexp.MustCompile(`^__vault_[A-Z][A-Z0-9_]*__$`)
-	hostPattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
-	tokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
-	idPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	kvPattern    = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
+	ErrUnlisted = errors.New("destination not in catalog")
+	ErrMethod   = errors.New("method not allowed for destination")
+	ErrPool     = errors.New("pool not granted destination")
+	ErrReadOnly = errors.New("repository binding is read-only")
+	repoPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$`)
+	refPattern  = regexp.MustCompile(`^refs/[A-Za-z0-9._/-]+$`)
+	// branchPrefixPattern is a pull request head prefix: a branch name ending
+	// in "/", so it names a directory of branches, never one branch's prefix.
+	branchPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*/$`)
+	labelPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,49}$`)
+	eventPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+	dnsLabel            = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	pgName              = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
+	vaultSegment        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	placeholder         = regexp.MustCompile(`^__vault_[A-Z][A-Z0-9_]*__$`)
+	hostPattern         = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	idPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	kvPattern           = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
 	// The same shapes the catalog's Terraform module accepts, since these
 	// strings end up in the broker's Vault policy.
 	vendorKeyPath = regexp.MustCompile(`^vendors(/[a-z0-9][a-z0-9_-]*)+$`)
@@ -375,6 +397,9 @@ func (e *Entry) normalize() error {
 		for _, r := range e.Git.Repos {
 			if r.Access != "write" || len(r.RefPrefixes) > 0 {
 				return fmt.Errorf("github-api repository %s must have access write (open pull requests) and no ref prefixes", r.Repo)
+			}
+			if err := r.normalizeGitHubAPI(); err != nil {
+				return err
 			}
 		}
 		if e.MaxRequestBytes == 1<<30 {
@@ -578,6 +603,9 @@ func (e *Entry) normalizeGit() error {
 	for i := range g.Repos {
 		r := &g.Repos[i]
 		r.Repo = strings.ToLower(r.Repo)
+		if e.Kind == "git" && (len(r.PullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0 || r.Actions || r.Deployments) {
+			return fmt.Errorf("repository %s: pull request prefixes, labels, dispatch events, actions and deployments belong to a github-api entry", r.Repo)
+		}
 		if !repoPattern.MatchString(r.Repo) || strings.Contains(r.Repo, "..") || strings.HasSuffix(r.Repo, ".git") || seen[r.Repo] {
 			return fmt.Errorf("invalid or duplicate repository %q", r.Repo)
 		}
@@ -606,6 +634,33 @@ func (e *Entry) normalizeGit() error {
 	return nil
 }
 
+// normalizeGitHubAPI checks a github-api repository's optional grants: each
+// list holds distinct, well-formed values.
+func (r *GitRepo) normalizeGitHubAPI() error {
+	check := func(what string, values []string, pattern *regexp.Regexp) error {
+		seen := map[string]bool{}
+		for _, v := range values {
+			if !pattern.MatchString(v) || strings.Contains(v, "..") || seen[strings.ToLower(v)] {
+				return fmt.Errorf("repository %s: invalid or duplicate %s %q", r.Repo, what, v)
+			}
+			seen[strings.ToLower(v)] = true
+		}
+		return nil
+	}
+	if err := check("pull request prefix", r.PullRequestPrefixes, branchPrefixPattern); err != nil {
+		return err
+	}
+	for _, prefix := range r.PullRequestPrefixes {
+		if strings.HasPrefix(prefix, "refs/") {
+			return fmt.Errorf("repository %s: pull request prefix %q is a branch name, without refs/heads/", r.Repo, prefix)
+		}
+	}
+	if err := check("label", r.Labels, labelPattern); err != nil {
+		return err
+	}
+	return check("dispatch event", r.DispatchEvents, eventPattern)
+}
+
 // GitRequest is a matched git smart-HTTP request.
 type GitRequest struct {
 	Entry *Entry
@@ -619,6 +674,24 @@ type GitRequest struct {
 	// CommentsOn is the pull request number a comment request targets: the
 	// broker comments only on a pull request whose head is one of HeadPrefixes.
 	CommentsOn int64
+	// The fields below describe every github-api request. Route names it
+	// (see githubAPIRoutes) and Method is the one method it was matched with.
+	Route  string
+	Method string
+	// Target is the pull request a write acts on (comment, label, body edit,
+	// ready); the broker acts only when its head is under HeadPrefixes, which
+	// then also holds the repository's PullRequestPrefixes. CommentID is the
+	// comment an edit targets, which must be the App's own.
+	Target    int64
+	CommentID int64
+	// Query is the request's query string, rebuilt from its allowed keys.
+	Query string
+	// Permissions is the token scope the route needs: "pull-requests",
+	// "contents-write" (a repository dispatch), "actions" or "deployments".
+	Permissions string
+	// Download marks a route GitHub answers with a redirect to a signed
+	// download URL, which the broker follows itself without the token.
+	Download bool
 }
 
 // GitMatch routes a request to a git entry. ok is false when the host has no
@@ -676,13 +749,15 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 }
 
 // GitHubAPIMatch routes a request to a github-api entry. ok is false when the
-// host has none. For a listed repository only these exist:
-// POST /repos/{owner}/{repo}/pulls (open a pull request, from a branch under
-// the pool's own push prefixes: HeadPrefixes),
-// GET /repos/{owner}/{repo}/pulls/{n} (read one, for its state and checks
-// summary), POST .../issues/{n}/comments (comment on one) and POST
-// .../pulls/{n}/comments and .../comments/{id}/replies (review comments).
-// Reviews, merges, updates and everything else are unlisted.
+// host has none. For a listed repository only the routes in githubAPIRoutes
+// exist. Every repository gets the pull request routes: open a pull request
+// from a branch under the pool's own push prefixes (HeadPrefixes), list and
+// read pull requests, read and post comments, and, on a pull request whose
+// head is under the pool's push prefixes or the repository's
+// PullRequestPrefixes, comment, edit the body, edit the App's own comment and
+// mark it ready. Labels, repository dispatch, Actions reads and deployment
+// reads exist only where the repository grants them. Reviews, merges, pushes
+// through the API and everything else are unlisted.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -695,11 +770,11 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 		return GitRequest{}, false, nil
 	}
 	parts := strings.Split(path, "/")
-	if rawQuery != "" || len(parts) < 5 || parts[0] != "" || parts[1] != "repos" {
+	if len(parts) < 5 || parts[0] != "" || parts[1] != "repos" {
 		return GitRequest{}, true, ErrUnlisted
 	}
-	want, create, number := githubAPIEndpoint(parts[4:])
-	if want == "" {
+	routes := githubAPIRoutes(parts[4:])
+	if len(routes) == 0 {
 		return GitRequest{}, true, ErrUnlisted
 	}
 	repo := strings.ToLower(parts[2] + "/" + parts[3])
@@ -708,18 +783,42 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if r.Repo != repo {
 				continue
 			}
-			matched := GitRequest{Entry: e, Repo: r, Write: want == "POST"}
+			var route *githubRoute
+			for i := range routes {
+				if routes[i].granted(r) {
+					if routes[i].method == method {
+						route = &routes[i]
+						break
+					}
+					route = &githubRoute{} // the path exists here, with another method
+				}
+			}
 			switch {
-			case method != want:
-				return matched, true, ErrMethod
-			case !contains(e.Pools, pool):
+			case route == nil:
+				return GitRequest{}, true, ErrUnlisted
+			case route.name == "":
+				return GitRequest{Entry: e, Repo: r}, true, ErrMethod
+			}
+			query, ok := githubQuery(rawQuery, route.query)
+			if !ok {
+				return GitRequest{}, true, ErrUnlisted
+			}
+			matched := GitRequest{Entry: e, Repo: r, Write: method != http.MethodGet, Route: route.name, Method: method,
+				Query: query, Permissions: route.permissions, Download: route.download, CommentID: route.comment}
+			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
-			if create {
+			switch {
+			case route.name == "open-pull":
 				matched.OpensPullRequest, matched.HeadPrefixes = true, c.pushBranchPrefixes(repo, pool)
-			}
-			if number > 0 {
-				matched.CommentsOn, matched.HeadPrefixes = number, c.pushBranchPrefixes(repo, pool)
+			case route.target > 0:
+				matched.Target = route.target
+				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.PullRequestPrefixes...)
+				if route.name == "comment" {
+					matched.CommentsOn = route.target
+				}
+			case route.comment > 0:
+				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.PullRequestPrefixes...)
 			}
 			return matched, true, nil
 		}
@@ -750,10 +849,37 @@ func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 	return out
 }
 
-// githubAPIEndpoint returns the one method a GitHub REST path allows, or ""
-// when it is unlisted, whether it opens a pull request, and for a comment the
-// number of the issue or pull request it comments on.
-func githubAPIEndpoint(rest []string) (method string, create bool, commentsOn int64) {
+// githubRoute is one GitHub REST route a github-api entry may serve.
+type githubRoute struct {
+	name, method, permissions string
+	target, comment           int64    // the pull request a write acts on; the comment an edit targets
+	query                     []string // the query keys allowed, each at most once
+	download                  bool
+	needs                     func(GitRepo) bool // nil: every github-api repository
+}
+
+func (g githubRoute) granted(r GitRepo) bool { return g.needs == nil || g.needs(r) }
+
+var (
+	pageQuery       = []string{"page", "per_page"}
+	pullListQuery   = []string{"base", "direction", "head", "page", "per_page", "sort", "state"}
+	commentQuery    = []string{"page", "per_page", "since"}
+	runQuery        = []string{"branch", "created", "event", "exclude_pull_requests", "head_sha", "page", "per_page", "status"}
+	jobQuery        = []string{"filter", "page", "per_page"}
+	artifactQuery   = []string{"name", "page", "per_page"}
+	deploymentQuery = []string{"environment", "page", "per_page", "ref", "sha", "task"}
+	workflowFile    = regexp.MustCompile(`^([1-9][0-9]{0,11}|[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.ya?ml)$`)
+	queryValue      = regexp.MustCompile(`^[A-Za-z0-9 _.,:/+-]{0,200}$`)
+)
+
+func hasLabels(r GitRepo) bool      { return len(r.Labels) > 0 }
+func hasDispatch(r GitRepo) bool    { return len(r.DispatchEvents) > 0 }
+func hasActions(r GitRepo) bool     { return r.Actions }
+func hasDeployments(r GitRepo) bool { return r.Deployments }
+
+// githubAPIRoutes returns the routes for a path below /repos/{owner}/{repo}/,
+// one per method; none when the path is unlisted.
+func githubAPIRoutes(rest []string) []githubRoute {
 	number := func(s string) int64 {
 		if s == "" || len(s) > 12 {
 			return 0
@@ -764,17 +890,92 @@ func githubAPIEndpoint(rest []string) (method string, create bool, commentsOn in
 		}
 		return n
 	}
-	switch {
-	case len(rest) == 1 && rest[0] == "pulls":
-		return "POST", true, 0
-	case len(rest) == 2 && rest[0] == "pulls" && number(rest[1]) > 0:
-		return "GET", false, 0
-	case len(rest) == 3 && (rest[0] == "issues" || rest[0] == "pulls") && number(rest[1]) > 0 && rest[2] == "comments":
-		return "POST", false, number(rest[1])
-	case len(rest) == 5 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "comments" && number(rest[3]) > 0 && rest[4] == "replies":
-		return "POST", false, number(rest[1])
+	const pr, actions, deployments = "pull-requests", "actions", "deployments"
+	n := len(rest)
+	at := func(i int) string {
+		if i < n {
+			return rest[i]
+		}
+		return ""
 	}
-	return "", false, 0
+	switch {
+	case n == 1 && rest[0] == "pulls":
+		return []githubRoute{{name: "open-pull", method: http.MethodPost, permissions: pr},
+			{name: "list-pulls", method: http.MethodGet, permissions: pr, query: pullListQuery}}
+	case n == 2 && rest[0] == "pulls" && number(rest[1]) > 0:
+		return []githubRoute{{name: "read-pull", method: http.MethodGet, permissions: pr},
+			{name: "edit-pull", method: http.MethodPatch, permissions: pr, target: number(rest[1])}}
+	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "ready":
+		// Not a GitHub REST route: GitHub marks a draft ready only through
+		// GraphQL, so the broker makes that one mutation for this path.
+		return []githubRoute{{name: "ready", method: http.MethodPost, permissions: pr, target: number(rest[1])}}
+	case n == 3 && rest[0] == "issues" && number(rest[1]) > 0 && rest[2] == "comments":
+		return []githubRoute{{name: "comment", method: http.MethodPost, permissions: pr, target: number(rest[1])},
+			{name: "list-comments", method: http.MethodGet, permissions: pr, query: commentQuery}}
+	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "comments":
+		return []githubRoute{{name: "comment", method: http.MethodPost, permissions: pr, target: number(rest[1])}}
+	case n == 5 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "comments" && number(rest[3]) > 0 && rest[4] == "replies":
+		return []githubRoute{{name: "comment", method: http.MethodPost, permissions: pr, target: number(rest[1])}}
+	case n == 3 && rest[0] == "issues" && rest[1] == "comments" && number(rest[2]) > 0:
+		return []githubRoute{{name: "edit-comment", method: http.MethodPatch, permissions: pr, comment: number(rest[2])}}
+	case n == 3 && rest[0] == "issues" && number(rest[1]) > 0 && rest[2] == "labels":
+		return []githubRoute{{name: "label", method: http.MethodPost, permissions: pr, target: number(rest[1]), needs: hasLabels}}
+	case n == 1 && rest[0] == "dispatches":
+		return []githubRoute{{name: "dispatch", method: http.MethodPost, permissions: "contents-write", needs: hasDispatch}}
+	case at(0) == "actions":
+		read := func(query []string) []githubRoute {
+			return []githubRoute{{name: "actions", method: http.MethodGet, permissions: actions, query: query, needs: hasActions}}
+		}
+		download := []githubRoute{{name: "actions-download", method: http.MethodGet, permissions: actions, download: true, needs: hasActions}}
+		switch {
+		case n == 2 && rest[1] == "runs":
+			return read(runQuery)
+		case n == 3 && rest[1] == "runs" && number(rest[2]) > 0:
+			return read(nil)
+		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "jobs":
+			return read(jobQuery)
+		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "artifacts":
+			return read(artifactQuery)
+		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "logs":
+			return download
+		case n == 4 && rest[1] == "workflows" && workflowFile.MatchString(rest[2]) && rest[3] == "runs":
+			return read(runQuery)
+		case n == 3 && rest[1] == "jobs" && number(rest[2]) > 0:
+			return read(nil)
+		case n == 4 && rest[1] == "jobs" && number(rest[2]) > 0 && rest[3] == "logs":
+			return download
+		case n == 3 && rest[1] == "artifacts" && number(rest[2]) > 0:
+			return read(nil)
+		case n == 4 && rest[1] == "artifacts" && number(rest[2]) > 0 && rest[3] == "zip":
+			return download
+		}
+	case n == 1 && rest[0] == "deployments":
+		return []githubRoute{{name: "deployments", method: http.MethodGet, permissions: deployments, query: deploymentQuery, needs: hasDeployments}}
+	case n == 2 && rest[0] == "deployments" && number(rest[1]) > 0:
+		return []githubRoute{{name: "deployments", method: http.MethodGet, permissions: deployments, needs: hasDeployments}}
+	case n == 3 && rest[0] == "deployments" && number(rest[1]) > 0 && rest[2] == "statuses":
+		return []githubRoute{{name: "deployments", method: http.MethodGet, permissions: deployments, query: pageQuery, needs: hasDeployments}}
+	}
+	return nil
+}
+
+// githubQuery rebuilds a query string from its allowed keys, each at most
+// once with a plain value; ok is false for any other key, a repeated key or
+// a value outside queryValue.
+func githubQuery(raw string, allowed []string) (string, bool) {
+	if raw == "" {
+		return "", true
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return "", false
+	}
+	for key, v := range values {
+		if !contains(allowed, key) || len(v) != 1 || !queryValue.MatchString(v[0]) {
+			return "", false
+		}
+	}
+	return values.Encode(), true
 }
 
 // Match returns the entry for a request, choosing the longest path prefix
@@ -872,7 +1073,9 @@ func (c Catalog) Entries() []Entry { return append([]Entry(nil), c.entries...) }
 
 // GitGranted reports whether some entry still lets the installation's tokens
 // reach repo at a scope: "contents-read" (a git entry), "contents-write" (a git
-// entry with write access) or "pull-requests" (a github-api entry).
+// entry with write access, or a github-api entry with dispatch events),
+// "pull-requests" (a github-api entry), "actions" or "deployments" (a
+// github-api entry granting them).
 func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
@@ -885,7 +1088,10 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 			switch {
 			case e.Kind == "git" && scope == "contents-read",
 				e.Kind == "git" && scope == "contents-write" && r.Access == "write",
-				e.Kind == "github-api" && scope == "pull-requests":
+				e.Kind == "github-api" && scope == "pull-requests",
+				e.Kind == "github-api" && scope == "contents-write" && len(r.DispatchEvents) > 0,
+				e.Kind == "github-api" && scope == "actions" && r.Actions,
+				e.Kind == "github-api" && scope == "deployments" && r.Deployments:
 				return true
 			}
 		}
@@ -894,8 +1100,9 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 }
 
 // GitScope returns every repository the catalog lists for an installation,
-// and whether any github-api entry on it opens pull requests.
-func (c Catalog) GitScope(installation int64) (repos []string, pullRequests bool) {
+// and whether any github-api entry on it opens pull requests, reads Actions
+// or reads deployments.
+func (c Catalog) GitScope(installation int64) (repos []string, pullRequests, actions, deployments bool) {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
 			continue
@@ -903,9 +1110,11 @@ func (c Catalog) GitScope(installation int64) (repos []string, pullRequests bool
 		pullRequests = pullRequests || e.Kind == "github-api"
 		for _, r := range e.Git.Repos {
 			repos = append(repos, r.Repo)
+			actions = actions || (e.Kind == "github-api" && r.Actions)
+			deployments = deployments || (e.Kind == "github-api" && r.Deployments)
 		}
 	}
-	return repos, pullRequests
+	return repos, pullRequests, actions, deployments
 }
 
 // clusterLocal reports whether host is a Kubernetes Service name, the only

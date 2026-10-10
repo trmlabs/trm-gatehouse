@@ -201,8 +201,8 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 			return nil, err
 		}
 		minter := &githubapp.Minter{Signer: signer, API: api, Log: srv.Logger(), ScopeMode: scopeMode, Scope: func(installation int64) githubapp.Scope {
-			repos, pullRequests := source.Current().GitScope(installation)
-			return githubapp.Scope{Repos: repos, PullRequests: pullRequests}
+			repos, pullRequests, actions, deployments := source.Current().GitScope(installation)
+			return githubapp.Scope{Repos: repos, PullRequests: pullRequests, Actions: actions, Deployments: deployments}
 		}}
 		adapter.GitTokens = minter
 		// A catalog change that removes or narrows a repository revokes the
@@ -257,6 +257,10 @@ func automatedAuthClient(catalog interface{ Current() httpcatalog.Catalog }, dia
 // gitScope names a token's permissions as the catalog grants them.
 func gitScope(p githubapp.Permissions) string {
 	switch {
+	case p.Actions == "read":
+		return "actions"
+	case p.Deployments == "read":
+		return "deployments"
 	case p.PullRequests == "write":
 		return "pull-requests"
 	case p.Contents == "write":

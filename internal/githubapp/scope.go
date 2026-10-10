@@ -16,10 +16,13 @@ import (
 )
 
 // Scope is what the catalog lets one installation's tokens reach: its
-// repositories ("owner/name") and whether any entry opens pull requests.
+// repositories ("owner/name") and whether any entry opens pull requests,
+// reads Actions or reads deployments.
 type Scope struct {
 	Repos        []string
 	PullRequests bool
+	Actions      bool
+	Deployments  bool
 }
 
 // ScopeMode is what the broker does when an installation reaches beyond the
@@ -221,7 +224,9 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 			switch {
 			case name == "metadata" && level == "read",
 				name == "contents" && (level == "read" || level == "write"),
-				name == "pull_requests" && want.PullRequests && level == "write":
+				name == "pull_requests" && want.PullRequests && level == "write",
+				name == "actions" && want.Actions && level == "read",
+				name == "deployments" && want.Deployments && level == "read":
 			default:
 				f.settings = append(f.settings, "holds "+name+" "+level)
 			}

@@ -33,10 +33,12 @@ type JWTSigner interface {
 }
 
 // Permissions is the scope a token is minted with, beyond metadata read,
-// which every token has. Only these two permissions can ever be requested.
+// which every token has. Only these permissions can ever be requested.
 type Permissions struct {
 	Contents     string // "", "read" or "write"
 	PullRequests string // "" or "write"
+	Actions      string // "" or "read"
+	Deployments  string // "" or "read"
 }
 
 // ContentsRead and ContentsWrite are the git fetch and push scopes;
@@ -47,10 +49,15 @@ var (
 	ContentsRead      = Permissions{Contents: "read"}
 	ContentsWrite     = Permissions{Contents: "write"}
 	PullRequestsWrite = Permissions{Contents: "read", PullRequests: "write"}
+	// ActionsRead reads workflow runs, jobs, logs and artifacts;
+	// DeploymentsRead reads deployments and their statuses.
+	ActionsRead     = Permissions{Actions: "read"}
+	DeploymentsRead = Permissions{Deployments: "read"}
 )
 
 func (p Permissions) valid() bool {
-	return (p.Contents == "" || p.Contents == "read" || p.Contents == "write") && (p.PullRequests == "" || p.PullRequests == "write") && p != Permissions{}
+	return (p.Contents == "" || p.Contents == "read" || p.Contents == "write") && (p.PullRequests == "" || p.PullRequests == "write") &&
+		(p.Actions == "" || p.Actions == "read") && (p.Deployments == "" || p.Deployments == "read") && p != Permissions{}
 }
 
 func (p Permissions) request() map[string]string {
@@ -60,6 +67,12 @@ func (p Permissions) request() map[string]string {
 	}
 	if p.PullRequests != "" {
 		out["pull_requests"] = p.PullRequests
+	}
+	if p.Actions != "" {
+		out["actions"] = p.Actions
+	}
+	if p.Deployments != "" {
+		out["deployments"] = p.Deployments
 	}
 	return out
 }
@@ -74,7 +87,8 @@ type Token struct {
 
 func (t Token) Value() string { return t.value }
 func (t Token) String() string {
-	return fmt.Sprintf("github-token(%s contents=%s pull_requests=%s)", t.Repo, t.Permissions.Contents, t.Permissions.PullRequests)
+	return fmt.Sprintf("github-token(%s contents=%s pull_requests=%s actions=%s deployments=%s)", t.Repo,
+		t.Permissions.Contents, t.Permissions.PullRequests, t.Permissions.Actions, t.Permissions.Deployments)
 }
 func (t Token) GoString() string           { return t.String() }
 func (t Token) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(t.String())) }
