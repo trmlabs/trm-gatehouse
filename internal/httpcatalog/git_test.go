@@ -118,16 +118,14 @@ func TestGitHubAPIEntries(t *testing.T) {
 		{"POST", "/repos/trmlabs/trm-b2b/git/refs", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/trmlabs/other/pulls", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/pulls", "per_page=1", "pool-a", ErrUnlisted},
-		{"GET", "/repos/trmlabs/trm-b2b/pulls", "", "pool-a", nil},
-		{"GET", "/repos/trmlabs/trm-b2b/pulls", "head=trmlabs:cursor/x&state=open", "pool-a", nil},
-		{"GET", "/repos/trmlabs/trm-b2b/pulls", "q=x", "pool-a", ErrUnlisted},
+		// The default operations (pr.open, pr.read, pr.comment) open no other route.
+		{"GET", "/repos/trmlabs/trm-b2b/pulls", "", "pool-a", ErrMethod},
 		{"DELETE", "/repos/trmlabs/trm-b2b/pulls", "", "pool-a", ErrMethod},
 		{"GET", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a", nil},
-		{"PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a", nil},
-		{"PUT", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a", ErrMethod},
-		{"POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "pool-a", nil},
-		{"GET", "/repos/trmlabs/trm-b2b/issues/12/comments", "per_page=100&page=2", "pool-a", nil},
-		{"PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", "pool-a", nil},
+		{"PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a", ErrMethod},
+		{"POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "pool-a", ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/issues/12/comments", "", "pool-a", ErrMethod},
+		{"PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/issues/12/labels", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/dispatches", "", "pool-a", ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs", "", "pool-a", ErrUnlisted},
@@ -174,7 +172,7 @@ func TestGitHubAPIEntries(t *testing.T) {
 // repository grants them, and pull request prefixes widen which existing pull
 // requests a write may act on, never which branch one may be opened from.
 func TestGitHubAPIRepositoryGrants(t *testing.T) {
-	granted := strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"],"actions":true,"deployments":true`, 1)
+	granted := strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.open","pr.read","pr.list","pr.comment","pr.edit","pr.label","pr.ready","dispatch","actions.read","deployments.read"],"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"]`, 1)
 	c, err := Parse([]byte(`{"entries":[` + gitEntry + `,` + granted + `]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -184,6 +182,12 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		download                                bool
 		err                                     error
 	}{
+		{"GET", "/repos/trmlabs/trm-b2b/pulls", "head=trmlabs:factory/x&state=open", "list-pulls", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/pulls", "q=x", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/issues/12/comments", "per_page=100&page=2", "list-comments", "pull-requests", false, nil},
+		{"PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", "edit-pull", "pull-requests", false, nil},
+		{"PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", "edit-comment", "pull-requests", false, nil},
+		{"POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "ready", "pull-requests", false, nil},
 		{"POST", "/repos/trmlabs/trm-b2b/issues/12/labels", "", "label", "pull-requests", false, nil},
 		{"POST", "/repos/trmlabs/trm-b2b/dispatches", "", "dispatch", "contents-write", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs", "head_sha=abc&per_page=5", "actions", "actions", false, nil},
@@ -228,13 +232,21 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		t.Errorf("GitScope = %v %v %v %v", repos, pullRequests, actions, deployments)
 	}
 	for name, doc := range map[string]string{
-		"grant on a git entry":        strings.Replace(gitEntry, `"access":"write"`, `"access":"write","labels":["preview"]`, 1),
-		"prefix without a slash":      strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["factory"]`, 1),
-		"prefix with refs/heads":      strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["refs/heads/factory/"]`, 1),
-		"prefix escaping":             strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["../"]`, 1),
-		"duplicate label":             strings.Replace(apiEntry, `"access":"write"`, `"access":"write","labels":["a","A"]`, 1),
-		"label with a control":        strings.Replace(apiEntry, `"access":"write"`, `"access":"write","labels":["a\n"]`, 1),
-		"dispatch event with a space": strings.Replace(apiEntry, `"access":"write"`, `"access":"write","dispatchEvents":["a b"]`, 1),
+		"operations on a git entry": strings.Replace(gitEntry, `"access":"write"`, `"access":"write","operations":["pr.read"]`, 1),
+		"unknown operation":         strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.merge"]`, 1),
+		"duplicate operation":       strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.read","pr.read"]`, 1),
+		"empty operations":          strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":[]`, 1),
+		"pr.label without labels":   strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.label"]`, 1),
+		"labels without pr.label":   strings.Replace(apiEntry, `"access":"write"`, `"access":"write","labels":["preview"]`, 1),
+		"dispatch without events":   strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["dispatch"]`, 1),
+		"events without dispatch":   strings.Replace(apiEntry, `"access":"write"`, `"access":"write","dispatchEvents":["x"]`, 1),
+		"prefixes with reads only":  strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.read"],"pullRequestPrefixes":["factory/"]`, 1),
+		"prefix without a slash":    strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["factory"]`, 1),
+		"prefix with refs/heads":    strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["refs/heads/factory/"]`, 1),
+		"prefix escaping":           strings.Replace(apiEntry, `"access":"write"`, `"access":"write","pullRequestPrefixes":["../"]`, 1),
+		"duplicate label":           strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.label"],"labels":["a","A"]`, 1),
+		"label with a control":      strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.label"],"labels":["a\n"]`, 1),
+		"event with a space":        strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["dispatch"],"dispatchEvents":["a b"]`, 1),
 	} {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil {
 			t.Errorf("%s accepted", name)
@@ -262,5 +274,68 @@ func TestEmptyPoolMatchesNoGrant(t *testing.T) {
 	}
 	if _, err := c.Database("core", ""); !errors.Is(err, ErrPool) {
 		t.Errorf("postgres entry: %v", err)
+	}
+}
+
+// Each operation opens exactly its routes, with its token scope, and nothing
+// else; every route belongs to an operation in the vocabulary.
+func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
+	samples := []string{
+		"POST pulls", "GET pulls", "GET pulls/1", "PATCH pulls/1", "POST pulls/1/ready",
+		"POST issues/1/comments", "GET issues/1/comments", "POST pulls/1/comments", "POST pulls/1/comments/2/replies",
+		"PATCH issues/comments/2", "POST issues/1/labels", "POST dispatches",
+		"GET actions/runs", "GET actions/runs/1", "GET actions/runs/1/jobs", "GET actions/runs/1/artifacts", "GET actions/runs/1/logs",
+		"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip",
+		"GET deployments", "GET deployments/1", "GET deployments/1/statuses",
+	}
+	want := map[string][]string{
+		"pr.open":    {"POST pulls"},
+		"pr.read":    {"GET pulls/1"},
+		"pr.list":    {"GET pulls", "GET issues/1/comments"},
+		"pr.comment": {"POST issues/1/comments", "POST pulls/1/comments", "POST pulls/1/comments/2/replies"},
+		"pr.edit":    {"PATCH pulls/1", "PATCH issues/comments/2"},
+		"pr.label":   {"POST issues/1/labels"},
+		"pr.ready":   {"POST pulls/1/ready"},
+		"dispatch":   {"POST dispatches"},
+		"actions.read": {"GET actions/runs", "GET actions/runs/1", "GET actions/runs/1/jobs", "GET actions/runs/1/artifacts", "GET actions/runs/1/logs",
+			"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip"},
+		"deployments.read": {"GET deployments", "GET deployments/1", "GET deployments/1/statuses"},
+	}
+	if len(want) != len(githubOperations) {
+		t.Fatalf("the vocabulary has %d operations, this test covers %d", len(githubOperations), len(want))
+	}
+	for op, routes := range want {
+		params := ""
+		switch op {
+		case "pr.label":
+			params = `,"labels":["preview"]`
+		case "dispatch":
+			params = `,"dispatchEvents":["build"]`
+		}
+		doc := strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["`+op+`"]`+params, 1)
+		c, err := Parse([]byte(`{"entries":[` + doc + `]}`))
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		var got []string
+		for _, sample := range samples {
+			method, rest, _ := strings.Cut(sample, " ")
+			m, _, err := c.GitHubAPIMatch("api.github.com", 443, method, "/repos/trmlabs/trm-b2b/"+rest, "", "pool-a")
+			if err != nil {
+				continue
+			}
+			got = append(got, sample)
+			if m.Operation != op || m.Permissions != githubOperations[op] {
+				t.Errorf("%s %s: operation %q scope %q", op, sample, m.Operation, m.Permissions)
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(routes) {
+			t.Errorf("%s opens %v, want %v", op, got, routes)
+		}
+		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments"} {
+			if c.GitGranted(42, "trmlabs/trm-b2b", scope) != (githubOperations[op] == scope) {
+				t.Errorf("%s: GitGranted(%s) = %v", op, scope, githubOperations[op] != scope)
+			}
+		}
 	}
 }

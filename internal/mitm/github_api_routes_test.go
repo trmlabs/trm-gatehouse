@@ -132,7 +132,8 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	f.port, _ = strconv.Atoi(portText)
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
 		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
-		"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"],"actions":true,"deployments":true}]}},
+		"operations":["pr.open","pr.read","pr.list","pr.comment","pr.edit","pr.label","pr.ready","dispatch","actions.read","deployments.read"],
+		"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"]}]}},
 		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
 		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
 	if err != nil {
