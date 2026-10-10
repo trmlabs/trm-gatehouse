@@ -28,6 +28,7 @@ type CleanupJournal interface {
 	AddDatabaseCleanup(context.Context, string, store.DatabaseCleanup) error
 	SetDatabaseCleanupLease(context.Context, string, string, string) error
 	MarkDatabaseCleanupTokenRevoked(context.Context, string, string) error
+	AdoptDatabaseCleanup(context.Context, string, string, string, string, time.Duration) error
 	SettledDatabaseCleanup(context.Context, string, time.Duration) ([]store.DatabaseCleanup, error)
 	QuarantineDatabaseCleanup(context.Context, string, string) error
 	DatabaseBindingQuarantined(context.Context, string) (bool, error)
@@ -551,10 +552,39 @@ func (m *DurableLeaseMinter) Mint(ctx context.Context, scope AgentScope, svc *Da
 		return nil, fmt.Errorf("database cleanup authority unavailable")
 	}
 	binding := databaseBinding(scope.VaultID, svc)
+	m.adoptLegacy(ctx, binding, svc)
 	if err := m.reconcile(ctx, binding); err != nil {
 		return nil, err
 	}
 	return m.issue(ctx, scope, svc, binding)
+}
+
+// adoptLegacy brings this binding's unknown issuances from before records kept
+// their credential path into the automatic check. They take the binding's
+// current mount and role, and a token expiry of now plus TokenTTL: the record
+// already existed, so its child token was created before now, and no child
+// token can outlive TokenTTL, the lifetime every build has requested and the
+// one the Vault policy admits. If the binding had moved to another role between
+// the lost request and now, a lease under the old role would not be seen; Vault
+// revokes that lease when its child token expires, so only a lease whose
+// revocation also failed could remain, held by no one. Requires m.mu.
+func (m *DurableLeaseMinter) adoptLegacy(ctx context.Context, binding string, svc *DatabaseService) {
+	if svc.Mount == "" || svc.Role == "" {
+		return
+	}
+	records, err := m.journal.ListOwnedDatabaseCleanup(ctx, m.owner)
+	if err != nil {
+		return
+	}
+	for _, record := range records {
+		if record.Binding != binding || record.LeaseID != "" || record.Mount != "" {
+			continue
+		}
+		if m.journal.AdoptDatabaseCleanup(ctx, m.owner, record.Accessor, svc.Mount, svc.Role, m.opts.TokenTTL) == nil {
+			m.opts.Logger.Info("pgproxy: unknown database issuance from an older build adopted for the automatic check",
+				slog.String("binding", binding), slog.Time("check_after", time.Now().Add(m.opts.TokenTTL+m.opts.UnknownSettle)))
+		}
+	}
 }
 
 // issue runs one issuance, from child token to journaled lease, under its own

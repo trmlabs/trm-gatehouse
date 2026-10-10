@@ -289,7 +289,7 @@ func TestUnknownIssuanceStaysWithTheOperatorWithoutProof(t *testing.T) {
 		{name: "another client's lease on the role", setup: func(f *durableVaultFixture) {
 			f.foreign = []string{"database/creds/reader/someone-else"}
 		}, listing: true},
-		{name: "record from before the credential path was kept", legacy: true},
+		{name: "older build's record, before its token can have expired", legacy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, st, f := durableFixture(t)
@@ -306,11 +306,8 @@ func TestUnknownIssuanceStaysWithTheOperatorWithoutProof(t *testing.T) {
 				f.mu.Unlock()
 			}
 			if tc.legacy {
-				record := store.DatabaseCleanup{Accessor: "legacy", Binding: databaseBinding("vault", drainService), TokenTTL: time.Second}
+				record := store.DatabaseCleanup{Accessor: "legacy", Binding: databaseBinding("vault", drainService)}
 				if err := st.AddDatabaseCleanup(context.Background(), m.owner, record); err != nil {
-					t.Fatal(err)
-				}
-				if err := st.MarkDatabaseCleanupTokenRevoked(context.Background(), m.owner, "legacy"); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -337,5 +334,76 @@ func TestUnknownIssuanceStaysWithTheOperatorWithoutProof(t *testing.T) {
 				t.Fatalf("lease list read %d times", f.lists)
 			}
 		})
+	}
+}
+
+// A record from an older build names no credential path. The first request for
+// its binding adopts the binding's mount and role and a token expiry one
+// TokenTTL from then; after that and the settle time, Vault's lease list
+// decides as for any other record.
+func TestOlderBuildsUnknownIssuanceClearsAfterAdoption(t *testing.T) {
+	client, st, f := durableFixture(t)
+	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
+		TokenTTL: time.Second, RetryInterval: 20 * time.Millisecond, UnknownSettle: 100 * time.Millisecond, UnknownRecheck: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(context.Background())
+	record := store.DatabaseCleanup{Accessor: "older-build", Binding: databaseBinding("vault", drainService)}
+	if err := st.AddDatabaseCleanup(context.Background(), m.owner, record); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "" {
+		t.Fatalf("record adopted before any request named its binding: %+v", records)
+	}
+	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
+		t.Fatal("binding reopened before the adopted token expiry")
+	}
+	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "database" || records[0].Role != "reader" {
+		t.Fatalf("record not adopted: %+v", records)
+	}
+	f.mu.Lock()
+	if f.lists != 0 {
+		t.Errorf("lease list read %d times before the adopted expiry", f.lists)
+	}
+	f.mu.Unlock()
+	waitWithin(t, 5*time.Second, "automatic reconciliation of the adopted record", func() bool { return len(unresolved(t, st)) == 0 })
+	lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Revoke(context.Background(), lease.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A quarantined binding refuses only itself: every other binding keeps
+// issuing while it waits.
+func TestQuarantinedBindingDoesNotBlockOthers(t *testing.T) {
+	client, st, f := durableFixture(t)
+	m := newDurableForTest(t, client, st)
+	f.mu.Lock()
+	f.loseResponse = true
+	f.mu.Unlock()
+	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
+		t.Fatal("interrupted response accepted")
+	}
+	f.mu.Lock()
+	f.loseResponse = false
+	f.mu.Unlock()
+	other := &DatabaseService{Name: "other", Mount: "database", Role: "writer"}
+	for range 3 {
+		lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, other)
+		if err != nil {
+			t.Fatal("a quarantine on one binding refused another:", err)
+		}
+		if err := m.Revoke(context.Background(), lease.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
+		t.Fatal("quarantined binding reopened")
 	}
 }

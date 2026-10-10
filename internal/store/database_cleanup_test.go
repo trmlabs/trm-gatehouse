@@ -689,4 +689,21 @@ func checkSettledUnknownIssuance(t *testing.T, s *SQLStore) {
 	if got := settled("owner-a", 50*time.Millisecond); fmt.Sprint(got) != "[expiring]" {
 		t.Fatalf("a confirmed record still settled: %v", got)
 	}
+	// An older build's record takes a path and an expiry once, only from its owner.
+	if err := s.AdoptDatabaseCleanup(ctx, "owner-b", "legacy", "database", "reader", 300*time.Millisecond); err == nil {
+		t.Fatal("another replica adopted this replica's record")
+	}
+	if err := s.AdoptDatabaseCleanup(ctx, "owner-a", "legacy", "database", "reader", 300*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdoptDatabaseCleanup(ctx, "owner-a", "legacy", "database", "writer", time.Millisecond); err == nil {
+		t.Fatal("an adopted record was adopted again")
+	}
+	if got := settled("owner-a", 50*time.Millisecond); fmt.Sprint(got) != "[expiring]" {
+		t.Fatalf("adopted record settled before its expiry: %v", got)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if got := settled("owner-a", 50*time.Millisecond); fmt.Sprint(got) != "[expiring legacy]" {
+		t.Fatalf("adopted record not settled after its expiry: %v", got)
+	}
 }
