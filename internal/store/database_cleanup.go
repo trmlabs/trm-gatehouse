@@ -22,6 +22,9 @@ type DatabaseCleanup struct {
 	Accessor, Binding, LeaseID, ActorID, WorkloadID string
 	Mount, Role                                     string
 	TokenTTL                                        time.Duration
+	// Quarantined: the binding is closed because Vault cannot revoke an
+	// orphan lease under its role. Read back, never written by Add.
+	Quarantined bool
 }
 
 // ErrReplicaNameInUse means another broker process that is still renewing its
@@ -267,7 +270,7 @@ func (s *SQLStore) ListDatabaseCleanup(ctx context.Context) ([]DatabaseCleanup, 
 	return s.listDatabaseCleanup(ctx, `SELECT `+databaseCleanupColumns+` FROM database_cleanup WHERE reconciliation_evidence = '' ORDER BY accessor`)
 }
 
-const databaseCleanupColumns = `accessor, binding, lease_id, actor_id, workload_id, mount, role`
+const databaseCleanupColumns = `accessor, binding, lease_id, actor_id, workload_id, mount, role, quarantined`
 
 // ListOwnedDatabaseCleanup returns only the records one owner must resolve.
 func (s *SQLStore) ListOwnedDatabaseCleanup(ctx context.Context, owner string) ([]DatabaseCleanup, error) {
@@ -284,9 +287,11 @@ func (s *SQLStore) listDatabaseCleanup(ctx context.Context, query string, args .
 	var records []DatabaseCleanup
 	for rows.Next() {
 		var record DatabaseCleanup
-		if err := rows.Scan(&record.Accessor, &record.Binding, &record.LeaseID, &record.ActorID, &record.WorkloadID, &record.Mount, &record.Role); err != nil {
+		var quarantined int
+		if err := rows.Scan(&record.Accessor, &record.Binding, &record.LeaseID, &record.ActorID, &record.WorkloadID, &record.Mount, &record.Role, &quarantined); err != nil {
 			return nil, err
 		}
+		record.Quarantined = quarantined != 0
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -301,12 +306,20 @@ func (s *SQLStore) SetDatabaseCleanupLease(ctx context.Context, owner, accessor,
 	return affectedOne(result, err, fmt.Errorf("database cleanup ownership or record lost"))
 }
 
-// QuarantineDatabaseCleanup marks an issuance whose lease ID never arrived.
-// The mark is fleet-wide: no replica reopens the binding until the record is
-// confirmed, by an operator or by the broker's Vault lease check.
+// QuarantineDatabaseCleanup closes an unknown issuance's binding fleet-wide:
+// Vault cannot revoke an orphan lease under its role. The mark lifts when the
+// record is confirmed or ReleaseDatabaseCleanupQuarantine clears it.
 func (s *SQLStore) QuarantineDatabaseCleanup(ctx context.Context, owner, accessor string) error {
 	_, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET quarantined = 1
 		WHERE accessor = ? AND owner = ? AND lease_id = '' AND reconciliation_evidence = ''`), accessor, owner)
+	return err
+}
+
+// ReleaseDatabaseCleanupQuarantine reopens a binding this owner closed, once
+// its check no longer finds an orphan lease Vault cannot revoke.
+func (s *SQLStore) ReleaseDatabaseCleanupQuarantine(ctx context.Context, owner, accessor string) error {
+	_, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET quarantined = 0
+		WHERE accessor = ? AND owner = ?`), accessor, owner)
 	return err
 }
 

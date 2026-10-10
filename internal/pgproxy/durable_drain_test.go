@@ -142,10 +142,10 @@ func TestRestartMidMintLeavesNothingForTheOperator(t *testing.T) {
 }
 
 // A broker process killed in the middle of a credential read leaves an
-// unknown issuance. Its successor keeps the binding closed while Vault still
-// lists a lease the journal cannot account for, and reopens it on its own
-// once the child token is dead and Vault lists none.
-func TestKilledMidMintRecoversOnlyWhenVaultShowsNoLease(t *testing.T) {
+// unknown issuance. Its successor keeps the database open throughout, keeps
+// the record while Vault lists the lost credential's lease, and clears it on
+// its own once the lease is gone.
+func TestKilledMidMintKeepsTheDatabaseOpenAndClearsWhenVaultShowsNoLease(t *testing.T) {
 	if os.Getenv("GH_MID_MINT_DB") != "" {
 		t.Skip("helper process")
 	}
@@ -179,29 +179,29 @@ func TestKilledMidMintRecoversOnlyWhenVaultShowsNoLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer successor.Close(context.Background())
+	lease, err := successor.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
+	if err != nil {
+		t.Fatal("database closed after a killed broker:", err)
+	}
+	if err := successor.Revoke(context.Background(), lease.ID); err != nil {
+		t.Fatal(err)
+	}
 	waitWithin(t, 8*time.Second, "an automatic check after the predecessor's row expired", func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return f.lists >= 2
 	})
-	if _, err := successor.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
-		t.Fatal("binding reopened while Vault still listed the lost credential's lease")
-	}
 	if records := unresolved(t, st); len(records) != 1 {
 		t.Fatalf("unknown issuance cleared while its lease was live: %+v", records)
 	}
-	// Vault expires the child token and revokes the lease it issued.
 	f.mu.Lock()
+	if !f.live[ref] {
+		t.Error("the broker revoked a lease too young to be an orphan")
+	}
+	// Vault expires the child token and revokes the lease it issued.
 	delete(f.live, ref)
 	f.mu.Unlock()
 	waitWithin(t, 3*time.Second, "automatic reconciliation", func() bool { return len(unresolved(t, st)) == 0 })
-	lease, err := successor.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
-	if err != nil {
-		t.Fatal("binding still closed after Vault showed no lease:", err)
-	}
-	if err := successor.Revoke(context.Background(), lease.ID); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestMidMintHelperProcess is a broker process: it starts one credential read
@@ -240,8 +240,8 @@ func TestMidMintHelperProcess(t *testing.T) {
 }
 
 // A lost response in a live process: the process revokes the child token with
-// the token itself, and the binding reopens once the settle time has passed
-// and Vault lists no lease for it, without an operator.
+// the token itself. The database keeps issuing, and the record clears once the
+// settle time has passed and Vault lists no lease for it.
 func TestLostResponseClearsAfterSettleWhenVaultListsNoLease(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
@@ -259,26 +259,28 @@ func TestLostResponseClearsAfterSettleWhenVaultListsNoLease(t *testing.T) {
 	}
 	f.mu.Lock()
 	f.loseResponse = false
+	f.mu.Unlock()
+	lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
+	if err != nil {
+		t.Fatal("database closed by a lost response:", err)
+	}
+	f.mu.Lock()
 	lists := f.lists
 	f.mu.Unlock()
-	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
-		t.Fatal("binding reopened before the settle time")
-	}
 	if lists != 0 {
 		t.Fatalf("Vault's lease list was read %d times before the settle time", lists)
 	}
-	waitWithin(t, 3*time.Second, "automatic reconciliation", func() bool { return len(unresolved(t, st)) == 0 })
-	lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
-	if err != nil {
-		t.Fatal(err)
+	waitWithin(t, 3*time.Second, "automatic reconciliation", func() bool { return len(unresolved(t, st)) == 1 })
+	if records := unresolved(t, st); records[0].LeaseID != lease.ID {
+		t.Fatalf("the remaining record is not the live session's: %+v", records)
 	}
 	if err := m.Revoke(context.Background(), lease.ID); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// Anything short of the proof leaves the binding to the operator procedure.
-func TestUnknownIssuanceStaysWithTheOperatorWithoutProof(t *testing.T) {
+// Without proof the record stays, and its database keeps issuing.
+func TestUnresolvedUnknownIssuanceNeverClosesItsDatabase(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		setup   func(*durableVaultFixture)
@@ -322,11 +324,15 @@ func TestUnknownIssuanceStaysWithTheOperatorWithoutProof(t *testing.T) {
 				f.mu.Unlock()
 			}
 			time.Sleep(500 * time.Millisecond)
-			if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
-				t.Fatal("binding reopened without proof")
+			lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
+			if err != nil {
+				t.Fatal("an unresolved record closed its database:", err)
 			}
-			if records := unresolved(t, st); len(records) != 1 {
-				t.Fatalf("unknown issuance cleared without proof: %+v", records)
+			if err := m.Revoke(context.Background(), lease.ID); err != nil {
+				t.Fatal(err)
+			}
+			if records := unresolved(t, st); len(records) != 1 || records[0].LeaseID != "" || records[0].Quarantined {
+				t.Fatalf("unknown issuance not kept, or kept as closing its database: %+v", records)
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -338,11 +344,11 @@ func TestUnknownIssuanceStaysWithTheOperatorWithoutProof(t *testing.T) {
 }
 
 // A record from an older build names no credential path. The first request for
-// its binding adopts the binding's mount and role and a token expiry one
-// TokenTTL from then; after that and the settle time, Vault's lease list
-// decides as for any other record.
+// its binding is served and adopts the binding's mount and role and a token
+// expiry one TokenTTL from then; after that and the settle time, Vault's lease
+// list decides as for any other record.
 func TestOlderBuildsUnknownIssuanceClearsAfterAdoption(t *testing.T) {
-	client, st, f := durableFixture(t)
+	client, st, _ := durableFixture(t)
 	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
 		TokenTTL: time.Second, RetryInterval: 20 * time.Millisecond, UnknownSettle: 100 * time.Millisecond, UnknownRecheck: 20 * time.Millisecond,
 	})
@@ -354,56 +360,106 @@ func TestOlderBuildsUnknownIssuanceClearsAfterAdoption(t *testing.T) {
 	if err := st.AddDatabaseCleanup(context.Background(), m.owner, record); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.QuarantineDatabaseCleanup(context.Background(), m.owner, "older-build"); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(300 * time.Millisecond)
 	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "" {
 		t.Fatalf("record adopted before any request named its binding: %+v", records)
 	}
-	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
-		t.Fatal("binding reopened before the adopted token expiry")
-	}
-	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "database" || records[0].Role != "reader" {
-		t.Fatalf("record not adopted: %+v", records)
-	}
-	f.mu.Lock()
-	if f.lists != 0 {
-		t.Errorf("lease list read %d times before the adopted expiry", f.lists)
-	}
-	f.mu.Unlock()
-	waitWithin(t, 5*time.Second, "automatic reconciliation of the adopted record", func() bool { return len(unresolved(t, st)) == 0 })
 	lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("an older build's record closed its database:", err)
 	}
 	if err := m.Revoke(context.Background(), lease.ID); err != nil {
 		t.Fatal(err)
 	}
+	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "database" || records[0].Role != "reader" || records[0].Quarantined {
+		t.Fatalf("record not adopted, or still closing its database: %+v", records)
+	}
+	waitWithin(t, 5*time.Second, "automatic reconciliation of the adopted record", func() bool { return len(unresolved(t, st)) == 0 })
 }
 
-// A quarantined binding refuses only itself: every other binding keeps
-// issuing while it waits.
-func TestQuarantinedBindingDoesNotBlockOthers(t *testing.T) {
-	client, st, f := durableFixture(t)
-	m := newDurableForTest(t, client, st)
+// lostWithLiveLease loses a credential response whose child token cannot
+// revoke itself, so the lost lease stays live in Vault, issued an orphan's
+// age ago.
+func lostWithLiveLease(t *testing.T, m *DurableLeaseMinter, f *durableVaultFixture) {
+	t.Helper()
 	f.mu.Lock()
-	f.loseResponse = true
+	f.loseResponse, f.failSelfRevoke, f.leaseAge = true, true, 10*time.Minute
 	f.mu.Unlock()
 	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
 		t.Fatal("interrupted response accepted")
 	}
 	f.mu.Lock()
-	f.loseResponse = false
+	f.loseResponse, f.failSelfRevoke, f.leaseAge = false, false, 0
+	if len(f.live) != 1 {
+		t.Fatalf("live leases %v, want the lost one", f.live)
+	}
+	f.mu.Unlock()
+}
+
+// Once the child token is dead, an unaccounted lease older than any issuance
+// still under way is an orphan: the broker revokes it by path and clears the
+// record, without waiting for Vault.
+func TestTheBrokerRevokesAnOrphanLease(t *testing.T) {
+	client, st, f := durableFixture(t)
+	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
+		TokenTTL: time.Second, RetryInterval: 20 * time.Millisecond, UnknownSettle: 100 * time.Millisecond, UnknownRecheck: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(context.Background())
+	lostWithLiveLease(t, m, f)
+	waitWithin(t, 5*time.Second, "the orphan revoked and the record cleared", func() bool { return len(unresolved(t, st)) == 0 })
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.live) != 0 {
+		t.Fatalf("orphan lease still live: %v", f.live)
+	}
+}
+
+// The one case that closes a database: Vault cannot revoke the orphan lease
+// (the database refuses to drop the role). Only that database closes; others
+// keep issuing; it reopens on its own once the revocation succeeds.
+func TestAnUnrevocableOrphanClosesOnlyItsOwnDatabase(t *testing.T) {
+	client, st, f := durableFixture(t)
+	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
+		TokenTTL: time.Second, RetryInterval: 20 * time.Millisecond, UnknownSettle: 100 * time.Millisecond, UnknownRecheck: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(context.Background())
+	lostWithLiveLease(t, m, f)
+	f.mu.Lock()
+	f.failRevoke = true
+	f.mu.Unlock()
+	waitWithin(t, 5*time.Second, "the unrevocable orphan to close its database", func() bool {
+		records := unresolved(t, st)
+		return len(records) == 1 && records[0].Quarantined
+	})
+	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
+		t.Fatal("database issued while Vault could not revoke an orphan lease under its role")
+	}
+	f.mu.Lock()
+	f.failRevoke = false
 	f.mu.Unlock()
 	other := &DatabaseService{Name: "other", Mount: "database", Role: "writer"}
-	for range 3 {
-		lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, other)
-		if err != nil {
-			t.Fatal("a quarantine on one binding refused another:", err)
-		}
-		if err := m.Revoke(context.Background(), lease.ID); err != nil {
-			t.Fatal(err)
-		}
+	lease, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, other)
+	if err != nil {
+		t.Fatal("a closed database closed another:", err)
 	}
-	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); err == nil {
-		t.Fatal("quarantined binding reopened")
+	if err := m.Revoke(context.Background(), lease.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitWithin(t, 5*time.Second, "the database reopened after revocation succeeded", func() bool { return len(unresolved(t, st)) == 0 })
+	lease, err = m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Revoke(context.Background(), lease.ID); err != nil {
+		t.Fatal(err)
 	}
 }

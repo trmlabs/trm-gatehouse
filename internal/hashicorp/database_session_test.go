@@ -3,6 +3,7 @@ package hashicorp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -247,5 +248,39 @@ func TestListDatabaseLeasesTrustsOnlyVaultsAnswers(t *testing.T) {
 	}
 	if _, err := newClientForServer(t, "http://127.0.0.1:1").ListDatabaseLeases(context.Background(), "database", "../sys"); err == nil {
 		t.Fatal("a traversing role was listed")
+	}
+}
+
+func TestDatabaseLeaseIssued(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		gone   bool
+		ok     bool
+	}{
+		{"held", 200, `{"data":{"id":"database/creds/reader/a1","issue_time":"2026-10-10T01:11:17.123456Z"}}`, false, true},
+		{"gone", 400, `{"errors":["invalid lease"]}`, true, false},
+		{"refused", 403, `{"errors":["permission denied"]}`, false, false},
+		{"no issue time", 200, `{"data":{"id":"database/creds/reader/a1"}}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/sys/leases/lookup" || decodeBody(t, r)["lease_id"] != "database/creds/reader/a1" {
+					t.Error("unexpected lease lookup", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			issued, err := newClientForServer(t, srv.URL).DatabaseLeaseIssued(context.Background(), "database/creds/reader/a1")
+			if errors.Is(err, ErrLeaseGone) != tc.gone || (err == nil) != tc.ok {
+				t.Fatalf("err %v", err)
+			}
+			if tc.ok && !issued.Equal(time.Date(2026, 10, 10, 1, 11, 17, 123456000, time.UTC)) {
+				t.Fatalf("issued %v", issued)
+			}
+		})
 	}
 }

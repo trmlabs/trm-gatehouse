@@ -277,3 +277,30 @@ func (c *Client) ListDatabaseLeases(ctx context.Context, mount, role string) ([]
 	}
 	return leases, nil
 }
+
+// DatabaseLeaseIssued returns when Vault registered a lease, by Vault's clock.
+// A lease Vault no longer holds returns ErrLeaseGone.
+func (c *Client) DatabaseLeaseIssued(ctx context.Context, leaseID string) (time.Time, error) {
+	for _, part := range strings.Split(leaseID, "/") {
+		if !databasePathSegment.MatchString(part) {
+			return time.Time{}, fmt.Errorf("invalid database lease ID")
+		}
+	}
+	secret, err := c.api.Logical().WriteWithContext(ctx, "sys/leases/lookup", map[string]interface{}{"lease_id": leaseID})
+	var response *vaultapi.ResponseError
+	if errors.As(err, &response) && response.StatusCode == 400 && len(response.Errors) == 1 && response.Errors[0] == "invalid lease" {
+		return time.Time{}, ErrLeaseGone
+	}
+	if err != nil || secret == nil {
+		return time.Time{}, fmt.Errorf("database lease lookup failed")
+	}
+	raw, _ := secret.Data["issue_time"].(string)
+	issued, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("database lease lookup returned no issue time")
+	}
+	return issued, nil
+}
+
+// ErrLeaseGone is a lease Vault no longer holds.
+var ErrLeaseGone = errors.New("database lease no longer held by Vault")
