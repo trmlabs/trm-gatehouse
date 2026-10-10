@@ -161,6 +161,7 @@ func (b *activityBroker) row(owner string) (SandboxActivity, bool) {
 // broker, keeping the later time and the shorter retention. If the broker's
 // view cannot be read, the report is this replica's alone and says so.
 func TestDurableActivityOutlivesTheReplica(t *testing.T) {
+	t.Parallel()
 	broker := newActivityBroker(t)
 	departed := time.Now().Add(-5 * time.Minute).Truncate(time.Second).UTC()
 	history := time.Now().Add(-3 * time.Hour).Truncate(time.Second).UTC()

@@ -153,6 +153,7 @@ func TestResolveLiveAuthorization(t *testing.T) {
 }
 
 func TestDenyProofAndVerifierFailures(t *testing.T) {
+	t.Parallel()
 	cases := map[string]func(*fixture){
 		"issuer":                func(f *fixture) { f.c.Issuer = "other" },
 		"audience":              func(f *fixture) { f.c.Audience = []string{"other"} },
@@ -208,6 +209,7 @@ func TestDenyProofAndVerifierFailures(t *testing.T) {
 }
 
 func TestTimeoutTLSAndCredentialRotation(t *testing.T) {
+	t.Parallel()
 	t.Run("configured-timeout", func(t *testing.T) {
 		f := setup(t)
 		cfg := f.r.config

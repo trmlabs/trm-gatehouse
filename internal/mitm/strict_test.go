@@ -19,6 +19,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 const strictCanary = "strict-canary-private-4a8279e6"
@@ -92,7 +93,9 @@ func newStrictFixture(t *testing.T, options ...func(*Options)) *strictFixture {
 	}))
 	t.Cleanup(f.upstream.Close)
 	var err error
-	f.store, err = store.Open(filepath.Join(t.TempDir(), "audit.db"))
+	auditPath := filepath.Join(t.TempDir(), "audit.db")
+	storetest.Seed(t, auditPath)
+	f.store, err = store.Open(auditPath)
 	if err != nil {
 		t.Fatal(err)
 	}

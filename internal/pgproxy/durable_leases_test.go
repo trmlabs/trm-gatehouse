@@ -15,6 +15,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/hashicorp"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 type durableVaultFixture struct {
@@ -34,7 +35,9 @@ type durableVaultFixture struct {
 
 func durableFixture(t *testing.T) (*hashicorp.Client, *store.SQLStore, *durableVaultFixture) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "journal.db"))
+	path := filepath.Join(t.TempDir(), "journal.db")
+	storetest.Seed(t, path)
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

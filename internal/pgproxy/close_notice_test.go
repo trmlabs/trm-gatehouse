@@ -36,6 +36,7 @@ func wantNotice(t *testing.T, s *agentSession, code, reason string) {
 }
 
 func TestUnpooledCloseNotices(t *testing.T) {
+	t.Parallel()
 	svc := func(up *fakeUpstream) *fakeResolver {
 		return &fakeResolver{svc: &DatabaseService{Name: "db", Addr: up.addr(), Mount: "database", Role: "readonly", SSLMode: "disable"}}
 	}
@@ -96,6 +97,7 @@ func TestUnpooledCloseNotices(t *testing.T) {
 }
 
 func TestPooledCloseNotices(t *testing.T) {
+	t.Parallel()
 	pooled := func(t *testing.T, auth AgentAuthenticator, audit AuditTrail) (*Broker, string) {
 		t.Helper()
 		up := noticeUpstreamWithTransactions(t)

@@ -229,6 +229,7 @@ func TestBroker_ShutdownRevokesInFlight(t *testing.T) {
 }
 
 func TestBroker_LeaseCapPerActor(t *testing.T) {
+	t.Parallel()
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, "")
 	minter := &fakeMinter{lease: lease}

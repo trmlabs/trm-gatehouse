@@ -13,6 +13,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/hashicorp"
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 type cleanupProbe struct {
@@ -59,7 +60,9 @@ func TestCredentialProxyStartupFailureReleasesCleanupOwner(t *testing.T) {
 
 func TestCredentialProxyClearsSynchronizedRows(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(filepath.Join(t.TempDir(), "proxy.db"))
+	path := filepath.Join(t.TempDir(), "proxy.db")
+	storetest.Seed(t, path)
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

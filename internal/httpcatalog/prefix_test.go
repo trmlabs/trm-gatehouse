@@ -95,6 +95,7 @@ func newPrefixVault(n int) *prefixVault {
 }
 
 func TestPrefixLoaderReadsTwentyThousandEntries(t *testing.T) {
+	t.Parallel()
 	v := newPrefixVault(20000)
 	raw, version, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background())
 	if err != nil || version != 1 {

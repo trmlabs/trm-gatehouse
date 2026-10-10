@@ -111,6 +111,7 @@ func readFull(c net.Conn, b []byte) (int, error) {
 
 // An unreachable broker is named, not a silent close.
 func TestUnreachableBrokerIsNamed(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: f.upstream(t, freeAddress(t)), Database: "canary", User: "workload", Placeholder: "public-placeholder"}
 	f.start(t)
@@ -192,6 +193,7 @@ func TestInSessionErrors(t *testing.T) {
 
 // The sidecar's own proof is unreadable: the worker hears it, not a silent close.
 func TestUnreadableProofIsNamed(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	up := f.upstream(t, freeAddress(t))
 	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: up, Database: "canary", User: "workload", Placeholder: "public-placeholder"}

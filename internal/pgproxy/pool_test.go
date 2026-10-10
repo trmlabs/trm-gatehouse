@@ -66,6 +66,7 @@ func TestPooledSessionsShareServerConnectionsAndOneCredential(t *testing.T) {
 // Budgets follow the fleet: when another replica joins, idle connections above
 // the smaller share close, so the replicas together stay within the budget.
 func TestPooledBudgetFollowsLiveReplicas(t *testing.T) {
+	t.Parallel()
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)
 	var live atomic.Int64

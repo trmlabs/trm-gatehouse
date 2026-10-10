@@ -11,6 +11,7 @@ import (
 )
 
 func TestConnectStandardConnectionHeaders(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, target, headers string
 		allowed               bool

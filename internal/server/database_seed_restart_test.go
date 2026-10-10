@@ -9,11 +9,13 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/pgproxy"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 func TestDatabaseSeedDeletionSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "seed.db")
+	storetest.Seed(t, path)
 	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)

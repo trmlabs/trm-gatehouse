@@ -4,29 +4,68 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
 func tp(t time.Time) *time.Time { return &t }
 
+// migratedTemplate is one fully migrated database file, built once per test
+// binary. Running every migration costs over a second per test under -race,
+// so openTestDB copies this file instead and Open finds nothing pending.
+var migratedTemplate = sync.OnceValues(func() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "store-template")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := filepath.Join(dir, "template.db")
+	s, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	if err := s.Close(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+})
+
 func openTestDB(t *testing.T) *SQLStore {
 	t.Helper()
-	s, err := Open(":memory:")
+	template, err := migratedTemplate()
 	if err != nil {
-		t.Fatalf("Open(:memory:): %v", err)
+		t.Fatalf("building migrated template: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "test.db")
+	if err := os.WriteFile(path, template, 0o600); err != nil {
+		t.Fatalf("copying migrated template: %v", err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", path, err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
 }
 
 func TestOpenAndMigrate(t *testing.T) {
-	s := openTestDB(t)
+	// Runs every migration from scratch, unlike openTestDB's copy.
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open(:memory:): %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
 
 	// Verify schema_migrations has migrations applied (new format uses name-based tracking).
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count)
+	err = s.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count)
 	if err != nil {
 		t.Fatalf("querying schema_migrations: %v", err)
 	}

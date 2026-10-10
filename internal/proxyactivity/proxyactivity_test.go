@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 // fakeProxies admits two proxy bindings by token.
@@ -28,7 +30,9 @@ func (f fakeProxies) IdentifyProxy(_ context.Context, token string, _ netip.Addr
 
 func newService(t *testing.T) (*Service, http.Handler) {
 	t.Helper()
-	db, err := store.Open(":memory:")
+	path := filepath.Join(t.TempDir(), "activity.db")
+	storetest.Seed(t, path)
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +82,7 @@ func readAll(t *testing.T, h http.Handler, token string) map[string]Row {
 // A proxy writes and reads only its own binding's Sandboxes, in its own
 // namespaces; the view pages through thousands and keeps the latest time.
 func TestProxyActivityIsPerBinding(t *testing.T) {
+	t.Parallel()
 	_, h := newService(t)
 	now := time.Now().Truncate(time.Millisecond).UTC()
 	var rows []Row
@@ -106,6 +111,7 @@ func TestProxyActivityIsPerBinding(t *testing.T) {
 // time from the future or an oversized report is refused, and nothing is
 // written.
 func TestProxyActivityRefusals(t *testing.T) {
+	t.Parallel()
 	_, h := newService(t)
 	now := time.Now()
 	good := Row{Namespace: "developers", OwnerUID: "sb-1", LastSeen: now}
@@ -143,6 +149,7 @@ func TestProxyActivityRefusals(t *testing.T) {
 }
 
 func TestProxyActivityValidation(t *testing.T) {
+	t.Parallel()
 	s, _ := newService(t)
 	for _, retention := range []time.Duration{time.Minute, 400 * 24 * time.Hour} {
 		c := &Service{Store: s.Store, Identifier: s.Identifier, Retention: retention}
@@ -167,6 +174,7 @@ func TestProxyActivityValidation(t *testing.T) {
 // A binding's history starts at its first report, empty or not, and the read
 // returns it; a report past the binding's row ceiling is refused whole.
 func TestProxyActivityHistoryAndCeiling(t *testing.T) {
+	t.Parallel()
 	s, h := newService(t)
 	s.MaxRows = 2
 	page := func() ReadResponse {
@@ -209,6 +217,7 @@ func TestProxyActivityHistoryAndCeiling(t *testing.T) {
 // one retention and streams after two, so a stream outlives the
 // acknowledgment its replica keeps.
 func TestProxyActivitySequenceOnTheWire(t *testing.T) {
+	t.Parallel()
 	svc, h := newService(t)
 	row := []Row{{Namespace: "developers", OwnerUID: "sb-1", LastSeen: time.Now()}}
 	answer := func(acked int64) RecordResponse {
@@ -262,6 +271,7 @@ func TestProxyActivitySequenceOnTheWire(t *testing.T) {
 // A report that would start a replica stream past the binding's ceiling is
 // refused with 507; the streams already held go on.
 func TestProxyActivityStreamCeilingOnTheWire(t *testing.T) {
+	t.Parallel()
 	svc, h := newService(t)
 	svc.MaxStreams = 1
 	row := []Row{{Namespace: "developers", OwnerUID: "sb-1", LastSeen: time.Now()}}

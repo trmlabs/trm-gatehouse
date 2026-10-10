@@ -165,6 +165,7 @@ func TestNamespacePicksTheProfile(t *testing.T) {
 
 // Every error path denies.
 func TestProxyAttestedRefusals(t *testing.T) {
+	t.Parallel()
 	type input struct {
 		ctx   context.Context
 		token string
@@ -308,6 +309,7 @@ func TestAdmissionMatchesTheDeclaredProfile(t *testing.T) {
 }
 
 func TestProxyBindingValidation(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(b *Binding){
 		"no profiles": func(b *Binding) { b.Proxy.Profiles = nil },
 		"repeated namespace": func(b *Binding) {

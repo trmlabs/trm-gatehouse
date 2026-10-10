@@ -102,9 +102,11 @@ func TestDatabaseSessionAccessorRetryOnlyAcceptsMissingAccessor(t *testing.T) {
 }
 
 func TestDatabaseProviderErrorsDoNotExposeResponseBody(t *testing.T) {
+	t.Parallel()
 	const canary = "synthetic-provider-error-credential-canary"
 	for _, phase := range []string{"create", "read", "child-read", "revoke-accessor", "revoke-lease", "confirm-lease", "renew", "legacy-revoke"} {
 		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if phase == "confirm-lease" && strings.Contains(r.URL.Path, "/revoke/") {
 					w.WriteHeader(204)
@@ -193,6 +195,7 @@ func TestDatabaseSessionRevokesItself(t *testing.T) {
 // That counts as done: the token's value died with its process, and it expires
 // at its TTL. Any other failure is still an error.
 func TestDatabaseSessionAccessorRevokeToleratesRefusal(t *testing.T) {
+	t.Parallel()
 	for status, ok := range map[int]bool{403: true, 503: false, 500: false} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)

@@ -178,6 +178,7 @@ func startupFor(database string) []byte {
 // encryption); a plaintext startup or cancellation is refused in fixed words.
 // The request carried the proxy's own token and only its names.
 func TestBrokerIssuedTLSOnEveryListener(t *testing.T) {
+	t.Parallel()
 	sf, ti := startIssued(t, time.Hour)
 	token, _ := os.ReadFile(sf.f.c.Connect.Upstream.ProofFile)
 	if bearer := <-ti.bearers; bearer != "Bearer "+strings.TrimSpace(string(token)) {
@@ -363,6 +364,7 @@ func TestBrokerIssuedCertificateChecks(t *testing.T) {
 // files, needs the CONNECT upstream to ask over, and only lower-case DNS
 // names, each once.
 func TestServingTLSValidation(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	base := func() FixedConfig {
 		c := f.c

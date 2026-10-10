@@ -183,6 +183,7 @@ func TestPairVerifierRejectsChangedIdentityAndSpoofedPeer(t *testing.T) {
 }
 
 func TestConnectCustodyRotationAndPairRevocation(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	proofs := make(chan string, 10)
 	broker := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -436,6 +437,7 @@ func TestConnectProofExpiryClosesExistingTunnel(t *testing.T) {
 }
 
 func TestPostgresDeniesAuthorityAndMalformedFramesBeforeUpstream(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	var calls atomic.Int32
 	l, e := net.Listen("tcp", "127.0.0.1:0")
@@ -518,6 +520,7 @@ func TestAuditFailureCancelsTaskBeforeAdmission(t *testing.T) {
 }
 
 func TestLoadConfigRejectsAmbiguousAndOversizedInput(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	f.c.Connect = &ConnectConfig{Listen: "127.0.0.1:14443", Upstream: f.upstream(t, "127.0.0.1:443"), AllowedTargets: []string{"approved.test:443"}}
 	valid, _ := json.Marshal(f.c)
@@ -744,6 +747,7 @@ func TestOperatorConfigExampleMatchesSchema(t *testing.T) {
 }
 
 func TestSupervisorRecordsUnknownBrowserCleanup(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
