@@ -85,3 +85,70 @@ func TestRealPostgres_MigrateCarriesBrokerTables(t *testing.T) {
 		t.Fatalf("proxy audit not carried: %d %v", audits, err)
 	}
 }
+
+// A CA on disk that cannot be read leaves the destination untouched, so the
+// rerun after fixing it starts clean instead of refusing a half-filled
+// database; the rerun moves the data and the CA together.
+func TestRealPostgres_MigrateWithCAIsAllOrNothing(t *testing.T) {
+	dsn := os.Getenv("AV_TEST_STORE_PG_URL")
+	if dsn == "" {
+		t.Skip("set AV_TEST_STORE_PG_URL")
+	}
+	ctx := context.Background()
+	admin, err := openPostgres(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	name := fmt.Sprintf("migrate_ca_%d", time.Now().UnixNano())
+	if _, err := admin.db.Exec("CREATE DATABASE " + name); err != nil { // #nosec G202 -- generated name
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.db.Exec("DROP DATABASE " + name + " WITH (FORCE)") }() // #nosec G202 -- generated name
+	target, _ := url.Parse(dsn)
+	target.Path = "/" + name
+	dir := t.TempDir()
+	src, err := Open(filepath.Join(dir, "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if _, err := src.CreateVault(ctx, "carried"); err != nil {
+		t.Fatal(err)
+	}
+	caDir := filepath.Join(dir, "ca")
+	if err := os.MkdirAll(caDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(caDir, "ca.crt.pem"), []byte("-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(caDir, "ca.key.enc"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst, err := openPostgres(target.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	if _, err := MigrateDataWithCA(ctx, src, dst, caDir, nil); err == nil {
+		t.Fatal("an unreadable CA key was accepted")
+	}
+	if found, err := CountDestinationData(dst); err != nil || found != "" {
+		t.Fatalf("a failed migration left data behind (%q, %v); a rerun would refuse", found, err)
+	}
+	if err := os.WriteFile(filepath.Join(caDir, "ca.key.enc"), []byte(`{"nonce":"bm9uY2U=","ciphertext":"Y2lwaGVydGV4dA=="}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := MigrateDataWithCA(ctx, src, dst, caDir, nil)
+	if err != nil || !moved {
+		t.Fatalf("rerun: moved %v, %v", moved, err)
+	}
+	if found, err := CountDestinationData(dst); err != nil || found == "" {
+		t.Fatalf("rerun did not carry the data: %q %v", found, err)
+	}
+	state, err := dst.GetCAState(ctx)
+	if err != nil || state == nil || state.Source != "migrated-from-disk" {
+		t.Fatalf("CA not moved with the data: %+v %v", state, err)
+	}
+}

@@ -139,25 +139,20 @@ func runMigrateDB(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 8. Copy data.
+	// 8. Copy data and move the CA from disk in one transaction: a failure
+	// anywhere leaves the destination empty, so a rerun starts clean.
 	fmt.Fprintln(cmd.OutOrStdout())
-	err = store.MigrateData(ctx, srcStore, dstStore, func(table string, rows int) {
+	caDir := filepath.Join(filepath.Dir(fromPath), "ca")
+	caMigrated, err := store.MigrateDataWithCA(ctx, srcStore, dstStore, caDir, func(table string, rows int) {
 		fmt.Fprintf(cmd.OutOrStdout(), "Copying %-30s %d rows... done\n", table+":", rows)
 	})
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
-
-	// 9. Migrate CA from disk (if present).
-	caDir := filepath.Join(filepath.Dir(fromPath), "ca")
-	caMigrated, err := store.MigrateCAFromDisk(ctx, dstStore, caDir)
-	if err != nil {
-		return fmt.Errorf("migrating CA from disk: %w", err)
-	}
 	if caMigrated {
 		fmt.Fprintln(cmd.OutOrStdout(), "\nCA certificate and key migrated from disk to database.")
 	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "\nNo CA files found on disk (this is normal if the CA was already in the database).")
+		fmt.Fprintln(cmd.OutOrStdout(), "\nNo CA moved from disk (none there, or the database already had one).")
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "\nMigration complete.")
