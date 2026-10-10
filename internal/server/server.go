@@ -106,6 +106,7 @@ type Server struct {
 	proxyCerts            *proxycert.Issuer      // signs shared proxies' serving certificates on that listener, or nil
 	proxyActivity         *proxyactivity.Service // keeps shared proxies' Sandbox activity on that listener, or nil
 	pgBroker              *pgproxy.Broker
+	pgTLS                 *pgTLSFront // the broker's own TLS listener for pgBroker, or nil
 	readiness             []readinessCheck
 	pgLeaseCloser         interface{ Close(context.Context) error }
 	shutdownTimeout       time.Duration // 0: the default 5s
@@ -1152,8 +1153,24 @@ func (s *Server) Start() error {
 			defer cancel()
 			_ = s.pgBroker.Shutdown(ctx)
 		}()
+		if s.pgTLS != nil {
+			tlsLn, err := net.Listen("tcp", s.pgTLS.addr)
+			if err != nil {
+				return fmt.Errorf("listen postgres broker TLS: %w", err)
+			}
+			defer func() { _ = tlsLn.Close() }()
+			merged := newMergedListener(pgLn)
+			pgLn = merged
+			fmt.Printf("Agent Vault PostgreSQL TLS listener on %s\n", tlsLn.Addr())
+			go func() { _ = servePostgresTLS(tlsLn, merged, s.pgTLS.config(), s.logger) }()
+		}
+	} else if s.pgTLS != nil {
+		return fmt.Errorf("the PostgreSQL TLS listener requires the PostgreSQL broker")
 	}
 	if s.crossClusterAddr != "" {
+		if s.pgTLS != nil {
+			return fmt.Errorf("the PostgreSQL TLS listener cannot be combined with the cross-cluster listener")
+		}
 		if !s.credentialProxy || strictMITMLn == nil {
 			return fmt.Errorf("the cross-cluster listener requires the credential proxy")
 		}
