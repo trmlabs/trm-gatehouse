@@ -91,11 +91,15 @@ func TestGracefulShutdownRevokesVaultLogins(t *testing.T) {
 	s.AttachDatabaseCleanup(probe)
 	done := make(chan error, 1)
 	go func() { done <- s.Start() }()
-	// The management listener serves only once the signal handler is in place.
+	// The management server answers only once the signal handler is in place.
+	// A TCP connect is not enough: the socket accepts into its backlog from
+	// the moment it is bound, before the handler exists, and a SIGTERM then
+	// ends the test binary.
+	probeClient := &http.Client{Timeout: 200 * time.Millisecond}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
-			_ = c.Close()
+		if resp, err := probeClient.Get("http://" + addr + "/"); err == nil {
+			_ = resp.Body.Close()
 			break
 		}
 		if time.Now().After(deadline) {
