@@ -49,11 +49,32 @@ The App acts as itself on GitHub, so branch protection and rulesets govern its p
 
 ## Opening pull requests (GitHub REST)
 
-A `github-api` entry lets agents open pull requests and comment on them, and nothing else:
+A `github-api` entry lets agents work with pull requests in listed repositories, and never review, approve, merge or push through the API:
 
 ```json
 {"name": "github-api", "host": "api.github.com", "kind": "github-api", "pools": ["<pool agent ID>"],
- "git": {"appID": 0, "installationID": 0, "repos": [{"repo": "trmlabs/trm-b2b", "access": "write"}]}}
+ "git": {"appID": 0, "installationID": 0, "repos": [{"repo": "example-org/example-repo", "access": "write"}]}}
 ```
 
-Only `POST` to these paths is served, for a listed repository: `/repos/{owner}/{repo}/pulls`, `/repos/{owner}/{repo}/issues/{n}/comments`, `/repos/{owner}/{repo}/pulls/{n}/comments` and `.../comments/{id}/replies`. Reviews, approvals, merges, reads and every other path are refused, so an agent can never approve or merge its own change. The broker mints a token for that one repository with `pull_requests: write` and `metadata: read` only. The request body is JSON and limited to 1 MiB; a placeholder anywhere in it is refused. The worker sends no token, or the placeholder `__vault_GITHUB_TOKEN__`, so `gh` works with `GH_TOKEN=__vault_GITHUB_TOKEN__`. A worker's own token is refused.
+Every listed repository gets these routes under `/repos/{owner}/{repo}`:
+
+| Route | What it does |
+|---|---|
+| `POST /pulls` | Open a pull request whose head is a branch under the pool's own push prefixes (its `git` entry's `refPrefixes`) |
+| `GET /pulls`, `GET /pulls/{n}` | List pull requests (query `state`, `head`, `base`, `sort`, `direction`, `page`, `per_page`) or read one |
+| `GET /issues/{n}/comments` | List comments (query `since`, `page`, `per_page`) |
+| `POST /issues/{n}/comments`, `POST /pulls/{n}/comments`, `POST .../comments/{id}/replies` | Comment on a pull request the pool may act on |
+| `PATCH /pulls/{n}` | Replace the body of a pull request the pool may act on; `{"body": ...}` only, so never its state, base or title |
+| `PATCH /issues/comments/{id}` | Edit a comment the App itself made on a pull request the pool may act on |
+| `POST /pulls/{n}/ready` | Mark a draft the pool may act on ready for review. Not a GitHub REST route: GitHub does this only through GraphQL, so the broker sends that one mutation |
+
+A pool may act on a pull request whose head is a branch of the same repository under its own push prefixes, or under the repository's `pullRequestPrefixes` (branch names ending in `/`, such as `"factory/"`, for pull requests another agent or person opened). These optional repository fields add routes, each off when unset:
+
+| Field | Adds |
+|---|---|
+| `labels` | `POST /issues/{n}/labels` on a pull request the pool may act on, with only these labels |
+| `dispatchEvents` | `POST /dispatches` with only these event types and an optional `client_payload` object. GitHub runs the matching workflows from the default branch |
+| `actions` | Read workflow runs, jobs, logs and artifacts. For a log or artifact download the broker follows GitHub's redirect to its signed download host itself, without the token; the broker's network policy must allow those hosts |
+| `deployments` | Read deployments and their statuses |
+
+Any other path, method or query key is refused. The broker mints a token for that one repository with only the scope the route needs: `pull_requests: write` (with `contents: read`) for pull request routes, `contents: write` for a dispatch, `actions: read` or `deployments: read`, and always `metadata: read`. A write body is JSON, limited to 1 MiB, and GitHub receives it rebuilt from the checked fields; a placeholder anywhere in it is refused. The worker sends no token, or the placeholder `__vault_GITHUB_TOKEN__`, so `gh api` works with `GH_TOKEN=__vault_GITHUB_TOKEN__`. Other `gh` commands use GraphQL and are refused. A worker's own token is refused.

@@ -240,13 +240,13 @@ func TestGitScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repos, pullRequests := c.GitScope(42); fmt.Sprint(repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !pullRequests {
+	if repos, pullRequests, actions, deployments := c.GitScope(42); fmt.Sprint(repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !pullRequests || actions || deployments {
 		t.Errorf("GitScope(42) = %v, %v", repos, pullRequests)
 	}
-	if repos, pullRequests := c.GitScope(43); fmt.Sprint(repos) != "[trmlabs/c]" || pullRequests {
+	if repos, pullRequests, _, _ := c.GitScope(43); fmt.Sprint(repos) != "[trmlabs/c]" || pullRequests {
 		t.Errorf("GitScope(43) = %v, %v", repos, pullRequests)
 	}
-	if repos, _ := c.GitScope(44); repos != nil {
+	if repos, _, _, _ := c.GitScope(44); repos != nil {
 		t.Errorf("GitScope(44) = %v", repos)
 	}
 }
