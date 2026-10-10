@@ -49,9 +49,9 @@ type signingKeys struct {
 // is usable (fetched within jwksMaxStale); while none is, a remote domain's
 // fallback set stands in. A key either holds serves at once, and an old or
 // missing live set is refreshed behind it, so neither an outage nor an
-// unreachable issuer stalls a known key. An unknown kid waits for a refetch
-// (at most one per 30 s), so a rotation is picked up with no configuration
-// change.
+// unreachable issuer stalls a known key. An unknown kid waits for the running
+// fetch, or starts one (at most one per 30 s), so a rotation is picked up with
+// no configuration change.
 func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto.PublicKey {
 	j := d.keys
 	for waited := false; ; waited = true {
@@ -66,13 +66,18 @@ func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto
 			key = d.fallback[kid]
 		}
 		fresh := live != nil && now.Sub(j.fetched) < jwksMaxAge
-		canFetch := !waited && (j.attempted.IsZero() || now.Sub(j.attempted) >= jwksRefetchBackoff)
-		if (key != nil && fresh) || !canFetch {
+		if (key != nil && fresh) || waited {
 			j.mu.Unlock()
 			return key
 		}
+		// An unknown kid joins a running fetch even inside the backoff, so a
+		// burst of tokens signed with a just-rotated key all wait for it.
 		flight := j.flight
 		if flight == nil {
+			if !j.attempted.IsZero() && now.Sub(j.attempted) < jwksRefetchBackoff {
+				j.mu.Unlock()
+				return key
+			}
 			flight = make(chan struct{})
 			j.flight, j.attempted = flight, now
 			// The fetch serves every waiter, so the caller's cancellation

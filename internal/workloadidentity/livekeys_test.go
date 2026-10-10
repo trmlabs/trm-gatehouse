@@ -467,3 +467,43 @@ func TestRemoteKeysDialAddress(t *testing.T) {
 		}
 	}
 }
+
+// Tokens signed with a just-rotated key that arrive while its fetch runs
+// wait for that fetch and verify; none is refused for arriving second.
+func TestRotationBurstJoinsTheRunningFetch(t *testing.T) {
+	li := newLiveIssuer(t)
+	oldKey, newKey := newSigner(t, "key-old"), newSigner(t, "key-new")
+	li.publish(oldKey)
+	r, clk, _ := liveResolver(t, li.domain())
+	if err := verifyEdge(r, clk, oldKey); err != nil {
+		t.Fatal(err)
+	}
+	li.publish(oldKey, newKey)
+	clk.Add(jwksRefetchBackoff)
+	gate := make(chan struct{})
+	var release sync.Once
+	open := func() { release.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	li.hang.Store(&gate)
+	calls := li.calls.Load()
+	done := make(chan error, 6)
+	go func() { done <- verifyEdge(r, clk, newKey) }()
+	for li.calls.Load() == calls {
+		time.Sleep(time.Millisecond)
+	}
+	// The rest arrive inside the backoff, with the fetch still running.
+	clk.Add(time.Second)
+	for i := 0; i < 5; i++ {
+		go func() { done <- verifyEdge(r, clk, newKey) }()
+	}
+	time.Sleep(50 * time.Millisecond)
+	open()
+	for i := 0; i < 6; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("token %d during the fetch: %v", i, err)
+		}
+	}
+	if n := li.calls.Load() - calls; n != 1 {
+		t.Fatalf("fetches %d, want 1", n)
+	}
+}
