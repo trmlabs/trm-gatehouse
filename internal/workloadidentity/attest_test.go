@@ -343,8 +343,34 @@ func TestSigningKeysSurviveAFailedFetch(t *testing.T) {
 	f.r.jwks.mu.Lock()
 	f.r.jwks.fetched, f.r.jwks.attempted = later.Add(-jwksMaxAge), later.Add(-jwksRefetchBackoff)
 	f.r.jwks.mu.Unlock()
-	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err != nil || f.jwksCalls.Load() != 3 {
-		t.Fatalf("old set after a failed refetch: err %v, key fetches %d", err, f.jwksCalls.Load())
+	// The known key serves at once and the refresh runs behind it.
+	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err != nil {
+		t.Fatalf("old set: %v", err)
+	}
+	waitForFetches(t, &f.jwksCalls, 3, f.r.jwks)
+	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err != nil {
+		t.Fatalf("old set after a failed refetch: %v", err)
+	}
+}
+
+// waitForFetches waits until n key fetches have run and none is in flight.
+func waitForFetches(t *testing.T, calls *atomic.Int64, n int64, keys *signingKeys) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		keys.mu.Lock()
+		idle := keys.flight == nil
+		keys.mu.Unlock()
+		if calls.Load() >= n && idle {
+			if got := calls.Load(); got != n {
+				t.Fatalf("key fetches %d, want %d", got, n)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("key fetches %d, want %d", calls.Load(), n)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
