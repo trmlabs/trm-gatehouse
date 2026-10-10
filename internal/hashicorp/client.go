@@ -58,7 +58,7 @@ func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 
 	method, err := DetectAuthMethod(os.Getenv, logger)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAuthConfig, err)
 	}
 	if method == "" {
 		return nil, ErrNoAuthMethod
@@ -112,7 +112,7 @@ func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 func newJWTClient(ctx context.Context, api *vaultapi.Client, logger *slog.Logger, getenv func(string) string, opts reauthOptions, now func() time.Time) (*Client, error) {
 	cfg, err := jwtConfigFromEnv(getenv)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidAuthConfig, err)
 	}
 	first, err := jwtLogin(ctx, api, cfg, now)
 	if err != nil {

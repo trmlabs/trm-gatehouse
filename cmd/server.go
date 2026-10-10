@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -108,6 +109,11 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		window, err := startupRetryWindow(os.Getenv)
+		if err != nil {
+			return err
+		}
+		startupRetry = window
 		if err := checkShutdownSeconds(os.Getenv); err != nil {
 			return err
 		}
@@ -632,7 +638,7 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		Logger:    logger,
 	}
 	// With a broker catalog, databases come from it and reload without a restart.
-	if catalog, err := brokerCatalog(context.Background(), client, os.Getenv, logger); err != nil {
+	if catalog, err := brokerCatalog(context.Background(), client, srv.CleanupStore(), srv.AttachReadiness, os.Getenv, logger); err != nil {
 		return fmt.Errorf("postgres broker catalog: %w", err)
 	} else if catalog != nil {
 		authz, err := loadAuthorization(os.Getenv)
@@ -812,34 +818,50 @@ func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
 }
 
 // attachHashicorpIfConfigured wires the HashiCorp Vault client when VAULT_ADDR
-// is set. The 10s deadline bounds an AppRole login (token auth is instant); on
-// timeout we proceed without a client so external vaults serve-stale until next
-// restart.
+// is set. Each login attempt has 10 s; a failed one is retried with backoff
+// for AGENT_VAULT_STARTUP_RETRY_SECONDS (default 120), so a Vault blip delays
+// the start instead of crash-looping the Pod. A missing or invalid auth
+// setting is not retried. With no client, external vaults serve stale until
+// the next restart, and the credential proxy refuses to start.
 func attachHashicorpIfConfigured(srv *server.Server, logger *slog.Logger) {
 	if os.Getenv("VAULT_ADDR") == "" {
 		return
 	}
-	type result struct {
-		c   *hashicorp.Client
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		c, err := hashicorp.NewClient(context.Background(), logger)
-		done <- result{c, err}
-	}()
-	select {
-	case r := <-done:
-		if r.err != nil {
-			logger.Warn("hashicorp client unavailable; external-store vaults will not refresh",
-				slog.String("err", r.err.Error()))
-			return
+	var client *hashicorp.Client
+	err := retryAtStartup(logger, "vault login", func() error {
+		c, err := boundedAttempt(10*time.Second, func(ctx context.Context) (*hashicorp.Client, error) {
+			return newHashicorpClient(ctx, logger)
+		}, func(late *hashicorp.Client) {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			late.CloseContext(closeCtx)
+		})
+		if err != nil && !retryableVaultLogin(err) {
+			return stopRetrying{err}
 		}
-		srv.AttachHashicorp(r.c)
-		srv.AttachReadiness("vault-login", r.c.Ready)
-	case <-time.After(10 * time.Second):
-		logger.Warn("hashicorp client login exceeded 10s deadline; continuing without external store")
+		client = c
+		return err
+	})
+	var stop stopRetrying
+	if errors.As(err, &stop) {
+		err = stop.err
 	}
+	if err != nil {
+		logger.Warn("hashicorp client unavailable; external-store vaults will not refresh",
+			slog.String("err", err.Error()))
+		return
+	}
+	srv.AttachHashicorp(client)
+	srv.AttachReadiness("vault-login", client.Ready)
+}
+
+// newHashicorpClient is hashicorp.NewClient, replaced in tests.
+var newHashicorpClient = hashicorp.NewClient
+
+// retryableVaultLogin is true for a login Vault did not complete, false for a
+// missing or invalid auth setting, which no retry fixes.
+func retryableVaultLogin(err error) bool {
+	return !errors.Is(err, hashicorp.ErrNotConfigured) && !errors.Is(err, hashicorp.ErrNoAuthMethod) && !errors.Is(err, hashicorp.ErrInvalidAuthConfig)
 }
 
 // attachLogSink wires the request-log pipeline: a BatchSink with async

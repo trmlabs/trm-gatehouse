@@ -16,6 +16,7 @@
 package hashicorp
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -84,3 +85,7 @@ var ErrNotConfigured = fmt.Errorf("hashicorp: VAULT_ADDR not set")
 // ErrNoAuthMethod signals that VAULT_ADDR is set but no auth-method env vars
 // are configured; surfaced as an operator-facing error.
 var ErrNoAuthMethod = fmt.Errorf("hashicorp: VAULT_ADDR is set but no auth-method env vars are configured (set VAULT_TOKEN, VAULT_ROLE_ID + VAULT_SECRET_ID, or VAULT_JWT_ROLE + VAULT_JWT_TOKEN_FILE)")
+
+// ErrInvalidAuthConfig wraps an auth setting that is present but unusable,
+// such as a malformed JWT role or token file setting. Retrying never fixes it.
+var ErrInvalidAuthConfig = errors.New("hashicorp: invalid auth configuration")

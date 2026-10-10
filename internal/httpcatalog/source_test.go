@@ -64,8 +64,10 @@ func TestSourceSwapsValidVersionsAndKeepsLastGood(t *testing.T) {
 			t.Error("rejection carried catalog content")
 		}
 	})
-	// A broken version is refused once and the previous catalog stays.
-	loader.set(`{"entries":[{"name":"x","host":"*.synthetic.example"}]}`, 2, nil)
+	// A version that cannot be decoded is refused once and the previous
+	// catalog stays. (One bad entry only drops that entry; see
+	// TestSourceDropsBadEntriesAndAppliesTheRest.)
+	loader.set(`{"entries":[{"name":"x","host":"*.synthetic.example"}],"futureSection":true}`, 2, nil)
 	waitFor(t, "rejection", func() bool { mu.Lock(); defer mu.Unlock(); return len(rejected) > 0 })
 	time.Sleep(30 * time.Millisecond)
 	mu.Lock()

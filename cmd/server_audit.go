@@ -40,6 +40,9 @@ func sharedAuditChain(ctx context.Context, client *hashicorp.Client, db any, get
 	return chain, nil
 }
 
+// newAuditChain is auditchain.New, replaced in tests.
+var newAuditChain = auditchain.New
+
 // brokerAuditChain starts the signed audit trail when AGENT_VAULT_AUDIT_CHAIN
 // is set. Enabled with incomplete settings, an unreadable key or an unwritable
 // stdout, it fails startup rather than serve unaudited. Off, it says so.
@@ -72,7 +75,15 @@ func brokerAuditChain(ctx context.Context, client *hashicorp.Client, db any, get
 		return nil, fmt.Errorf("audit chain requires a Vault client, the SQL store, AGENT_VAULT_AUDIT_HMAC_PATH and AGENT_VAULT_AUDIT_TRANSIT_KEY")
 	}
 	keys.Vault, signer.Vault = client.Logical(), client.Logical()
-	chain, err := auditchain.New(ctx, auditchain.Options{Out: os.Stdout, Replica: replica, Keys: keys, Signer: signer, Boots: boots})
+	// Reading the audit key needs Vault: a blip is retried for the startup
+	// window rather than exiting, and the settings above fail at once.
+	var chain *auditchain.Chain
+	err = retryAtStartup(logger, "audit trail", func() error {
+		attemptCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		chain, err = newAuditChain(attemptCtx, auditchain.Options{Out: os.Stdout, Replica: replica, Keys: keys, Signer: signer, Boots: boots})
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
