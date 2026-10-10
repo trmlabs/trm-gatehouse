@@ -109,21 +109,27 @@ func TestPinnedSetValidation(t *testing.T) {
 	}
 	small, _ := rsa.GenerateKey(rand.Reader, 1024) // #nosec G403 -- the test proves a short key is refused
 	for name, td := range map[string]TrustDomain{
-		"private exponent d":      pinnedDomain(rc, with(map[string]any{"d": "AQAB"})),
-		"private prime p":         pinnedDomain(rc, with(map[string]any{"p": "AQAB"})),
-		"CRT member qi":           pinnedDomain(rc, with(map[string]any{"qi": "AQAB"})),
-		"symmetric k":             pinnedDomain(rc, map[string]any{"kty": "oct", "kid": "x", "k": "AQAB"}),
-		"unknown member":          pinnedDomain(rc, with(map[string]any{"x5u": "https://example.test"})),
-		"empty set":               pinnedDomain(rc),
-		"duplicate kid":           pinnedDomain(rc, good, good),
-		"no kid":                  pinnedDomain(rc, with(map[string]any{"kid": ""})),
-		"encryption key":          pinnedDomain(rc, with(map[string]any{"use": "enc"})),
-		"RSA under 2048 bits":     pinnedDomain(rc, rsaJWK("small", &small.PublicKey)),
-		"EC off the curve":        pinnedDomain(rc, map[string]any{"kty": "EC", "kid": "e", "crv": "P-256", "x": b64(make([]byte, 32)), "y": b64(make([]byte, 32))}),
-		"pinned with a keys URL":  func() TrustDomain { td := pinnedDomain(rc, good); td.JWKSURL = rc.td.JWKSURL; return td }(),
-		"pinned with a CA file":   func() TrustDomain { td := pinnedDomain(rc, good); td.CAFile = rc.td.CAFile; return td }(),
-		"remote with pinned keys": func() TrustDomain { td := rc.td; td.JWKS = pinnedSet(good); return td }(),
-		"not a key set":           func() TrustDomain { td := pinnedDomain(rc, good); td.JWKS = json.RawMessage(`[1]`); return td }(),
+		"private exponent d":         pinnedDomain(rc, with(map[string]any{"d": "AQAB"})),
+		"private prime p":            pinnedDomain(rc, with(map[string]any{"p": "AQAB"})),
+		"CRT member qi":              pinnedDomain(rc, with(map[string]any{"qi": "AQAB"})),
+		"symmetric k":                pinnedDomain(rc, map[string]any{"kty": "oct", "kid": "x", "k": "AQAB"}),
+		"unknown member":             pinnedDomain(rc, with(map[string]any{"x5u": "https://example.test"})),
+		"empty set":                  pinnedDomain(rc),
+		"duplicate kid":              pinnedDomain(rc, good, good),
+		"no kid":                     pinnedDomain(rc, with(map[string]any{"kid": ""})),
+		"encryption key":             pinnedDomain(rc, with(map[string]any{"use": "enc"})),
+		"RSA under 2048 bits":        pinnedDomain(rc, rsaJWK("small", &small.PublicKey)),
+		"EC off the curve":           pinnedDomain(rc, map[string]any{"kty": "EC", "kid": "e", "crv": "P-256", "x": b64(make([]byte, 32)), "y": b64(make([]byte, 32))}),
+		"pinned with a keys URL":     func() TrustDomain { td := pinnedDomain(rc, good); td.JWKSURL = rc.td.JWKSURL; return td }(),
+		"pinned with a CA file":      func() TrustDomain { td := pinnedDomain(rc, good); td.CAFile = rc.td.CAFile; return td }(),
+		"pinned with a dial address": func() TrustDomain { td := pinnedDomain(rc, good); td.JWKSDialAddress = "199.36.153.8:443"; return td }(),
+		"remote with a private fallback member": func() TrustDomain {
+			td := rc.td
+			td.JWKS = pinnedSet(with(map[string]any{"d": "AQAB"}))
+			return td
+		}(),
+		"remote with an empty fallback": func() TrustDomain { td := rc.td; td.JWKS = pinnedSet(); return td }(),
+		"not a key set":                 func() TrustDomain { td := pinnedDomain(rc, good); td.JWKS = json.RawMessage(`[1]`); return td }(),
 	} {
 		c := f.r.config
 		c.TrustDomains = []TrustDomain{td}

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/netip"
@@ -44,20 +45,30 @@ type signingKeys struct {
 	flight    chan struct{} // closed when the running fetch ends
 }
 
+// signingKey returns the key for kid, or nil. The live set decides while it
+// is usable (fetched within jwksMaxStale); while none is, a remote domain's
+// fallback set stands in. A key either holds serves at once, and an old or
+// missing live set is refreshed behind it, so neither an outage nor an
+// unreachable issuer stalls a known key. An unknown kid waits for a refetch
+// (at most one per 30 s), so a rotation is picked up with no configuration
+// change.
 func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto.PublicKey {
 	j := d.keys
 	for waited := false; ; waited = true {
 		j.mu.Lock()
 		now := r.now()
-		key := j.keys[kid]
-		// An unknown kid or an old set triggers a refetch for key rotation, at
-		// most every 30 s; meanwhile the last good keys stand.
-		if (key != nil && now.Sub(j.fetched) < jwksMaxAge) || waited || (!j.attempted.IsZero() && now.Sub(j.attempted) < jwksRefetchBackoff) {
-			stale := now.Sub(j.fetched) > jwksMaxStale
+		live := j.keys
+		if j.fetched.IsZero() || now.Sub(j.fetched) > jwksMaxStale {
+			live = nil
+		}
+		key := live[kid]
+		if live == nil {
+			key = d.fallback[kid]
+		}
+		fresh := live != nil && now.Sub(j.fetched) < jwksMaxAge
+		canFetch := !waited && (j.attempted.IsZero() || now.Sub(j.attempted) >= jwksRefetchBackoff)
+		if (key != nil && fresh) || !canFetch {
 			j.mu.Unlock()
-			if stale {
-				return nil
-			}
 			return key
 		}
 		flight := j.flight
@@ -69,6 +80,10 @@ func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto
 			go r.fetchSigningKeys(context.WithoutCancel(ctx), d, flight)
 		}
 		j.mu.Unlock()
+		if key != nil {
+			// A known key serves now; the refresh runs behind it.
+			return key
+		}
 		select {
 		case <-flight:
 		case <-ctx.Done():
@@ -78,7 +93,9 @@ func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto
 }
 
 // fetchSigningKeys replaces the key set on success and leaves it alone on
-// failure, then releases the waiters.
+// failure, then releases the waiters. A failure and a changed set are each
+// logged by kid, so an operator sees an outage, and every rotation, without
+// any part of a key.
 func (r *Resolver) fetchSigningKeys(ctx context.Context, d *domain, flight chan struct{}) {
 	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
 	defer cancel()
@@ -93,14 +110,57 @@ func (r *Resolver) fetchSigningKeys(ctx context.Context, d *domain, flight chan 
 			keys[kid] = key
 		}
 	}
+	if err == nil && len(keys) == 0 {
+		// A set with no usable key is an outage, not a revocation of every
+		// key: keep the last good set.
+		err = errors.New("trust domain published no usable key")
+	}
 	j := d.keys
 	j.mu.Lock()
+	var added, removed []string
+	lastGood := j.fetched
 	if err == nil {
+		for kid := range keys {
+			if j.keys[kid] == nil {
+				added = append(added, kid)
+			}
+		}
+		for kid := range j.keys {
+			if keys[kid] == nil {
+				removed = append(removed, kid)
+			}
+		}
 		j.keys, j.fetched = keys, r.now()
 	}
 	j.flight = nil
 	j.mu.Unlock()
-	close(flight)
+	// Log before releasing the waiters, so a waiter that returns has seen
+	// the line.
+	defer close(flight)
+	name := d.name
+	if name == "" {
+		name = "in-cluster"
+	}
+	switch {
+	case err != nil:
+		using := "last good keys"
+		if lastGood.IsZero() || r.now().Sub(lastGood) > jwksMaxStale {
+			using = "no live keys"
+			if d.fallback != nil {
+				using = "fallback keys"
+			}
+		}
+		var since any = "never"
+		if !lastGood.IsZero() {
+			since = lastGood.UTC().Format(time.RFC3339)
+		}
+		r.logger.Warn("workloadidentity: trust domain keys refresh failed", "domain", name, "error", err.Error(),
+			"verifying_with", using, "last_good", since)
+	case len(added) != 0 || len(removed) != 0:
+		slices.Sort(added)
+		slices.Sort(removed)
+		r.logger.Info("workloadidentity: trust domain keys changed", "domain", name, "added", added, "removed", removed)
+	}
 }
 
 // verifyLocally checks the token's signature against the keys of the trust
