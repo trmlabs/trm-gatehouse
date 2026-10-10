@@ -688,6 +688,10 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		}
 		opts.TrustProxyHeader = true
 	}
+	tlsAddr, certFile, keyFile, err := postgresTLSSettings(os.Getenv, host)
+	if err != nil {
+		return err
+	}
 	// Transaction-mode multiplexing: client sessions share server connections
 	// and one rotating credential per pool and database. MaxConns then caps
 	// client sessions; each database's server budget comes from the catalog.
@@ -698,7 +702,39 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 			DrainSessions: intEnvValue("AGENT_VAULT_SHUTDOWN_SECONDS") > 0}
 	}
 	srv.AttachPostgresBroker(pgproxy.New(net.JoinHostPort(host, strconv.Itoa(postgresPort)), opts))
+	if tlsAddr != "" {
+		return srv.EnablePostgresTLS(tlsAddr, certFile, keyFile)
+	}
 	return nil
+}
+
+// postgresTLSSettings reads the broker's own PostgreSQL TLS listener, which
+// replaces an in-Pod TLS front: AGENT_VAULT_DB_TLS_PORT, served on every
+// interface, with AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE.
+// Unset leaves it off. The plain listener stays on loopback, and the client's
+// own address replaces the PROXY header, so the two cannot be combined.
+func postgresTLSSettings(getenv func(string) string, host string) (addr, certFile, keyFile string, err error) {
+	port, certFile, keyFile := getenv("AGENT_VAULT_DB_TLS_PORT"), getenv("AGENT_VAULT_DB_TLS_CERT_FILE"), getenv("AGENT_VAULT_DB_TLS_KEY_FILE")
+	if port == "" {
+		if certFile != "" || keyFile != "" {
+			return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE need AGENT_VAULT_DB_TLS_PORT")
+		}
+		return "", "", "", nil
+	}
+	n, convErr := strconv.Atoi(port)
+	if convErr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT must be a port from 1 to 65535")
+	}
+	if certFile == "" || keyFile == "" {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT needs AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE")
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT requires a loopback PostgreSQL listener")
+	}
+	if proxyHeader, _ := strconv.ParseBool(getenv("AGENT_VAULT_DB_PROXY_PROTOCOL")); proxyHeader || getenv("AGENT_VAULT_CROSS_CLUSTER_PORT") != "" {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT replaces the TLS front's PROXY header; unset AGENT_VAULT_DB_PROXY_PROTOCOL and AGENT_VAULT_CROSS_CLUSTER_PORT")
+	}
+	return net.JoinHostPort("0.0.0.0", port), certFile, keyFile, nil
 }
 
 // firstPositive returns the first value above zero, or 0.
