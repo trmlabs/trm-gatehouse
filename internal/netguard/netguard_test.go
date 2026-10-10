@@ -607,3 +607,63 @@ func fakeDNSAnswer(query []byte, records map[string][]netip.Addr) ([]byte, error
 	}
 	return b.Finish()
 }
+
+// A name whose every answer is blocked fails, and no answer is connected to,
+// even one with a live listener behind it. The check runs on each address
+// right before connect, so a hostile DNS answer can only offer addresses that
+// the policy would refuse if dialed directly.
+func TestSafeDialer_AllAnswersBlockedNeverConnect(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		dialer func() *net.Dialer
+	}{
+		{"network policy", func() *net.Dialer { return newSafeDialer(false, nil) }},
+		{"egress ranges", func() *net.Dialer { return withEgressRanges(newSafeDialer(true, nil), "203.0.113.0/24") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+			_, port, _ := net.SplitHostPort(listener.Addr().String())
+			d := tc.dialer()
+			d.Resolver = fakeResolver(t, map[string][]netip.Addr{
+				"blocked.test.": {
+					netip.MustParseAddr("127.0.0.1"),
+					netip.MustParseAddr("::1"),
+					netip.MustParseAddr("169.254.169.254"),
+					netip.MustParseAddr("10.1.2.3"),
+				},
+			})
+			policy := d.ControlContext
+			var mu sync.Mutex
+			var attempts, refused int
+			d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+				err := policy(ctx, network, address, c)
+				mu.Lock()
+				attempts++
+				if err != nil {
+					refused++
+				}
+				mu.Unlock()
+				return err
+			}
+
+			conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort("blocked.test", port))
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("a name with only blocked answers was dialed")
+			}
+			if !strings.Contains(err.Error(), "blocked by network policy") {
+				t.Fatalf("error = %v, want network policy error", err)
+			}
+			mu.Lock()
+			if attempts == 0 || refused != attempts {
+				t.Fatalf("refused %d of %d attempts, want every attempt refused", refused, attempts)
+			}
+			mu.Unlock()
+			_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
+			if c, err := listener.Accept(); err == nil {
+				_ = c.Close()
+				t.Fatal("a blocked answer was connected to")
+			}
+		})
+	}
+}
