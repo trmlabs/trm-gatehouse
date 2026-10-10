@@ -166,32 +166,68 @@ func TestScopeInsideCatalogMintsAndRevokesListingToken(t *testing.T) {
 	}
 }
 
-func TestScopeRefusesRepositoriesBeyondTheCatalog(t *testing.T) {
+// An installation that also reaches repositories the catalog does not list
+// (or every repository) is reported, and the listed repositories keep their
+// tokens: one App installed somewhere new never takes down every pool.
+func TestScopeReachBeyondTheCatalogKeepsListedRepositories(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"all repositories":    func(g *scopeGitHub) { g.selection = "all" },
 		"unlisted repository": func(g *scopeGitHub) { g.repos = append(g.repos, "trmlabs/secret") },
-		"listing unavailable": func(g *scopeGitHub) { g.listErr = http.StatusForbidden },
 	} {
 		t.Run(name, func(t *testing.T) {
 			g, m := newScopeGitHub(t)
 			var logs bytes.Buffer
 			m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 			widen(g)
-			if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != ErrUnavailable {
-				t.Fatalf("token minted for a wider installation: %v", err)
+			if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+				t.Fatalf("a listed repository lost its token: %v", err)
 			}
-			if _, _, repoMints, _ := g.counts(); repoMints != 0 {
-				t.Fatal("a repository token was minted")
-			}
-			if !strings.Contains(logs.String(), `"outcome":"refuse"`) || strings.Contains(logs.String(), "ghs_") {
+			if !strings.Contains(logs.String(), `"outcome":"serve"`) || !strings.Contains(logs.String(), `"reach":"installed on`) || strings.Contains(logs.String(), "ghs_") {
 				t.Fatalf("log: %s", logs.String())
 			}
-			g.mu.Lock()
-			defer g.mu.Unlock()
-			if g.listMints != len(g.revoked) {
-				t.Fatalf("listing tokens %d, revoked %d", g.listMints, len(g.revoked))
-			}
 		})
+	}
+}
+
+// Refuse mode never mints for a repository the catalog does not list, even
+// one the installation reaches, and asks GitHub nothing for it.
+func TestScopeRefusesOnlyTheUnlistedRepository(t *testing.T) {
+	g, m := newScopeGitHub(t)
+	g.mu.Lock()
+	g.repos = append(g.repos, "trmlabs/secret")
+	g.mu.Unlock()
+	if _, err := m.Token(context.Background(), app, "trmlabs/secret", ContentsRead); err != ErrUnavailable {
+		t.Fatalf("minted for an unlisted repository: %v", err)
+	}
+	if settings, _, repoMints, _ := g.counts(); settings != 0 || repoMints != 0 {
+		t.Fatalf("GitHub asked about an unlisted repository: settings %d, mints %d", settings, repoMints)
+	}
+	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+		t.Fatalf("the listed repository lost its token: %v", err)
+	}
+	m.ScopeMode = ScopeWarn
+	if _, err := m.Token(context.Background(), app, "trmlabs/secret", ContentsRead); err != nil {
+		t.Fatalf("warn mode refused: %v", err)
+	}
+}
+
+// A repository list that cannot be read leaves no repository's place known,
+// so refuse mode stops the installation's tokens until a check succeeds.
+func TestScopeUnreadableListingRefuses(t *testing.T) {
+	g, m := newScopeGitHub(t)
+	var logs bytes.Buffer
+	m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	g.mu.Lock()
+	g.listErr = http.StatusForbidden
+	g.mu.Unlock()
+	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != ErrUnavailable {
+		t.Fatalf("token minted while the installation was unreadable: %v", err)
+	}
+	if _, _, repoMints, _ := g.counts(); repoMints != 0 {
+		t.Fatal("a repository token was minted")
+	}
+	if !strings.Contains(logs.String(), `"outcome":"refuse"`) || strings.Contains(logs.String(), "ghs_") {
+		t.Fatalf("log: %s", logs.String())
 	}
 }
 
@@ -251,7 +287,7 @@ func TestScopeRechecksAfterTTLRetryAndCatalogChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.mu.Lock()
-	g.selection = "all"
+	g.listErr = http.StatusForbidden
 	g.mu.Unlock()
 	now = now.Add(scopeTTL - time.Second)
 	if err := token(); err != nil {
@@ -259,10 +295,10 @@ func TestScopeRechecksAfterTTLRetryAndCatalogChange(t *testing.T) {
 	}
 	now = now.Add(2 * time.Second)
 	if err := token(); err == nil {
-		t.Fatal("a widened installation still mints after the verdict expired")
+		t.Fatal("an unreadable installation still mints after the verdict expired")
 	}
 	g.mu.Lock()
-	g.selection = "selected"
+	g.listErr = 0
 	g.mu.Unlock()
 	now = now.Add(scopeRetry - time.Second)
 	if err := token(); err == nil {
@@ -302,8 +338,8 @@ func TestScopeReadsEveryPageWithNoCap(t *testing.T) {
 	m2.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	g2.repos = append(append([]string(nil), want...), "trmlabs/x1", "trmlabs/x2", "trmlabs/x3", "trmlabs/x4", "trmlabs/x5", "trmlabs/x6", "trmlabs/x7")
 	m2.Scope = func(int64) Scope { return Scope{Repos: append(want, "trmlabs/trm-b2b")} }
-	if _, err := m2.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err == nil {
-		t.Fatal("unlisted repositories on the last page were missed")
+	if _, err := m2.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+		t.Fatalf("unlisted repositories took the listed one's token: %v", err)
 	}
 	if !strings.Contains(logs.String(), "installed on trmlabs/x1, trmlabs/x2, trmlabs/x3, trmlabs/x4, trmlabs/x5 and 2 more") {
 		t.Fatalf("log: %s", logs.String())
@@ -408,8 +444,10 @@ func TestScopeAllRepositoriesSkipsTheListing(t *testing.T) {
 	g.mu.Lock()
 	g.selection = "all"
 	g.mu.Unlock()
-	if err := m.checkScope(context.Background(), App{AppID: 7, InstallationID: 42}); err == nil || !strings.Contains(err.Error(), "all repositories") {
-		t.Fatalf("err %v", err)
+	var logs bytes.Buffer
+	m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	if err := m.checkScope(context.Background(), App{AppID: 7, InstallationID: 42}); err != nil || !strings.Contains(logs.String(), "installed on all repositories") {
+		t.Fatalf("err %v, log %s", err, logs.String())
 	}
 	if _, listMints, _, _ := g.counts(); listMints != 0 {
 		t.Fatalf("%d listing tokens minted", listMints)

@@ -49,32 +49,32 @@ The App acts as itself on GitHub, so branch protection and rulesets govern its p
 
 ## Opening pull requests (GitHub REST)
 
-A `github-api` entry lets agents work with pull requests in listed repositories, and never review, approve, merge or push through the API:
+A `github-api` entry lets agents work with pull requests in listed repositories, doing only the operations each repository lists, and never review, approve, merge or push through the API:
 
 ```json
 {"name": "github-api", "host": "api.github.com", "kind": "github-api", "pools": ["<pool agent ID>"],
- "git": {"appID": 0, "installationID": 0, "repos": [{"repo": "example-org/example-repo", "access": "write"}]}}
+ "git": {"appID": 0, "installationID": 0, "repos": [
+   {"repo": "example-org/example-repo", "access": "write"},
+   {"repo": "example-org/example-service", "access": "write",
+    "operations": ["pr.read", "pr.list", "pr.comment", "pr.edit", "pr.label", "pr.ready", "actions.read"],
+    "pullRequestPrefixes": ["factory/"], "labels": ["preview"]}]}}
 ```
 
-Every listed repository gets these routes under `/repos/{owner}/{repo}`:
+`operations` comes from this vocabulary. A repository that lists none gets `pr.open`, `pr.read` and `pr.comment`. Paths are under `/repos/{owner}/{repo}`:
 
-| Route | What it does |
-|---|---|
-| `POST /pulls` | Open a pull request whose head is a branch under the pool's own push prefixes (its `git` entry's `refPrefixes`) |
-| `GET /pulls`, `GET /pulls/{n}` | List pull requests (query `state`, `head`, `base`, `sort`, `direction`, `page`, `per_page`) or read one |
-| `GET /issues/{n}/comments` | List comments (query `since`, `page`, `per_page`) |
-| `POST /issues/{n}/comments`, `POST /pulls/{n}/comments`, `POST .../comments/{id}/replies` | Comment on a pull request the pool may act on |
-| `PATCH /pulls/{n}` | Replace the body of a pull request the pool may act on; `{"body": ...}` only, so never its state, base or title |
-| `PATCH /issues/comments/{id}` | Edit a comment the App itself made on a pull request the pool may act on |
-| `POST /pulls/{n}/ready` | Mark a draft the pool may act on ready for review. Not a GitHub REST route: GitHub does this only through GraphQL, so the broker sends that one mutation |
+| Operation | Routes | Token scope |
+|---|---|---|
+| `pr.open` | `POST /pulls`, from a branch under the pool's own push prefixes (its `git` entry's `refPrefixes`) | `pull_requests: write`, `contents: read` |
+| `pr.read` | `GET /pulls/{n}` | same |
+| `pr.list` | `GET /pulls` (query `state`, `head`, `base`, `sort`, `direction`, `page`, `per_page`), `GET /issues/{n}/comments` (query `since`, `page`, `per_page`) | same |
+| `pr.comment` | `POST /issues/{n}/comments`, `POST /pulls/{n}/comments`, `POST .../comments/{id}/replies` on a pull request in reach | same |
+| `pr.edit` | `PATCH /pulls/{n}` with `{"body": ...}` only, on a pull request in reach (never its state, base or title); `PATCH /issues/comments/{id}` on a comment the App itself made there | same |
+| `pr.label` | `POST /issues/{n}/labels` on a pull request in reach, with only the repository's `labels` | same |
+| `pr.ready` | `POST /pulls/{n}/ready` marks a draft in reach ready. Not a GitHub REST route: GitHub does this only through GraphQL, so the broker sends that one mutation | same |
+| `dispatch` | `POST /dispatches` with one of the repository's `dispatchEvents` and an optional `client_payload` object. GitHub runs the matching workflows from the default branch | `contents: write` |
+| `actions.read` | Workflow runs, jobs, logs and artifacts. For a log or artifact download the broker follows GitHub's redirect to its signed download host itself, without the token; the broker's network policy must allow those hosts | `actions: read` |
+| `deployments.read` | Deployments and their statuses | `deployments: read` |
 
-A pool may act on a pull request whose head is a branch of the same repository under its own push prefixes, or under the repository's `pullRequestPrefixes` (branch names ending in `/`, such as `"factory/"`, for pull requests another agent or person opened). These optional repository fields add routes, each off when unset:
+A pull request is in reach when its head is a branch of the same repository under the pool's own push prefixes, or under the repository's `pullRequestPrefixes` (branch names ending in `/`, for pull requests another agent or a person opened). `labels` come only with `pr.label` and `dispatchEvents` only with `dispatch`; `pullRequestPrefixes` need an operation that acts on an existing pull request. Any other path, method or query key is refused. Each token is minted for one repository with only the scope its operation needs, and always `metadata: read`. A write body is JSON, limited to 1 MiB, and GitHub receives it rebuilt from the checked fields; a placeholder anywhere in it is refused. The worker sends no token, or the placeholder `__vault_GITHUB_TOKEN__`, so `gh api` works with `GH_TOKEN=__vault_GITHUB_TOKEN__`. Other `gh` commands use GraphQL and are refused. A worker's own token is refused.
 
-| Field | Adds |
-|---|---|
-| `labels` | `POST /issues/{n}/labels` on a pull request the pool may act on, with only these labels |
-| `dispatchEvents` | `POST /dispatches` with only these event types and an optional `client_payload` object. GitHub runs the matching workflows from the default branch |
-| `actions` | Read workflow runs, jobs, logs and artifacts. For a log or artifact download the broker follows GitHub's redirect to its signed download host itself, without the token; the broker's network policy must allow those hosts |
-| `deployments` | Read deployments and their statuses |
-
-Any other path, method or query key is refused. The broker mints a token for that one repository with only the scope the route needs: `pull_requests: write` (with `contents: read`) for pull request routes, `contents: write` for a dispatch, `actions: read` or `deployments: read`, and always `metadata: read`. A write body is JSON, limited to 1 MiB, and GitHub receives it rebuilt from the checked fields; a placeholder anywhere in it is refused. The worker sends no token, or the placeholder `__vault_GITHUB_TOKEN__`, so `gh api` works with `GH_TOKEN=__vault_GITHUB_TOKEN__`. Other `gh` commands use GraphQL and are refused. A worker's own token is refused.
+The broker checks each App installation's repositories against the catalog (`AGENT_VAULT_GITHUB_APP_SCOPE`). An installation that also reaches a repository the catalog does not list, or every repository, is reported in a `github app installation scope` log line; the listed repositories keep their tokens, and in `refuse` mode (the default) no token is ever minted for an unlisted repository. Only an installation whose repositories cannot be read stops its tokens in `refuse` mode, until a check succeeds (retried after 30 seconds). `warn` reports and serves either way.

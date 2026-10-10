@@ -87,21 +87,63 @@ type GitRepo struct {
 	Repo        string   `json:"repo"` // owner/name
 	Access      string   `json:"access"`
 	RefPrefixes []string `json:"refPrefixes,omitempty"`
-	// The rest apply to github-api entries only, and each is off when unset.
+	// The rest apply to github-api entries only.
+	// Operations are what the pool may do in this repository, from the
+	// vocabulary in githubOperations; unset means DefaultGitHubOperations.
+	Operations []string `json:"operations,omitempty"`
 	// PullRequestPrefixes are head branch names (refs/heads/ removed) of pull
 	// requests in this repository that the pool may also comment on, label,
-	// edit the body of and mark ready, besides its own (from its push
-	// prefixes). It never opens a pull request from them.
+	// edit and mark ready, as its operations allow, besides its own (from its
+	// push prefixes). It never opens a pull request from them.
 	PullRequestPrefixes []string `json:"pullRequestPrefixes,omitempty"`
-	// Labels are the only labels the pool may add to those pull requests.
+	// Labels are the only labels pr.label may add.
 	Labels []string `json:"labels,omitempty"`
-	// DispatchEvents are the only repository_dispatch event types the pool may
+	// DispatchEvents are the only repository_dispatch event types dispatch may
 	// send. A dispatch runs workflows from the default branch, never the pool's.
 	DispatchEvents []string `json:"dispatchEvents,omitempty"`
-	// Actions lets the pool read workflow runs, jobs, logs and artifacts;
-	// Deployments lets it read deployments and their statuses.
-	Actions     bool `json:"actions,omitempty"`
-	Deployments bool `json:"deployments,omitempty"`
+}
+
+// DefaultGitHubOperations are a github-api repository's operations when it
+// lists none: open a pull request from the pool's own branch, read one, and
+// comment on the pool's own.
+var DefaultGitHubOperations = []string{"pr.open", "pr.read", "pr.comment"}
+
+// githubOperations is the reviewed vocabulary a github-api repository's
+// operations come from, and the token scope each needs (see GitGranted). The
+// routes each one opens are in githubAPIRoutes.
+var githubOperations = map[string]string{
+	"pr.open":          "pull-requests",  // POST /pulls, head under the pool's push prefixes
+	"pr.read":          "pull-requests",  // GET /pulls/{n}
+	"pr.list":          "pull-requests",  // GET /pulls, GET /issues/{n}/comments
+	"pr.comment":       "pull-requests",  // POST comments and review replies on a pull request in reach
+	"pr.edit":          "pull-requests",  // PATCH a body, or the App's own comment, in reach
+	"pr.label":         "pull-requests",  // POST /issues/{n}/labels, listed labels only, in reach
+	"pr.ready":         "pull-requests",  // mark a draft in reach ready (one GraphQL mutation)
+	"dispatch":         "contents-write", // POST /dispatches, listed event types only
+	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts
+	"deployments.read": "deployments",    // deployments and their statuses
+}
+
+// operations returns the repository's operations, the default when unset.
+func (r GitRepo) operations() []string {
+	if r.Operations == nil {
+		return DefaultGitHubOperations
+	}
+	return r.Operations
+}
+
+// Allows reports whether a github-api repository grants an operation.
+func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
+
+// grantsScope reports whether any of the repository's operations needs a
+// token scope.
+func (r GitRepo) grantsScope(scope string) bool {
+	for _, op := range r.operations() {
+		if githubOperations[op] == scope {
+			return true
+		}
+	}
+	return false
 }
 
 // KeyRef locates a key in a KV version 2 secret. A new KV version rotates it.
@@ -603,8 +645,8 @@ func (e *Entry) normalizeGit() error {
 	for i := range g.Repos {
 		r := &g.Repos[i]
 		r.Repo = strings.ToLower(r.Repo)
-		if e.Kind == "git" && (len(r.PullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0 || r.Actions || r.Deployments) {
-			return fmt.Errorf("repository %s: pull request prefixes, labels, dispatch events, actions and deployments belong to a github-api entry", r.Repo)
+		if e.Kind == "git" && (r.Operations != nil || len(r.PullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
+			return fmt.Errorf("repository %s: operations, pull request prefixes, labels and dispatch events belong to a github-api entry", r.Repo)
 		}
 		if !repoPattern.MatchString(r.Repo) || strings.Contains(r.Repo, "..") || strings.HasSuffix(r.Repo, ".git") || seen[r.Repo] {
 			return fmt.Errorf("invalid or duplicate repository %q", r.Repo)
@@ -634,9 +676,30 @@ func (e *Entry) normalizeGit() error {
 	return nil
 }
 
-// normalizeGitHubAPI checks a github-api repository's optional grants: each
-// list holds distinct, well-formed values.
+// normalizeGitHubAPI checks a github-api repository's operations and their
+// parameters: every operation is in the vocabulary, each list holds distinct,
+// well-formed values, labels come exactly with pr.label, dispatch events
+// exactly with dispatch, and pull request prefixes only with an operation
+// that acts on an existing pull request.
 func (r *GitRepo) normalizeGitHubAPI() error {
+	if r.Operations != nil && len(r.Operations) == 0 {
+		return fmt.Errorf("repository %s: list at least one operation, or leave operations unset for the default", r.Repo)
+	}
+	seenOp := map[string]bool{}
+	for _, op := range r.Operations {
+		if _, ok := githubOperations[op]; !ok || seenOp[op] {
+			return fmt.Errorf("repository %s: unknown or duplicate operation %q", r.Repo, op)
+		}
+		seenOp[op] = true
+	}
+	switch {
+	case r.Allows("pr.label") != (len(r.Labels) > 0):
+		return fmt.Errorf("repository %s: pr.label needs labels, and labels need pr.label", r.Repo)
+	case r.Allows("dispatch") != (len(r.DispatchEvents) > 0):
+		return fmt.Errorf("repository %s: dispatch needs dispatchEvents, and dispatchEvents need dispatch", r.Repo)
+	case len(r.PullRequestPrefixes) > 0 && !r.Allows("pr.comment") && !r.Allows("pr.edit") && !r.Allows("pr.label") && !r.Allows("pr.ready"):
+		return fmt.Errorf("repository %s: pullRequestPrefixes need pr.comment, pr.edit, pr.label or pr.ready", r.Repo)
+	}
 	check := func(what string, values []string, pattern *regexp.Regexp) error {
 		seen := map[string]bool{}
 		for _, v := range values {
@@ -675,9 +738,11 @@ type GitRequest struct {
 	// broker comments only on a pull request whose head is one of HeadPrefixes.
 	CommentsOn int64
 	// The fields below describe every github-api request. Route names it
-	// (see githubAPIRoutes) and Method is the one method it was matched with.
-	Route  string
-	Method string
+	// (see githubAPIRoutes), Operation is the repository operation that opened
+	// it, and Method is the one method it was matched with.
+	Route     string
+	Operation string
+	Method    string
 	// Target is the pull request a write acts on (comment, label, body edit,
 	// ready); the broker acts only when its head is under HeadPrefixes, which
 	// then also holds the repository's PullRequestPrefixes. CommentID is the
@@ -803,8 +868,8 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !ok {
 				return GitRequest{}, true, ErrUnlisted
 			}
-			matched := GitRequest{Entry: e, Repo: r, Write: method != http.MethodGet, Route: route.name, Method: method,
-				Query: query, Permissions: route.permissions, Download: route.download, CommentID: route.comment}
+			matched := GitRequest{Entry: e, Repo: r, Write: method != http.MethodGet, Route: route.name, Operation: route.op, Method: method,
+				Query: query, Permissions: githubOperations[route.op], Download: route.download, CommentID: route.comment}
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
@@ -849,16 +914,16 @@ func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 	return out
 }
 
-// githubRoute is one GitHub REST route a github-api entry may serve.
+// githubRoute is one GitHub REST route a github-api entry may serve, opened
+// by one operation.
 type githubRoute struct {
-	name, method, permissions string
-	target, comment           int64    // the pull request a write acts on; the comment an edit targets
-	query                     []string // the query keys allowed, each at most once
-	download                  bool
-	needs                     func(GitRepo) bool // nil: every github-api repository
+	name, method, op string
+	target, comment  int64    // the pull request a write acts on; the comment an edit targets
+	query            []string // the query keys allowed, each at most once
+	download         bool
 }
 
-func (g githubRoute) granted(r GitRepo) bool { return g.needs == nil || g.needs(r) }
+func (g githubRoute) granted(r GitRepo) bool { return r.Allows(g.op) }
 
 var (
 	pageQuery       = []string{"page", "per_page"}
@@ -872,13 +937,9 @@ var (
 	queryValue      = regexp.MustCompile(`^[A-Za-z0-9 _.,:/+-]{0,200}$`)
 )
 
-func hasLabels(r GitRepo) bool      { return len(r.Labels) > 0 }
-func hasDispatch(r GitRepo) bool    { return len(r.DispatchEvents) > 0 }
-func hasActions(r GitRepo) bool     { return r.Actions }
-func hasDeployments(r GitRepo) bool { return r.Deployments }
-
 // githubAPIRoutes returns the routes for a path below /repos/{owner}/{repo}/,
-// one per method; none when the path is unlisted.
+// one per method, each naming the operation that opens it; none when the
+// path is unlisted.
 func githubAPIRoutes(rest []string) []githubRoute {
 	number := func(s string) int64 {
 		if s == "" || len(s) > 12 {
@@ -890,7 +951,6 @@ func githubAPIRoutes(rest []string) []githubRoute {
 		}
 		return n
 	}
-	const pr, actions, deployments = "pull-requests", "actions", "deployments"
 	n := len(rest)
 	at := func(i int) string {
 		if i < n {
@@ -900,33 +960,33 @@ func githubAPIRoutes(rest []string) []githubRoute {
 	}
 	switch {
 	case n == 1 && rest[0] == "pulls":
-		return []githubRoute{{name: "open-pull", method: http.MethodPost, permissions: pr},
-			{name: "list-pulls", method: http.MethodGet, permissions: pr, query: pullListQuery}}
+		return []githubRoute{{name: "open-pull", method: http.MethodPost, op: "pr.open"},
+			{name: "list-pulls", method: http.MethodGet, op: "pr.list", query: pullListQuery}}
 	case n == 2 && rest[0] == "pulls" && number(rest[1]) > 0:
-		return []githubRoute{{name: "read-pull", method: http.MethodGet, permissions: pr},
-			{name: "edit-pull", method: http.MethodPatch, permissions: pr, target: number(rest[1])}}
+		return []githubRoute{{name: "read-pull", method: http.MethodGet, op: "pr.read"},
+			{name: "edit-pull", method: http.MethodPatch, op: "pr.edit", target: number(rest[1])}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "ready":
 		// Not a GitHub REST route: GitHub marks a draft ready only through
 		// GraphQL, so the broker makes that one mutation for this path.
-		return []githubRoute{{name: "ready", method: http.MethodPost, permissions: pr, target: number(rest[1])}}
+		return []githubRoute{{name: "ready", method: http.MethodPost, op: "pr.ready", target: number(rest[1])}}
 	case n == 3 && rest[0] == "issues" && number(rest[1]) > 0 && rest[2] == "comments":
-		return []githubRoute{{name: "comment", method: http.MethodPost, permissions: pr, target: number(rest[1])},
-			{name: "list-comments", method: http.MethodGet, permissions: pr, query: commentQuery}}
+		return []githubRoute{{name: "comment", method: http.MethodPost, op: "pr.comment", target: number(rest[1])},
+			{name: "list-comments", method: http.MethodGet, op: "pr.list", query: commentQuery}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "comments":
-		return []githubRoute{{name: "comment", method: http.MethodPost, permissions: pr, target: number(rest[1])}}
+		return []githubRoute{{name: "comment", method: http.MethodPost, op: "pr.comment", target: number(rest[1])}}
 	case n == 5 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "comments" && number(rest[3]) > 0 && rest[4] == "replies":
-		return []githubRoute{{name: "comment", method: http.MethodPost, permissions: pr, target: number(rest[1])}}
+		return []githubRoute{{name: "comment", method: http.MethodPost, op: "pr.comment", target: number(rest[1])}}
 	case n == 3 && rest[0] == "issues" && rest[1] == "comments" && number(rest[2]) > 0:
-		return []githubRoute{{name: "edit-comment", method: http.MethodPatch, permissions: pr, comment: number(rest[2])}}
+		return []githubRoute{{name: "edit-comment", method: http.MethodPatch, op: "pr.edit", comment: number(rest[2])}}
 	case n == 3 && rest[0] == "issues" && number(rest[1]) > 0 && rest[2] == "labels":
-		return []githubRoute{{name: "label", method: http.MethodPost, permissions: pr, target: number(rest[1]), needs: hasLabels}}
+		return []githubRoute{{name: "label", method: http.MethodPost, op: "pr.label", target: number(rest[1])}}
 	case n == 1 && rest[0] == "dispatches":
-		return []githubRoute{{name: "dispatch", method: http.MethodPost, permissions: "contents-write", needs: hasDispatch}}
+		return []githubRoute{{name: "dispatch", method: http.MethodPost, op: "dispatch"}}
 	case at(0) == "actions":
 		read := func(query []string) []githubRoute {
-			return []githubRoute{{name: "actions", method: http.MethodGet, permissions: actions, query: query, needs: hasActions}}
+			return []githubRoute{{name: "actions", method: http.MethodGet, op: "actions.read", query: query}}
 		}
-		download := []githubRoute{{name: "actions-download", method: http.MethodGet, permissions: actions, download: true, needs: hasActions}}
+		download := []githubRoute{{name: "actions-download", method: http.MethodGet, op: "actions.read", download: true}}
 		switch {
 		case n == 2 && rest[1] == "runs":
 			return read(runQuery)
@@ -950,11 +1010,11 @@ func githubAPIRoutes(rest []string) []githubRoute {
 			return download
 		}
 	case n == 1 && rest[0] == "deployments":
-		return []githubRoute{{name: "deployments", method: http.MethodGet, permissions: deployments, query: deploymentQuery, needs: hasDeployments}}
+		return []githubRoute{{name: "deployments", method: http.MethodGet, op: "deployments.read", query: deploymentQuery}}
 	case n == 2 && rest[0] == "deployments" && number(rest[1]) > 0:
-		return []githubRoute{{name: "deployments", method: http.MethodGet, permissions: deployments, needs: hasDeployments}}
+		return []githubRoute{{name: "deployments", method: http.MethodGet, op: "deployments.read"}}
 	case n == 3 && rest[0] == "deployments" && number(rest[1]) > 0 && rest[2] == "statuses":
-		return []githubRoute{{name: "deployments", method: http.MethodGet, permissions: deployments, query: pageQuery, needs: hasDeployments}}
+		return []githubRoute{{name: "deployments", method: http.MethodGet, op: "deployments.read", query: pageQuery}}
 	}
 	return nil
 }
@@ -1073,9 +1133,9 @@ func (c Catalog) Entries() []Entry { return append([]Entry(nil), c.entries...) }
 
 // GitGranted reports whether some entry still lets the installation's tokens
 // reach repo at a scope: "contents-read" (a git entry), "contents-write" (a git
-// entry with write access, or a github-api entry with dispatch events),
-// "pull-requests" (a github-api entry), "actions" or "deployments" (a
-// github-api entry granting them).
+// entry with write access, or a github-api repository with dispatch),
+// "pull-requests", "actions" or "deployments" (a github-api repository with an
+// operation that needs that scope).
 func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
@@ -1088,10 +1148,7 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 			switch {
 			case e.Kind == "git" && scope == "contents-read",
 				e.Kind == "git" && scope == "contents-write" && r.Access == "write",
-				e.Kind == "github-api" && scope == "pull-requests",
-				e.Kind == "github-api" && scope == "contents-write" && len(r.DispatchEvents) > 0,
-				e.Kind == "github-api" && scope == "actions" && r.Actions,
-				e.Kind == "github-api" && scope == "deployments" && r.Deployments:
+				e.Kind == "github-api" && r.grantsScope(scope):
 				return true
 			}
 		}
@@ -1107,11 +1164,13 @@ func (c Catalog) GitScope(installation int64) (repos []string, pullRequests, act
 		if e.Git == nil || e.Git.InstallationID != installation {
 			continue
 		}
-		pullRequests = pullRequests || e.Kind == "github-api"
 		for _, r := range e.Git.Repos {
 			repos = append(repos, r.Repo)
-			actions = actions || (e.Kind == "github-api" && r.Actions)
-			deployments = deployments || (e.Kind == "github-api" && r.Deployments)
+			if e.Kind == "github-api" {
+				pullRequests = pullRequests || r.grantsScope("pull-requests")
+				actions = actions || r.grantsScope("actions")
+				deployments = deployments || r.grantsScope("deployments")
+			}
 		}
 	}
 	return repos, pullRequests, actions, deployments

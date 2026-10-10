@@ -25,10 +25,14 @@ type Scope struct {
 	Deployments  bool
 }
 
-// ScopeMode is what the broker does when an installation reaches beyond the
-// catalog: ScopeRefuse (the default) stops every token for it, ScopeWarn
-// reports and keeps serving. Either way each token is still minted for one
-// repository and the minimum permissions, and a wider token is revoked.
+// ScopeMode is what the broker does about an installation's reach.
+// ScopeRefuse (the default) mints only for repositories the catalog lists
+// and stops every token while the installation's repositories cannot be
+// read; ScopeWarn reports and keeps serving. An installation that also
+// reaches repositories the catalog does not list (or all of them) is
+// reported in either mode and never stops the listed repositories' tokens:
+// each token is still minted for one listed repository and the minimum
+// permissions, and a wider token is revoked.
 type ScopeMode string
 
 const (
@@ -51,7 +55,9 @@ func ParseScopeMode(s string) (ScopeMode, error) {
 // The installation's repositories on GitHub should stay inside the catalog,
 // so an App widened in GitHub's settings is caught instead of quietly
 // reaching more than Gatehouse grants. Reach (all repositories, an unlisted
-// repository, or a list that cannot be read) is what ScopeMode governs. Other
+// repository, or a list that cannot be read) is reported; only a list that
+// cannot be read stops tokens, in refuse mode, since then no repository's
+// place in the installation is known. Other
 // settings (permissions, suspension, another App) are only reported: the
 // broker requests only what each token needs. Checked before tokens are
 // handed out, at most every scopeTTL per installation, and again after a
@@ -69,9 +75,10 @@ type scopeVerdict struct {
 
 var errScope = errors.New("github app installation is wider than the catalog")
 
-// findings are what one check found: reach decides the verdict in refuse
-// mode; settings never do.
+// findings are what one check found: an unreadable repository list decides
+// the verdict in refuse mode; other reach and settings are only reported.
 type findings struct {
+	unreadable      bool // the repository list could not be read
 	reach, settings []string
 }
 
@@ -82,6 +89,22 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// repoListed reports whether the catalog lists repo for the installation, so
+// refuse mode mints only for listed repositories. Without a Scope function,
+// or in warn mode, every repository passes; the catalog match already limits
+// what is asked for.
+func (m *Minter) repoListed(app App, repo string) bool {
+	if m.Scope == nil || m.ScopeMode == ScopeWarn {
+		return true
+	}
+	for _, r := range m.Scope(app.InstallationID).Repos {
+		if strings.EqualFold(r, repo) {
+			return true
+		}
+	}
+	return false
 }
 
 // ForgetScope drops every installation's verdict, for a catalog change.
@@ -155,7 +178,7 @@ func (m *Minter) checkScope(ctx context.Context, app App) error {
 	}()
 	found := m.verifyScope(context.WithoutCancel(ctx), app, m.Scope(app.InstallationID))
 	outcome := "serve"
-	if len(found.reach) > 0 && m.ScopeMode != ScopeWarn {
+	if found.unreadable && m.ScopeMode != ScopeWarn {
 		err, outcome = fmt.Errorf("%w: %s", errScope, strings.Join(found.reach, "; ")), "refuse"
 	}
 	finished = true
@@ -184,7 +207,7 @@ func (m *Minter) checkScope(ctx context.Context, app App) error {
 func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings {
 	var f findings
 	if m.Signer == nil || app.AppID <= 0 || app.InstallationID <= 0 {
-		f.reach = append(f.reach, "repositories unreadable")
+		f.reach, f.unreadable = append(f.reach, "repositories unreadable"), true
 		return f
 	}
 	timeout := m.ScopeTimeout
@@ -195,7 +218,7 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 	defer cancel()
 	jwt, err := m.jwt(ctx, app.AppID)
 	if err != nil {
-		f.reach = append(f.reach, "repositories unreadable")
+		f.reach, f.unreadable = append(f.reach, "repositories unreadable"), true
 		return f
 	}
 	api, client := m.api(), m.client()
@@ -246,7 +269,7 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 	}
 	body, _ := json.Marshal(map[string]any{"permissions": map[string]string{"metadata": "read"}})
 	if err := m.githubJSON(ctx, client, http.MethodPost, installation+"/access_tokens", jwt, body, http.StatusCreated, &listing); err != nil || !tokenShape(listing.Token) {
-		f.reach = append(f.reach, "repositories unreadable")
+		f.reach, f.unreadable = append(f.reach, "repositories unreadable"), true
 		return f
 	}
 	defer m.revoke(api, client, listing.Token)
@@ -269,7 +292,7 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 		}
 		url := api + "/installation/repositories?per_page=100&page=" + strconv.Itoa(page)
 		if err := m.githubJSON(ctx, client, http.MethodGet, url, listing.Token, nil, http.StatusOK, &repos); err != nil {
-			f.reach = append(f.reach, "repositories unreadable")
+			f.reach, f.unreadable = append(f.reach, "repositories unreadable"), true
 			return f
 		}
 		for _, r := range repos.Repositories {

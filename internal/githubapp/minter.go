@@ -151,7 +151,7 @@ func (m *Minter) now() time.Time {
 // Token returns a token for repo ("owner/name") with exactly permissions plus
 // metadata read. Nothing else is ever requested.
 func (m *Minter) Token(ctx context.Context, app App, repo string, permissions Permissions) (Token, error) {
-	if !permissions.valid() || m.checkScope(ctx, app) != nil {
+	if !permissions.valid() || !m.repoListed(app, repo) || m.checkScope(ctx, app) != nil {
 		return Token{}, ErrUnavailable
 	}
 	key := tokenKey{app.InstallationID, strings.ToLower(repo), permissions}
