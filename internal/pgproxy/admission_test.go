@@ -75,8 +75,11 @@ func TestAdmissionWaitsForCleanupWithoutMintingOrUnboundedPending(t *testing.T) 
 	if code := <-overflow; code != "53300" {
 		t.Fatalf("overflow ended with %q", code)
 	}
-	if m.mintCallCount() != 2 || len(b.acceptSem) != 0 {
-		t.Fatal("admission did not release pending slot or mint exactly once")
+	// The refused connection's handler returns its pending slot after it has
+	// written the refusal, so the client can read the code first.
+	waitFor(t, time.Second, func() bool { return len(b.acceptSem) == 0 }, "admission did not release pending slot")
+	if m.mintCallCount() != 2 {
+		t.Fatal("admission did not mint exactly once per served connection")
 	}
 }
 
