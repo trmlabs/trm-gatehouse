@@ -137,8 +137,9 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		reload := databaseURLReload()
 		if flagURL, _ := cmd.Flags().GetString("database-url"); flagURL != "" {
-			dbURL = flagURL
+			dbURL, reload = flagURL, nil
 		}
 		dbPath, err := store.DefaultDBPath()
 		if err != nil && dbURL == "" {
@@ -146,8 +147,9 @@ var serverCmd = &cobra.Command{
 		}
 
 		db, err := store.OpenStore(store.StoreConfig{
-			DatabaseURL: dbURL,
-			SQLitePath:  dbPath,
+			DatabaseURL:       dbURL,
+			SQLitePath:        dbPath,
+			ReloadDatabaseURL: reload,
 		})
 		if err != nil {
 			return fmt.Errorf("opening store: %w", err)
@@ -1215,8 +1217,9 @@ func runDetachedChild(host, addr string, mitmPort, postgresPort int, logger *slo
 	}
 
 	db, err := store.OpenStore(store.StoreConfig{
-		DatabaseURL: dbURL,
-		SQLitePath:  dbPath,
+		DatabaseURL:       dbURL,
+		SQLitePath:        dbPath,
+		ReloadDatabaseURL: databaseURLReload(),
 	})
 	if err != nil {
 		return fmt.Errorf("opening store: %w", err)

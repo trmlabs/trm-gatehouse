@@ -10,6 +10,10 @@ import (
 type StoreConfig struct {
 	DatabaseURL string
 	SQLitePath  string
+	// ReloadDatabaseURL, when set, is called after PostgreSQL refuses a new
+	// connection's login; a different URL it returns is used from then on,
+	// so a rotated password needs no restart. Unused for SQLite.
+	ReloadDatabaseURL func() (string, error)
 }
 
 // OpenStore opens a Store backed by either PostgreSQL or SQLite depending on
@@ -38,7 +42,7 @@ func OpenStore(cfg StoreConfig) (Store, error) {
 		return nil, fmt.Errorf("unrecognized DATABASE_URL scheme %q; supported: postgres://, postgresql://", scheme)
 	}
 
-	return openPostgres(cfg.DatabaseURL)
+	return openPostgresReloading(cfg.DatabaseURL, cfg.ReloadDatabaseURL)
 }
 
 // RedactURL returns a URL string with the password replaced by "***".

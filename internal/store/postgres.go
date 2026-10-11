@@ -6,8 +6,6 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func envInt(key string, fallback int) int {
@@ -34,11 +32,14 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	return d
 }
 
-func openPostgres(databaseURL string) (*SQLStore, error) {
-	db, err := sql.Open("pgx", databaseURL)
+// openPostgresReloading opens the store; reload, when set, supplies the URL
+// again after the server refuses a new connection's login.
+func openPostgresReloading(databaseURL string, reload func() (string, error)) (*SQLStore, error) {
+	connector, err := newReloadingConnector(databaseURL, reload)
 	if err != nil {
 		return nil, fmt.Errorf("opening postgres: %w", err)
 	}
+	db := sql.OpenDB(connector)
 
 	db.SetMaxOpenConns(envInt("DB_MAX_OPEN_CONNS", 25))
 	db.SetMaxIdleConns(envInt("DB_MAX_IDLE_CONNS", 10))
