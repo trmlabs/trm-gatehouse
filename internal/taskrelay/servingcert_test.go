@@ -274,7 +274,13 @@ func TestBrokerIssuedCertificateRenewsAndExpires(t *testing.T) {
 	if n := ti.issued.Load(); n != 2 {
 		t.Fatalf("%d issuances by four fifths of the lifetime, want 2", n)
 	}
+	// The issuer counts the renewal when it answers; the proxy installs the
+	// new certificate just after, so wait for it to be served.
 	second, e := servedSerial(t, ti, address)
+	for deadline := leaf.NotBefore.Add(life * 9 / 10); (e != nil || second.Cmp(first) == 0) && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		second, e = servedSerial(t, ti, address)
+	}
 	if e != nil || second.Cmp(first) == 0 {
 		t.Fatalf("renewed certificate not served: %v", e)
 	}
