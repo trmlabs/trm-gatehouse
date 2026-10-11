@@ -463,3 +463,20 @@ func TestAnUnrevocableOrphanClosesOnlyItsOwnDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The server starts the drain when SIGTERM arrives, before its listeners
+// drain: readiness turns false at once and no new issuance starts.
+func TestBeginDrainStopsReadinessAndNewIssuance(t *testing.T) {
+	client, st, _ := durableFixture(t)
+	m := newDurableForTest(t, client, st)
+	if !m.Ready() {
+		t.Fatal("a fresh minter is not ready")
+	}
+	m.BeginDrain()
+	if m.Ready() {
+		t.Fatal("ready while draining")
+	}
+	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); !errors.Is(err, errDraining) {
+		t.Fatalf("issuance while draining: %v", err)
+	}
+}

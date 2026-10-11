@@ -68,6 +68,7 @@ type Server struct {
 	encKey        []byte // 32-byte encryption key, held in memory while running
 	notifier      *notify.Notifier
 	initialized   atomic.Bool         // true when at least one owner account exists; replicas share registration
+	shuttingDown  atomic.Bool         // SIGTERM arrived: readiness is false from here on
 	lastInitCheck atomic.Int64        // unix-millis of last DB check for initialization (throttle)
 	baseURL       string              // externally-reachable base URL (e.g. "https://sb.example.com")
 	skillCLI      []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
@@ -1332,6 +1333,7 @@ func (s *Server) Start() error {
 		return err
 	case <-stop:
 	}
+	s.beginShutdown()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownBudget())
 	defer cancel()
@@ -1387,6 +1389,15 @@ func (s *Server) Start() error {
 	fmt.Println("server shut down gracefully")
 	crypto.WipeBytes(s.encKey)
 	return nil
+}
+
+// beginShutdown turns readiness false and stops new database credential
+// issuance before any listener drains, so the drain sees no new work.
+func (s *Server) beginShutdown() {
+	s.shuttingDown.Store(true)
+	if drain, ok := s.pgLeaseCloser.(interface{ BeginDrain() }); ok {
+		drain.BeginDrain()
+	}
 }
 
 var errTooManyPendingCodes = errors.New("too many pending verification codes")

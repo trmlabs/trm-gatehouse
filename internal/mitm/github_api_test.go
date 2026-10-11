@@ -154,13 +154,13 @@ func (f *apiFixture) post(t *testing.T, method, path, auth, body string) (int, s
 
 func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 	f := newAPIFixture(t)
-	for _, tc := range []struct{ path, auth string }{
-		{"/repos/trmlabs/trm-b2b/pulls", "token " + githubTokenPlaceholder}, // gh sends "token"
-		{"/repos/trmlabs/trm-b2b/issues/12/comments", "Bearer " + githubTokenPlaceholder},
-		{"/repos/trmlabs/trm-b2b/pulls/12/comments", ""},
-		{"/repos/trmlabs/trm-b2b/pulls/12/comments/99/replies", ""},
+	for _, tc := range []struct{ path, auth, body string }{
+		{"/repos/trmlabs/trm-b2b/pulls", "token " + githubTokenPlaceholder, `{"title":"agent change","head":"cursor/pool-agent/x","base":"main"}`}, // gh sends "token"
+		{"/repos/trmlabs/trm-b2b/issues/12/comments", "Bearer " + githubTokenPlaceholder, `{"body":"note"}`},
+		{"/repos/trmlabs/trm-b2b/pulls/12/comments", "", `{"body":"note","commit_id":"abc","path":"a.go","line":1}`},
+		{"/repos/trmlabs/trm-b2b/pulls/12/comments/99/replies", "", `{"body":"note"}`},
 	} {
-		if code, body := f.post(t, "POST", tc.path, tc.auth, `{"title":"agent change","head":"cursor/pool-agent/x","base":"main"}`); code != 201 || !strings.Contains(body, `"number":12`) {
+		if code, body := f.post(t, "POST", tc.path, tc.auth, tc.body); code != 201 || !strings.Contains(body, `"number":12`) {
 			t.Fatalf("%s: %d %s", tc.path, code, body)
 		}
 	}

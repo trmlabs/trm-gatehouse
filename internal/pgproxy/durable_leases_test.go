@@ -41,6 +41,8 @@ type durableVaultFixture struct {
 	foreign  []string
 	lists    int
 	denyList bool
+	// revokeStatus, when set, answers every lease revoke with this status.
+	revokeStatus int
 }
 
 // leaseRef is the child token a fixture lease ID belongs to.
@@ -134,6 +136,11 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 			delete(f.live, body["accessor"])
 			w.WriteHeader(204)
 		case strings.HasPrefix(r.URL.Path, "/v1/sys/leases/revoke/"):
+			if f.revokeStatus != 0 {
+				w.WriteHeader(f.revokeStatus)
+				write(map[string]any{"errors": []string{"synthetic revoke blip"}})
+				return
+			}
 			if f.failRevoke {
 				w.WriteHeader(403)
 				write(map[string]any{"errors": []string{"synthetic cleanup unavailable"}})

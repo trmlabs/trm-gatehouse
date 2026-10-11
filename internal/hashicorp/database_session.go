@@ -197,7 +197,7 @@ func (c *Client) RevokeDatabaseLeaseConfirmed(ctx context.Context, leaseID strin
 		}
 	}
 	if _, err := c.api.Logical().WriteWithContext(ctx, "sys/leases/revoke/"+leaseID, map[string]interface{}{"sync": true}); err != nil {
-		return fmt.Errorf("synchronous database revoke failed")
+		return revokeFailure("synchronous database revoke failed", err)
 	}
 	secret, err := c.api.Logical().WriteWithContext(ctx, "sys/leases/lookup", map[string]interface{}{"lease_id": leaseID})
 	var response *vaultapi.ResponseError
@@ -205,12 +205,30 @@ func (c *Client) RevokeDatabaseLeaseConfirmed(ctx context.Context, leaseID strin
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("confirm database lease removal failed")
+		return revokeFailure("confirm database lease removal failed", err)
 	}
 	if secret == nil {
 		return fmt.Errorf("database lease lookup returned no confirmation")
 	}
-	return fmt.Errorf("database lease still present after revoke")
+	return fmt.Errorf("database lease still present after revoke: %w", ErrLeaseRevokeRefused)
+}
+
+// ErrLeaseRevokeRefused marks a revocation Vault answered and refused, or
+// confirmed but still lists: a fault on Vault's or the database's side that a
+// retry will meet again. A timeout, a transport error or a 429, 502, 503 or
+// 504 reply is a blip and does not carry it.
+var ErrLeaseRevokeRefused = errors.New("vault refused the database lease revocation")
+
+func revokeFailure(message string, err error) error {
+	var response *vaultapi.ResponseError
+	if !errors.As(err, &response) {
+		return errors.New(message)
+	}
+	switch response.StatusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, ErrLeaseRevokeRefused)
 }
 
 // DatabaseLeasePrefix is the lease ID prefix of every credential read from

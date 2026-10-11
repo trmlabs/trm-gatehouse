@@ -67,7 +67,7 @@ A `github-api` entry lets agents work with pull requests in listed repositories,
 | `pr.open` | `POST /pulls`, from a branch under the pool's own push prefixes (its `git` entry's `refPrefixes`) | `pull_requests: write`, `contents: read` |
 | `pr.read` | `GET /pulls/{n}` | same |
 | `pr.list` | `GET /pulls` (query `state`, `head`, `base`, `sort`, `direction`, `page`, `per_page`), `GET /issues/{n}/comments` (query `since`, `page`, `per_page`) | same |
-| `pr.comment` | `POST /issues/{n}/comments`, `POST /pulls/{n}/comments`, `POST .../comments/{id}/replies` on a pull request in reach | same |
+| `pr.comment` | `POST /issues/{n}/comments` and `POST .../comments/{id}/replies` with `{"body": ...}` only; `POST /pulls/{n}/comments` with `body` plus `commit_id`, `path`, `line`, `side`, `start_line`, `start_side`, `subject_type` or `position` (never `in_reply_to`); on a pull request in reach | same |
 | `pr.edit` | `PATCH /pulls/{n}` with `{"body": ...}` only, on a pull request in reach (never its state, base or title); `PATCH /issues/comments/{id}` on a comment the App itself made there | same |
 | `pr.label` | `POST /issues/{n}/labels` on a pull request in reach, with only the repository's `labels` | same |
 | `pr.ready` | `POST /pulls/{n}/ready` marks a draft in reach ready. Not a GitHub REST route: GitHub does this only through GraphQL, so the broker sends that one mutation | same |

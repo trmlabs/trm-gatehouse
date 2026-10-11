@@ -1331,6 +1331,7 @@ type readiness struct{ ready bool }
 
 func (r *readiness) Ready() bool                 { return r.ready }
 func (r *readiness) Close(context.Context) error { return nil }
+func (r *readiness) BeginDrain()                 { r.ready = false }
 
 // The readiness gate follows the cleanup owner row; liveness does not.
 func TestReadyEndpointFollowsCleanupOwnership(t *testing.T) {
@@ -1351,6 +1352,12 @@ func TestReadyEndpointFollowsCleanupOwnership(t *testing.T) {
 	cleanup.ready = true
 	if code := get("/ready"); code != http.StatusOK {
 		t.Fatalf("not ready with a fresh owner row: %d", code)
+	}
+	// SIGTERM turns readiness false before any listener drains, and starts
+	// the database cleanup's drain.
+	srv.beginShutdown()
+	if code := get("/ready"); code != http.StatusServiceUnavailable || cleanup.ready {
+		t.Fatalf("ready after shutdown began: %d, cleanup ready %v", code, cleanup.ready)
 	}
 }
 

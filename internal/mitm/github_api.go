@@ -103,6 +103,8 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		body = rebuilt
 	case "edit-pull", "edit-comment":
 		body, ok = onlyBody(body)
+	case "comment":
+		body, ok = commentFrom(body, r.URL.Path)
 	case "label":
 		body, ok = labelsFrom(body, api.Repo.Labels)
 	case "dispatch":
@@ -356,6 +358,51 @@ func onlyBody(data []byte) ([]byte, bool) {
 	}
 	out, err := json.Marshal(map[string]string{"body": text})
 	return out, err == nil
+}
+
+// reviewCommentFields are the only fields a pull request review comment may
+// carry. in_reply_to is left out: it would thread the comment under any review
+// comment in the repository, on whichever pull request that one belongs to;
+// a reply goes through its own route, whose path names the pull request.
+var reviewCommentFields = map[string]bool{"body": true, "commit_id": true, "path": true, "line": true, "side": true,
+	"start_line": true, "start_side": true, "subject_type": true, "position": true}
+
+// commentFrom rebuilds a comment. An issue comment or a review reply is
+// {"body"} alone; a review comment (POST /pulls/{n}/comments) may add GitHub's
+// position fields, each checked for its type.
+func commentFrom(data []byte, path string) ([]byte, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 3 || parts[len(parts)-3] != "pulls" || parts[len(parts)-1] != "comments" {
+		return onlyBody(data)
+	}
+	fields, ok := jsonFields(data, reviewCommentFields)
+	if !ok || fields["body"] == nil {
+		return nil, false
+	}
+	out := make(map[string]any, len(fields))
+	for key, raw := range fields {
+		switch key {
+		case "body", "commit_id", "path", "side", "start_side", "subject_type":
+			var text string
+			if json.Unmarshal(raw, &text) != nil {
+				return nil, false
+			}
+			switch {
+			case (key == "side" || key == "start_side") && text != "LEFT" && text != "RIGHT",
+				key == "subject_type" && text != "line" && text != "file":
+				return nil, false
+			}
+			out[key] = text
+		default: // line, start_line, position
+			var n int64
+			if json.Unmarshal(raw, &n) != nil || n <= 0 {
+				return nil, false
+			}
+			out[key] = n
+		}
+	}
+	rebuilt, err := json.Marshal(out)
+	return rebuilt, err == nil
 }
 
 // labelsFrom rebuilds an add-labels body: {"labels": [...]} with at least one

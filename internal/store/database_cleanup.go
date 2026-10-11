@@ -244,12 +244,13 @@ func (s *SQLStore) MarkDatabaseCleanupTokenRevoked(ctx context.Context, owner, a
 // expiry of now plus ttl by the database clock. The record already existed, so
 // its child token was created before now; ttl must be the longest lifetime a
 // child token could have been given. Only this owner's records that still
-// lack a path change.
+// lack a path change. Adoption also lifts a quarantine mark an older build
+// wrote, since an unknown issuance alone no longer closes its binding.
 func (s *SQLStore) AdoptDatabaseCleanup(ctx context.Context, owner, accessor, mount, role string, ttl time.Duration) error {
 	if mount == "" || role == "" || ttl <= 0 {
 		return fmt.Errorf("mount, role and token lifetime are required")
 	}
-	result, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET mount = ?, role = ?, token_expires_ms = `+s.dbNowMs()+` + CAST(? AS BIGINT)
+	result, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET mount = ?, role = ?, quarantined = 0, token_expires_ms = `+s.dbNowMs()+` + CAST(? AS BIGINT)
 		WHERE accessor = ? AND owner = ? AND mount = '' AND lease_id = '' AND reconciliation_evidence = '' AND `+s.liveOwner()),
 		mount, role, ttl.Milliseconds(), accessor, owner, owner)
 	return affectedOne(result, err, ErrDatabaseCleanupOwnershipLost)

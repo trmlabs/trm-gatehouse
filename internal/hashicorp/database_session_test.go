@@ -284,3 +284,58 @@ func TestDatabaseLeaseIssued(t *testing.T) {
 		})
 	}
 }
+
+// A revocation Vault answers and refuses, or confirms while still listing the
+// lease, is a fault a retry meets again. A timeout, a lost connection or an
+// overloaded Vault is a blip and must not read as one.
+func TestRevokeDatabaseLeaseConfirmedTellsRefusalFromBlip(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		revoke        int
+		lookup        int
+		cancel, close bool
+		refused       bool
+	}{
+		{name: "refused by policy", revoke: 403, refused: true},
+		{name: "database refuses to drop the role", revoke: 500, refused: true},
+		{name: "still listed after revoke", revoke: 204, lookup: 200, refused: true},
+		{name: "overloaded", revoke: 503},
+		{name: "rate limited", revoke: 429},
+		{name: "gateway timeout", revoke: 504},
+		{name: "lookup unavailable", revoke: 204, lookup: 502},
+		{name: "caller gone", revoke: 204, cancel: true},
+		{name: "connection refused", close: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := tc.revoke
+				if r.URL.Path == "/v1/sys/leases/lookup" {
+					status = tc.lookup
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if status == 200 {
+					_, _ = w.Write([]byte(`{"data":{"id":"database/creds/reader/a1"}}`))
+				} else if status != 204 {
+					_, _ = w.Write([]byte(`{"errors":["synthetic"]}`))
+				}
+			}))
+			c := newClientForServer(t, srv.URL)
+			c.api.SetMaxRetries(0)
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			}
+			defer cancel()
+			if tc.close {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+			err := c.RevokeDatabaseLeaseConfirmed(ctx, "database/creds/reader/a1")
+			if err == nil || errors.Is(err, ErrLeaseRevokeRefused) != tc.refused {
+				t.Fatalf("err %v, refused %v", err, tc.refused)
+			}
+		})
+	}
+}
