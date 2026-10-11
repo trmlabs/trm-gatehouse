@@ -62,6 +62,23 @@ type durable struct {
 	// reaches its acknowledged sequence: its next report goes even with
 	// nothing new, so the broker restarts the history. Once per loss.
 	lossOwed bool
+	// unreachableAt is when a report to, or a read from, the broker last
+	// failed (no answer, a timeout, or a refusal); zero if none has.
+	unreachableAt time.Time
+}
+
+// failed records a failed call to the broker's store.
+func (d *durable) failed() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.unreachableAt = time.Now().UTC()
+}
+
+// unreachable is when a call to the broker's store last failed.
+func (d *durable) unreachable() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.unreachableAt
 }
 
 // oweLoss marks that the store lost writes acknowledged to this replica.
@@ -128,6 +145,7 @@ func (d *durable) push(ctx context.Context) error {
 		}
 		status, b, e := brokerPost(ctx, d.upstream, activityRecordPath, body, 4096)
 		if e != nil {
+			d.failed()
 			return e
 		}
 		var answer struct {
@@ -136,6 +154,7 @@ func (d *durable) push(ctx context.Context) error {
 			RetentionSeconds int64 `json:"retentionSeconds"`
 		}
 		if status != http.StatusOK || json.Unmarshal(b, &answer) != nil || answer.Seq <= 0 || answer.RetentionSeconds <= 0 {
+			d.failed()
 			return errDenied
 		}
 		d.activity.accepted(chunk)

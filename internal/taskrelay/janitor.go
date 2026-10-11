@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -30,9 +31,17 @@ type JanitorConfig struct {
 	IdleSeconds int64    `json:"idleSeconds"`
 	// DryRun logs what would be deleted and deletes nothing.
 	DryRun bool `json:"dryRun"`
-	// DeleteConcurrency is how many deletes are in flight at once. There is
-	// no cap on how many a pass deletes: it pages through every Sandbox.
+	// DeleteConcurrency is how many deletes are in flight at once.
 	DeleteConcurrency int `json:"deleteConcurrency"`
+	// MaxDeleteFraction and MaxDeletesPerPass cap one pass: it deletes at
+	// most the smaller of MaxDeleteFraction of all Sandboxes in Namespaces
+	// (rounded up) and MaxDeletesPerPass, longest idle first, and leaves the
+	// rest for the next pass. Zero means the default (0.1 and 1000). The cap
+	// is not a capacity limit: a backlog clears over a few one-minute passes.
+	// It bounds the damage of activity lost in a way no hold detected, since
+	// a Sandbox still in use shows activity again within minutes and is kept.
+	MaxDeleteFraction float64 `json:"maxDeleteFraction,omitempty"`
+	MaxDeletesPerPass int     `json:"maxDeletesPerPass,omitempty"`
 	// ListPageSize is the page size for every list (the API's continue tokens).
 	ListPageSize int `json:"listPageSize"`
 	// ReplicaConcurrency is how many proxy replicas are read at once (default
@@ -79,7 +88,9 @@ func (c JanitorConfig) validate() error {
 	// server's own scale, and pages up to what one response should carry.
 	if len(c.Namespaces) == 0 || c.IdleSeconds < 60 || c.DeleteConcurrency < 1 || c.DeleteConcurrency > 10000 ||
 		c.ReplicaConcurrency < 0 || c.ReplicaConcurrency > 10000 ||
-		c.ListPageSize < 1 || c.ListPageSize > 10000 || !dnsLabel.MatchString(c.ProxyNamespace) || len(c.ProxyLabels) == 0 ||
+		c.ListPageSize < 1 || c.ListPageSize > 10000 ||
+		c.MaxDeleteFraction < 0 || c.MaxDeleteFraction > 1 ||
+		c.MaxDeletesPerPass < 0 || c.MaxDeletesPerPass > 1000000 || !dnsLabel.MatchString(c.ProxyNamespace) || len(c.ProxyLabels) == 0 ||
 		c.AdminPort < 1 || c.AdminPort > 65535 || !apiVersionPattern.MatchString(c.SandboxAPIVersion) || !strings.Contains(c.SandboxAPIVersion, "/") ||
 		c.Kubernetes.CAFile == "" || c.Kubernetes.ReviewerTokenFile == "" {
 		return errConfig
@@ -106,6 +117,24 @@ func (c JanitorConfig) validate() error {
 		return errConfig
 	}
 	return nil
+}
+
+// Defaults for the per-pass delete cap.
+const (
+	defaultMaxDeleteFraction = 0.1
+	defaultMaxDeletesPerPass = 1000
+)
+
+// deleteCap is how many Sandboxes one pass may delete out of total.
+func (c JanitorConfig) deleteCap(total int) int {
+	fraction, count := c.MaxDeleteFraction, c.MaxDeletesPerPass
+	if fraction == 0 {
+		fraction = defaultMaxDeleteFraction
+	}
+	if count == 0 {
+		count = defaultMaxDeletesPerPass
+	}
+	return min(int(math.Ceil(fraction*float64(total))), count)
 }
 
 func (j *janitor) replicaConcurrency() int {
@@ -215,8 +244,25 @@ func (j *janitor) pass(ctx context.Context) error {
 			idle = append(idle, s)
 		}
 	}
+	// Longest idle first: the oldest last use (none seen sorts first), then
+	// the oldest Sandbox, then by UID so a pass is repeatable.
+	sort.Slice(idle, func(a, b int) bool {
+		la, lb := lastSeen[idle[a].UID], lastSeen[idle[b].UID]
+		if !la.Equal(lb) {
+			return la.Before(lb)
+		}
+		if !idle[a].Created.Equal(idle[b].Created) {
+			return idle[a].Created.Before(idle[b].Created)
+		}
+		return idle[a].UID < idle[b].UID
+	})
+	capped := 0
+	if limit := j.config.deleteCap(total); len(idle) > limit {
+		capped = len(idle) - limit
+		idle = idle[:limit]
+	}
 	deleted, e := j.delete(ctx, idle, lastSeen)
-	fields := map[string]any{"sandboxes": total, "idle": len(idle), "deleted": deleted, "dryRun": j.config.DryRun, "durable": durable}
+	fields := map[string]any{"sandboxes": total, "idle": len(idle) + capped, "deleted": deleted, "capped": capped, "dryRun": j.config.DryRun, "durable": durable}
 	if e != nil {
 		fields["error"] = e.Error()
 	}
@@ -374,7 +420,16 @@ func (j *janitor) activity(ctx context.Context, cutoff time.Time) (map[string]ti
 	var vouched time.Time
 	lost := false
 	var unaware []string
+	unreachable := false
 	for i, report := range reports {
+		// A replica whose report to the broker failed within the idle
+		// window may have had a sibling die holding activity the broker
+		// never took, so nothing in the window can be trusted as idle. The
+		// hold lifts on its own one idle window after the last failure. A
+		// proxy too old to send the field reports zero: no signal, no hold.
+		if report.BrokerUnreachableAt.After(cutoff) {
+			unreachable = true
+		}
 		if report.ReplicaStarted.After(cutoff) {
 			young = true
 		}
@@ -396,6 +451,8 @@ func (j *janitor) activity(ctx context.Context, cutoff time.Time) (map[string]ti
 		}
 	}
 	switch {
+	case unreachable:
+		return nil, false, false, janitorHold{"broker_unreachable_recently"}
 	case historyYoung:
 		return nil, false, false, janitorHold{"activity_history_young"}
 	case durable && lost:
