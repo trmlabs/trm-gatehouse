@@ -191,7 +191,7 @@ func TestUnknownChecksStayLinearInTheBacklog(t *testing.T) {
 	const records, roles = 2000, 4
 	ctx := context.Background()
 	for i := range records {
-		role := fmt.Sprintf("r%d", i%roles)
+		role := fmt.Sprintf("gatehouse-test.r%d", i%roles)
 		record := store.DatabaseCleanup{Accessor: fmt.Sprintf("lost-%04d", i), Binding: databaseBinding("vault", &DatabaseService{Name: role}),
 			Mount: "database", Role: role, TokenTTL: time.Millisecond}
 		if err := st.AddDatabaseCleanup(ctx, m.owner, record); err != nil {
@@ -200,7 +200,7 @@ func TestUnknownChecksStayLinearInTheBacklog(t *testing.T) {
 	}
 	time.Sleep(2 * m.opts.UnknownSettle)
 	for i := range roles {
-		svc := &DatabaseService{Name: fmt.Sprintf("r%d", i), Mount: "database", Role: fmt.Sprintf("r%d", i)}
+		svc := &DatabaseService{Name: fmt.Sprintf("gatehouse-test.r%d", i), Mount: "database", Role: fmt.Sprintf("gatehouse-test.r%d", i)}
 		lease, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
 		if err != nil {
 			t.Fatal("a backlog of unknown issuances closed a database:", err)
@@ -229,4 +229,52 @@ func TestUnknownChecksStayLinearInTheBacklog(t *testing.T) {
 			records, lists, roles, journal.settled.Load(), journal.fleet.Load())
 	}
 	t.Logf("one pass cleared %d unknown issuances in %v", records, elapsed)
+}
+
+// Orphan listing and revocation touch only roles named gatehouse-*. A lease
+// under a shared role, here old enough to be an orphan and still live, is
+// never listed or revoked, even when a list that held it reached the check:
+// its record stays unresolved and its database stays open.
+func TestASharedRolesLeaseIsNeverRevoked(t *testing.T) {
+	client, st, f := durableFixture(t)
+	m := checkOnlyMinter(t, client, st)
+	shared := &DatabaseService{Name: "shared", Mount: "database", Role: "readonly"}
+	setFixture(f, func(f *durableVaultFixture) { f.loseResponse, f.failSelfRevoke, f.leaseAge = true, true, 10*time.Minute })
+	if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, shared); err == nil {
+		t.Fatal("interrupted response accepted")
+	}
+	setFixture(f, func(f *durableVaultFixture) { f.loseResponse, f.failSelfRevoke, f.leaseAge = false, false, 0 })
+	waitSettled(t, st, m)
+	for range 3 {
+		checkAgain(m)
+	}
+	f.mu.Lock()
+	lists, live := f.lists, len(f.live)
+	var lease string
+	for _, id := range f.leases {
+		lease = id
+	}
+	f.mu.Unlock()
+	if lists != 0 || live != 1 {
+		t.Fatalf("a shared role was listed %d times; live leases %d, want the orphan still live", lists, live)
+	}
+	if check := m.checkPath(credentialPath{"database", "readonly"}, []string{lease}, map[string]bool{}); !check.shared {
+		t.Fatalf("a shared role's listed lease was checked: %+v", check)
+	}
+	f.mu.Lock()
+	live = len(f.live)
+	f.mu.Unlock()
+	if live != 1 {
+		t.Fatal("a shared role's lease was revoked")
+	}
+	if records := unresolved(t, st); len(records) != 1 || records[0].Quarantined {
+		t.Fatalf("the shared role's record: %+v", records)
+	}
+	lease2, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, shared)
+	if err != nil {
+		t.Fatal("the shared role's database closed:", err)
+	}
+	if err := m.Revoke(context.Background(), lease2.ID); err != nil {
+		t.Fatal(err)
+	}
 }

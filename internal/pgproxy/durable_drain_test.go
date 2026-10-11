@@ -16,7 +16,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-var drainService = &DatabaseService{Name: "db", Mount: "database", Role: "reader"}
+var drainService = &DatabaseService{Name: "db", Mount: "database", Role: "gatehouse-test.reader"}
 
 func blockIssuance(f *durableVaultFixture) {
 	f.mu.Lock()
@@ -162,7 +162,7 @@ func TestKilledMidMintKeepsTheDatabaseOpenAndClearsWhenVaultShowsNoLease(t *test
 	}
 	_ = cmd.Wait()
 	records := unresolved(t, st)
-	if len(records) != 1 || records[0].LeaseID != "" || records[0].Mount != "database" || records[0].Role != "reader" {
+	if len(records) != 1 || records[0].LeaseID != "" || records[0].Mount != "database" || records[0].Role != drainService.Role {
 		t.Fatalf("want one unknown issuance naming its credential path, got %+v", records)
 	}
 	f.mu.Lock()
@@ -289,7 +289,7 @@ func TestUnresolvedUnknownIssuanceNeverClosesItsDatabase(t *testing.T) {
 	}{
 		{name: "lease list refused", setup: func(f *durableVaultFixture) { f.denyList = true }, listing: true},
 		{name: "another client's lease on the role", setup: func(f *durableVaultFixture) {
-			f.foreign = []string{"database/creds/reader/someone-else"}
+			f.foreign = []string{"database/creds/gatehouse-test.reader/someone-else"}
 		}, listing: true},
 		{name: "older build's record, before its token can have expired", legacy: true},
 	} {
@@ -374,7 +374,7 @@ func TestOlderBuildsUnknownIssuanceClearsAfterAdoption(t *testing.T) {
 	if err := m.Revoke(context.Background(), lease.ID); err != nil {
 		t.Fatal(err)
 	}
-	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "database" || records[0].Role != "reader" || records[0].Quarantined {
+	if records := unresolved(t, st); len(records) != 1 || records[0].Mount != "database" || records[0].Role != drainService.Role || records[0].Quarantined {
 		t.Fatalf("record not adopted, or still closing its database: %+v", records)
 	}
 	waitWithin(t, 5*time.Second, "automatic reconciliation of the adopted record", func() bool { return len(unresolved(t, st)) == 0 })

@@ -45,14 +45,17 @@ for _ in {1..50}; do
 done
 $ready || { echo "Vault startup timed out" >&2; exit 1; }
 vault secrets enable database >/dev/null
-vault write database/config/appdb plugin_name=postgresql-database-plugin allowed_roles=readonly connection_url="postgresql://{{username}}:{{password}}@127.0.0.1:$pg_port/appdb?sslmode=disable" username=review_admin password="$admin_pw" >/dev/null
+vault write database/config/appdb plugin_name=postgresql-database-plugin allowed_roles=readonly,gatehouse-test.readonly connection_url="postgresql://{{username}}:{{password}}@127.0.0.1:$pg_port/appdb?sslmode=disable" username=review_admin password="$admin_pw" >/dev/null
 vault write database/roles/readonly db_name=appdb creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE pg_read_all_data;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=8s max_ttl=90s >/dev/null
 vault write database/config/appdb2 plugin_name=postgresql-database-plugin allowed_roles=readonly2 connection_url="postgresql://{{username}}:{{password}}@127.0.0.1:$pg_port/appdb2?sslmode=disable" username=review_admin password="$admin_pw" >/dev/null
 vault write database/roles/readonly2 db_name=appdb2 creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE pg_read_all_data;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=8s max_ttl=90s >/dev/null
 # Each child token can read only its selected role and end itself, which
 # revokes the credential it issued. The parent needs these policies plus token
 # creation and lease renewal; it holds no right to revoke tokens by accessor.
-for db_role in readonly readonly2; do
+# gatehouse-test.readonly is the same grant under a Gatehouse role name: the
+# broker lists and revokes orphan leases only under gatehouse-* roles.
+vault write database/roles/gatehouse-test.readonly db_name=appdb creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE pg_read_all_data;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=8s max_ttl=90s >/dev/null
+for db_role in readonly readonly2 gatehouse-test.readonly; do
   db_policy_hash=$(printf '%s' "database/creds/$db_role" | openssl dgst -sha256 | awk '{print $NF}')
   printf 'path "database/creds/%s" { capabilities = ["read"] }\npath "auth/token/revoke-self" { capabilities = ["update"] }\n' "$db_role" | vault policy write "agent-vault-db-$db_policy_hash" - >/dev/null
 done
@@ -62,26 +65,28 @@ path "sys/leases/renew" {
   capabilities = ["update"]
   required_parameters = ["lease_id"]
   allowed_parameters = {
-    "lease_id" = ["database/creds/readonly/*", "database/creds/readonly2/*"]
+    "lease_id" = ["database/creds/readonly/*", "database/creds/readonly2/*", "database/creds/gatehouse-test.readonly/*"]
     "increment" = []
   }
 }
 path "sys/leases/revoke/database/creds/readonly/*" { capabilities = ["update"] }
 path "sys/leases/revoke/database/creds/readonly2/*" { capabilities = ["update"] }
+path "sys/leases/revoke/database/creds/gatehouse-test.readonly/*" { capabilities = ["update"] }
 # Listing its own roles' leases lets the broker clear an unknown issuance once
 # Vault shows no credential from it remains. Vault requires sudo to list leases;
 # on these exact paths it grants nothing else.
 path "sys/leases/lookup/database/creds/readonly/" { capabilities = ["list", "sudo"] }
 path "sys/leases/lookup/database/creds/readonly2/" { capabilities = ["list", "sudo"] }
+path "sys/leases/lookup/database/creds/gatehouse-test.readonly/" { capabilities = ["list", "sudo"] }
 path "sys/leases/lookup" {
   capabilities = ["update"]
   required_parameters = ["lease_id"]
   allowed_parameters = {
-    "lease_id" = ["database/creds/readonly/*", "database/creds/readonly2/*"]
+    "lease_id" = ["database/creds/readonly/*", "database/creds/readonly2/*", "database/creds/gatehouse-test.readonly/*"]
   }
 }
 POLICY
-export AV_TEST_PG_SECOND_DB=appdb2 AV_TEST_VAULT_SECOND_ROLE=readonly2
+export AV_TEST_PG_SECOND_DB=appdb2 AV_TEST_VAULT_SECOND_ROLE=readonly2 AV_TEST_VAULT_GATEHOUSE_ROLE=gatehouse-test.readonly
 export AV_TEST_PG_UPSTREAM="[::1]:$pg_port" AV_TEST_PG_DENIED_UPSTREAM="127.0.0.1:$pg_port" AV_TEST_PG_DB=appdb
 export AV_TEST_PG_ADMIN="postgres://review_admin:$admin_pw@127.0.0.1:$pg_port/appdb?sslmode=disable"
 export AV_TEST_STORE_PG_URL="postgres://review_admin:$admin_pw@127.0.0.1:$pg_port/brokerstore?sslmode=disable"

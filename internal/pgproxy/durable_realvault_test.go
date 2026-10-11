@@ -27,6 +27,13 @@ import (
 
 func realDurableInputs(t *testing.T) (*hashicorp.Client, *pgx.Conn, *DatabaseService) {
 	t.Helper()
+	return realDurableInputsFor(t, os.Getenv("AV_TEST_VAULT_ROLE"))
+}
+
+// realDurableInputsFor is realDurableInputs for one Vault role ("readonly"
+// when empty).
+func realDurableInputsFor(t *testing.T, role string) (*hashicorp.Client, *pgx.Conn, *DatabaseService) {
+	t.Helper()
 	if os.Getenv("VAULT_ADDR") == "" || os.Getenv("AV_TEST_PG_ADMIN") == "" || os.Getenv("AV_TEST_PG_UPSTREAM") == "" {
 		t.Skip("requires disposable real Vault/PostgreSQL fixture")
 	}
@@ -36,7 +43,7 @@ func realDurableInputs(t *testing.T) (*hashicorp.Client, *pgx.Conn, *DatabaseSer
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = admin.Close(ctx) })
-	mount, role := os.Getenv("AV_TEST_VAULT_MOUNT"), os.Getenv("AV_TEST_VAULT_ROLE")
+	mount := os.Getenv("AV_TEST_VAULT_MOUNT")
 	if mount == "" {
 		mount = "database"
 	}
@@ -206,7 +213,12 @@ func TestRealVault_DurableParentPolicyScope(t *testing.T) {
 // the database closed. When the dependency is gone the revocation succeeds,
 // the list comes back empty, and the broker reopens it without an operator.
 func TestRealVault_DurableUnknownIssuanceClearsWhenVaultListsNoLease(t *testing.T) {
-	_, admin, svc := realDurableInputs(t)
+	// The broker lists and revokes orphans only under gatehouse-* roles.
+	role := os.Getenv("AV_TEST_VAULT_GATEHOUSE_ROLE")
+	if role == "" {
+		t.Skip("set AV_TEST_VAULT_GATEHOUSE_ROLE to a gatehouse-* role on the fixture database")
+	}
+	_, admin, svc := realDurableInputsFor(t, role)
 	upstream, err := url.Parse(os.Getenv("VAULT_ADDR"))
 	if err != nil {
 		t.Fatal(err)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -491,7 +492,16 @@ type credentialPath struct{ mount, role string }
 type pathCheck struct {
 	listed, unaccounted, young, refused int
 	unavailable                         bool
+	shared                              bool // not a Gatehouse role: never listed
 }
+
+// gatehouseRolePrefix names the Vault roles only Gatehouse uses. Orphan
+// listing and revocation touch no other role, whatever Vault's policy allows:
+// a shared role's list holds other clients' leases, and revoking one as an
+// orphan would end that client's sessions.
+const gatehouseRolePrefix = "gatehouse-"
+
+func gatehouseRole(role string) bool { return strings.HasPrefix(role, gatehouseRolePrefix) }
 
 // state is where this check leaves an issuance that Vault refused to revoke
 // an orphan for on refusals checks in a row (zero when it did not refuse).
@@ -499,7 +509,7 @@ func (c pathCheck) state(refusals int) unknownState {
 	switch {
 	case refusals >= 2:
 		return unknownStuck
-	case refusals == 1 || c.unavailable:
+	case refusals == 1 || c.unavailable || c.shared:
 		return unknownUnavailable
 	case c.unaccounted > 0:
 		return unknownPending
@@ -531,8 +541,9 @@ func (c pathCheck) state(refusals int) unknownState {
 // database refuses to drop the role: the state is unknownStuck and the binding
 // closes. A timeout, a transport error or an overloaded Vault is a blip and
 // changes nothing. A younger lease may be another replica's issuance, so the
-// check waits. The roles the broker lists are its own (Gatehouse-only), so no
-// other client's lease is revoked here.
+// check waits. Only roles named gatehouse-* are ever listed or revoked, in
+// code as well as in Vault's policy, so no other client's lease is revoked
+// here even if the policy is widened.
 //
 // Each journal or Vault call of a check runs on its own deadline, so a slow
 // call cannot use up the others' time; a fence or Close still ends it. The
@@ -631,6 +642,9 @@ func (m *DurableLeaseMinter) checkUnknowns() {
 	listed := make(map[credentialPath][]string, len(paths))
 	failed := make(map[credentialPath]bool)
 	for _, path := range paths {
+		if !gatehouseRole(path.role) {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
 		leases, err := m.client.ListDatabaseLeases(ctx, path.mount, path.role)
 		cancel()
@@ -654,10 +668,13 @@ func (m *DurableLeaseMinter) checkUnknowns() {
 	}
 	for _, path := range paths {
 		var check pathCheck
-		if failed[path] {
+		switch {
+		case !gatehouseRole(path.role):
+			check.shared = true
+		case failed[path]:
 			check.unavailable = true
-		} else {
-			check = m.checkPath(listed[path], known)
+		default:
+			check = m.checkPath(path, listed[path], known)
 		}
 		m.settlePath(path, groups[path], check, now)
 	}
@@ -665,10 +682,14 @@ func (m *DurableLeaseMinter) checkUnknowns() {
 
 // checkPath revokes the orphans among a credential path's unaccounted leases,
 // each on its own deadline.
-func (m *DurableLeaseMinter) checkPath(leases []string, known map[string]bool) pathCheck {
+func (m *DurableLeaseMinter) checkPath(path credentialPath, leases []string, known map[string]bool) pathCheck {
 	check := pathCheck{listed: len(leases)}
+	prefix, err := hashicorp.DatabaseLeasePrefix(path.mount, path.role)
+	if err != nil || !gatehouseRole(path.role) {
+		return pathCheck{shared: true}
+	}
 	for _, lease := range leases {
-		if known[lease] {
+		if known[lease] || !strings.HasPrefix(lease, prefix) {
 			continue
 		}
 		check.unaccounted++
@@ -745,6 +766,8 @@ func (m *DurableLeaseMinter) settlePath(path credentialPath, records []store.Dat
 	case check.refused > 0:
 		log.Warn("pgproxy: unknown database issuance unresolved: Vault refused to revoke an orphan lease under this role; the database closes if the next check is refused too",
 			slog.Int("unrevocable", check.refused))
+	case check.shared:
+		log.Warn("pgproxy: unknown database issuance unresolved: the role is not a Gatehouse role (" + gatehouseRolePrefix + "*), so the broker never lists or revokes its leases; an operator closes the record")
 	case check.unavailable:
 		log.Warn("pgproxy: unknown database issuance unresolved: Vault or the journal did not answer; nothing changes until a check completes")
 	case check.unaccounted > 0:
