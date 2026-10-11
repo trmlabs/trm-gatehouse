@@ -51,7 +51,7 @@ agent entirely.
 | PostgreSQL databases | A placeholder password | A temporary database login issued by HashiCorp Vault, revoked when no longer needed |
 | HTTP APIs | A placeholder in the key header, or no key | The real key, for the catalog's host, paths and methods only |
 | GitHub repositories (clone, push) | Nothing | A short-lived GitHub App token for that one repository; pushes can be limited to branch prefixes |
-| GitHub pull requests | A placeholder token, or none | The same App token, for the pull request API |
+| GitHub pull requests, Actions runs and deployments | A placeholder token, or none | The same App token, for the pull request API and, where the catalog grants them, Actions and deployment reads |
 | Google Cloud (Cloud Storage, BigQuery) | A placeholder token | A short-lived token narrowed to one bucket prefix or one service account |
 | Staging web apps as a test user | Nothing | A sign-in for the test user; the browser holds only placeholders |
 
@@ -67,11 +67,12 @@ catalog with how its agents prove who they are and how they reach the broker.
 
 | Harness | How agents connect | Who is named in the audit |
 |---|---|---|
-| Cursor self-hosted workers | A Gatehouse sidecar on each worker's loopback address | The worker pool. The staging Cursor pool does not name a person, so it reaches only entries open to the whole pool |
+| Cursor self-hosted workers | A Gatehouse sidecar on each worker's loopback address | The worker pool for a shared Cursor pool, which reaches only entries open to the whole pool. A Cursor person pool names the person behind each task |
 | agent-sandbox | A shared relay that matches each connection to a live sandbox Pod and the images it runs | The person who started the sandbox, when the pool runs in person mode; otherwise the pool |
 
-Entries can be limited to people in specific groups. Cursor pools never reach
-those entries.
+Entries can be limited to people in specific groups. A shared Cursor pool never
+reaches those entries; a Cursor person pool can, because each of its requests
+names the person.
 
 ## Try it
 
