@@ -286,7 +286,6 @@ func TestJanitorFirstPassAfterARestore(t *testing.T) {
 // janitor holds it until a replica's acknowledgment is older than the idle
 // window. One hold per rollout; nothing is deleted meanwhile.
 func TestJanitorHoldsAfterEveryReplicaRestarts(t *testing.T) {
-	t.Parallel()
 	const idle = 4 * time.Second
 	rig := newRestoreRig(t)
 	sf, _ := rig.replica(t)
