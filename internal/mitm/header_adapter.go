@@ -121,6 +121,33 @@ func requestedTarget(r *http.Request) string {
 	return r.Host
 }
 
+// gitOperation names a matched git request for the audit row: "git.push"
+// for the receive-pack service, "git.fetch" for upload-pack, or "" when no
+// repository matched.
+func gitOperation(git httpcatalog.GitRequest) string {
+	switch {
+	case git.Entry == nil:
+		return ""
+	case git.Write:
+		return "git.push"
+	}
+	return "git.fetch"
+}
+
+// githubAPIOperation names a github-api request for the audit row: the
+// repository operation its route belongs to, or "graphql" for a GraphQL
+// request no route admits, so those refusals can be counted apart from other
+// unlisted paths. Never the path itself.
+func githubAPIOperation(api httpcatalog.GitRequest, path string) string {
+	if api.Operation != "" {
+		return api.Operation
+	}
+	if path == "/graphql" || path == "/api/graphql" {
+		return "graphql"
+	}
+	return ""
+}
+
 func auditMethod(m string) string {
 	switch m {
 	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE":
@@ -170,12 +197,14 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return false
 	}
 	if git, ok, err := catalog.GitMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
+		event.Operation = gitOperation(git)
 		if !refused(git.Entry, err) {
 			p.forwardGit(w, r, target, scope, event, git, err)
 		}
 		return
 	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
+		event.Operation = githubAPIOperation(api, r.URL.Path)
 		if !refused(api.Entry, err) {
 			p.forwardGitHubAPI(w, r, target, scope, event, api, err)
 		}

@@ -56,9 +56,13 @@ func TestV1InputIsUnchanged(t *testing.T) {
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v4\x00")) {
 		t.Fatal("a v4 row does not use the v4 input")
 	}
-	r.MACVersion = MACVersionCurrent
+	r.MACVersion = 5
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v5\x00")) {
-		t.Fatal("a current row does not use the v5 input")
+		t.Fatal("a v5 row does not use the v5 input")
+	}
+	r.MACVersion = MACVersionCurrent
+	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v6\x00")) {
+		t.Fatal("a current row does not use the v6 input")
 	}
 }
 
@@ -67,7 +71,8 @@ func authzFixture(t *testing.T) (*fixture, string) {
 	f := newFixture(t)
 	if err := f.chain.Record(Event{Event: EventDenied, Pool: "claude", Binding: "vault/core", Outcome: "not_entitled",
 		RequesterKind: "person", RequesterOID: "oid-1", TokenSHA256: "ab", Tier: "T1", Decision: "not_entitled", Groups: "11111111-2222-3333-4444-555555555555", CacheAgeSec: 3,
-		Kid: "invalid", KidSHA256: "0123456789ab", Peer: "10.0.0.5"}); err != nil {
+		Kid: "invalid", KidSHA256: "0123456789ab", Peer: "10.0.0.5",
+		Operation: "pr.open", Database: "b2bcore", RequesterDepartment: "Security & IT"}); err != nil {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
@@ -77,17 +82,20 @@ func authzFixture(t *testing.T) (*fixture, string) {
 // The High finding: a log-sink editor flips a decision and the chain must fail.
 func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 	for name, edit := range map[string][2]string{
-		"decision":  {`"decision":"not_entitled"`, `"decision":"entitled"`},
-		"tier":      {`"tier":"T1"`, `"tier":"T0"`},
-		"groups":    {`"groups":"11111111-2222-3333-4444-555555555555"`, `"groups":"11111111-2222-3333-4444-555555555556"`},
-		"person":    {`"requesterOID":"oid-1"`, `"requesterOID":"oid-2"`},
-		"kind":      {`"requesterKind":"person"`, `"requesterKind":"workload"`},
-		"token":     {`"tokenSHA256":"ab"`, `"tokenSHA256":"cd"`},
-		"cache age": {`"cacheAgeSec":3`, `"cacheAgeSec":4`},
-		"kid":       {`"kid":"invalid"`, `"kid":"k1"`},
-		"kid hash":  {`"kidSHA256":"0123456789ab"`, `"kidSHA256":"ba9876543210"`},
-		"peer":      {`"peer":"10.0.0.5"`, `"peer":"10.0.0.6"`},
-		"version":   {`"macVersion":5`, `"macVersion":4`},
+		"decision":   {`"decision":"not_entitled"`, `"decision":"entitled"`},
+		"tier":       {`"tier":"T1"`, `"tier":"T0"`},
+		"groups":     {`"groups":"11111111-2222-3333-4444-555555555555"`, `"groups":"11111111-2222-3333-4444-555555555556"`},
+		"person":     {`"requesterOID":"oid-1"`, `"requesterOID":"oid-2"`},
+		"kind":       {`"requesterKind":"person"`, `"requesterKind":"workload"`},
+		"token":      {`"tokenSHA256":"ab"`, `"tokenSHA256":"cd"`},
+		"cache age":  {`"cacheAgeSec":3`, `"cacheAgeSec":4`},
+		"kid":        {`"kid":"invalid"`, `"kid":"k1"`},
+		"kid hash":   {`"kidSHA256":"0123456789ab"`, `"kidSHA256":"ba9876543210"`},
+		"peer":       {`"peer":"10.0.0.5"`, `"peer":"10.0.0.6"`},
+		"version":    {`"macVersion":6`, `"macVersion":5`},
+		"operation":  {`"operation":"pr.open"`, `"operation":"pr.read"`},
+		"database":   {`"database":"b2bcore"`, `"database":"b2btm2"`},
+		"department": {`"requesterDepartment":"Security \u0026 IT"`, `"requesterDepartment":"Engineering"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, out := authzFixture(t)
@@ -111,14 +119,17 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 // chain never steps down from v2 to v1.
 func TestV1RowsCannotCarryAuthorizationOrDowngrade(t *testing.T) {
 	for name, forge := range map[string]func(*Row){
-		"v1 row with a decision": func(r *Row) { r.Decision = "entitled" },
-		"v2 row with a peer":     func(r *Row) { r.MACVersion, r.Peer = 2, "10.0.0.5" },
-		"v2 row with a kid":      func(r *Row) { r.MACVersion, r.Kid = 2, "k1" },
-		"v3 row with a serial":   func(r *Row) { r.MACVersion, r.Serial = 3, "1a" },
-		"v3 row with a notAfter": func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
-		"v4 row with a target":   func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
-		"plain downgrade":        func(*Row) {},
-		"unknown version":        func(r *Row) { r.MACVersion = 9 },
+		"v1 row with a decision":   func(r *Row) { r.Decision = "entitled" },
+		"v2 row with a peer":       func(r *Row) { r.MACVersion, r.Peer = 2, "10.0.0.5" },
+		"v2 row with a kid":        func(r *Row) { r.MACVersion, r.Kid = 2, "k1" },
+		"v3 row with a serial":     func(r *Row) { r.MACVersion, r.Serial = 3, "1a" },
+		"v3 row with a notAfter":   func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
+		"v4 row with a target":     func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
+		"v5 row with an operation": func(r *Row) { r.MACVersion, r.Operation = 5, "pr.open" },
+		"v5 row with a database":   func(r *Row) { r.MACVersion, r.Database = 5, "b2bcore" },
+		"v5 row with a department": func(r *Row) { r.MACVersion, r.RequesterDepartment = 5, "Engineering" },
+		"plain downgrade":          func(*Row) {},
+		"unknown version":          func(r *Row) { r.MACVersion = 9 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, out := authzFixture(t)
@@ -146,7 +157,7 @@ func hasKind(r Report, kind string) bool {
 	return false
 }
 
-// A trail written by a v2 broker, then after upgrades by v3, v4 and v5 ones,
+// A trail written by a v2 broker, then after upgrades by v3 to v6 ones,
 // verifies; an older row after a newer one is a step down and does not.
 func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	writeMACVersion = 2
@@ -166,9 +177,15 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
-	writeMACVersion = MACVersionCurrent
+	writeMACVersion = 5
 	f.restart(t)
 	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "unlisted", Target: "example.com:443"}); err != nil {
+		t.Fatal(err)
+	}
+	f.checkpoint(t)
+	writeMACVersion = MACVersionCurrent
+	f.restart(t)
+	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "no_database", Database: "invalid", RequesterDepartment: "Engineering"}); err != nil {
 		t.Fatal(err)
 	}
 	f.session(t, 2)
@@ -178,8 +195,8 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	for _, r := range rows(t, out) {
 		versions[r.MACVersion]++
 	}
-	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 4 {
-		t.Fatalf("trail versions %v, want v2, v3, v4 then v5", versions)
+	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 5 {
+		t.Fatalf("trail versions %v, want v2, v3, v4, v5 then v6", versions)
 	}
 	if report := verify(t, f.verifier(), out); len(report.Findings) != 0 {
 		t.Fatalf("upgraded trail: %v", kinds(report))
@@ -187,13 +204,13 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	parsed := rows(t, out)
 	last := parsed[len(parsed)-1]
 	key, _ := f.keys.lookup(last.KeyVersion)
-	for _, older := range []int{2, 3, 4} {
+	for _, older := range []int{2, 3, 4, 5} {
 		forged := Row{Type: RowType, Replica: last.Replica, Boot: last.Boot, Seq: last.Seq + 1, Time: last.Time,
 			Event: EventSessionOpen, Pool: "claude", KeyVersion: last.KeyVersion, Prev: last.MAC, MACVersion: older}
 		forged.MAC = forged.computeMAC(key)
 		line, _ := json.Marshal(forged)
 		if report := verify(t, f.verifier(), out+string(line)+"\n"); !hasKind(report, FindingEdit) {
-			t.Fatalf("step down from v5 to v%d accepted: %v", older, kinds(report))
+			t.Fatalf("step down from v6 to v%d accepted: %v", older, kinds(report))
 		}
 	}
 }
@@ -291,6 +308,65 @@ func TestRefusalTargetIsCoveredAndBounded(t *testing.T) {
 	for _, bad := range []string{"API.example.com:443", "api.example.com/v1", "api.example.com:070"} {
 		if (Event{Event: EventDenied, Target: bad}).Validate() == nil {
 			t.Errorf("target %q accepted", bad)
+		}
+	}
+}
+
+func TestDatabaseFieldAdmitsOnlyPlainNames(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                      "",
+		"b2bcore":               "b2bcore",
+		"audit_log-2.v1":        "audit_log-2.v1",
+		"has space":             "invalid",
+		`quote"d`:               "invalid",
+		"line\nbreak":           "invalid",
+		strings.Repeat("a", 63): strings.Repeat("a", 63),
+		strings.Repeat("a", 64): "invalid",
+		"-leading-dash":         "invalid",
+	} {
+		if got := DatabaseField(in); got != want {
+			t.Errorf("DatabaseField(%q) = %q, want %q", in, got, want)
+		}
+		if got := DatabaseField(in); got != "" && (Event{Event: EventDenied, Database: got}).Validate() != nil {
+			t.Errorf("DatabaseField(%q) = %q does not validate", in, got)
+		}
+	}
+	if (Event{Event: EventDenied, Database: "has space"}).Validate() == nil {
+		t.Error("a non-canonical database validated")
+	}
+}
+
+func TestDepartmentFieldIsBoundedText(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                           "",
+		"  Security   &\tIT ":        "Security & IT",
+		"Recherche et Développement": "Recherche et Développement",
+		`R"D`:                        "invalid",
+		`R\D`:                        "invalid",
+		"R\u0000D":                   "invalid",
+		strings.Repeat("x", 257):     "invalid",
+	} {
+		if got := DepartmentField(in); got != want {
+			t.Errorf("DepartmentField(%q) = %q, want %q", in, got, want)
+		}
+		if got := DepartmentField(in); got != "" && (Event{Event: EventDenied, RequesterDepartment: got}).Validate() != nil {
+			t.Errorf("DepartmentField(%q) = %q does not validate", in, got)
+		}
+	}
+	if (Event{Event: EventDenied, RequesterDepartment: " Security"}).Validate() == nil {
+		t.Error("a non-canonical department validated")
+	}
+}
+
+func TestOperationIsAFixedVocabularyShape(t *testing.T) {
+	for _, ok := range []string{"pr.open", "git.fetch", "graphql", "deployments.read"} {
+		if (Event{Event: EventHTTPRequest, Operation: ok}).Validate() != nil {
+			t.Errorf("operation %q refused", ok)
+		}
+	}
+	for _, bad := range []string{"PR.open", "/repos/x", "pr open", "pr..open", ".pr", "a.b.c.d.e"} {
+		if (Event{Event: EventHTTPRequest, Operation: bad}).Validate() == nil {
+			t.Errorf("operation %q accepted", bad)
 		}
 	}
 }

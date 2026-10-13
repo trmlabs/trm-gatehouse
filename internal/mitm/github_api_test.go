@@ -171,7 +171,7 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	if e := f.audit.last(); e.Binding != "github-api/trmlabs/trm-b2b" || e.Outcome != "completed" || e.Status != 201 {
+	if e := f.audit.last(); e.Binding != "github-api/trmlabs/trm-b2b" || e.Outcome != "completed" || e.Status != 201 || e.Operation != "pr.comment" {
 		t.Fatalf("audit: %+v", e)
 	}
 	// GitHub receives the request rebuilt from the checked fields, not the worker's bytes.
@@ -268,6 +268,19 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 			if code, _ := f.post(t, tc.method, tc.path, tc.auth, tc.body); code < 400 || f.audit.last().Outcome != tc.outcome {
 				t.Fatalf("code=%d outcome=%q", code, f.audit.last().Outcome)
 			}
+			// A refusal past route matching names its operation; an unlisted
+			// path has none, and the row never carries the path.
+			want := ""
+			switch tc.outcome {
+			case "unlisted", "method":
+			case "request_shape":
+				want = "pr.read"
+			default:
+				want = "pr.open"
+			}
+			if got := f.audit.last().Operation; got != want {
+				t.Fatalf("operation=%q, want %q", got, want)
+			}
 		})
 	}
 	f.mu.Lock()
@@ -281,5 +294,17 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	f.mu.Unlock()
 	if code, _ := f.post(t, "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}`); code == 201 || f.audit.last().Outcome != "secret_echo" {
 		t.Fatalf("token echo not blocked: %d %+v", code, f.audit.last())
+	}
+}
+
+// A GitHub GraphQL request no route admits is recorded as "graphql", so those
+// refusals can be counted apart from other unlisted paths.
+func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
+	f := newAPIFixture(t)
+	if code, _ := f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code < 400 {
+		t.Fatalf("GraphQL was not refused: %d", code)
+	}
+	if e := f.audit.last(); e.Outcome != "unlisted" || e.Operation != "graphql" {
+		t.Fatalf("audit: %+v", e)
 	}
 }
