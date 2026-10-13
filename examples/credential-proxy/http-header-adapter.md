@@ -42,6 +42,7 @@ Set `AGENT_VAULT_HTTP_CATALOG_FILE` to a JSON file. One entry per binding:
 | `pools` | Broker agent IDs of the worker pools granted this entry. |
 | `forwardHeaders` | Extra caller headers the vendor needs. Only Accept, Accept-Language, Content-Type and User-Agent pass otherwise; routing headers such as `X-Forwarded-Host` or `X-HTTP-Method-Override` can never be listed. |
 | `maxRequestBytes`, `maxResponseBytes` | Default 1 MiB and 32 MiB. |
+| `requestFields` | Request parameters limited to listed values, as `[{"name": "channel", "values": ["C0123456789"]}]`. Each listed parameter must appear exactly once in the whole request (query string, JSON object body or form body) as a string equal to a listed value. A request with the parameter missing, repeated, in both the query and the body, a duplicate JSON key, a body that is not a JSON object or form, or two `Content-Type` headers is refused (403, `request_field` in the audit trail). An entry for `slack.com` must limit `channel` to channel IDs (`C...`); direct messages, group conversations and people can never be listed, and a Slack entry without the rule fails at load. |
 
 ## Guarantees
 

@@ -234,6 +234,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		// reach the vendor verbatim.
 		deny(http.StatusBadRequest, "placeholder_misplaced")
 		return
+	case entry.CheckRequestFields(r.URL.RawQuery, r.Header.Values("Content-Type"), body) != nil:
+		// A limited parameter (a Slack channel) missing, repeated, placed
+		// twice or not listed.
+		deny(http.StatusForbidden, "request_field")
+		return
 	}
 	expectedCredential := entry.Credential(entry.Placeholder)
 	forwarded := http.Header{}
