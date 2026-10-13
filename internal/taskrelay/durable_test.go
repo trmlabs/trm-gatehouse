@@ -411,3 +411,53 @@ func TestDurableActivityReportDuringTheReadIsNoLoss(t *testing.T) {
 		t.Fatalf("a report during the read read as a loss: owed %v, pending %v", owed, a.pending())
 	}
 }
+
+// A refused report or an unreadable view records when the broker was last
+// unreachable, and the activity report carries it for the janitor; a broker
+// that answers again does not clear it, so the janitor's hold runs one idle
+// window from the last failure. A read the caller gave up on records nothing.
+func TestDurableActivityRecordsWhenTheBrokerWasUnreachable(t *testing.T) {
+	broker := newActivityBroker(t)
+	f := newRelayFixture(t)
+	a := newActivity(time.Now(), time.Hour)
+	d := &durable{activity: a, upstream: broker.upstream(f.upstream(t, "")), interval: time.Hour, replica: "aaaa0001"}
+	a.durable = d
+	report := func(path string) ActivityReport {
+		rec := httptest.NewRecorder()
+		a.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		var r ActivityReport
+		if e := json.NewDecoder(rec.Body).Decode(&r); e != nil {
+			t.Fatal(e)
+		}
+		return r
+	}
+	a.record("ns", "sb-1", time.Now())
+	if e := d.push(context.Background()); e != nil || !report(ActivityLocalPath).BrokerUnreachableAt.IsZero() {
+		t.Fatalf("a reachable broker recorded a failure: %v", e)
+	}
+	before := time.Now().UTC()
+	broker.failRecord.Store(true)
+	a.record("ns", "sb-1", time.Now().Add(time.Second))
+	if d.push(context.Background()) == nil {
+		t.Fatal("a refused report succeeded")
+	}
+	first := report(ActivityLocalPath).BrokerUnreachableAt
+	if first.Before(before) {
+		t.Fatalf("a refused report was not recorded: %v", first)
+	}
+	broker.failRecord.Store(false)
+	if e := d.push(context.Background()); e != nil || !report(ActivityLocalPath).BrokerUnreachableAt.Equal(first) {
+		t.Fatalf("a later success changed the failure time: %v", e)
+	}
+	broker.failRead.Store(true)
+	if r := report(ActivityPath); r.Durable || !r.BrokerUnreachableAt.After(first) {
+		t.Fatalf("an unreadable view was not recorded: %+v", r)
+	}
+	last := d.unreachable()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.withDurable(ctx, a.report(time.Now()))
+	if !d.unreachable().Equal(last) {
+		t.Fatal("a read the caller gave up on was recorded")
+	}
+}

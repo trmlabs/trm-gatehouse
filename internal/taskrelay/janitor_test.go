@@ -226,6 +226,8 @@ func TestJanitorClearsTwelveThousandInOnePass(t *testing.T) {
 		jf.api.sandboxes = append(jf.api.sandboxes, s)
 	}
 	jf.api.throttle.Store(200) // the API server throttles the first 200 deletes
+	// Caps raised to their maximum: a full-fleet pass, as after a long pause.
+	jf.j.config.MaxDeleteFraction, jf.j.config.MaxDeletesPerPass = 1, 1000000
 	if e := jf.j.pass(context.Background()); e != nil {
 		t.Fatal(e)
 	}
@@ -346,6 +348,7 @@ func TestJanitorBackoffJitters(t *testing.T) {
 func TestJanitorDryRun(t *testing.T) {
 	jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, time.Now().Add(-2*time.Hour))})
 	jf.j.config.DryRun = true
+	jf.j.config.MaxDeleteFraction = 1
 	for i := 0; i < 3; i++ {
 		jf.api.sandboxes = append(jf.api.sandboxes, janitorSandbox(i, 3*time.Hour))
 	}
@@ -358,6 +361,7 @@ func TestJanitorDryRun(t *testing.T) {
 func TestJanitorStopsOnAnError(t *testing.T) {
 	jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, time.Now().Add(-2*time.Hour))})
 	jf.j.config.DeleteConcurrency = 1
+	jf.j.config.MaxDeleteFraction = 1
 	for i := 0; i < 50; i++ {
 		jf.api.sandboxes = append(jf.api.sandboxes, janitorSandbox(i, 3*time.Hour))
 	}
@@ -371,17 +375,21 @@ func TestJanitorConfigValidation(t *testing.T) {
 	jf := newJanitor(t, nil)
 	good := jf.j.config
 	for name, change := range map[string]func(*JanitorConfig){
-		"no namespaces":       func(c *JanitorConfig) { c.Namespaces = nil },
-		"idle under a minute": func(c *JanitorConfig) { c.IdleSeconds = 59 },
-		"no concurrency":      func(c *JanitorConfig) { c.DeleteConcurrency = 0 },
-		"no page size":        func(c *JanitorConfig) { c.ListPageSize = 0 },
-		"proxy as tenant":     func(c *JanitorConfig) { c.Namespaces = []string{"gatehouse-proxy"} },
-		"no proxy labels":     func(c *JanitorConfig) { c.ProxyLabels = nil },
-		"plain API":           func(c *JanitorConfig) { c.Kubernetes.APIURL = "http://x" },
-		"core API version":    func(c *JanitorConfig) { c.SandboxAPIVersion = "v1" },
-		"bad admin port":      func(c *JanitorConfig) { c.AdminPort = 0 },
-		"bad autoscaler name": func(c *JanitorConfig) { c.ProxyAutoscaler = "Gatehouse_Proxy" },
-		"bad deployment name": func(c *JanitorConfig) { c.ProxyDeployment = "gatehouse/proxy" },
+		"no namespaces":        func(c *JanitorConfig) { c.Namespaces = nil },
+		"idle under a minute":  func(c *JanitorConfig) { c.IdleSeconds = 59 },
+		"no concurrency":       func(c *JanitorConfig) { c.DeleteConcurrency = 0 },
+		"no page size":         func(c *JanitorConfig) { c.ListPageSize = 0 },
+		"proxy as tenant":      func(c *JanitorConfig) { c.Namespaces = []string{"gatehouse-proxy"} },
+		"no proxy labels":      func(c *JanitorConfig) { c.ProxyLabels = nil },
+		"plain API":            func(c *JanitorConfig) { c.Kubernetes.APIURL = "http://x" },
+		"core API version":     func(c *JanitorConfig) { c.SandboxAPIVersion = "v1" },
+		"bad admin port":       func(c *JanitorConfig) { c.AdminPort = 0 },
+		"bad autoscaler name":  func(c *JanitorConfig) { c.ProxyAutoscaler = "Gatehouse_Proxy" },
+		"bad deployment name":  func(c *JanitorConfig) { c.ProxyDeployment = "gatehouse/proxy" },
+		"negative fraction":    func(c *JanitorConfig) { c.MaxDeleteFraction = -0.1 },
+		"fraction over one":    func(c *JanitorConfig) { c.MaxDeleteFraction = 1.5 },
+		"negative count":       func(c *JanitorConfig) { c.MaxDeletesPerPass = -1 },
+		"count over a million": func(c *JanitorConfig) { c.MaxDeletesPerPass = 1000001 },
 	} {
 		c := good
 		c.Namespaces = append([]string(nil), good.Namespaces...)
@@ -606,5 +614,120 @@ func TestJanitorReportDuringThePassIsNoLoss(t *testing.T) {
 	jf.api.sandboxes = []map[string]any{janitorSandbox(1, 3*time.Hour)}
 	if e := jf.j.pass(context.Background()); e != nil || len(jf.api.deleted) != 1 {
 		t.Fatalf("deleted %v, error %v, pass %v", jf.api.deleted, e, jf.events(t, "janitor_pass"))
+	}
+}
+
+// The delete cap: the defaults (a tenth of all Sandboxes, at most 1000) and
+// each configured bound, with the rest left for the next pass.
+func TestJanitorDeleteCap(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fraction float64
+		count    int
+		total    int
+		want     int
+	}{
+		"default fraction":         {0, 0, 50, 5},
+		"default count":            {0, 0, 20000, 1000},
+		"fraction rounds up":       {0, 0, 3, 1},
+		"configured fraction":      {0.5, 0, 50, 25},
+		"configured count":         {1, 7, 50, 7},
+		"fraction one, count high": {1, 1000000, 12000, 12000},
+	} {
+		c := JanitorConfig{MaxDeleteFraction: tc.fraction, MaxDeletesPerPass: tc.count}
+		if got := c.deleteCap(tc.total); got != tc.want {
+			t.Errorf("%s: cap %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+// A capped pass deletes the longest idle first: never seen through any
+// replica, then the oldest last use, then the oldest Sandbox. It logs how
+// many it left, and dry run reports the same.
+func TestJanitorCapsLongestIdleFirst(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			var seen []SandboxActivity
+			for i := 0; i < 10; i++ { // sb-00000..9 last used 2h10m down to 1h10m ago
+				seen = append(seen, SandboxActivity{Namespace: tenantNS, OwnerUID: fmt.Sprintf("uid-sb-%05d", i),
+					LastSeen: time.Now().Add(-130*time.Minute + time.Duration(i)*6*time.Minute)})
+			}
+			jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, time.Now().Add(-5*time.Hour), seen...)})
+			jf.j.config.DryRun = dryRun
+			jf.j.config.MaxDeleteFraction, jf.j.config.MaxDeletesPerPass = 1, 4
+			for i := 0; i < 12; i++ {
+				age := 3 * time.Hour
+				if i == 11 {
+					age = 4 * time.Hour
+				}
+				jf.api.sandboxes = append(jf.api.sandboxes, janitorSandbox(i, age))
+			}
+			if e := jf.j.pass(context.Background()); e != nil {
+				t.Fatal(e)
+			}
+			// sb-00010 and sb-00011 were never seen (sb-00011 is older), then sb-00000 and sb-00001.
+			want := []string{"sb-00011", "sb-00010", "sb-00000", "sb-00001"}
+			var got []string
+			if dryRun {
+				for _, e := range jf.events(t, "sandbox_would_delete") {
+					got = append(got, e["name"].(string))
+				}
+			} else {
+				for _, name := range want {
+					if jf.api.deleted[name] {
+						got = append(got, name)
+					}
+				}
+				if len(jf.api.deleted) != 4 {
+					t.Fatalf("deleted %v", jf.api.deleted)
+				}
+			}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("chose %v, want %v", got, want)
+			}
+			pass := jf.events(t, "janitor_pass")
+			if len(pass) != 1 || pass[0]["idle"] != float64(12) || pass[0]["capped"] != float64(8) {
+				t.Fatalf("pass line %v", pass)
+			}
+		})
+	}
+}
+
+// A replica that failed to reach the broker within the idle window holds the
+// pass; one idle window after the failure, the same reports delete, with no
+// one releasing anything. A proxy too old to send the field is no signal.
+func TestJanitorHoldsWhileTheBrokerWasRecentlyUnreachable(t *testing.T) {
+	old := time.Now().Add(-5 * time.Hour)
+	server := func(unreachable time.Time, omit bool) *httptest.Server {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if omit {
+				fmt.Fprintf(w, `{"replicaStarted":%q,"retentionSeconds":86400,"sandboxes":[]}`, old.UTC().Format(time.RFC3339))
+				return
+			}
+			json.NewEncoder(w).Encode(ActivityReport{ReplicaStarted: old, RetentionSeconds: 86400, BrokerUnreachableAt: unreachable})
+		}))
+		t.Cleanup(s.Close)
+		return s
+	}
+	for name, tc := range map[string]struct {
+		unreachable time.Time
+		omit        bool
+		held        bool
+	}{
+		"failed ten minutes ago":        {time.Now().Add(-10 * time.Minute), false, true},
+		"failed two hours ago":          {time.Now().Add(-2 * time.Hour), false, false},
+		"never failed":                  {time.Time{}, false, false},
+		"older proxy without the field": {time.Time{}, true, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": server(time.Time{}, false), "10.0.0.2": server(tc.unreachable, tc.omit)})
+			jf.api.sandboxes = []map[string]any{janitorSandbox(1, 3*time.Hour)}
+			if e := jf.j.pass(context.Background()); e != nil {
+				t.Fatal(e)
+			}
+			pass := jf.events(t, "janitor_pass")
+			if tc.held != (len(jf.api.deleted) == 0) || len(pass) != 1 || (tc.held && pass[0]["held"] != "broker_unreachable_recently") {
+				t.Fatalf("deleted %v, pass line %v", jf.api.deleted, pass)
+			}
+		})
 	}
 }

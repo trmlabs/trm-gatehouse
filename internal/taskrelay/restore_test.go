@@ -202,6 +202,8 @@ func passOver(t *testing.T, idle time.Duration, admins ...string) *janitorFixtur
 	}
 	jf.j.replicaURL = func(ip, path string) string { return "http://" + byIP[ip] + path }
 	jf.j.config.IdleSeconds = int64(idle / time.Second)
+	// These tests are about holds; the delete cap would leave one of the two.
+	jf.j.config.MaxDeleteFraction = 1
 	jf.api.sandboxes = []map[string]any{janitorSandbox(1, 3*time.Hour), janitorSandbox(7, 3*time.Hour)}
 	if e := jf.j.pass(context.Background()); e != nil {
 		t.Fatalf("pass: %v", e)

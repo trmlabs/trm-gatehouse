@@ -144,6 +144,10 @@ type ActivityReport struct {
 	// this proxy's binding began. Zero means none yet: a new, recreated or
 	// emptied history, which vouches for nothing.
 	HistoryStarted time.Time `json:"historyStarted,omitzero"`
+	// BrokerUnreachableAt is when this replica last failed to report to, or
+	// read from, the broker's store; zero if never since it started. The
+	// janitor holds while any live replica's is within its idle window.
+	BrokerUnreachableAt time.Time `json:"brokerUnreachableAt,omitzero"`
 }
 
 // SandboxActivity is one Sandbox's last use through this replica.
@@ -194,6 +198,7 @@ func (a *activity) handler() http.Handler {
 			if req.URL.Path == ActivityPath {
 				report = a.withDurable(req.Context(), report)
 			}
+			report.BrokerUnreachableAt = a.durable.unreachable()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -210,6 +215,10 @@ func (a *activity) withDurable(ctx context.Context, report ActivityReport) Activ
 	acked, _ := a.durable.verification()
 	view, e := a.durable.read(ctx)
 	if e != nil {
+		// A janitor that gave up waiting is not the broker failing.
+		if ctx.Err() == nil {
+			a.durable.failed()
+		}
 		return report
 	}
 	a.repushMissing(view.sandboxes)
