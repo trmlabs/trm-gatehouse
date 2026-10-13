@@ -886,6 +886,11 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
+			if route.code && !c.canClone(repo, pool) {
+				// A file list or compare returns code: only for a pool whose git
+				// entry already lets it clone the repository.
+				return GitRequest{}, true, ErrUnlisted
+			}
 			switch {
 			case route.name == "open-pull":
 				matched.OpensPullRequest, matched.HeadPrefixes = true, c.pushBranchPrefixes(repo, pool)
@@ -935,6 +940,7 @@ type githubRoute struct {
 	query            []string // the query keys allowed, each at most once
 	download         bool
 	scope            string // the token scope when not the operation's own (githubRouteScopes)
+	code             bool   // reads repository content: only for a pool that can clone the repository
 }
 
 func (g githubRoute) granted(r GitRepo) bool { return r.Allows(g.op) }
@@ -992,17 +998,17 @@ func githubAPIRoutes(rest []string) []githubRoute {
 		return []githubRoute{{name: "read-pull", method: http.MethodGet, op: "pr.read"},
 			{name: "edit-pull", method: http.MethodPatch, op: "pr.edit", target: number(rest[1])}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "files":
-		return []githubRoute{{name: "read-pull", method: http.MethodGet, op: "pr.read", query: pageQuery}}
+		return []githubRoute{{name: "pull-files", method: http.MethodGet, op: "pr.read", query: pageQuery, code: true}}
 	case n == 2 && rest[0] == "compare" && compareRange(rest[1]):
-		return []githubRoute{{name: "compare", method: http.MethodGet, op: "pr.read", query: pageQuery}}
+		return []githubRoute{{name: "compare", method: http.MethodGet, op: "pr.read", query: pageQuery, code: true}}
 	case n == 3 && rest[0] == "commits" && commitSHA.MatchString(rest[1]) && (rest[2] == "status" || rest[2] == "statuses"):
 		return []githubRoute{{name: "statuses", method: http.MethodGet, op: "actions.read", query: pageQuery, scope: "statuses"}}
 	case n == 3 && rest[0] == "commits" && commitSHA.MatchString(rest[1]) && rest[2] == "check-runs":
-		return []githubRoute{{name: "checks", method: http.MethodGet, op: "actions.read", query: checkRunQuery, scope: "checks"}}
+		return []githubRoute{{name: "check-runs", method: http.MethodGet, op: "actions.read", query: checkRunQuery, scope: "checks"}}
 	case n == 2 && rest[0] == "check-runs" && number(rest[1]) > 0:
-		return []githubRoute{{name: "checks", method: http.MethodGet, op: "actions.read", scope: "checks"}}
+		return []githubRoute{{name: "check-run", method: http.MethodGet, op: "actions.read", scope: "checks"}}
 	case n == 3 && rest[0] == "check-runs" && number(rest[1]) > 0 && rest[2] == "annotations":
-		return []githubRoute{{name: "checks", method: http.MethodGet, op: "actions.read", query: pageQuery, scope: "checks"}}
+		return []githubRoute{{name: "check-annotations", method: http.MethodGet, op: "actions.read", query: pageQuery, scope: "checks"}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "ready":
 		// Not a GitHub REST route: GitHub marks a draft ready only through
 		// GraphQL, so the broker makes that one mutation for this path.
@@ -1214,6 +1220,21 @@ func (c Catalog) GitScope(installation int64) (repos []string, pullRequests, act
 		}
 	}
 	return repos, pullRequests, actions, deployments
+}
+
+// canClone reports whether a git entry lets the pool fetch the repository.
+func (c Catalog) canClone(repo, pool string) bool {
+	for _, e := range c.entries {
+		if e.Kind != "git" || e.Git == nil || !contains(e.Pools, pool) {
+			continue
+		}
+		for _, r := range e.Git.Repos {
+			if r.Repo == repo {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // clusterLocal reports whether host is a Kubernetes Service name, the only

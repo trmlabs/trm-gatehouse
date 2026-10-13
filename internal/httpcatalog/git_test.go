@@ -210,10 +210,10 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/277393220", "", "actions", "actions", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123456789abcdef0123456789abcdef01234567/status", "", "statuses", "statuses", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/statuses", "per_page=100", "statuses", "statuses", false, nil},
-		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=unit&filter=latest&per_page=100", "checks", "checks", false, nil},
-		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9", "", "checks", "checks", false, nil},
-		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "per_page=100", "checks", "checks", false, nil},
-		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "per_page=100&page=2", "read-pull", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=unit&filter=latest&per_page=100", "check-runs", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9", "", "check-run", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "per_page=100", "check-annotations", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "per_page=100&page=2", "pull-files", "pull-requests", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/compare/staging...0123abc", "", "compare", "pull-requests", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/compare/main...staging", "per_page=1", "compare", "pull-requests", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/compare/staging..0123abc", "", "", "", false, ErrUnlisted},
@@ -318,7 +318,7 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 	}
 	want := map[string][]string{
 		"pr.open":    {"POST pulls"},
-		"pr.read":    {"GET pulls/1", "GET pulls/1/files", "GET compare/main...feature"},
+		"pr.read":    {"GET pulls/1"}, // files and compare also need a git entry (TestGitHubAPICodeReadsNeedClone)
 		"pr.list":    {"GET pulls", "GET issues/1/comments"},
 		"pr.comment": {"POST issues/1/comments", "POST pulls/1/comments", "POST pulls/1/comments/2/replies"},
 		"pr.edit":    {"PATCH pulls/1", "PATCH issues/comments/2"},
@@ -375,5 +375,29 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 				t.Errorf("%s: GitGranted(%s) = %v", op, scope, !want)
 			}
 		}
+	}
+}
+
+// A pull request's files and a compare return code, so they open only for a
+// pool whose git entry can already clone the repository.
+func TestGitHubAPICodeReadsNeedClone(t *testing.T) {
+	withGit, err := Parse([]byte(`{"entries":[` + gitEntry + `,` + apiEntry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alone, err := Parse([]byte(`{"entries":[` + apiEntry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/repos/trmlabs/trm-b2b/pulls/12/files", "/repos/trmlabs/trm-b2b/compare/main...feature"} {
+		if m, _, err := withGit.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); err != nil || m.Operation != "pr.read" {
+			t.Errorf("%s with a git entry: %v %+v", path, err, m)
+		}
+		if _, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); !errors.Is(err, ErrUnlisted) {
+			t.Errorf("%s without a git entry: %v", path, err)
+		}
+	}
+	if _, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a"); err != nil {
+		t.Errorf("reading a pull request still needs no git entry: %v", err)
 	}
 }
