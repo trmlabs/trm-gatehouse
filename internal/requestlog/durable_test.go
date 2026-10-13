@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 func auditAttempt() Attempt {
@@ -17,8 +18,10 @@ func auditAttempt() Attempt {
 }
 
 func TestDurableAuditRestartAndStorageRecovery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "audit.db")
+	storetest.Seed(t, path)
 	s, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +90,10 @@ func TestDurableAuditRestartAndStorageRecovery(t *testing.T) {
 }
 
 func TestDurableAuditConcurrentRequests(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "audit.db"))
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	storetest.Seed(t, path)
+	s, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

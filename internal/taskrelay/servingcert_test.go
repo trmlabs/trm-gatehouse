@@ -178,6 +178,7 @@ func startupFor(database string) []byte {
 // encryption); a plaintext startup or cancellation is refused in fixed words.
 // The request carried the proxy's own token and only its names.
 func TestBrokerIssuedTLSOnEveryListener(t *testing.T) {
+	t.Parallel()
 	sf, ti := startIssued(t, time.Hour)
 	token, _ := os.ReadFile(sf.f.c.Connect.Upstream.ProofFile)
 	if bearer := <-ti.bearers; bearer != "Bearer "+strings.TrimSpace(string(token)) {
@@ -273,7 +274,13 @@ func TestBrokerIssuedCertificateRenewsAndExpires(t *testing.T) {
 	if n := ti.issued.Load(); n != 2 {
 		t.Fatalf("%d issuances by four fifths of the lifetime, want 2", n)
 	}
+	// The issuer counts the renewal when it answers; the proxy installs the
+	// new certificate just after, so wait for it to be served.
 	second, e := servedSerial(t, ti, address)
+	for deadline := leaf.NotBefore.Add(life * 9 / 10); (e != nil || second.Cmp(first) == 0) && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		second, e = servedSerial(t, ti, address)
+	}
 	if e != nil || second.Cmp(first) == 0 {
 		t.Fatalf("renewed certificate not served: %v", e)
 	}
@@ -363,6 +370,7 @@ func TestBrokerIssuedCertificateChecks(t *testing.T) {
 // files, needs the CONNECT upstream to ask over, and only lower-case DNS
 // names, each once.
 func TestServingTLSValidation(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	base := func() FixedConfig {
 		c := f.c

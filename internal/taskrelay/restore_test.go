@@ -18,6 +18,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/proxyactivity"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 // anyProxy admits every caller as one proxy binding serving the fixture's
@@ -42,8 +43,11 @@ type restoreRig struct {
 func newRestoreRig(t *testing.T) *restoreRig {
 	t.Helper()
 	rig := &restoreRig{path: filepath.Join(t.TempDir(), "broker.db")}
+	storetest.Seed(t, rig.path)
 	rig.restartBroker(t)
-	raw, err := sql.Open("sqlite", rig.path)
+	// The broker writes the same file; wait out its write lock as the broker
+	// does rather than failing at once with SQLITE_BUSY.
+	raw, err := sql.Open("sqlite", rig.path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +218,7 @@ func held(t *testing.T, jf *janitorFixture) any {
 // replica reporting to the real proxy-activity service and store, and the
 // janitor's first pass after the restore.
 func TestJanitorFirstPassAfterARestore(t *testing.T) {
+	t.Parallel()
 	const idle = 4 * time.Second
 	rig := newRestoreRig(t)
 	sf, admin := rig.replica(t)
@@ -320,6 +325,7 @@ func TestJanitorHoldsAfterEveryReplicaRestarts(t *testing.T) {
 // shows the idle replica its loss, the idle replica reports it once with
 // nothing new, and the history restarts: one idle window, then on.
 func TestJanitorSeesAnIdleReplicasLossPastABusyOne(t *testing.T) {
+	t.Parallel()
 	const idle = 4 * time.Second
 	rig := newRestoreRig(t)
 	busy, busyAdmin := rig.replica(t)
@@ -367,6 +373,7 @@ func TestJanitorSeesAnIdleReplicasLossPastABusyOne(t *testing.T) {
 // replica ever reports: the hold ends once every live replica has been up a
 // whole idle window, its own memory covering it, and not before.
 func TestJanitorHoldEndsAWindowAfterAQuietRestart(t *testing.T) {
+	t.Parallel()
 	const idle = 4 * time.Second
 	rig := newRestoreRig(t)
 	sf, _ := rig.replica(t)

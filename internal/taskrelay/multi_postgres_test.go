@@ -145,6 +145,7 @@ func cancelBinding(t *testing.T, f *relayFixture, p PostgresConfig, key []byte) 
 	_ = c.Close()
 }
 func TestFivePostgresBindingsRoutingCancellationAndWithdrawal(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	var backends []*bindingBackend
 	for i := 0; i < 5; i++ {
@@ -212,6 +213,7 @@ func TestFivePostgresBindingsRoutingCancellationAndWithdrawal(t *testing.T) {
 }
 
 func TestPostgresBindingsShareConnectionLimit(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	for i := 0; i < 5; i++ {
 		f.c.PostgresBindings = append(f.c.PostgresBindings, PostgresConfig{Listen: freeAddress(t), Upstream: f.upstream(t, "127.0.0.1:25443"), Database: fmt.Sprintf("database-%d", i), User: "workload", Placeholder: "public-placeholder"})
@@ -293,6 +295,7 @@ func TestPostgresBindingBindFailureClosesTask(t *testing.T) {
 // A sidecar's connection cap comes from its config (the pool render sets it
 // from sessionsPerWorker), well past the old fixed 32.
 func TestSidecarConnectionCapIsConfigured(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	f.c.MaxConnections = 100
 	f.c.PostgresBindings = []PostgresConfig{{Listen: freeAddress(t), Upstream: f.upstream(t, "127.0.0.1:25443"), Database: "database-0", User: "workload", Placeholder: "public-placeholder"}}
@@ -339,6 +342,7 @@ func TestConnectionCapAndHandshakeValidation(t *testing.T) {
 // The configured handshake bound is the one applied: a client that sends no
 // startup is dropped after it.
 func TestHandshakeBoundIsConfigured(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	f.c.HandshakeSeconds = 1
 	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: f.upstream(t, "127.0.0.1:25443"), Database: "d", User: "workload", Placeholder: "p"}

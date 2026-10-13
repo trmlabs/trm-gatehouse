@@ -209,6 +209,7 @@ func TestSharedPostgresListenerRoutesByCatalog(t *testing.T) {
 // refuses a bad or repeated name, a listen address another listener uses,
 // and a session file. Its size is not capped by count.
 func TestPostgresListenerValidation(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	base := func() FixedConfig {
 		c := f.c

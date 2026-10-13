@@ -171,6 +171,7 @@ func TestAttestCarriesTheClaimedRun(t *testing.T) {
 }
 
 func TestAttestRefusals(t *testing.T) {
+	t.Parallel()
 	cases := map[string]func(f *poolFixture) (string, netip.Addr){
 		"stolen token from another address": func(f *poolFixture) (string, netip.Addr) {
 			return f.token(f.c), netip.MustParseAddr("10.244.0.77")
@@ -281,6 +282,7 @@ func TestPoolBindingNeverAdmittedWithoutPeer(t *testing.T) {
 }
 
 func TestPoolBindingValidation(t *testing.T) {
+	t.Parallel()
 	base := Binding{Namespace: "pool", ServiceAccount: "worker", ServiceAccountUID: "u", AgentID: "a", VaultID: "v", OwnerUIDs: []string{"o"}, MaxPodSeconds: 1800,
 		ImageDigests: []string{workerDigest}}
 	f := setupPool(t)
@@ -399,6 +401,7 @@ func TestSigningKeyFetchIsSingleFlightOutsideTheLock(t *testing.T) {
 // A Pod refused for an unlisted image is logged with the reason and the
 // container, so operators see why; the worker still sees a generic refusal.
 func TestAttestLogsTheRefusedImage(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		mutate    func(f *poolFixture)
 		container string

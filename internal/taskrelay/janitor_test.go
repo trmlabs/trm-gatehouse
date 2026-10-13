@@ -203,6 +203,7 @@ func (jf *janitorFixture) events(t *testing.T, name string) []map[string]any {
 // UID, with at most deleteConcurrency deletes in flight; used, young and
 // leaving ones are kept.
 func TestJanitorClearsTwelveThousandInOnePass(t *testing.T) {
+	t.Parallel()
 	old := time.Now().Add(-2 * time.Hour)
 	var recent []SandboxActivity
 	for i := 0; i < 12000; i += 4 { // every fourth Sandbox was used 5 minutes ago, on one replica or the other

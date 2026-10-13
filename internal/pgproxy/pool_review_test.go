@@ -78,6 +78,7 @@ func TestPooledServerConnectionsCarryTheIdleInTransactionLimit(t *testing.T) {
 // so a session holding one ends even if the Vault role's revocation does not
 // terminate backends.
 func TestPooledSessionEndsWhenItsCredentialExpires(t *testing.T) {
+	t.Parallel()
 	lease := newLease()
 	lease.ExpiresAt = time.Now().Add(3 * time.Second)
 	_, addr := pooledBroker(t, lease)
@@ -102,6 +103,7 @@ func TestPooledSessionEndsWhenItsCredentialExpires(t *testing.T) {
 
 // Named prepared statements are capped per session by count and by bytes.
 func TestPooledSessionCapsPreparedStatements(t *testing.T) {
+	t.Parallel()
 	s := &pooledSession{statements: map[string]clientStatement{}}
 	for i := range maxSessionStatements {
 		name := "s" + strings.Repeat("x", i%3) + string(rune('a'+i%26)) + strings.Repeat("y", i/26)

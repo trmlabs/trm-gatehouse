@@ -16,6 +16,7 @@ import (
 // stream ahead of the startup it authors; without one it sends the startup
 // alone. The worker never supplies either.
 func TestSelfModePostgresCarriesTheRunnerSession(t *testing.T) {
+	t.Parallel()
 	const token = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEifQ.c2ln"
 	for name, session := range map[string]string{"with a session": token, "without one": ""} {
 		t.Run(name, func(t *testing.T) {

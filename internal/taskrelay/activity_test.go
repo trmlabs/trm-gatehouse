@@ -37,6 +37,7 @@ func sandboxSeen(r ActivityReport, owner string) (time.Time, bool) {
 // connection stays open. The entry outlives the Pod, and a replacement Pod's
 // start counts as use of the same Sandbox.
 func TestActivityRecordsUseBySandbox(t *testing.T) {
+	t.Parallel()
 	admin := freeAddress(t)
 	sf := startSharedWith(t, false, false, func(c *FixedConfig) { c.AdminListen = admin })
 	before := readActivity(t, admin)

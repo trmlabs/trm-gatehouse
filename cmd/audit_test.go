@@ -15,6 +15,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 type cmdTestKeys struct{ secret []byte }
@@ -30,13 +31,16 @@ func (s cmdTestSigner) Sign(_ context.Context, input []byte) (string, error) {
 }
 
 func TestAuditVerifyExitStatus(t *testing.T) {
+	t.Parallel()
 	public, private, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secret := bytes.Repeat([]byte{0x5a}, 32) // synthetic
 	var trail bytes.Buffer
-	db, err := store.Open(filepath.Join(t.TempDir(), "audit.db"))
+	auditPath := filepath.Join(t.TempDir(), "audit.db")
+	storetest.Seed(t, auditPath)
+	db, err := store.Open(auditPath)
 	if err != nil {
 		t.Fatal(err)
 	}

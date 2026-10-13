@@ -17,6 +17,7 @@ import (
 // malformed target, an IP literal or another port is refused before the
 // broker hears of it.
 func TestConnectRoutesBroker(t *testing.T) {
+	t.Parallel()
 	sf := startSharedWith(t, false, true, func(c *FixedConfig) {
 		c.Connect.Routes, c.Connect.AllowedTargets = routesBroker, nil
 	})

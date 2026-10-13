@@ -137,6 +137,7 @@ func TestPoolConnectionWithoutProxyHeaderIsRefused(t *testing.T) {
 }
 
 func TestPoolCapIsPerWorkloadNotPerAgent(t *testing.T) {
+	t.Parallel()
 	auth := &fakePeerAuth{}
 	addr := poolBroker(t, auth, 1)
 	held, err := openSession(t, addr, header("10.244.0.9"))

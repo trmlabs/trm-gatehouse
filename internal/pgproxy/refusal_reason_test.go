@@ -43,6 +43,7 @@ func refusalReason(t *testing.T, addr, header string) (code, reason string) {
 // The broker names each refusal with a reason code a relay can map, so the
 // per-worker cap and a full database budget, both 53300, stay distinct.
 func TestBrokerRefusalsCarryAReason(t *testing.T) {
+	t.Parallel()
 	addr := poolBroker(t, &fakePeerAuth{}, 1)
 	held, err := openSession(t, addr, header("10.244.0.9"))
 	if err != nil {

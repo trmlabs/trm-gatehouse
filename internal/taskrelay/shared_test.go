@@ -210,6 +210,7 @@ func tunnelCloses(t *testing.T, c net.Conn, b *bufio.Reader) bool {
 // The shared proxy attests the agent Pod at the connection's source, and
 // drops the tunnel once that Pod stops qualifying.
 func TestSharedProxyAttestsThenDropsTheAgent(t *testing.T) {
+	t.Parallel()
 	sf := startShared(t, false)
 	c, b, status := sf.connect(t, "")
 	if status != 200 {
@@ -241,6 +242,7 @@ func TestSharedProxyAttestsThenDropsTheAgent(t *testing.T) {
 // The recheck compares the controller too: the same Pod under a replaced
 // Sandbox is a different agent.
 func TestSharedProxyDropsTheAgentWhenItsSandboxChanges(t *testing.T) {
+	t.Parallel()
 	sf := startShared(t, false)
 	c, b, status := sf.connect(t, "")
 	if status != 200 {
@@ -258,6 +260,7 @@ func TestSharedProxyDropsTheAgentWhenItsSandboxChanges(t *testing.T) {
 // A client cannot speak for the proxy: an attestation or PROXY header it
 // sends is refused before anything reaches the broker.
 func TestSharedProxyRefusesClientAttestations(t *testing.T) {
+	t.Parallel()
 	sf := startShared(t, true)
 	for _, extra := range []string{"Gatehouse-Attestation: forged\r\n", "Gatehouse-Session: a.b.c\r\n", "Forwarded: for=10.0.0.9\r\n"} {
 		if _, _, status := sf.connect(t, extra); status != 403 {
@@ -385,6 +388,7 @@ func decodePods(t *testing.T, pods []map[string]any) []*agentPod {
 }
 
 func TestSharedConfigValidation(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	base := func() FixedConfig {
 		c := f.c
@@ -432,6 +436,7 @@ func TestSharedConfigValidation(t *testing.T) {
 // other request is refused, a PostgreSQL client asking for TLS is told no and
 // goes on, and admissions are audited with the agent Pod and its images.
 func TestSharedProxyPlaintext(t *testing.T) {
+	t.Parallel()
 	sf := startSharedWith(t, true, true)
 	if _, _, status := sf.connect(t, ""); status != 200 {
 		t.Fatalf("plaintext CONNECT: %d", status)
@@ -476,6 +481,7 @@ func TestSharedProxyPlaintext(t *testing.T) {
 // Upstreams to the broker are TLS in every mode; a shared config cannot
 // leave out the broker's name or CA, nor give a certificate without its key.
 func TestSharedUpstreamsStayTLS(t *testing.T) {
+	t.Parallel()
 	f := newRelayFixture(t)
 	base := func() FixedConfig {
 		c := f.c
@@ -630,6 +636,7 @@ func (sf *sharedFixture) connectUntil(t *testing.T, want int) (net.Conn, *bufio.
 // row name the requester from the Pod's annotation. A Pod there without a
 // valid one is not admitted, and an open connection ends if it changes.
 func TestSharedProxyAttestsTheRequester(t *testing.T) {
+	t.Parallel()
 	sf := startSharedWith(t, false, false, func(c *FixedConfig) { c.Shared.RequesterNamespaces = []string{"agent-sandboxes"} })
 	if _, _, status := sf.connect(t, ""); status == 200 {
 		t.Fatal("a Pod with no requester was admitted")

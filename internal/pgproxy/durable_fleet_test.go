@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 // partitionJournal cuts one replica off from the store. While cut, every call
@@ -374,6 +375,7 @@ func TestSecondBrokerProcessWithTheSameNameRefuses(t *testing.T) {
 		t.Skip("helper process")
 	}
 	path := filepath.Join(t.TempDir(), "journal.db")
+	storetest.Seed(t, path)
 	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -425,6 +427,7 @@ func TestGracefulRestartReRegistersAtOnce(t *testing.T) {
 		t.Skip("helper process")
 	}
 	path := filepath.Join(t.TempDir(), "journal.db")
+	storetest.Seed(t, path)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestReplicaRestartHelperProcess$", "-test.count=1") // #nosec G702 -- re-runs this test binary
 	cmd.Env = append(os.Environ(), "GH_REPLICA_RESTART_DB="+path)
 	stdout, err := cmd.StdoutPipe()

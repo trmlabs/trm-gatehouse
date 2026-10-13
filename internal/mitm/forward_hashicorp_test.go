@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/hashicorp"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
 // credStoreAdapter layers the typed UnmatchedHostPolicy lookup onto the store
@@ -73,7 +75,9 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 	}
 
 	// --- 3. Real store + vault; sync the secret in via the real syncer. ---
-	st, err := store.Open(":memory:")
+	storePath := filepath.Join(t.TempDir(), "store.db")
+	storetest.Seed(t, storePath)
+	st, err := store.Open(storePath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

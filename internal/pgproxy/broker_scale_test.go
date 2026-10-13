@@ -86,6 +86,7 @@ func (m *vaultLikeMinter) requestedIncrements() []time.Duration {
 // regardless of whether that behavior happens to reach a stable fixed point at
 // any particular set of timings.
 func TestBroker_RenewalRequestsConstantGenerousIncrement(t *testing.T) {
+	t.Parallel()
 	const initTTL = 1 * time.Second
 	minter := newVaultLikeMinter(initTTL, 5*time.Second)
 	upstream := startFakeUpstream(t, authTrust, "")
@@ -219,6 +220,7 @@ func (tokenActorAuth) Authenticate(_ context.Context, token, _ string) (*AgentSc
 // one noisy agent from monopolizing the serving cap: actor A is bounded at its
 // per-actor limit while a different actor B still gets served.
 func TestBroker_PerActorCapDoesNotStarveOtherActors(t *testing.T) {
+	t.Parallel()
 	upstream := startFakeUpstream(t, authTrust, "")
 	minter := &fakeMinter{lease: newLease()}
 	_, addr := startBroker(t, Options{

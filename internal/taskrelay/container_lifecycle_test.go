@@ -38,6 +38,7 @@ func TestContainerNameIsRequiredConfiguration(t *testing.T) {
 }
 
 func TestPairRequiresRunningTaskContainerWithoutReportedRestarts(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		change func(map[string]any) []map[string]any
@@ -101,6 +102,7 @@ func TestPairRequiresRunningTaskContainerWithoutReportedRestarts(t *testing.T) {
 }
 
 func TestTaskContainerExitClosesEstablishedDatabaseStream(t *testing.T) {
+	t.Parallel()
 	for _, restart := range []bool{false, true} {
 		name := "terminated"
 		if restart {

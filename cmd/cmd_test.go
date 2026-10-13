@@ -13,6 +13,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/pidfile"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/Infisical/agent-vault/internal/store/storetest"
 	"github.com/spf13/cobra"
 )
 
@@ -388,7 +389,9 @@ func TestServerPasswordStdinFlag(t *testing.T) {
 
 func openTestDB(t *testing.T) store.Store {
 	t.Helper()
-	db, err := store.Open(":memory:")
+	path := filepath.Join(t.TempDir(), "test.db")
+	storetest.Seed(t, path)
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("Open(:memory:): %v", err)
 	}
@@ -397,6 +400,7 @@ func openTestDB(t *testing.T) store.Store {
 }
 
 func TestUnlockOrSetupWithPassword_Setup(t *testing.T) {
+	t.Parallel()
 	db := openTestDB(t)
 	password := []byte("test-master-password")
 
@@ -412,6 +416,7 @@ func TestUnlockOrSetupWithPassword_Setup(t *testing.T) {
 }
 
 func TestUnlockOrSetupWithPassword_Unlock(t *testing.T) {
+	t.Parallel()
 	db := openTestDB(t)
 
 	// First call sets up the master key.
@@ -434,6 +439,7 @@ func TestUnlockOrSetupWithPassword_Unlock(t *testing.T) {
 }
 
 func TestUnlockOrSetupWithPassword_WrongPassword(t *testing.T) {
+	t.Parallel()
 	db := openTestDB(t)
 
 	// Setup with one password.

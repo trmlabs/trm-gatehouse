@@ -30,6 +30,7 @@ func (m *slowRevokeMinter) Revoke(ctx context.Context, id string) error {
 }
 
 func TestAdmissionWaitsForCleanupWithoutMintingOrUnboundedPending(t *testing.T) {
+	t.Parallel()
 	up := startFakeUpstream(t, authTrust, "")
 	m := &slowRevokeMinter{fakeMinter: &fakeMinter{lease: newLease()}, entered: make(chan struct{}), release: make(chan struct{})}
 	release := sync.OnceFunc(func() { close(m.release) })
@@ -74,8 +75,11 @@ func TestAdmissionWaitsForCleanupWithoutMintingOrUnboundedPending(t *testing.T) 
 	if code := <-overflow; code != "53300" {
 		t.Fatalf("overflow ended with %q", code)
 	}
-	if m.mintCallCount() != 2 || len(b.acceptSem) != 0 {
-		t.Fatal("admission did not release pending slot or mint exactly once")
+	// The refused connection's handler returns its pending slot after it has
+	// written the refusal, so the client can read the code first.
+	waitFor(t, time.Second, func() bool { return len(b.acceptSem) == 0 }, "admission did not release pending slot")
+	if m.mintCallCount() != 2 {
+		t.Fatal("admission did not mint exactly once per served connection")
 	}
 }
 
@@ -412,6 +416,7 @@ func TestQueuedRefusalReachesTheClient(t *testing.T) {
 // per-workload slot they hold no admission slot, so another workload's
 // admission does not stall behind them.
 func TestWorkloadAtItsCapDoesNotStallOthers(t *testing.T) {
+	t.Parallel()
 	up := startFakeUpstream(t, authTrust, "")
 	_, addr := startBroker(t, Options{AdmissionConcurrency: 2, MaxLeasesPerActor: 1, AdmissionTimeout: 1500 * time.Millisecond,
 		Auth: authFunc(func(_ context.Context, token, _ string) (*AgentScope, error) {
@@ -458,6 +463,7 @@ func (gatedLedger) Remove(context.Context, string) error { return nil }
 // A session refused after authentication because no admission slot freed in
 // time is audited, like every other refusal after authentication.
 func TestBusyRefusalAfterAuthenticationIsAudited(t *testing.T) {
+	t.Parallel()
 	up := startFakeUpstream(t, authTrust, "")
 	audit := &recordingAudit{}
 	ledger := gatedLedger{workload: "pod-a", entered: make(chan struct{}), release: make(chan struct{})}
