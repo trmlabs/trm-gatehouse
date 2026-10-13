@@ -52,6 +52,9 @@ type Entry struct {
 	ForwardHeaders   []string `json:"forwardHeaders,omitempty"`
 	MaxRequestBytes  int64    `json:"maxRequestBytes,omitempty"`  // default 1 MiB; git 1 GiB (a push)
 	MaxResponseBytes int64    `json:"maxResponseBytes,omitempty"` // default 32 MiB; git 4 GiB
+	// RequestFields limit request parameters to listed values (see
+	// RequestField). Header entries only; a Slack entry must limit channel.
+	RequestFields []RequestField `json:"requestFields,omitempty"`
 	// Kind "git" makes the entry a git smart-HTTP binding, and "github-api" a
 	// GitHub REST binding limited to pull request work and the reads and
 	// writes its repositories grant (GitHubAPIMatch). Paths, methods and the
@@ -424,6 +427,9 @@ func (e *Entry) normalize() error {
 	if e.Port < 1 || e.Port > 65535 {
 		return errors.New("invalid port")
 	}
+	if e.Kind != "" && len(e.RequestFields) > 0 {
+		return errors.New("requestFields apply to header entries only")
+	}
 	if e.Kind != "browser-session" && (len(e.DeniedPaths) > 0 || len(e.ReadOnlyPaths) > 0) {
 		return errors.New("deniedPaths and readOnlyPaths apply to browser-session entries only")
 	}
@@ -520,6 +526,9 @@ func (e *Entry) normalize() error {
 	}
 	if e.MaxRequestBytes < 0 || e.MaxRequestBytes > 16<<20 || e.MaxResponseBytes < 1 || e.MaxResponseBytes > 1<<30 {
 		return errors.New("size limits out of range")
+	}
+	if err := e.normalizeRequestFields(); err != nil {
+		return err
 	}
 	sort.Strings(e.Methods)
 	return nil
