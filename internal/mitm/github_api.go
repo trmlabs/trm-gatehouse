@@ -332,17 +332,25 @@ func (p *Proxy) pullRequestInScope(r *http.Request, target, host string, api htt
 		} `json:"head"`
 	}
 	path := "/repos/" + api.Repo.Repo + "/pulls/" + strconv.FormatInt(number, 10)
-	if !p.githubGet(r, target, host, path, token, &pr) ||
-		pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, api.Repo.Repo) ||
-		strings.Contains(pr.Head.Ref, ":") || unsafeBranch(pr.Head.Ref) {
+	if !p.githubGet(r, target, host, path, token, &pr) || pr.Head.Repo == nil ||
+		!headInReach(api.Repo.Repo, pr.Head.Repo.FullName, pr.Head.Ref, api.HeadPrefixes) {
 		return "", false
 	}
-	for _, prefix := range api.HeadPrefixes {
-		if strings.HasPrefix(pr.Head.Ref, prefix) && len(pr.Head.Ref) > len(prefix) {
-			return pr.NodeID, true
+	return pr.NodeID, true
+}
+
+// headInReach reports whether a pull request's head is a branch of repo itself
+// (not a fork) under one of prefixes.
+func headInReach(repo, headRepo, ref string, prefixes []string) bool {
+	if !strings.EqualFold(headRepo, repo) || strings.Contains(ref, ":") || unsafeBranch(ref) {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(ref, prefix) && len(ref) > len(prefix) {
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // onlyBody rebuilds a body edit: one JSON object with exactly one string

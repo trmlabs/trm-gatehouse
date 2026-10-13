@@ -14,6 +14,7 @@ require (
 	github.com/muesli/reflow v0.3.0
 	github.com/posthog/posthog-go v1.24.4
 	github.com/spf13/cobra v1.10.2
+	github.com/vektah/gqlparser/v2 v2.5.58
 	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
 	golang.org/x/oauth2 v0.36.0

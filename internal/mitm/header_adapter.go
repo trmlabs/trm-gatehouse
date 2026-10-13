@@ -175,6 +175,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		}
 		return
 	}
+	if r.URL.Path == "/graphql" {
+		if granted, ok := catalog.GitHubAPIRepos(host, port, scope.Pool); ok {
+			p.forwardGitHubGraphQL(w, r, target, host, port, scope, event, catalog, granted, refused)
+			return
+		}
+	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
 		if !refused(api.Entry, err) {
 			p.forwardGitHubAPI(w, r, target, scope, event, api, err)

@@ -1,0 +1,236 @@
+package httpcatalog
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// ghFixture is one gh command's requests, recorded from gh 2.89.0 against a
+// local mock server with no GitHub token. {{PR}} and {{LABEL}} stand for the
+// node IDs gh had just read.
+type ghFixture struct {
+	Requests []struct {
+		Method  string            `json:"method"`
+		Path    string            `json:"path"`
+		Headers map[string]string `json:"headers"`
+		Body    string            `json:"body"`
+	} `json:"requests"`
+}
+
+func readGhFixture(t *testing.T, name string) ghFixture {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "gh", name+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f ghFixture
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+const (
+	fixturePR    = "PR_kwDNA-jNB9A" // [0, 1000, 2000]
+	fixtureLabel = "LA_kwDNA-jNB9E" // [0, 1000, 2001]
+)
+
+// Every GraphQL request gh sends for the supported commands maps to the
+// operations it needs, and GitHub would receive it rebuilt.
+func TestGraphQLMapsEveryGhRequest(t *testing.T) {
+	const repo = "example-org/example-repo"
+	read := []string{"pr.read"}
+	list := []string{"pr.list"}
+	for _, tc := range []struct {
+		fixture string
+		want    [][]string // per GraphQL request: its operations; nil for the broker's own answer
+		targets [][]GraphQLTarget
+	}{
+		{"pr-view-number", [][]string{read, read}, nil},
+		{"pr-view-url", [][]string{read, read}, nil},
+		{"pr-view-comments", [][]string{read, read}, nil},
+		{"pr-view-json", [][]string{read}, nil},
+		{"pr-view-branch", [][]string{list, read}, nil},
+		{"pr-list", [][]string{list}, nil},
+		{"pr-list-all-json", [][]string{list}, nil},
+		{"pr-list-head", [][]string{list}, nil},
+		{"pr-list-limit-200", [][]string{list}, nil},
+		{"pr-status", [][]string{list}, nil},
+		{"pr-comment", [][]string{read, {"pr.comment"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-edit-body", [][]string{read, read, {"pr.edit"}}, [][]GraphQLTarget{nil, nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-edit-add-label", [][]string{read, read, {"pr.label"}, {"pr.label"}},
+			[][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequestWrite}, {fixtureLabel, TargetLabel}}}},
+		{"pr-ready", [][]string{read, {"pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
+		{"pr-checks-json", [][]string{read, read}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequest}}}},
+	} {
+		i := 0
+		for _, r := range readGhFixture(t, tc.fixture).Requests {
+			if r.Path != "/graphql" {
+				continue
+			}
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			got, err := ParseGitHubGraphQL([]byte(body))
+			if err != nil {
+				t.Fatalf("%s request %d: %v", tc.fixture, i, err)
+			}
+			want := tc.want[i]
+			switch {
+			case want == nil:
+				if got.Answer == nil || got.Body != nil {
+					t.Errorf("%s request %d: not answered by the broker", tc.fixture, i)
+				}
+			case !reflect.DeepEqual(got.Operations, want):
+				t.Errorf("%s request %d: operations %v, want %v", tc.fixture, i, got.Operations, want)
+			case len(got.Targets) == 0 && got.Repo != repo:
+				t.Errorf("%s request %d: repository %q", tc.fixture, i, got.Repo)
+			}
+			var targets []GraphQLTarget
+			if tc.targets != nil {
+				targets = tc.targets[i]
+			}
+			if !reflect.DeepEqual(got.Targets, targets) {
+				t.Errorf("%s request %d: targets %v, want %v", tc.fixture, i, got.Targets, targets)
+			}
+			if want != nil {
+				// The rebuilt request parses to the same result.
+				again, err := ParseGitHubGraphQL(got.Body)
+				if err != nil || !reflect.DeepEqual(again.Operations, got.Operations) || !reflect.DeepEqual(again.Targets, got.Targets) ||
+					string(again.Body) != string(got.Body) {
+					t.Errorf("%s request %d: rebuilt body reads differently: %v", tc.fixture, i, err)
+				}
+			}
+			i++
+		}
+		if i != len(tc.want) {
+			t.Errorf("%s: %d GraphQL requests, want %d", tc.fixture, i, len(tc.want))
+		}
+	}
+}
+
+func graphqlBody(query string, variables map[string]any) []byte {
+	b, _ := json.Marshal(map[string]any{"query": query, "variables": variables})
+	return b
+}
+
+func TestGraphQLRefusals(t *testing.T) {
+	repoVars := map[string]any{"owner": "example-org", "repo": "example-repo"}
+	repoQuery := func(inner string) string {
+		return `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ` + inner + ` } }`
+	}
+	comment := func(input map[string]any) []byte {
+		return graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }`, map[string]any{"input": input})
+	}
+	deep := "pullRequest(number: 1) { " + strings.Repeat("author { ", 25) + "login" + strings.Repeat(" }", 25) + " }"
+	aliases := ""
+	for i := range 11 {
+		aliases += "a" + string(rune('a'+i)) + ": pullRequest(number: 1) { id } "
+	}
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want *GraphQLError
+	}{
+		{"not JSON", []byte(`query { x }`), ErrGraphQLShape},
+		{"unknown key", []byte(`{"query":"query { x }","extensions":{}}`), ErrGraphQLShape},
+		{"no query", []byte(`{"variables":{}}`), ErrGraphQLShape},
+		{"trailing data", []byte(`{"query":"query { x }"} {}`), ErrGraphQLShape},
+		{"parse error", graphqlBody(`query {`, nil), ErrGraphQLShape},
+		{"two operations", graphqlBody(`query a { viewer { login } } query b { viewer { login } }`, nil), ErrGraphQLShape},
+		{"wrong operation name", []byte(`{"query":"query a { repository(owner: \"o\", name: \"r\") { pullRequest(number: 1) { id } } }","operationName":"b"}`), ErrGraphQLShape},
+		{"duplicate argument", graphqlBody(`query { repository(owner: "o", owner: "x", name: "r") { pullRequest(number: 1) { id } } }`, nil), ErrGraphQLShape},
+		{"duplicate input field", graphqlBody(`query { repository(owner: "o", name: "r") { pullRequests(orderBy: {field: CREATED_AT, field: UPDATED_AT}, first: 1) { totalCount } } }`, nil), ErrGraphQLShape},
+		{"fragment cycle", graphqlBody(repoQuery(`pullRequest(number: 1) { ...a }`)+` fragment a on PullRequest { author { ...a } }`, repoVars), ErrGraphQLShape},
+		{"unknown fragment", graphqlBody(repoQuery(`pullRequest(number: 1) { ...missing }`), repoVars), ErrGraphQLShape},
+		{"too many tokens", graphqlBody(repoQuery(`pullRequest(number: 1) { `+strings.Repeat("id ", maxGraphQLTokens)+`}`), repoVars), ErrGraphQLLimit},
+		{"oversized document", graphqlBody(repoQuery(`pullRequest(number: 1) { id }`)+strings.Repeat(" ", maxGraphQLDocument), repoVars), ErrGraphQLLimit},
+
+		{"subscription", graphqlBody(`subscription { repository(owner: "o", name: "r") { id } }`, nil), ErrGraphQLUnmapped},
+		{"viewer", graphqlBody(`query { viewer { login } }`, nil), ErrGraphQLUnmapped},
+		{"organization", graphqlBody(`query { organization(login: "o") { repositories(first: 5) { nodes { name } } } }`, nil), ErrGraphQLUnmapped},
+		{"another repository field", graphqlBody(repoQuery(`collaborators(first: 5) { nodes { login } }`), repoVars), ErrGraphQLUnmapped},
+		{"repository object", graphqlBody(repoQuery(`object(expression: "main:secrets.txt") { id }`), repoVars), ErrGraphQLUnmapped},
+		{"fragment at the root", graphqlBody(`query { ...q } fragment q on Query { viewer { login } }`, nil), ErrGraphQLUnmapped},
+		{"fragment under repository", graphqlBody(repoQuery(`...r`)+` fragment r on Repository { collaborators(first: 1) { totalCount } }`, repoVars), ErrGraphQLUnmapped},
+		{"directive", graphqlBody(repoQuery(`pullRequest(number: 1) @include(if: true) { id }`), repoVars), ErrGraphQLUnmapped},
+		{"node of another type", graphqlBody(`query { node(id: "R_kgDNA-g") { ... on Repository { collaborators(first: 1) { totalCount } } } }`, nil), ErrGraphQLUnmapped},
+		{"nodes", graphqlBody(`query { nodes(ids: ["PR_kwDNA-jNB9A"]) { id } }`, nil), ErrGraphQLUnmapped},
+		{"search without a repository", graphqlBody(`query { search(query: "is:pr author:@me", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search across an organization", graphqlBody(`query { search(query: "repo:o/r org:o", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search two repositories", graphqlBody(`query { search(query: "repo:o/r repo:o/s", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search code", graphqlBody(`query { search(query: "repo:o/r token", type: REPOSITORY, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"merge", graphqlBody(`mutation($input: MergePullRequestInput!) { mergePullRequest(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A"}}), ErrGraphQLUnmapped},
+		{"approve", graphqlBody(`mutation($input: AddPullRequestReviewInput!) { addPullRequestReview(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A", "event": "APPROVE"}}), ErrGraphQLUnmapped},
+		{"two mutations", graphqlBody(`mutation($input: AddCommentInput!) { a: addComment(input: $input) { clientMutationId } b: addComment(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}), ErrGraphQLUnmapped},
+		{"literal input", graphqlBody(`mutation { addComment(input: {subjectId: "PR_kwDNA-jNB9A", body: "x"}) { clientMutationId } }`, nil), ErrGraphQLUnmapped},
+		{"edit the title", graphqlBody(`mutation($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A", "title": "x"}}), ErrGraphQLUnmapped},
+		{"edit the state", graphqlBody(`mutation($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A", "body": "x", "state": "CLOSED"}}), ErrGraphQLUnmapped},
+		{"comment without a target", comment(map[string]any{"body": "x"}), ErrGraphQLUnmapped},
+		{"comment with a number target", comment(map[string]any{"subjectId": 12, "body": "x"}), ErrGraphQLUnmapped},
+		{"comment input not an object", graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }`, map[string]any{"input": "x"}), ErrGraphQLUnmapped},
+		{"label without labels", graphqlBody(`mutation($input: AddLabelsToLabelableInput!) { addLabelsToLabelable(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"labelableId": "PR_kwDNA-jNB9A", "labelIds": []any{}}}), ErrGraphQLUnmapped},
+		{"label ID not a list", graphqlBody(`mutation($input: AddLabelsToLabelableInput!) { addLabelsToLabelable(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"labelableId": "PR_kwDNA-jNB9A", "labelIds": "LA_kwDNA-jNB9E"}}), ErrGraphQLUnmapped},
+
+		{"too many aliases", graphqlBody(repoQuery(aliases), repoVars), ErrGraphQLLimit},
+		{"too deep", graphqlBody(repoQuery(deep), repoVars), ErrGraphQLLimit},
+		{"first above 100", graphqlBody(repoQuery(`pullRequests(first: 101) { totalCount }`), repoVars), ErrGraphQLLimit},
+		{"last above 100 deep down", graphqlBody(repoQuery(`pullRequest(number: 1) { commits(last: 1000) { totalCount } }`), repoVars), ErrGraphQLLimit},
+		{"first from a variable", graphqlBody(`query($owner: String!, $repo: String!, $n: Int) { repository(owner: $owner, name: $repo) { pullRequests(first: $n) { totalCount } } }`,
+			map[string]any{"owner": "o", "repo": "r", "n": 5000}), ErrGraphQLLimit},
+		{"first from a default", graphqlBody(`query($owner: String!, $repo: String!, $n: Int = 5000) { repository(owner: $owner, name: $repo) { pullRequests(first: $n) { totalCount } } }`,
+			repoVars), ErrGraphQLLimit},
+		{"first not a number", graphqlBody(repoQuery(`pullRequests(first: "5") { totalCount }`), repoVars), ErrGraphQLLimit},
+		{"negative first", graphqlBody(repoQuery(`pullRequests(first: -1) { totalCount }`), repoVars), ErrGraphQLLimit},
+		{"fragment fan-out", graphqlBody(repoQuery(`pullRequests(first: 1) { nodes { ...f1 } }`)+
+			` fragment f1 on PullRequest { `+strings.Repeat(`author { ...f2 } `, 10)+`}`+
+			` fragment f2 on Actor { `+strings.Repeat(`...f3 `, 10)+`}`+
+			` fragment f3 on Actor { login url resourcePath avatarUrl login url resourcePath avatarUrl login url }`, repoVars), ErrGraphQLLimit},
+
+		{"schema introspection", graphqlBody(`query { __schema { types { name } } }`, nil), ErrGraphQLIntrospection},
+		{"type of another name", graphqlBody(`query { __type(name: "Repository") { fields(includeDeprecated: true) { name } } }`, nil), ErrGraphQLIntrospection},
+		{"type with more fields", graphqlBody(`query { __type(name: "PullRequest") { fields(includeDeprecated: true) { name args { name } } } }`, nil), ErrGraphQLIntrospection},
+		{"type beside a repository", graphqlBody(`query { repository(owner: "o", name: "r") { pullRequest(number: 1) { id } } __type(name: "PullRequest") { name } }`, nil), ErrGraphQLIntrospection},
+		{"nested introspection", graphqlBody(repoQuery(`pullRequest(number: 1) { __type(name: "User") { name } }`), repoVars), ErrGraphQLIntrospection},
+
+		{"two repositories", graphqlBody(`query { a: repository(owner: "o", name: "r") { pullRequest(number: 1) { id } } b: repository(owner: "o", name: "s") { pullRequest(number: 1) { id } } }`, nil), ErrGraphQLRepository},
+		{"repository and another search", graphqlBody(`query { repository(owner: "o", name: "r") { pullRequest(number: 1) { id } } search(query: "repo:o/s", type: ISSUE, first: 1) { issueCount } }`, nil), ErrGraphQLRepository},
+		{"no repository", graphqlBody(`query { __typename }`, nil), ErrGraphQLRepository},
+	} {
+		_, err := ParseGitHubGraphQL(tc.body)
+		var got *GraphQLError
+		if !errors.As(err, &got) || got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
+// A variable the document does not declare never reaches GitHub, and a
+// literal or default argument is checked as GitHub would read it.
+func TestGraphQLRebuildsTheRequest(t *testing.T) {
+	body := []byte(`{"query":"query Q($owner: String!, $repo: String!) {\n  repository(owner: $owner, name: $repo) { pullRequest(number: 1) { id } } # comment\n}",` +
+		`"variables":{"owner":"Example-Org","repo":"example-repo","extra":"dropped"},"operationName":"Q"}`)
+	got, err := ParseGitHubGraphQL(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repo != "example-org/example-repo" || strings.Contains(string(got.Body), "extra") || strings.Contains(string(got.Body), "comment") ||
+		strings.Contains(string(got.Body), "operationName") {
+		t.Fatalf("rebuilt: repo %q body %s", got.Repo, got.Body)
+	}
+	answer, err := ParseGitHubGraphQL(graphqlBody(`query PullRequest_fields2{WorkflowRun: __type(name: "WorkflowRun"){fields(includeDeprecated: true){name}}}`, nil))
+	if err != nil || string(answer.Answer) != `{"data":{"WorkflowRun":{"fields":[{"name":"event"}]}}}` {
+		t.Fatalf("feature detection: %v %s", err, answer.Answer)
+	}
+}

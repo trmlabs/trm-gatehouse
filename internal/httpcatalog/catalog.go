@@ -891,6 +891,60 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 	return GitRequest{}, true, ErrUnlisted
 }
 
+// GitHubAPIRepos returns, for a GraphQL request to a github-api host, every
+// repository its entries list that the pool is granted, each with its head
+// prefixes as for a write. ok is false when the host has no github-api entry.
+func (c Catalog) GitHubAPIRepos(host string, port int, pool string) ([]GitRequest, bool) {
+	host = strings.ToLower(host)
+	var out []GitRequest
+	found := false
+	for i := range c.entries {
+		e := &c.entries[i]
+		if e.Kind != "github-api" || e.Host != host || e.Port != port {
+			continue
+		}
+		found = true
+		if !contains(e.Pools, pool) {
+			continue
+		}
+		for _, r := range e.Git.Repos {
+			out = append(out, GitRequest{Entry: e, Repo: r, Write: true, Route: "graphql", Method: http.MethodPost,
+				Permissions: "pull-requests", HeadPrefixes: append(c.pushBranchPrefixes(r.Repo, pool), r.PullRequestPrefixes...)})
+		}
+	}
+	return out, found
+}
+
+// GitHubAPIRepository is the GraphQL counterpart of GitHubAPIMatch: the
+// github-api entry listing repo on the host, with the pool's head prefixes
+// there. A repository no entry lists is ErrUnlisted; one listed only for
+// other pools is ErrPool.
+func (c Catalog) GitHubAPIRepository(host string, port int, repo, pool string) (GitRequest, error) {
+	repo = strings.ToLower(repo)
+	var listed *Entry
+	for i := range c.entries {
+		e := &c.entries[i]
+		if e.Kind != "github-api" || e.Host != strings.ToLower(host) || e.Port != port {
+			continue
+		}
+		for _, r := range e.Git.Repos {
+			if r.Repo == repo && listed == nil {
+				listed = e
+			}
+		}
+	}
+	granted, _ := c.GitHubAPIRepos(host, port, pool)
+	for _, g := range granted {
+		if g.Repo.Repo == repo {
+			return g, nil
+		}
+	}
+	if listed != nil {
+		return GitRequest{Entry: listed}, ErrPool
+	}
+	return GitRequest{}, ErrUnlisted
+}
+
 // pushBranchPrefixes are the branch names (refs/heads/ removed) a pool may
 // push to in a repository, from its git entries' refPrefixes. A pull request
 // may come only from one of them; none means none may be opened.
