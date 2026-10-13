@@ -202,8 +202,9 @@ func (m *Minter) checkScope(ctx context.Context, app App) error {
 // verifyScope finds reach beyond the catalog (an installation on all
 // repositories, any repository the catalog does not list, or a repository list
 // that cannot be read) and settings wider than the catalog needs (a
-// permission other than metadata read, contents and, only with a github-api
-// entry, pull requests write; a suspension; another App's installation). A
+// permission other than metadata read, contents, and only where a github-api
+// entry needs them, pull requests write and actions, deployments, checks and
+// statuses read; a suspension; another App's installation). A
 // catalog repository the installation lacks needs no check here: its mint
 // already fails.
 func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings {
