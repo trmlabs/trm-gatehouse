@@ -1,6 +1,7 @@
 package hashicorp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -275,6 +276,47 @@ func TestJWTOlderLoginRevokeIsRetried(t *testing.T) {
 	h.advance(time.Minute)
 	if _, _, revoked := h.vault.snapshot(); len(revoked) != 1 || revoked[0] != "parent-1" {
 		t.Fatalf("revoked=%v; a failed revoke must be retried", revoked)
+	}
+}
+
+// A login whose revoke keeps failing is one warning naming the failure's
+// class and status, not one every tick; the retries log at debug.
+func TestJWTOlderLoginRevokeFailureWarnsOncePerLogin(t *testing.T) {
+	h := newJWTHarness(t, 3600, defaultReauthOptions())
+	var logs bytes.Buffer
+	h.c.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.vault.mu.Lock()
+	h.vault.failRevokes = 5
+	h.vault.mu.Unlock()
+	h.advance(27 * time.Minute) // refresh, then five failed revokes and a success
+	var warnings, retries int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		switch {
+		case strings.HasPrefix(msg, "vault older login revoke failed; retrying"):
+			warnings++
+			if rec["level"] != "WARN" || rec["class"] != "status" || rec["status"] != float64(500) {
+				t.Errorf("warning %v; want WARN with class status and status 500", rec)
+			}
+		case strings.HasPrefix(msg, "vault older login revoke failed again"):
+			retries++
+			if rec["level"] != "DEBUG" {
+				t.Errorf("retry logged at %v; want DEBUG", rec["level"])
+			}
+		}
+		if strings.Contains(line, "parent-") {
+			t.Fatalf("a log line carries a token: %s", line)
+		}
+	}
+	if warnings != 1 || retries != 4 {
+		t.Fatalf("warnings=%d retries=%d; want one warning, then four debug retries", warnings, retries)
+	}
+	if _, _, revoked := h.vault.snapshot(); len(revoked) != 1 {
+		t.Fatalf("revoked=%v; the login must still be revoked once Vault answers", revoked)
 	}
 }
 

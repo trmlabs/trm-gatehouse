@@ -24,9 +24,10 @@ const MaxCacheTTL = 5 * time.Minute
 
 // Person is one directory user and the subset of asked groups it belongs to.
 type Person struct {
-	ObjectID string
-	Enabled  bool
-	MemberOf []string // only groups that were asked about
+	ObjectID   string
+	Enabled    bool
+	MemberOf   []string // only groups that were asked about
+	Department string   // the directory's department, for the audit trail only; never decides
 }
 
 // Source looks a person up by SSO subject and checks membership of groups.
@@ -245,12 +246,13 @@ type Requester struct {
 
 // Decision records why a request was allowed or refused, for the audit row.
 type Decision struct {
-	Allowed  bool
-	Outcome  string // fixed code
-	Tier     string
-	Groups   []string // groups checked
-	ObjectID string
-	CacheAge time.Duration
+	Allowed    bool
+	Outcome    string // fixed code
+	Tier       string
+	Groups     []string // groups checked
+	ObjectID   string
+	Department string // the person's directory department when one was looked up
+	CacheAge   time.Duration
 }
 
 type recheckKey struct{}
@@ -327,11 +329,11 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 	case err != nil:
 		d.Outcome = "entitlement_unavailable"
 	case !person.Enabled:
-		d.ObjectID, d.Outcome = person.ObjectID, "account_disabled"
+		d.ObjectID, d.Department, d.Outcome = person.ObjectID, person.Department, "account_disabled"
 	case !subset(entry.Requires, person.MemberOf):
-		d.ObjectID, d.Outcome = person.ObjectID, "not_entitled"
+		d.ObjectID, d.Department, d.Outcome = person.ObjectID, person.Department, "not_entitled"
 	default:
-		d.ObjectID, d.Allowed, d.Outcome = person.ObjectID, true, "entitled"
+		d.ObjectID, d.Department, d.Allowed, d.Outcome = person.ObjectID, person.Department, true, "entitled"
 		return d
 	}
 	// A recheck that refuses, or a fresh answer that refuses, forgets the
