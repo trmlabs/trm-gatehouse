@@ -234,3 +234,39 @@ func TestPrefixLoaderReadsVaultsEmptyListing(t *testing.T) {
 		t.Fatalf("a head naming entries loaded from an empty listing: %v", err)
 	}
 }
+
+// A stray document under entries/ (one a cancelled apply left behind) breaks
+// the digest of a head that lists nothing, so that catalog cannot reload.
+// A head that names its entries ignores the stray and loads.
+func TestPrefixLoaderIgnoresStrayDocumentsTheHeadDoesNotName(t *testing.T) {
+	v := newPrefixVault(3)
+	digest := v.head["entries_sha256"]
+	v.entries["stray"] = prefixEntry("stray")
+	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("a head without names accepted a stray document: %v", err)
+	}
+	for name, names := range map[string]interface{}{
+		"array":  []interface{}{"e00002", "e00000", "e00001"},
+		"string": `["e00000","e00001","e00002"]`,
+	} {
+		v.head = map[string]interface{}{"catalog": `{}`, "entries_sha256": digest, "entries_names": names}
+		raw, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(string(raw), "stray") || strings.Count(string(raw), `"name"`) != 3 {
+			t.Fatalf("%s: loaded %s", name, raw)
+		}
+	}
+	// A named entry that is missing still fails, as a half-written apply should.
+	v.head["entries_names"] = []interface{}{"e00000", "e00001", "e00002", "e00003"}
+	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil {
+		t.Fatal("a head naming a missing entry loaded")
+	}
+	for _, bad := range []interface{}{`not json`, []interface{}{"e00000", "e00000"}, []interface{}{"../x"}, 7} {
+		v.head["entries_names"] = bad
+		if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil {
+			t.Fatalf("head names %v accepted", bad)
+		}
+	}
+}

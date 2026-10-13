@@ -28,15 +28,18 @@ func (s *Server) handleDatabaseCleanupList(w http.ResponseWriter, r *http.Reques
 		jsonError(w, http.StatusServiceUnavailable, "Database cleanup storage unavailable")
 		return
 	}
+	// An unknown issuance is checked and cleared by the broker; only one whose
+	// orphan lease Vault cannot revoke closes its database and needs a fix.
 	type view struct {
 		Accessor string `json:"accessor"`
 		Binding  string `json:"binding"`
 		LeaseID  string `json:"lease_id,omitempty"`
-		Unknown  bool   `json:"operator_reconciliation_required"`
+		Unknown  bool   `json:"unknown_issuance"`
+		Closed   bool   `json:"operator_reconciliation_required"`
 	}
 	rows := make([]view, 0, len(records))
 	for _, record := range records {
-		rows = append(rows, view{record.Accessor, record.Binding, record.LeaseID, record.LeaseID == ""})
+		rows = append(rows, view{record.Accessor, record.Binding, record.LeaseID, record.LeaseID == "", record.Quarantined})
 	}
 	jsonOK(w, map[string]any{"records": rows})
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -108,6 +109,11 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		window, err := startupRetryWindow(os.Getenv)
+		if err != nil {
+			return err
+		}
+		startupRetry = window
 		if err := checkShutdownSeconds(os.Getenv); err != nil {
 			return err
 		}
@@ -131,8 +137,9 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		reload := databaseURLReload()
 		if flagURL, _ := cmd.Flags().GetString("database-url"); flagURL != "" {
-			dbURL = flagURL
+			dbURL, reload = flagURL, nil
 		}
 		dbPath, err := store.DefaultDBPath()
 		if err != nil && dbURL == "" {
@@ -140,8 +147,9 @@ var serverCmd = &cobra.Command{
 		}
 
 		db, err := store.OpenStore(store.StoreConfig{
-			DatabaseURL: dbURL,
-			SQLitePath:  dbPath,
+			DatabaseURL:       dbURL,
+			SQLitePath:        dbPath,
+			ReloadDatabaseURL: reload,
 		})
 		if err != nil {
 			return fmt.Errorf("opening store: %w", err)
@@ -632,7 +640,7 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		Logger:    logger,
 	}
 	// With a broker catalog, databases come from it and reload without a restart.
-	if catalog, err := brokerCatalog(context.Background(), client, os.Getenv, logger); err != nil {
+	if catalog, err := brokerCatalog(context.Background(), client, srv.CleanupStore(), srv.AttachReadiness, os.Getenv, logger); err != nil {
 		return fmt.Errorf("postgres broker catalog: %w", err)
 	} else if catalog != nil {
 		authz, err := loadAuthorization(os.Getenv)
@@ -688,6 +696,10 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		}
 		opts.TrustProxyHeader = true
 	}
+	tlsAddr, certFile, keyFile, err := postgresTLSSettings(os.Getenv, host)
+	if err != nil {
+		return err
+	}
 	// Transaction-mode multiplexing: client sessions share server connections
 	// and one rotating credential per pool and database. MaxConns then caps
 	// client sessions; each database's server budget comes from the catalog.
@@ -698,7 +710,39 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 			DrainSessions: intEnvValue("AGENT_VAULT_SHUTDOWN_SECONDS") > 0}
 	}
 	srv.AttachPostgresBroker(pgproxy.New(net.JoinHostPort(host, strconv.Itoa(postgresPort)), opts))
+	if tlsAddr != "" {
+		return srv.EnablePostgresTLS(tlsAddr, certFile, keyFile)
+	}
 	return nil
+}
+
+// postgresTLSSettings reads the broker's own PostgreSQL TLS listener, which
+// replaces an in-Pod TLS front: AGENT_VAULT_DB_TLS_PORT, served on every
+// interface, with AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE.
+// Unset leaves it off. The plain listener stays on loopback, and the client's
+// own address replaces the PROXY header, so the two cannot be combined.
+func postgresTLSSettings(getenv func(string) string, host string) (addr, certFile, keyFile string, err error) {
+	port, certFile, keyFile := getenv("AGENT_VAULT_DB_TLS_PORT"), getenv("AGENT_VAULT_DB_TLS_CERT_FILE"), getenv("AGENT_VAULT_DB_TLS_KEY_FILE")
+	if port == "" {
+		if certFile != "" || keyFile != "" {
+			return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE need AGENT_VAULT_DB_TLS_PORT")
+		}
+		return "", "", "", nil
+	}
+	n, convErr := strconv.Atoi(port)
+	if convErr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT must be a port from 1 to 65535")
+	}
+	if certFile == "" || keyFile == "" {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT needs AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE")
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT requires a loopback PostgreSQL listener")
+	}
+	if proxyHeader, _ := strconv.ParseBool(getenv("AGENT_VAULT_DB_PROXY_PROTOCOL")); proxyHeader || getenv("AGENT_VAULT_CROSS_CLUSTER_PORT") != "" {
+		return "", "", "", fmt.Errorf("AGENT_VAULT_DB_TLS_PORT replaces the TLS front's PROXY header; unset AGENT_VAULT_DB_PROXY_PROTOCOL and AGENT_VAULT_CROSS_CLUSTER_PORT")
+	}
+	return net.JoinHostPort("0.0.0.0", port), certFile, keyFile, nil
 }
 
 // firstPositive returns the first value above zero, or 0.
@@ -812,34 +856,50 @@ func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
 }
 
 // attachHashicorpIfConfigured wires the HashiCorp Vault client when VAULT_ADDR
-// is set. The 10s deadline bounds an AppRole login (token auth is instant); on
-// timeout we proceed without a client so external vaults serve-stale until next
-// restart.
+// is set. Each login attempt has 10 s; a failed one is retried with backoff
+// for AGENT_VAULT_STARTUP_RETRY_SECONDS (default 120), so a Vault blip delays
+// the start instead of crash-looping the Pod. A missing or invalid auth
+// setting is not retried. With no client, external vaults serve stale until
+// the next restart, and the credential proxy refuses to start.
 func attachHashicorpIfConfigured(srv *server.Server, logger *slog.Logger) {
 	if os.Getenv("VAULT_ADDR") == "" {
 		return
 	}
-	type result struct {
-		c   *hashicorp.Client
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		c, err := hashicorp.NewClient(context.Background(), logger)
-		done <- result{c, err}
-	}()
-	select {
-	case r := <-done:
-		if r.err != nil {
-			logger.Warn("hashicorp client unavailable; external-store vaults will not refresh",
-				slog.String("err", r.err.Error()))
-			return
+	var client *hashicorp.Client
+	err := retryAtStartup(logger, "vault login", func() error {
+		c, err := boundedAttempt(10*time.Second, func(ctx context.Context) (*hashicorp.Client, error) {
+			return newHashicorpClient(ctx, logger)
+		}, func(late *hashicorp.Client) {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			late.CloseContext(closeCtx)
+		})
+		if err != nil && !retryableVaultLogin(err) {
+			return stopRetrying{err}
 		}
-		srv.AttachHashicorp(r.c)
-		srv.AttachReadiness("vault-login", r.c.Ready)
-	case <-time.After(10 * time.Second):
-		logger.Warn("hashicorp client login exceeded 10s deadline; continuing without external store")
+		client = c
+		return err
+	})
+	var stop stopRetrying
+	if errors.As(err, &stop) {
+		err = stop.err
 	}
+	if err != nil {
+		logger.Warn("hashicorp client unavailable; external-store vaults will not refresh",
+			slog.String("err", err.Error()))
+		return
+	}
+	srv.AttachHashicorp(client)
+	srv.AttachReadiness("vault-login", client.Ready)
+}
+
+// newHashicorpClient is hashicorp.NewClient, replaced in tests.
+var newHashicorpClient = hashicorp.NewClient
+
+// retryableVaultLogin is true for a login Vault did not complete, false for a
+// missing or invalid auth setting, which no retry fixes.
+func retryableVaultLogin(err error) bool {
+	return !errors.Is(err, hashicorp.ErrNotConfigured) && !errors.Is(err, hashicorp.ErrNoAuthMethod) && !errors.Is(err, hashicorp.ErrInvalidAuthConfig)
 }
 
 // attachLogSink wires the request-log pipeline: a BatchSink with async
@@ -1157,8 +1217,9 @@ func runDetachedChild(host, addr string, mitmPort, postgresPort int, logger *slo
 	}
 
 	db, err := store.OpenStore(store.StoreConfig{
-		DatabaseURL: dbURL,
-		SQLitePath:  dbPath,
+		DatabaseURL:       dbURL,
+		SQLitePath:        dbPath,
+		ReloadDatabaseURL: databaseURLReload(),
 	})
 	if err != nil {
 		return fmt.Errorf("opening store: %w", err)

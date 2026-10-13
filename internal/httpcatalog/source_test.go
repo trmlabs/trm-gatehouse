@@ -64,8 +64,10 @@ func TestSourceSwapsValidVersionsAndKeepsLastGood(t *testing.T) {
 			t.Error("rejection carried catalog content")
 		}
 	})
-	// A broken version is refused once and the previous catalog stays.
-	loader.set(`{"entries":[{"name":"x","host":"*.synthetic.example"}]}`, 2, nil)
+	// A version that cannot be decoded is refused once and the previous
+	// catalog stays. (One bad entry only drops that entry; see
+	// TestSourceDropsBadEntriesAndAppliesTheRest.)
+	loader.set(`{"entries":[{"name":"x","host":"*.synthetic.example"}],"futureSection":true}`, 2, nil)
 	waitFor(t, "rejection", func() bool { mu.Lock(); defer mu.Unlock(); return len(rejected) > 0 })
 	time.Sleep(30 * time.Millisecond)
 	mu.Lock()
@@ -240,13 +242,13 @@ func TestGitScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repos, pullRequests := c.GitScope(42); fmt.Sprint(repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !pullRequests {
+	if repos, pullRequests, actions, deployments := c.GitScope(42); fmt.Sprint(repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !pullRequests || actions || deployments {
 		t.Errorf("GitScope(42) = %v, %v", repos, pullRequests)
 	}
-	if repos, pullRequests := c.GitScope(43); fmt.Sprint(repos) != "[trmlabs/c]" || pullRequests {
+	if repos, pullRequests, _, _ := c.GitScope(43); fmt.Sprint(repos) != "[trmlabs/c]" || pullRequests {
 		t.Errorf("GitScope(43) = %v, %v", repos, pullRequests)
 	}
-	if repos, _ := c.GitScope(44); repos != nil {
+	if repos, _, _, _ := c.GitScope(44); repos != nil {
 		t.Errorf("GitScope(44) = %v", repos)
 	}
 }

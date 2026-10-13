@@ -68,6 +68,7 @@ type Server struct {
 	encKey        []byte // 32-byte encryption key, held in memory while running
 	notifier      *notify.Notifier
 	initialized   atomic.Bool         // true when at least one owner account exists; replicas share registration
+	shuttingDown  atomic.Bool         // SIGTERM arrived: readiness is false from here on
 	lastInitCheck atomic.Int64        // unix-millis of last DB check for initialization (throttle)
 	baseURL       string              // externally-reachable base URL (e.g. "https://sb.example.com")
 	skillCLI      []byte              // embedded CLI skill content (served at GET /v1/skills/cli)
@@ -106,6 +107,7 @@ type Server struct {
 	proxyCerts            *proxycert.Issuer      // signs shared proxies' serving certificates on that listener, or nil
 	proxyActivity         *proxyactivity.Service // keeps shared proxies' Sandbox activity on that listener, or nil
 	pgBroker              *pgproxy.Broker
+	pgTLS                 *pgTLSFront // the broker's own TLS listener for pgBroker, or nil
 	readiness             []readinessCheck
 	pgLeaseCloser         interface{ Close(context.Context) error }
 	shutdownTimeout       time.Duration // 0: the default 5s
@@ -1210,8 +1212,24 @@ func (s *Server) Start() error {
 			defer cancel()
 			_ = s.pgBroker.Shutdown(ctx)
 		}()
+		if s.pgTLS != nil {
+			tlsLn, err := net.Listen("tcp", s.pgTLS.addr)
+			if err != nil {
+				return fmt.Errorf("listen postgres broker TLS: %w", err)
+			}
+			defer func() { _ = tlsLn.Close() }()
+			merged := newMergedListener(pgLn)
+			pgLn = merged
+			fmt.Printf("Agent Vault PostgreSQL TLS listener on %s\n", tlsLn.Addr())
+			go func() { _ = servePostgresTLS(tlsLn, merged, s.pgTLS.config(), s.logger) }()
+		}
+	} else if s.pgTLS != nil {
+		return fmt.Errorf("the PostgreSQL TLS listener requires the PostgreSQL broker")
 	}
 	if s.crossClusterAddr != "" {
+		if s.pgTLS != nil {
+			return fmt.Errorf("the PostgreSQL TLS listener cannot be combined with the cross-cluster listener")
+		}
 		if !s.credentialProxy || strictMITMLn == nil {
 			return fmt.Errorf("the cross-cluster listener requires the credential proxy")
 		}
@@ -1373,6 +1391,7 @@ func (s *Server) Start() error {
 		return err
 	case <-stop:
 	}
+	s.beginShutdown()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownBudget())
 	defer cancel()
@@ -1428,6 +1447,15 @@ func (s *Server) Start() error {
 	fmt.Println("server shut down gracefully")
 	crypto.WipeBytes(s.encKey)
 	return nil
+}
+
+// beginShutdown turns readiness false and stops new database credential
+// issuance before any listener drains, so the drain sees no new work.
+func (s *Server) beginShutdown() {
+	s.shuttingDown.Store(true)
+	if drain, ok := s.pgLeaseCloser.(interface{ BeginDrain() }); ok {
+		drain.BeginDrain()
+	}
 }
 
 var errTooManyPendingCodes = errors.New("too many pending verification codes")

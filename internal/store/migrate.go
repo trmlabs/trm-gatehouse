@@ -105,12 +105,30 @@ func CountDestinationData(dst *SQLStore) (string, error) {
 //
 // progressFn is called with (tableName, rowCount) after each table is copied.
 func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table string, rows int)) error {
+	_, err := MigrateDataWithCA(ctx, src, dst, "", progressFn)
+	return err
+}
+
+// MigrateDataWithCA is MigrateData that also moves the interception CA from
+// caDir on disk into the same transaction, so a failure anywhere leaves the
+// destination empty and a rerun starts clean. Nothing else can make a rerun
+// refuse with "destination database already contains data" halfway. It
+// reports whether a CA was moved from disk; an empty caDir moves none.
+func MigrateDataWithCA(ctx context.Context, src, dst *SQLStore, caDir string, progressFn func(table string, rows int)) (bool, error) {
+	// Read and parse the CA files before writing anything.
+	var ca *CAState
+	if caDir != "" {
+		var err error
+		if ca, err = readCAFromDisk(caDir); err != nil {
+			return false, err
+		}
+	}
 	// Use a single Postgres transaction for the entire copy so we get
 	// atomic all-or-nothing semantics. Tables are copied in FK
 	// dependency order so referential integrity is maintained.
 	tx, err := dst.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("beginning destination transaction: %w", err)
+		return false, fmt.Errorf("beginning destination transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -155,11 +173,23 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 	for _, step := range steps {
 		n, err := step.fn(ctx, src, tx, dst.dialect)
 		if err != nil {
-			return fmt.Errorf("copying %s: %w", step.name, err)
+			return false, fmt.Errorf("copying %s: %w", step.name, err)
 		}
 		if progressFn != nil {
 			progressFn(step.name, n)
 		}
+	}
+	caMoved := false
+	if ca != nil {
+		// A CA already in the source database wins, as SetCAState does.
+		now := dst.now()
+		result, err := tx.ExecContext(ctx, dst.dialect.Rebind(`INSERT INTO ca_state (id, root_cert, root_key_ct, root_key_nonce, source, created_at, updated_at)
+			VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`), ca.RootCert, ca.RootKeyCT, ca.RootKeyNonce, ca.Source, now, now)
+		if err != nil {
+			return false, fmt.Errorf("writing CA state: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		caMoved = n == 1
 	}
 
 	// Update Postgres sequences for SERIAL columns so new inserts get the
@@ -176,7 +206,7 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 	for _, su := range seqUpdates {
 		var maxID sql.NullInt64
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT MAX(id) FROM %s", su.table)).Scan(&maxID); err != nil {
-			return fmt.Errorf("querying max id for %s: %w", su.table, err)
+			return false, fmt.Errorf("querying max id for %s: %w", su.table, err)
 		}
 		if maxID.Valid && maxID.Int64 > 0 {
 			_, err := tx.ExecContext(ctx, fmt.Sprintf(
@@ -184,16 +214,15 @@ func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table 
 				su.seq, maxID.Int64,
 			))
 			if err != nil {
-				return fmt.Errorf("updating sequence %s: %w", su.seq, err)
+				return false, fmt.Errorf("updating sequence %s: %w", su.seq, err)
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing migration transaction: %w", err)
+		return false, fmt.Errorf("committing migration transaction: %w", err)
 	}
-
-	return nil
+	return caMoved, nil
 }
 
 // --- Per-table copy helpers ---
@@ -1225,29 +1254,42 @@ func copyCAState(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dial
 // Returns (true, nil) if the CA was migrated, (false, nil) if the files
 // were not found on disk (not an error), or (false, err) on failure.
 func MigrateCAFromDisk(ctx context.Context, dst *SQLStore, caDir string) (bool, error) {
+	state, err := readCAFromDisk(caDir)
+	if err != nil || state == nil {
+		return false, err
+	}
+	if err := dst.SetCAState(ctx, state); err != nil {
+		return false, fmt.Errorf("writing CA state: %w", err)
+	}
+	return true, nil
+}
+
+// readCAFromDisk reads and parses the CA files in caDir, or returns nil when
+// there are none.
+func readCAFromDisk(caDir string) (*CAState, error) {
 	certPath := caDir + "/ca.crt.pem"
 	keyPath := caDir + "/ca.key.enc"
 
 	certPEM, err := readFileIfExists(certPath)
 	if err != nil {
-		return false, fmt.Errorf("reading %s: %w", certPath, err)
+		return nil, fmt.Errorf("reading %s: %w", certPath, err)
 	}
 	if certPEM == nil {
-		return false, nil // no CA files on disk
+		return nil, nil // no CA files on disk
 	}
 
 	keyJSON, err := readFileIfExists(keyPath)
 	if err != nil {
-		return false, fmt.Errorf("reading %s: %w", keyPath, err)
+		return nil, fmt.Errorf("reading %s: %w", keyPath, err)
 	}
 	if keyJSON == nil {
-		return false, nil
+		return nil, nil
 	}
 
 	// Parse the encrypted key JSON: {"nonce":"<base64>","ciphertext":"<base64>"}
 	nonce, ct, err := parseEncryptedKeyJSON(keyJSON)
 	if err != nil {
-		return false, fmt.Errorf("parsing %s: %w", keyPath, err)
+		return nil, fmt.Errorf("parsing %s: %w", keyPath, err)
 	}
 
 	now := time.Now().UTC()
@@ -1259,11 +1301,7 @@ func MigrateCAFromDisk(ctx context.Context, dst *SQLStore, caDir string) (bool, 
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-
-	if err := dst.SetCAState(ctx, state); err != nil {
-		return false, fmt.Errorf("writing CA state: %w", err)
-	}
-	return true, nil
+	return state, nil
 }
 
 // readFileIfExists reads the named file, returning nil (not an error) when

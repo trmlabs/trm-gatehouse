@@ -33,6 +33,10 @@ const prefixReadConcurrency = 64
 //     "entries_sha256" is the SHA-256, in lowercase hex, of each entry name in
 //     byte order followed by a newline, its stored JSON and a newline.
 //   - entries/<name>: field "entry" is that entry's JSON.
+//   - head, optionally: field "entries_names" lists the entry names, as a
+//     JSON array or a string holding one. When it is there, only those
+//     entries are read and digested, so a stray document under entries/ (one
+//     left by a cancelled apply) is ignored instead of failing every reload.
 //
 // Terraform writes the entries, then the head. The head's KV version is the
 // catalog version, so a poll costs one read until the head changes. A reload
@@ -62,24 +66,29 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		if document == "" || len(want) != 64 {
 			return nil, 0, errors.New("catalog head incomplete")
 		}
-		listing, err := vault.ListWithContext(ctx, mount+"/metadata/"+prefix+"/entries")
+		names, named, err := headNames(head["entries_names"])
 		if err != nil {
-			return nil, version, errors.New("catalog entry listing failed")
+			return nil, version, err
 		}
-		// Vault answers LIST on an empty folder with 404, which the client
-		// returns as no secret: no entries. The head's digest still decides,
-		// so this loads only a head that itself says there are none.
-		var keys []interface{}
-		if listing != nil && listing.Data != nil {
-			keys, _ = listing.Data["keys"].([]interface{})
-		}
-		names := make([]string, 0, len(keys))
-		for _, k := range keys {
-			name, _ := k.(string)
-			if !idPattern.MatchString(name) {
-				return nil, version, fmt.Errorf("catalog entry key %q is not an entry name", name)
+		if !named {
+			listing, err := vault.ListWithContext(ctx, mount+"/metadata/"+prefix+"/entries")
+			if err != nil {
+				return nil, version, errors.New("catalog entry listing failed")
 			}
-			names = append(names, name)
+			// Vault answers LIST on an empty folder with 404, which the client
+			// returns as no secret: no entries. The head's digest still decides,
+			// so this loads only a head that itself says there are none.
+			var keys []interface{}
+			if listing != nil && listing.Data != nil {
+				keys, _ = listing.Data["keys"].([]interface{})
+			}
+			for _, k := range keys {
+				name, _ := k.(string)
+				if !idPattern.MatchString(name) {
+					return nil, version, fmt.Errorf("catalog entry key %q is not an entry name", name)
+				}
+				names = append(names, name)
+			}
 		}
 		sort.Strings(names)
 		stored, err := readEntries(ctx, vault, mount+"/data/"+prefix+"/entries/", names)
@@ -111,6 +120,36 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		}
 		return out, version, nil
 	}
+}
+
+// headNames reads the head's optional entry name list. listed is false when
+// the head has none, and the loader lists entries/ instead.
+func headNames(field interface{}) (names []string, listed bool, err error) {
+	if field == nil {
+		return nil, false, nil
+	}
+	var raw []interface{}
+	switch v := field.(type) {
+	case []interface{}:
+		raw = v
+	case string:
+		if json.Unmarshal([]byte(v), &raw) != nil {
+			return nil, true, errors.New("catalog head entries_names is not a JSON array")
+		}
+	default:
+		return nil, true, errors.New("catalog head entries_names is not a list")
+	}
+	seen := make(map[string]bool, len(raw))
+	names = make([]string, 0, len(raw))
+	for _, k := range raw {
+		name, _ := k.(string)
+		if !idPattern.MatchString(name) || seen[name] {
+			return nil, true, fmt.Errorf("catalog head names %q, which is not a unique entry name", name)
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names, true, nil
 }
 
 // errDeleted is a KV secret whose current version is deleted or destroyed.

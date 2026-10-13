@@ -19,18 +19,39 @@ import (
 )
 
 type durableVaultFixture struct {
-	mu           sync.Mutex
-	issued       int
-	next         int
-	failRevoke   bool
-	denyLookup   bool
-	selfRevokes  int
-	accessorRevs int
-	loseResponse bool
-	live         map[string]bool
-	journal      *store.SQLStore
-	mintStarted  chan struct{}
-	mintRelease  chan struct{}
+	mu         sync.Mutex
+	issued     int
+	next       int
+	failRevoke bool
+	// failSelfRevoke fails only a child token's revoke-self, so the lease it
+	// issued stays live in Vault.
+	failSelfRevoke bool
+	denyLookup     bool
+	selfRevokes    int
+	accessorRevs   int
+	loseResponse   bool
+	live           map[string]bool
+	journal        *store.SQLStore
+	mintStarted    chan struct{}
+	mintRelease    chan struct{}
+	// Vault's lease store as the lease list shows it: the lease each live
+	// child token issued, plus leases other Vault clients hold.
+	leases   map[string]string
+	issuedAt map[string]time.Time
+	leaseAge time.Duration // how long before now Vault says each new lease was issued
+	foreign  []string
+	lists    int
+	denyList bool
+	// revokeStatus, when set, answers every lease revoke with this status.
+	revokeStatus int
+}
+
+// leaseRef is the child token a fixture lease ID belongs to.
+func leaseRef(leaseID string) string {
+	if i := strings.LastIndex(leaseID, "/lease-"); i >= 0 {
+		return leaseID[i+len("/lease-"):]
+	}
+	return leaseID
 }
 
 func durableFixture(t *testing.T) (*hashicorp.Client, *store.SQLStore, *durableVaultFixture) {
@@ -47,7 +68,7 @@ func durableFixture(t *testing.T) (*hashicorp.Client, *store.SQLStore, *durableV
 
 func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *store.SQLStore, *durableVaultFixture) {
 	t.Helper()
-	f := &durableVaultFixture{live: make(map[string]bool), journal: st}
+	f := &durableVaultFixture{live: make(map[string]bool), leases: make(map[string]string), issuedAt: make(map[string]time.Time), journal: st}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -65,7 +86,7 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 			f.next++
 			ref := fmt.Sprintf("ref-%d", f.next)
 			write(map[string]any{"auth": map[string]any{"accessor": ref, "client_token": ref, "policies": body["policies"], "lease_duration": 60, "renewable": false}})
-		case strings.Contains(r.URL.Path, "/creds/"):
+		case strings.Contains(r.URL.Path, "/creds/") && !strings.HasPrefix(r.URL.Path, "/v1/sys/"):
 			ref := r.Header.Get("X-Vault-Token")
 			records, err := st.ListDatabaseCleanup(r.Context())
 			if err != nil {
@@ -82,6 +103,8 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 			}
 			f.issued++
 			f.live[ref] = true
+			f.leases[ref] = strings.TrimPrefix(r.URL.Path, "/v1/") + "/lease-" + ref
+			f.issuedAt[ref] = time.Now().Add(-f.leaseAge)
 			if f.mintStarted != nil {
 				close(f.mintStarted)
 				select {
@@ -94,9 +117,9 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 				_, _ = w.Write([]byte("interrupted-json"))
 				return
 			}
-			write(map[string]any{"lease_id": "lease-" + ref, "lease_duration": 30, "renewable": true, "data": map[string]any{"username": "user-" + ref, "password": "synthetic-private-password"}})
+			write(map[string]any{"lease_id": f.leases[ref], "lease_duration": 30, "renewable": true, "data": map[string]any{"username": "user-" + ref, "password": "synthetic-private-password"}})
 		case r.URL.Path == "/v1/auth/token/revoke-self":
-			if f.failRevoke {
+			if f.failRevoke || f.failSelfRevoke {
 				w.WriteHeader(503)
 				write(map[string]any{"errors": []string{"synthetic cleanup unavailable"}})
 				return
@@ -116,6 +139,11 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 			delete(f.live, body["accessor"])
 			w.WriteHeader(204)
 		case strings.HasPrefix(r.URL.Path, "/v1/sys/leases/revoke/"):
+			if f.revokeStatus != 0 {
+				w.WriteHeader(f.revokeStatus)
+				write(map[string]any{"errors": []string{"synthetic revoke blip"}})
+				return
+			}
 			if f.failRevoke {
 				w.WriteHeader(403)
 				write(map[string]any{"errors": []string{"synthetic cleanup unavailable"}})
@@ -126,9 +154,40 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 			if body["sync"] != true {
 				t.Error("database revoke was not synchronous")
 			}
-			delete(f.live, strings.TrimPrefix(r.URL.Path, "/v1/sys/leases/revoke/lease-"))
+			delete(f.live, leaseRef(strings.TrimPrefix(r.URL.Path, "/v1/sys/leases/revoke/")))
 			w.WriteHeader(204)
+		case strings.HasPrefix(r.URL.Path, "/v1/sys/leases/lookup/") && r.URL.Query().Get("list") == "true":
+			f.lists++
+			if f.denyList {
+				w.WriteHeader(http.StatusForbidden)
+				write(map[string]any{"errors": []string{"permission denied"}})
+				return
+			}
+			prefix := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/sys/leases/lookup/"), "/") + "/"
+			keys := []string{}
+			for ref, lease := range f.leases {
+				if f.live[ref] && strings.HasPrefix(lease, prefix) {
+					keys = append(keys, strings.TrimPrefix(lease, prefix))
+				}
+			}
+			for _, lease := range f.foreign {
+				if strings.HasPrefix(lease, prefix) {
+					keys = append(keys, strings.TrimPrefix(lease, prefix))
+				}
+			}
+			if len(keys) == 0 {
+				w.WriteHeader(http.StatusNotFound)
+				write(map[string]any{"errors": []string{}})
+				return
+			}
+			write(map[string]any{"data": map[string]any{"keys": keys}})
 		case r.URL.Path == "/v1/sys/leases/lookup":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if ref := leaseRef(body["lease_id"]); f.live[ref] && f.leases[ref] == body["lease_id"] {
+				write(map[string]any{"data": map[string]any{"id": body["lease_id"], "issue_time": f.issuedAt[ref].Format(time.RFC3339Nano)}})
+				return
+			}
 			w.WriteHeader(400)
 			write(map[string]any{"errors": []string{"invalid lease"}})
 		case r.URL.Path == "/v1/sys/leases/renew":
@@ -213,7 +272,10 @@ func TestDurableLeaseCleanupFailureBlocksBindingAndPreservesOtherSession(t *test
 	}
 }
 
-func TestDurableLeaseLostIssuanceResponseRecoversOnRestart(t *testing.T) {
+// A lost response whose child token could not revoke itself survives a stop
+// and a restart as a record; the database keeps issuing meanwhile, and an
+// operator's confirmation still closes the record.
+func TestDurableLeaseLostIssuanceStaysRecordedAcrossRestart(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := newDurableForTest(t, client, st)
 	ctx := context.Background()
@@ -225,44 +287,33 @@ func TestDurableLeaseLostIssuanceResponseRecoversOnRestart(t *testing.T) {
 	if _, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
 		t.Fatal("interrupted response accepted")
 	}
-	if err := m.Close(ctx); err == nil {
-		t.Fatal("cleanup outage accepted")
+	if err := m.Close(ctx); err != nil {
+		t.Fatal("an unresolved unknown issuance failed the stop:", err)
 	}
 	records, err := st.ListDatabaseCleanup(ctx)
-	if err != nil || len(records) != 1 {
+	if err != nil || len(records) != 1 || records[0].LeaseID != "" {
 		t.Fatal("lost unknown issuance recovery record", err)
 	}
 	m2 := newDurableForTest(t, client, st)
-	if _, err := m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
-		t.Fatal("restart admitted unreconciled binding")
-	}
 	f.mu.Lock()
-	if f.issued != 1 {
-		t.Error("ambiguous issuance retried")
-	}
 	f.failRevoke = false
 	f.loseResponse = false
 	f.mu.Unlock()
-	if _, err = m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
-		t.Fatal("unknown issuance automatically cleared")
+	lease, err := m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+	if err != nil {
+		t.Fatal("restart closed the database over an unresolved record:", err)
+	}
+	if records, err := st.ListDatabaseCleanup(ctx); err != nil || len(records) != 2 {
+		t.Fatalf("unknown issuance not kept beside the new lease: %d %v", len(records), err)
 	}
 	if err = m2.ConfirmDatabaseCleanup(ctx, records[0].Accessor, "test: observed fixture credential absence"); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The unknown issuance's child token is not revoked by accessor: only its
-	// lost process held it, and Vault revokes it and its credential at its
-	// TTL. The fixture has no TTL, so both sessions are still live here.
-	f.mu.Lock()
-	if len(f.live) != 2 {
-		t.Errorf("live sessions %d, want the new one and the unknown one", len(f.live))
-	}
-	f.mu.Unlock()
 	if err = m2.Revoke(ctx, lease.ID); err != nil {
 		t.Fatal(err)
+	}
+	if records, err := st.ListDatabaseCleanup(ctx); err != nil || len(records) != 0 {
+		t.Fatalf("records remain: %d %v", len(records), err)
 	}
 }
 
@@ -414,7 +465,7 @@ func TestDurableRecoveryNeverRevokesByAccessor(t *testing.T) {
 
 // A lost credential response: the process still holds the child token, so it
 // revokes it with its own token at once, taking the unknown credential with
-// it. The binding stays quarantined until an operator confirms the database.
+// it. The record stays for the automatic check; the database keeps issuing.
 func TestDurableLeaseLostIssuanceRevokesTheHeldChild(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := newDurableForTest(t, client, st)
@@ -432,7 +483,14 @@ func TestDurableLeaseLostIssuanceRevokesTheHeldChild(t *testing.T) {
 	}
 	f.loseResponse = false
 	f.mu.Unlock()
-	if _, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
-		t.Fatal("unknown issuance reopened without confirmation")
+	lease, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+	if err != nil {
+		t.Fatal("database closed over a lost response:", err)
+	}
+	if records, err := st.ListDatabaseCleanup(ctx); err != nil || len(records) != 2 {
+		t.Fatalf("unknown issuance not kept for its check: %d %v", len(records), err)
+	}
+	if err := m.Revoke(ctx, lease.ID); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -27,6 +27,13 @@ import (
 
 func realDurableInputs(t *testing.T) (*hashicorp.Client, *pgx.Conn, *DatabaseService) {
 	t.Helper()
+	return realDurableInputsFor(t, os.Getenv("AV_TEST_VAULT_ROLE"))
+}
+
+// realDurableInputsFor is realDurableInputs for one Vault role ("readonly"
+// when empty).
+func realDurableInputsFor(t *testing.T, role string) (*hashicorp.Client, *pgx.Conn, *DatabaseService) {
+	t.Helper()
 	if os.Getenv("VAULT_ADDR") == "" || os.Getenv("AV_TEST_PG_ADMIN") == "" || os.Getenv("AV_TEST_PG_UPSTREAM") == "" {
 		t.Skip("requires disposable real Vault/PostgreSQL fixture")
 	}
@@ -36,7 +43,7 @@ func realDurableInputs(t *testing.T) (*hashicorp.Client, *pgx.Conn, *DatabaseSer
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = admin.Close(ctx) })
-	mount, role := os.Getenv("AV_TEST_VAULT_MOUNT"), os.Getenv("AV_TEST_VAULT_ROLE")
+	mount := os.Getenv("AV_TEST_VAULT_MOUNT")
 	if mount == "" {
 		mount = "database"
 	}
@@ -171,8 +178,12 @@ func TestRealVault_DurableParentPolicyScope(t *testing.T) {
 			_, err := api.Logical().ReadWithContext(context.Background(), "database/creds/readonly2")
 			return err
 		}},
-		{"lease enumeration", func() error {
-			_, err := api.Logical().ListWithContext(context.Background(), "sys/leases/lookup/database/creds/readonly")
+		{"lease enumeration beyond the broker's roles", func() error {
+			_, err := api.Logical().ListWithContext(context.Background(), "sys/leases/lookup/database/creds")
+			return err
+		}},
+		{"lease enumeration of another mount", func() error {
+			_, err := api.Logical().ListWithContext(context.Background(), "sys/leases/lookup/other/creds/admin")
 			return err
 		}},
 		{"unrelated lease lookup", func() error {
@@ -188,6 +199,185 @@ func TestRealVault_DurableParentPolicyScope(t *testing.T) {
 			}
 		})
 	}
+	// The automatic check of an unknown issuance lists its own role's leases.
+	if _, err := client.ListDatabaseLeases(context.Background(), svc.Mount, svc.Role); err != nil {
+		t.Fatal("parent cannot list its own role's leases:", err)
+	}
+}
+
+// A lost credential response whose child token could not revoke itself. The
+// database keeps issuing throughout the lost lease's life. The child token
+// expires, but a database dependency makes Vault's revocation fail, so the
+// lease stays listed. Once it is old enough to be an orphan the broker tries
+// to revoke it itself; that fails too, a real database fault, and only then is
+// the database closed. When the dependency is gone the revocation succeeds,
+// the list comes back empty, and the broker reopens it without an operator.
+func TestRealVault_DurableUnknownIssuanceClearsWhenVaultListsNoLease(t *testing.T) {
+	// The broker lists and revokes orphans only under gatehouse-* roles.
+	role := os.Getenv("AV_TEST_VAULT_GATEHOUSE_ROLE")
+	if role == "" {
+		t.Skip("set AV_TEST_VAULT_GATEHOUSE_ROLE to a gatehouse-* role on the fixture database")
+	}
+	_, admin, svc := realDurableInputsFor(t, role)
+	upstream, err := url.Parse(os.Getenv("VAULT_ADDR"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interrupted atomic.Bool
+	var orphanName atomic.Value
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/revoke-self" && interrupted.Load() {
+			http.Error(w, "revoke unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		request := r.Clone(r.Context())
+		request.RequestURI = ""
+		request.URL.Scheme = upstream.Scheme
+		request.URL.Host = upstream.Host
+		response, err := http.DefaultTransport.RoundTrip(request)
+		if err != nil {
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			http.Error(w, "response unavailable", http.StatusBadGateway)
+			return
+		}
+		if r.URL.Path == "/v1/"+svc.Mount+"/creds/"+svc.Role && response.StatusCode == 200 && interrupted.CompareAndSwap(false, true) {
+			var result struct {
+				Data struct {
+					Username string `json:"username"`
+				} `json:"data"`
+			}
+			_ = json.Unmarshal(body, &result)
+			orphanName.Store(result.Data.Username)
+			_, _ = w.Write([]byte("lost issuance response"))
+			return
+		}
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(body)
+	}))
+	defer proxy.Close()
+	t.Setenv("VAULT_ADDR", proxy.URL)
+	client, err := hashicorp.NewClient(context.Background(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "cleanup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// The child token outlives the settle time but not the role's 8 s TTL, so
+	// it is the token's expiry that revokes the lost lease.
+	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
+		TokenTTL: 3 * time.Second, UnknownSettle: time.Second, UnknownRecheck: 200 * time.Millisecond, RetryInterval: 100 * time.Millisecond,
+		IssueTimeout: time.Second, // an orphan after 61 s
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(context.Background())
+	ctx := context.Background()
+	if _, err = m.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
+		t.Fatal("lost issuance accepted")
+	}
+	orphan, _ := orphanName.Load().(string)
+	if orphan == "" {
+		t.Fatal("fixture did not observe the issued role")
+	}
+	var roles int
+	if err = admin.QueryRow(ctx, "SELECT count(*) FROM pg_roles WHERE rolname=$1", orphan).Scan(&roles); err != nil || roles != 1 {
+		t.Fatalf("lost credential's role not in the database: %d %v", roles, err)
+	}
+	leases, err := client.ListDatabaseLeases(ctx, svc.Mount, svc.Role)
+	if err != nil || len(leases) == 0 {
+		t.Fatalf("Vault did not list the lost credential's lease: %v %v", leases, err)
+	}
+	// A real dependency blocks DROP ROLE, so Vault's revocation at token expiry fails.
+	schema := fmt.Sprintf("unknown_fault_%d", time.Now().UnixNano())
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()+" AUTHORIZATION "+pgx.Identifier{orphan}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA IF EXISTS "+pgx.Identifier{schema}.Sanitize()) }()
+	mintAndRevoke := func(stage string) {
+		t.Helper()
+		lease, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+		if err != nil {
+			t.Fatalf("database closed %s: %v", stage, err)
+		}
+		if err = m.Revoke(ctx, lease.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unknown := func() []store.DatabaseCleanup {
+		t.Helper()
+		records, err := st.ListDatabaseCleanup(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []store.DatabaseCleanup
+		for _, r := range records {
+			if r.LeaseID == "" {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	time.Sleep(2 * time.Second)
+	mintAndRevoke("while the lost credential's token was alive")
+	// Past token expiry plus the settle time: the check runs, finds the failed
+	// revocation's lease, and waits, since it is too young to be an orphan.
+	time.Sleep(5 * time.Second)
+	if leases, err = client.ListDatabaseLeases(ctx, svc.Mount, svc.Role); err != nil || len(leases) == 0 {
+		t.Fatalf("a lease whose revocation failed was not listed: %v %v", leases, err)
+	}
+	mintAndRevoke("while Vault's revocation was failing on a young lease")
+	if records := unknown(); len(records) != 1 || records[0].Quarantined {
+		t.Fatalf("want one open unknown issuance, got %+v", records)
+	}
+	// Once an orphan, the broker's own revocation fails too: only now does the
+	// database close.
+	closedBy := time.Now().Add(90 * time.Second)
+	for records := unknown(); len(records) != 1 || !records[0].Quarantined; records = unknown() {
+		if time.Now().After(closedBy) {
+			t.Fatalf("an unrevocable orphan did not close its database: %+v", records)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, err = m.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
+		t.Fatal("database issued while Vault could not revoke an orphan lease under its role")
+	}
+	if _, err = admin.Exec(ctx, "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	deadline := time.Now().Add(150 * time.Second)
+	for {
+		records, err := st.ListDatabaseCleanup(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) == 0 && len(unknown()) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unknown issuance not cleared: %+v", records)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	assertDatabaseRemoved(t, admin, orphan)
+	lease, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Revoke(ctx, lease.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertDatabaseRemoved(t, admin, lease.Username)
+	t.Logf("database reopened %s after the dependency was removed; it was open throughout the lost lease's life until the orphan proved unrevocable; residual roles=0 sessions=0", time.Since(started).Round(time.Millisecond))
 }
 
 func TestRealVault_DurableInterruptedIssuance(t *testing.T) {
@@ -249,23 +439,24 @@ func TestRealVault_DurableInterruptedIssuance(t *testing.T) {
 	}
 	// The process still held the child token, so it revoked it with its own
 	// token: the lost credential is gone at once. The issuance stays unknown
-	// to the journal, so the binding stays quarantined.
+	// to the journal and stays recorded; the database keeps serving.
 	assertDatabaseRemoved(t, admin, orphanName.Load().(string))
-	if err = m.Close(ctx); err == nil {
-		t.Fatal("unknown issuance closed as clean")
+	if err = m.Close(ctx); err != nil {
+		t.Fatal("an unresolved unknown issuance failed the stop:", err)
 	}
 	m2 := newDurableForTest(t, client, st)
-	if _, err = m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
-		t.Fatal("restart reopened unresolved binding")
-	}
 	started := time.Now()
-	if _, err = m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil {
-		t.Fatal("unknown issuance automatically reopened")
+	served, err := m2.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+	if err != nil {
+		t.Fatal("restart closed the database over an unresolved record:", err)
+	}
+	if err = m2.Revoke(ctx, served.ID); err != nil {
+		t.Fatal(err)
 	}
 	assertDatabaseRemoved(t, admin, orphanName.Load().(string))
 	records, err := st.ListDatabaseCleanup(ctx)
 	if err != nil || len(records) != 1 {
-		t.Fatal("missing quarantine", err)
+		t.Fatal("unknown issuance not kept for its check", err)
 	}
 	if err = m2.ConfirmDatabaseCleanup(ctx, records[0].Accessor, "real fixture: matched issued username; observed zero roles and sessions after the child token revoked itself"); err != nil {
 		t.Fatal(err)
@@ -278,7 +469,7 @@ func TestRealVault_DurableInterruptedIssuance(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertDatabaseRemoved(t, admin, lease.Username)
-	t.Logf("lost-response recovery completed in %s after explicit database reconciliation; residual roles=0 sessions=0; automatic reopening refused", time.Since(started).Round(time.Millisecond))
+	t.Logf("lost-response recovery completed in %s after explicit database reconciliation; residual roles=0 sessions=0; database served throughout", time.Since(started).Round(time.Millisecond))
 }
 
 func TestRealVault_DurableCrashHelper(t *testing.T) {

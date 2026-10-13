@@ -44,11 +44,11 @@ func TestHTTPHeaderAdapterStartupRefusals(t *testing.T) {
 
 func TestCatalogTakesOneVaultLocation(t *testing.T) {
 	env := map[string]string{"AGENT_VAULT_CATALOG_VAULT_PATH": "gatehouse/catalog", "AGENT_VAULT_CATALOG_VAULT_PREFIX": "gatehouse/catalog"}
-	if _, err := brokerCatalog(context.Background(), nil, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "not both") {
+	if _, err := brokerCatalog(context.Background(), nil, nil, nil, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "not both") {
 		t.Fatalf("both locations accepted: %v", err)
 	}
 	delete(env, "AGENT_VAULT_CATALOG_VAULT_PATH")
-	if _, err := brokerCatalog(context.Background(), nil, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "Vault client") {
+	if _, err := brokerCatalog(context.Background(), nil, nil, nil, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "Vault client") {
 		t.Fatalf("per-entry catalog without Vault: %v", err)
 	}
 }

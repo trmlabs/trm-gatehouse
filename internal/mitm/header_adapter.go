@@ -322,6 +322,13 @@ func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles 
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	p.relayResponse(w, resp, needles, limit, finish, rejected)
+}
+
+// relayResponse streams an upstream response back as relayScreened does, and
+// closes it.
+func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needles [][]byte, limit int64, finish func(int, string), rejected func(*http.Response)) {
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		rejected(resp)
 	}

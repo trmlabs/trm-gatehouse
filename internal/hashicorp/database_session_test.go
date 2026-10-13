@@ -3,6 +3,7 @@ package hashicorp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -206,5 +207,138 @@ func TestDatabaseSessionAccessorRevokeToleratesRefusal(t *testing.T) {
 			t.Errorf("status %d: cleanup result %v", status, err)
 		}
 		srv.Close()
+	}
+}
+
+// The lease list is what clears an unknown issuance, so only Vault's own
+// empty-list answer reads as "no leases"; every other reply is an error.
+func TestListDatabaseLeasesTrustsOnlyVaultsAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   []string
+		ok     bool
+	}{
+		{"leases", 200, `{"data":{"keys":["a1","b2"]}}`, []string{"database/creds/reader/a1", "database/creds/reader/b2"}, true},
+		{"vault empty list", 404, `{"errors":[]}`, []string{}, true},
+		{"404 from something else", 404, `<html>not found</html>`, nil, false},
+		{"404 without errors", 404, `{}`, nil, false},
+		{"404 with an error", 404, `{"errors":["no handler for route"]}`, nil, false},
+		{"refused", 403, `{"errors":["permission denied"]}`, nil, false},
+		{"nested key", 200, `{"data":{"keys":["sub/"]}}`, nil, false},
+		{"no keys", 200, `{"data":{}}`, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The client drops the trailing slash; Vault adds it back to every list.
+				if strings.TrimSuffix(r.URL.Path, "/") != "/v1/sys/leases/lookup/database/creds/reader" || r.URL.Query().Get("list") != "true" {
+					t.Error("unexpected lease list request", r.Method, r.URL.String())
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := newClientForServer(t, srv.URL).ListDatabaseLeases(context.Background(), "/database/", "reader")
+			if (err == nil) != tc.ok {
+				t.Fatalf("error %v, want ok=%v", err, tc.ok)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") || (tc.ok && got == nil) {
+				t.Fatalf("leases %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if _, err := newClientForServer(t, "http://127.0.0.1:1").ListDatabaseLeases(context.Background(), "database", "../sys"); err == nil {
+		t.Fatal("a traversing role was listed")
+	}
+}
+
+func TestDatabaseLeaseIssued(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		gone   bool
+		ok     bool
+	}{
+		{"held", 200, `{"data":{"id":"database/creds/reader/a1","issue_time":"2026-10-10T01:11:17.123456Z"}}`, false, true},
+		{"gone", 400, `{"errors":["invalid lease"]}`, true, false},
+		{"refused", 403, `{"errors":["permission denied"]}`, false, false},
+		{"no issue time", 200, `{"data":{"id":"database/creds/reader/a1"}}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/sys/leases/lookup" || decodeBody(t, r)["lease_id"] != "database/creds/reader/a1" {
+					t.Error("unexpected lease lookup", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			issued, err := newClientForServer(t, srv.URL).DatabaseLeaseIssued(context.Background(), "database/creds/reader/a1")
+			if errors.Is(err, ErrLeaseGone) != tc.gone || (err == nil) != tc.ok {
+				t.Fatalf("err %v", err)
+			}
+			if tc.ok && !issued.Equal(time.Date(2026, 10, 10, 1, 11, 17, 123456000, time.UTC)) {
+				t.Fatalf("issued %v", issued)
+			}
+		})
+	}
+}
+
+// A revocation Vault answers and refuses, or confirms while still listing the
+// lease, is a fault a retry meets again. A timeout, a lost connection or an
+// overloaded Vault is a blip and must not read as one.
+func TestRevokeDatabaseLeaseConfirmedTellsRefusalFromBlip(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		revoke        int
+		lookup        int
+		cancel, close bool
+		refused       bool
+	}{
+		{name: "refused by policy", revoke: 403, refused: true},
+		{name: "database refuses to drop the role", revoke: 500, refused: true},
+		{name: "still listed after revoke", revoke: 204, lookup: 200, refused: true},
+		{name: "overloaded", revoke: 503},
+		{name: "rate limited", revoke: 429},
+		{name: "gateway timeout", revoke: 504},
+		{name: "lookup unavailable", revoke: 204, lookup: 502},
+		{name: "caller gone", revoke: 204, cancel: true},
+		{name: "connection refused", close: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := tc.revoke
+				if r.URL.Path == "/v1/sys/leases/lookup" {
+					status = tc.lookup
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if status == 200 {
+					_, _ = w.Write([]byte(`{"data":{"id":"database/creds/reader/a1"}}`))
+				} else if status != 204 {
+					_, _ = w.Write([]byte(`{"errors":["synthetic"]}`))
+				}
+			}))
+			c := newClientForServer(t, srv.URL)
+			c.api.SetMaxRetries(0)
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			}
+			defer cancel()
+			if tc.close {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+			err := c.RevokeDatabaseLeaseConfirmed(ctx, "database/creds/reader/a1")
+			if err == nil || errors.Is(err, ErrLeaseRevokeRefused) != tc.refused {
+				t.Fatalf("err %v, refused %v", err, tc.refused)
+			}
+		})
 	}
 }

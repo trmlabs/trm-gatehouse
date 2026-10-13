@@ -36,7 +36,13 @@ var sharedCatalog struct {
 // AGENT_VAULT_CATALOG_VAULT_PREFIX reads the same catalog stored one secret
 // per entry, with the same reload. AGENT_VAULT_HTTP_CATALOG_FILE is a fixed
 // catalog read at start.
-func brokerCatalog(ctx context.Context, client *hashicorp.Client, getenv func(string) string, logger *slog.Logger) (*httpcatalog.Source, error) {
+//
+// A Vault catalog never stops the broker: an entry that fails validation is
+// left out and named in the log, and each accepted version is kept in st. A
+// broker that starts while Vault is unreachable starts from that stored copy,
+// or, with none, from an empty catalog that refuses everything and reports
+// not ready until the watch loads a version.
+func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready func(string, func() bool), getenv func(string) string, logger *slog.Logger) (*httpcatalog.Source, error) {
 	sharedCatalog.Lock()
 	defer sharedCatalog.Unlock()
 	if sharedCatalog.started {
@@ -63,9 +69,34 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, getenv func(st
 		if perEntry != "" {
 			load = httpcatalog.VaultPrefixLoader(client.Logical(), mount, path)
 		}
+		kept, _ := st.(catalogStore)
+		var stored httpcatalog.Loader
+		if kept != nil {
+			stored = func(ctx context.Context) ([]byte, int, error) { return kept.LoadBrokerCatalog(ctx, location) }
+		}
+		accepted := func(version int, data []byte, dropped []httpcatalog.Dropped) {
+			logDroppedCatalogParts(logger, version, dropped)
+			if kept == nil {
+				return
+			}
+			saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := kept.SaveBrokerCatalog(saveCtx, location, version, data); err != nil {
+				logger.Warn("broker catalog accepted but not stored; a restart during a Vault outage starts from an older copy",
+					slog.Int("version", version), slog.String("error", err.Error()))
+			}
+		}
 		var err error
-		if source, err = httpcatalog.Open(ctx, load); err != nil {
-			return nil, fmt.Errorf("broker catalog: %w", err)
+		source, err = httpcatalog.Start(ctx, load, stored, accepted)
+		switch {
+		case err == nil:
+		case source.Loaded():
+			logger.Warn("broker catalog unavailable at start; serving the stored copy until Vault answers", slog.String("error", err.Error()))
+		default:
+			logger.Error("broker catalog unavailable at start and none stored; refusing every destination until Vault answers", slog.String("error", err.Error()))
+		}
+		if ready != nil {
+			ready("catalog", source.Loaded)
 		}
 		// ctx is the server's lifetime context, so the watch runs until exit.
 		go source.Watch(ctx, 30*time.Second, load, func(version int, err error) {
@@ -81,6 +112,21 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, getenv func(st
 	}
 	sharedCatalog.source, sharedCatalog.started = source, true
 	return source, nil
+}
+
+// catalogStore keeps the last accepted catalog across restarts.
+type catalogStore interface {
+	SaveBrokerCatalog(ctx context.Context, location string, version int, document []byte) error
+	LoadBrokerCatalog(ctx context.Context, location string) ([]byte, int, error)
+}
+
+// logDroppedCatalogParts names, without contents, each part a catalog version
+// left out, so a bad entry is found from the log while the rest serve.
+func logDroppedCatalogParts(logger *slog.Logger, version int, dropped []httpcatalog.Dropped) {
+	for _, d := range dropped {
+		logger.Error("broker catalog part left out; the rest of the catalog is in force",
+			slog.Int("version", version), slog.String("kind", d.Kind), slog.String("name", d.Name), slog.String("reason", d.Reason))
+	}
 }
 
 // httpHeaderAdapter builds the catalog-driven HTTP adapter when a broker
@@ -103,7 +149,7 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 		}
 		return nil, fmt.Errorf("requires a HashiCorp Vault client")
 	}
-	source, err := brokerCatalog(ctx, client, getenv, srv.Logger())
+	source, err := brokerCatalog(ctx, client, srv.CleanupStore(), srv.AttachReadiness, getenv, srv.Logger())
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +201,8 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 			return nil, err
 		}
 		minter := &githubapp.Minter{Signer: signer, API: api, Log: srv.Logger(), ScopeMode: scopeMode, Scope: func(installation int64) githubapp.Scope {
-			repos, pullRequests := source.Current().GitScope(installation)
-			return githubapp.Scope{Repos: repos, PullRequests: pullRequests}
+			repos, pullRequests, actions, deployments := source.Current().GitScope(installation)
+			return githubapp.Scope{Repos: repos, PullRequests: pullRequests, Actions: actions, Deployments: deployments}
 		}}
 		adapter.GitTokens = minter
 		// A catalog change that removes or narrows a repository revokes the
@@ -211,6 +257,10 @@ func automatedAuthClient(catalog interface{ Current() httpcatalog.Catalog }, dia
 // gitScope names a token's permissions as the catalog grants them.
 func gitScope(p githubapp.Permissions) string {
 	switch {
+	case p.Actions == "read":
+		return "actions"
+	case p.Deployments == "read":
+		return "deployments"
 	case p.PullRequests == "write":
 		return "pull-requests"
 	case p.Contents == "write":

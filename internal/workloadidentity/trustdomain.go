@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"time"
@@ -27,13 +29,23 @@ type TrustDomain struct {
 	Audience string `json:"audience"`
 	// Keys is "remote" or "pinned". Remote: JWKSURL is the HTTPS address of
 	// the issuer's published keys (for GKE, the issuer URL followed by
-	// /jwks), and CAFile, when set, replaces the system roots for it.
+	// /jwks), and CAFile, when set, replaces the system roots for it. The
+	// live set is cached and refetched, so a rotation on the cluster needs no
+	// configuration change. JWKSDialAddress, when set, is the IP and port
+	// the fetch connects to instead of resolving the URL's host (a private
+	// Google APIs address, so egress policy can name a fixed address); TLS
+	// still verifies the URL's host. JWKS beside remote keys is an optional
+	// fallback, used only while no live set is usable: never fetched, or
+	// every refetch failing for longer than jwksMaxStale. A usable live set
+	// always wins, so a key the cluster removed stops verifying even if the
+	// fallback still holds it.
 	// Pinned: JWKS holds the issuer's public key set itself, and the broker
 	// never fetches; a key the set lacks refuses until the set is updated.
-	Keys    string          `json:"keys"`
-	JWKSURL string          `json:"jwksURL,omitempty"`
-	CAFile  string          `json:"caFile,omitempty"`
-	JWKS    json.RawMessage `json:"jwks,omitempty"`
+	Keys            string          `json:"keys"`
+	JWKSURL         string          `json:"jwksURL,omitempty"`
+	JWKSDialAddress string          `json:"jwksDialAddress,omitempty"`
+	CAFile          string          `json:"caFile,omitempty"`
+	JWKS            json.RawMessage `json:"jwks,omitempty"`
 	// MaxTokenLifetimeSeconds bounds accepted tokens (default 3600). A remote
 	// token is never checked against a live Pod in the broker's cluster, so
 	// its lifetime is the revocation window.
@@ -51,6 +63,8 @@ type domain struct {
 	keys        *signingKeys
 	fetch       func(context.Context, any) error
 	pinned      map[string]crypto.PublicKey // set for keys "pinned"; nil otherwise
+	// fallback, for remote keys, verifies only while no live set is usable.
+	fallback map[string]crypto.PublicKey
 }
 
 // remoteKeys returns a fetch for a published key set: HTTPS only, no
@@ -72,9 +86,22 @@ func remoteKeys(td TrustDomain, timeout time.Duration) (func(context.Context, an
 		}
 		tlsConfig.RootCAs = pool
 	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig, Proxy: nil, MaxResponseHeaderBytes: 16 << 10}
+	if td.JWKSDialAddress != "" {
+		dial, err := netip.ParseAddrPort(td.JWKSDialAddress)
+		if err != nil || !dial.IsValid() || dial.Port() == 0 || dial.Addr().IsUnspecified() {
+			return nil, errors.New("trust domain jwksDialAddress must be an IP address and port")
+		}
+		// Only the connection's address changes: the request, its Host and
+		// the certificate check stay on the URL's host.
+		dialer := &net.Dialer{Timeout: timeout}
+		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, dial.String())
+		}
+	}
 	client := &http.Client{
 		Timeout:       timeout,
-		Transport:     &http.Transport{TLSClientConfig: tlsConfig, Proxy: nil, MaxResponseHeaderBytes: 16 << 10},
+		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	address := u.String()
@@ -129,8 +156,8 @@ func (r *Resolver) buildDomains(c Config) error {
 		}
 		dom := &domain{name: td.Name, issuer: td.Issuer, audience: td.Audience, maxLifetime: td.MaxTokenLifetimeSeconds, remote: true, keys: &signingKeys{}}
 		if td.Keys == "pinned" {
-			if td.JWKSURL != "" || td.CAFile != "" {
-				return errors.New("a pinned trust domain takes no jwksURL or caFile")
+			if td.JWKSURL != "" || td.CAFile != "" || td.JWKSDialAddress != "" {
+				return errors.New("a pinned trust domain takes no jwksURL, jwksDialAddress or caFile")
 			}
 			pinned, err := parsePinnedJWKS(td.JWKS)
 			if err != nil {
@@ -138,8 +165,11 @@ func (r *Resolver) buildDomains(c Config) error {
 			}
 			dom.pinned = pinned
 		} else {
+			// A fallback set is held to the same rules as a pinned one.
 			if len(td.JWKS) != 0 {
-				return errors.New("a remote trust domain takes no pinned jwks")
+				if dom.fallback, err = parsePinnedJWKS(td.JWKS); err != nil {
+					return err
+				}
 			}
 			if dom.fetch, err = remoteKeys(td, jwksFetchTimeout); err != nil {
 				return err

@@ -10,10 +10,12 @@ import (
 const maxDatabaseURLFile = 4096
 
 // databaseURL returns the shared store's URL: DATABASE_URL, or the contents of
-// the file DATABASE_URL_FILE names, read once, so a mounted Secret never has
-// to enter the environment. Setting both is refused, as is a file that is
-// not a regular file, is empty or is over 4 KiB. The value is never logged
-// or returned in an error. An empty result means the local SQLite store.
+// the file DATABASE_URL_FILE names, so a mounted Secret never has to enter the
+// environment. The file is read at start and again whenever PostgreSQL
+// refuses a new connection's login (databaseURLReload). Setting both is
+// refused, as is a file that is not a regular file, is empty or is over 4 KiB.
+// The value is never logged or returned in an error. An empty result means
+// the local SQLite store.
 func databaseURL() (string, error) {
 	inline, path := os.Getenv("DATABASE_URL"), os.Getenv("DATABASE_URL_FILE")
 	switch {
@@ -41,6 +43,16 @@ func databaseURL() (string, error) {
 		return "", fmt.Errorf("DATABASE_URL_FILE is empty or too large")
 	}
 	return url, nil
+}
+
+// databaseURLReload re-reads DATABASE_URL_FILE for the store after a refused
+// login, so a password rotated in the mounted file needs no restart. Nil
+// without the file: an inline URL cannot change.
+func databaseURLReload() func() (string, error) {
+	if os.Getenv("DATABASE_URL_FILE") == "" {
+		return nil
+	}
+	return databaseURL
 }
 
 // sharedStoreConfigured reports whether a shared store is named at all, by

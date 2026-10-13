@@ -154,13 +154,13 @@ func (f *apiFixture) post(t *testing.T, method, path, auth, body string) (int, s
 
 func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 	f := newAPIFixture(t)
-	for _, tc := range []struct{ path, auth string }{
-		{"/repos/trmlabs/trm-b2b/pulls", "token " + githubTokenPlaceholder}, // gh sends "token"
-		{"/repos/trmlabs/trm-b2b/issues/12/comments", "Bearer " + githubTokenPlaceholder},
-		{"/repos/trmlabs/trm-b2b/pulls/12/comments", ""},
-		{"/repos/trmlabs/trm-b2b/pulls/12/comments/99/replies", ""},
+	for _, tc := range []struct{ path, auth, body string }{
+		{"/repos/trmlabs/trm-b2b/pulls", "token " + githubTokenPlaceholder, `{"title":"agent change","head":"cursor/pool-agent/x","base":"main"}`}, // gh sends "token"
+		{"/repos/trmlabs/trm-b2b/issues/12/comments", "Bearer " + githubTokenPlaceholder, `{"body":"note"}`},
+		{"/repos/trmlabs/trm-b2b/pulls/12/comments", "", `{"body":"note","commit_id":"abc","path":"a.go","line":1}`},
+		{"/repos/trmlabs/trm-b2b/pulls/12/comments/99/replies", "", `{"body":"note"}`},
 	} {
-		if code, body := f.post(t, "POST", tc.path, tc.auth, `{"title":"agent change","head":"cursor/pool-agent/x","base":"main"}`); code != 201 || !strings.Contains(body, `"number":12`) {
+		if code, body := f.post(t, "POST", tc.path, tc.auth, tc.body); code != 201 || !strings.Contains(body, `"number":12`) {
 			t.Fatalf("%s: %d %s", tc.path, code, body)
 		}
 	}
@@ -236,8 +236,17 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 		{"approve a review", "POST", "/repos/trmlabs/trm-b2b/pulls/12/reviews", "", `{"event":"APPROVE"}`, "unlisted"},
 		{"merge", "PUT", "/repos/trmlabs/trm-b2b/pulls/12/merge", "", `{}`, "unlisted"},
 		{"another repository", "POST", "/repos/trmlabs/other/pulls", "", `{}`, "unlisted"},
+		// The default operations: no list, edit, label, ready, dispatch, Actions or deployments.
 		{"list pull requests", "GET", "/repos/trmlabs/trm-b2b/pulls", "", "", "method"},
-		{"update a pull request", "PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", `{"state":"closed"}`, "method"},
+		{"update a pull request", "PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", `{"body":"b"}`, "method"},
+		{"delete a pull request", "DELETE", "/repos/trmlabs/trm-b2b/pulls/12", "", "", "method"},
+		{"mark ready", "POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "", "unlisted"},
+		{"edit a comment", "PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", `{"body":"b"}`, "unlisted"},
+		{"labels without a grant", "POST", "/repos/trmlabs/trm-b2b/issues/12/labels", "", `{"labels":["x"]}`, "unlisted"},
+		{"dispatch without a grant", "POST", "/repos/trmlabs/trm-b2b/dispatches", "", `{"event_type":"x"}`, "unlisted"},
+		{"actions without a grant", "GET", "/repos/trmlabs/trm-b2b/actions/runs", "", "", "unlisted"},
+		{"deployments without a grant", "GET", "/repos/trmlabs/trm-b2b/deployments", "", "", "unlisted"},
+		{"run a workflow", "POST", "/repos/trmlabs/trm-b2b/actions/workflows/ci.yml/dispatches", "", `{"ref":"main"}`, "unlisted"},
 		{"read with a body", "GET", "/repos/trmlabs/trm-b2b/pulls/12", "", `{"x":1}`, "request_shape"},
 		{"head outside the pool", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/other/x","base":"main"}`, "head"},
 		{"head is the prefix itself", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/","base":"main"}`, "head"},

@@ -32,6 +32,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unready", "error": reason})
 	}
+	if s.shuttingDown.Load() {
+		unready("shutting down")
+		return
+	}
 	if s.store.DialectName() == "postgres" && !s.storeReachable(time.Now()) {
 		unready("database unreachable")
 		return

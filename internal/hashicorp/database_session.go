@@ -3,8 +3,10 @@ package hashicorp
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -195,7 +197,7 @@ func (c *Client) RevokeDatabaseLeaseConfirmed(ctx context.Context, leaseID strin
 		}
 	}
 	if _, err := c.api.Logical().WriteWithContext(ctx, "sys/leases/revoke/"+leaseID, map[string]interface{}{"sync": true}); err != nil {
-		return fmt.Errorf("synchronous database revoke failed")
+		return revokeFailure("synchronous database revoke failed", err)
 	}
 	secret, err := c.api.Logical().WriteWithContext(ctx, "sys/leases/lookup", map[string]interface{}{"lease_id": leaseID})
 	var response *vaultapi.ResponseError
@@ -203,10 +205,120 @@ func (c *Client) RevokeDatabaseLeaseConfirmed(ctx context.Context, leaseID strin
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("confirm database lease removal failed")
+		return revokeFailure("confirm database lease removal failed", err)
 	}
 	if secret == nil {
 		return fmt.Errorf("database lease lookup returned no confirmation")
 	}
-	return fmt.Errorf("database lease still present after revoke")
+	return fmt.Errorf("database lease still present after revoke: %w", ErrLeaseRevokeRefused)
 }
+
+// ErrLeaseRevokeRefused marks a revocation Vault answered and refused, or
+// confirmed but still lists: a fault on Vault's or the database's side that a
+// retry will meet again. A timeout, a transport error or a 429, 502, 503 or
+// 504 reply is a blip and does not carry it.
+var ErrLeaseRevokeRefused = errors.New("vault refused the database lease revocation")
+
+func revokeFailure(message string, err error) error {
+	var response *vaultapi.ResponseError
+	if !errors.As(err, &response) {
+		return errors.New(message)
+	}
+	switch response.StatusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, ErrLeaseRevokeRefused)
+}
+
+// DatabaseLeasePrefix is the lease ID prefix of every credential read from
+// <mount>/creds/<role>, built as ReadDatabaseCredential builds its path.
+func DatabaseLeasePrefix(mount, role string) (string, error) {
+	mount = strings.Trim(strings.TrimSpace(mount), "/")
+	role = strings.TrimSpace(role)
+	if err := ValidateDatabaseReference(mount, role); err != nil {
+		return "", err
+	}
+	return mount + "/creds/" + role + "/", nil
+}
+
+// ListDatabaseLeases returns the full ID of every lease Vault holds under one
+// credential path: live leases, leases whose revocation is pending or failing,
+// and leases Vault has marked irrevocable. Vault deletes a lease only after
+// the database engine has removed its user, so an ID missing here was revoked
+// or never registered. Only Vault's own empty-list answer, a 404 whose body is
+// {"errors":[]}, counts as none; any other reply is an error.
+func (c *Client) ListDatabaseLeases(ctx context.Context, mount, role string) ([]string, error) {
+	prefix, err := DatabaseLeasePrefix(mount, role)
+	if err != nil {
+		return nil, err
+	}
+	api, err := c.api.CloneWithHeaders()
+	if err != nil {
+		return nil, fmt.Errorf("prepare lease list failed")
+	}
+	api.SetToken(c.api.Token())
+	api.SetMaxRetries(0)
+	// Logical().List would read every 404 as an empty list.
+	resp, err := api.Logical().ReadRawWithDataWithContext(ctx, "sys/leases/lookup/"+prefix, map[string][]string{"list": {"true"}})
+	if resp != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		var body struct {
+			Errors *[]string `json:"errors"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) != nil || body.Errors == nil || len(*body.Errors) != 0 {
+			return nil, fmt.Errorf("database lease list returned an unrecognized 404")
+		}
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("database lease list failed")
+	}
+	secret, err := vaultapi.ParseSecret(resp.Body)
+	if err != nil || secret == nil {
+		return nil, fmt.Errorf("database lease list returned no data")
+	}
+	raw, ok := secret.Data["keys"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("database lease list returned no keys")
+	}
+	leases := make([]string, 0, len(raw))
+	for _, key := range raw {
+		suffix, ok := key.(string)
+		// A database lease is <prefix><id>; a nested key is not one.
+		if !ok || suffix == "" || strings.Contains(suffix, "/") {
+			return nil, fmt.Errorf("database lease list returned an unexpected key")
+		}
+		leases = append(leases, prefix+suffix)
+	}
+	return leases, nil
+}
+
+// DatabaseLeaseIssued returns when Vault registered a lease, by Vault's clock.
+// A lease Vault no longer holds returns ErrLeaseGone.
+func (c *Client) DatabaseLeaseIssued(ctx context.Context, leaseID string) (time.Time, error) {
+	for _, part := range strings.Split(leaseID, "/") {
+		if !databasePathSegment.MatchString(part) {
+			return time.Time{}, fmt.Errorf("invalid database lease ID")
+		}
+	}
+	secret, err := c.api.Logical().WriteWithContext(ctx, "sys/leases/lookup", map[string]interface{}{"lease_id": leaseID})
+	var response *vaultapi.ResponseError
+	if errors.As(err, &response) && response.StatusCode == 400 && len(response.Errors) == 1 && response.Errors[0] == "invalid lease" {
+		return time.Time{}, ErrLeaseGone
+	}
+	if err != nil || secret == nil {
+		return time.Time{}, fmt.Errorf("database lease lookup failed")
+	}
+	raw, _ := secret.Data["issue_time"].(string)
+	issued, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("database lease lookup returned no issue time")
+	}
+	return issued, nil
+}
+
+// ErrLeaseGone is a lease Vault no longer holds.
+var ErrLeaseGone = errors.New("database lease no longer held by Vault")

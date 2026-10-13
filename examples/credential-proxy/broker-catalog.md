@@ -5,7 +5,7 @@ The broker catalog is the one list of everything workers may reach through the b
 ## Where it lives and how it loads
 
 - **Source:** a YAML file in trm-infra, next to the Vault roles and key paths its entries use, so one Atlantis pull request creates both. The `gatehouse-catalog` module validates it at plan time and writes it as JSON to the KV version 2 secret `gatehouse/catalog`, field `catalog`.
-- **Broker:** `AGENT_VAULT_CATALOG_VAULT_PATH=gatehouse/catalog`. The broker refuses to start without a valid catalog, then polls every 30 seconds. A new version that passes the broker's parser replaces the old one atomically, and the next request or connection uses it. A version that fails is logged as `broker catalog version rejected` with its number, and the last good catalog stays in force. Alert on that log line.
+- **Broker:** `AGENT_VAULT_CATALOG_VAULT_PATH=gatehouse/catalog`. The broker polls every 30 seconds. A new version replaces the old one atomically, and the next request or connection uses it. See [When a catalog is bad or Vault is down](#when-a-catalog-is-bad-or-vault-is-down) for what happens to a bad entry and to a start without Vault.
 - **One secret per entry:** `AGENT_VAULT_CATALOG_VAULT_PREFIX=gatehouse/catalog` reads the same catalog split so no single secret holds all of it, which is how a catalog grows past Vault's size limit for one secret. The layout is below. Set this or `AGENT_VAULT_CATALOG_VAULT_PATH`, never both; the single document stays accepted while catalogs move.
 - **Fixed file:** `AGENT_VAULT_HTTP_CATALOG_FILE` still works for local fixtures. It is read once at start.
 
@@ -97,8 +97,24 @@ Under `AGENT_VAULT_CATALOG_VAULT_PREFIX=<mount>/<prefix>`:
 |---|---|---|
 | `<prefix>/head` | `catalog` | The catalog document without `entries`, for example the `pools` list. |
 | `<prefix>/head` | `entries_sha256` | SHA-256, lowercase hex, over every entry in byte order of name: the name, a newline, the stored entry JSON, a newline. |
+| `<prefix>/head` | `entries_names` | Optional. The entry names, as a JSON array (or a string holding one). When present, the broker reads and digests only these entries, so a stray document under `entries/` (one a cancelled apply left behind) is ignored instead of failing every reload. Without it, the broker lists `entries/` as before. |
 | `<prefix>/entries/<name>` | `entry` | One entry's JSON. Its `name` must equal `<name>`. |
 
 Write every changed entry first and the head last. The head's KV version is the catalog version: each poll reads only the head, and reads every entry only when that version changes. If the entries read do not hash to the head's digest, because an apply is part way through, the broker logs `broker catalog version rejected`, keeps the last good catalog and tries again at the next poll. A head that carries `entries` is refused. An entry whose current version is deleted or destroyed is out of the catalog, so removing an entry needs no metadata cleanup; leave it out of the digest.
+
+## When a catalog is bad or Vault is down
+
+One bad input never stops the broker or freezes the catalog, and nothing fails open:
+
+| Event | What the broker does |
+|---|---|
+| One entry fails validation (an unknown field from a newer format, a bad host, grant or tier) | Leaves that entry out and logs `broker catalog part left out` with the version, kind, name and reason. The rest of the version applies, so removals in it take effect. The left-out entry is unreachable. |
+| Entries conflict (a duplicate name, a shared route, host, test user or repository) | Leaves every entry in the conflict out; it never picks a winner. |
+| A pool or harness fails validation or conflicts | Leaves it out with every entry that grants that pool. When the catalog lists harnesses, a pool left without one is left out too, so the harness check is never switched off. |
+| The document cannot be decoded at all (truncated, or a new top-level section) | Logs `broker catalog version rejected` and keeps the last good catalog. |
+| Vault cannot serve the catalog at startup | Starts from the last version this store accepted (each accepted version is kept in the `broker_catalog` table) and reloads from Vault when it answers. With no stored copy, it starts with an empty catalog that refuses everything, reports `catalog` not ready on `GET /ready`, and loads the first version Vault serves. |
+| The Vault login or audit key read fails at startup | Retries with backoff for `AGENT_VAULT_STARTUP_RETRY_SECONDS` (default 120, inside a 150 s startup probe), then exits. A missing or invalid setting fails at once. |
+
+Alert on `broker catalog part left out` and `broker catalog version rejected`. A stored copy is used only while Vault is unreachable, and every grant it holds still needs Vault at request time for its key or credential.
 
 The broker's Vault policy needs `read` on `<mount>/data/<prefix>/head` and `<mount>/data/<prefix>/entries/*`, and `list` on `<mount>/metadata/<prefix>/entries`. Reads run 64 at a time; that sets reload speed, not how many entries the catalog may hold. The tests load 20,000 entries.

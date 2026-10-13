@@ -3,10 +3,12 @@ package pgproxy
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,7 +28,11 @@ type CleanupJournal interface {
 	LiveDatabaseCleanupOwners(context.Context) (int, error)
 	AddDatabaseCleanup(context.Context, string, store.DatabaseCleanup) error
 	SetDatabaseCleanupLease(context.Context, string, string, string) error
+	MarkDatabaseCleanupTokenRevoked(context.Context, string, string) error
+	AdoptDatabaseCleanup(context.Context, string, string, string, string, time.Duration) error
+	SettledDatabaseCleanup(context.Context, string, time.Duration) ([]store.DatabaseCleanup, error)
 	QuarantineDatabaseCleanup(context.Context, string, string) error
+	ReleaseDatabaseCleanupQuarantine(context.Context, string, string) error
 	DatabaseBindingQuarantined(context.Context, string) (bool, error)
 	ListDatabaseCleanup(context.Context) ([]store.DatabaseCleanup, error)
 	ListOwnedDatabaseCleanup(context.Context, string) ([]store.DatabaseCleanup, error)
@@ -52,6 +58,20 @@ type DurableLeaseOptions struct {
 	Replica string
 	// Logger names a refused start or a duplicate-name fence. Default discard.
 	Logger *slog.Logger
+	// IssueTimeout bounds one issuance from child token to journaled lease.
+	// Neither its caller leaving nor a graceful Close cuts it short, only this
+	// bound or a fence: abandoned between the credential read and the lease
+	// write, it would leave an unknown issuance. Default 15s, the handshake's.
+	IssueTimeout time.Duration
+	// UnknownSettle is how long an unknown issuance's child token must have
+	// been dead, by the database clock, before Vault's lease list is read to
+	// clear it. It must exceed Vault's max_request_duration (90s by default)
+	// plus clock skew, so no request made with the token can still register a
+	// lease. Default 3 minutes.
+	UnknownSettle time.Duration
+	// UnknownRecheck spaces automatic checks of one unknown issuance that
+	// could not be cleared. Default 30s.
+	UnknownRecheck time.Duration
 }
 
 type durableLease struct {
@@ -62,10 +82,13 @@ type durableLease struct {
 
 // DurableLeaseMinter journals a child-token accessor before credential issuance.
 // Known leases are reconciled automatically. An interrupted response without a
-// lease ID quarantines its binding fleet-wide for explicit operator
-// reconciliation. Each replica owns the records it wrote; a survivor claims a
-// dead replica's records and revokes them. A replica that cannot renew fences
-// itself before its records become claimable.
+// lease ID stays recorded, without closing its binding, until Vault's lease
+// list proves no credential from it remains (checkUnknowns). Only an orphan
+// lease Vault refuses to revoke on two checks in a row closes the binding,
+// fleet-wide.
+// Each replica owns the records it wrote; a survivor claims a dead replica's
+// records and revokes them. A replica that cannot renew fences itself before
+// its records become claimable.
 type DurableLeaseMinter struct {
 	client   *hashicorp.Client
 	journal  CleanupJournal
@@ -88,6 +111,12 @@ type DurableLeaseMinter struct {
 	fenced    atomic.Bool
 	live      atomic.Int64
 	kick      chan struct{}
+
+	draining atomic.Bool // shutdown has begun: no new issuance starts
+
+	checkMu sync.Mutex           // one pass of unknown-issuance checks at a time
+	checked map[string]time.Time // last check per unknown issuance; under checkMu
+	refused map[string]int       // checks in a row whose orphan revoke Vault refused; under checkMu
 }
 
 func NewDurableLeaseMinter(ctx context.Context, client *hashicorp.Client, journal CleanupJournal, opts DurableLeaseOptions) (*DurableLeaseMinter, error) {
@@ -109,6 +138,15 @@ func NewDurableLeaseMinter(ctx context.Context, client *hashicorp.Client, journa
 	if opts.Heartbeat <= 0 {
 		opts.Heartbeat = opts.OwnerTTL / 6
 	}
+	if opts.IssueTimeout <= 0 {
+		opts.IssueTimeout = defaultHandshakeTimeout
+	}
+	if opts.UnknownSettle <= 0 {
+		opts.UnknownSettle = 3 * time.Minute
+	}
+	if opts.UnknownRecheck <= 0 {
+		opts.UnknownRecheck = 30 * time.Second
+	}
 	if opts.OwnerTTL < 3*time.Second || opts.TokenTTL < time.Second || opts.TokenTTL > 24*time.Hour ||
 		opts.Heartbeat >= opts.FenceAfter || opts.FenceAfter >= opts.OwnerTTL {
 		return nil, fmt.Errorf("invalid database lifecycle timing")
@@ -121,7 +159,7 @@ func NewDurableLeaseMinter(ctx context.Context, client *hashicorp.Client, journa
 	if opts.Replica != "" {
 		owner = opts.Replica + "/" + owner
 	}
-	m := &DurableLeaseMinter{client: client, journal: journal, opts: opts, owner: owner, done: make(chan struct{}), active: make(map[string]durableLease), kick: make(chan struct{}, 1)}
+	m := &DurableLeaseMinter{client: client, journal: journal, opts: opts, owner: owner, done: make(chan struct{}), active: make(map[string]durableLease), kick: make(chan struct{}, 1), checked: make(map[string]time.Time), refused: make(map[string]int)}
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -185,7 +223,7 @@ func (m *DurableLeaseMinter) Fenced() bool { return m.fenced.Load() }
 // row, and a replica whose renewals are failing stops taking new sessions
 // before it fences.
 func (m *DurableLeaseMinter) Ready() bool {
-	return !m.fenced.Load() && m.ctx.Err() == nil && m.untilFence(time.Now()) > m.opts.FenceAfter/2
+	return !m.fenced.Load() && !m.draining.Load() && m.ctx.Err() == nil && m.untilFence(time.Now()) > m.opts.FenceAfter/2
 }
 
 // LiveReplicas is the number of live owner rows at the last heartbeat,
@@ -335,23 +373,32 @@ func (m *DurableLeaseMinter) run() {
 				go func() {
 					defer cleanup.Done()
 					defer func() { <-busy }()
-					if !m.mu.TryLock() {
-						return
-					}
-					defer m.mu.Unlock()
-					ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
-					defer cancel()
-					// Claim on every pass, not only on heartbeats, so a dead
-					// replica's records move within a second of its expiry.
-					if m.untilFence(time.Now()) > 0 {
-						_, _ = m.journal.ClaimOrphanedDatabaseCleanup(ctx, m.owner)
-					}
-					_ = m.reconcile(ctx, "")
+					m.reconcilePass()
+					// Unknown issuances are checked outside m.mu, so a slow
+					// Vault never holds up an issuance.
+					m.checkUnknowns()
 				}()
 			default:
 			}
 		}
 	}
+}
+
+// reconcilePass revokes known leases no session holds, when no issuance is
+// under way.
+func (m *DurableLeaseMinter) reconcilePass() {
+	if !m.mu.TryLock() {
+		return
+	}
+	defer m.mu.Unlock()
+	ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
+	defer cancel()
+	// Claim on every pass, not only on heartbeats, so a dead replica's records
+	// move within a second of its expiry.
+	if m.untilFence(time.Now()) > 0 {
+		_, _ = m.journal.ClaimOrphanedDatabaseCleanup(ctx, m.owner)
+	}
+	_ = m.reconcile(ctx, "")
 }
 
 func databaseBinding(vaultID string, svc *DatabaseService) string {
@@ -362,7 +409,9 @@ func databaseBinding(vaultID string, svc *DatabaseService) string {
 
 // reconcile revokes this replica's records that no live session holds,
 // including records claimed from dead replicas. Revocation is idempotent, so a
-// record revoked twice after a contested takeover is harmless.
+// record revoked twice after a contested takeover is harmless. Unknown
+// issuances are left to checkUnknowns; here a binding's quarantine mark is only
+// honored, never set or lifted, so neither an issuance nor Close reopens it.
 func (m *DurableLeaseMinter) reconcile(ctx context.Context, binding string) error {
 	if err := m.journal.CheckDatabaseCleanupOwner(ctx, m.owner); err != nil {
 		return err
@@ -379,25 +428,19 @@ func (m *DurableLeaseMinter) reconcile(ctx context.Context, binding string) erro
 	m.activeMu.Unlock()
 	var failure error
 	for _, record := range records {
-		if active[record.Accessor] || (binding != "" && binding != record.Binding) {
+		if active[record.Accessor] || record.LeaseID == "" || (binding != "" && binding != record.Binding) {
 			continue
 		}
 		if err := m.journal.CheckDatabaseCleanupOwner(ctx, m.owner); err != nil {
 			return err
 		}
-		cleanupCtx, cancel := context.WithTimeout(ctx, leaseRevokeTimeout)
-		var err error
 		// A record no live session holds belongs to a dead or retired session:
 		// its credential is revoked by path. Its child token is not revoked by
 		// accessor, a right no policy could limit to the broker's own tokens;
 		// only that session's process ever held the token, and it expires
 		// within its TTL.
-		if record.LeaseID == "" {
-			_ = m.journal.QuarantineDatabaseCleanup(cleanupCtx, m.owner, record.Accessor)
-			err = fmt.Errorf("unknown database issuance requires operator reconciliation")
-		} else {
-			err = m.client.RevokeDatabaseLeaseConfirmed(cleanupCtx, record.LeaseID)
-		}
+		cleanupCtx, cancel := context.WithTimeout(ctx, leaseRevokeTimeout)
+		err := m.client.RevokeDatabaseLeaseConfirmed(cleanupCtx, record.LeaseID)
 		cancel()
 		if err == nil {
 			err = m.journal.DeleteDatabaseCleanup(ctx, record.Accessor)
@@ -407,13 +450,337 @@ func (m *DurableLeaseMinter) reconcile(ctx context.Context, binding string) erro
 		}
 	}
 	if failure == nil && binding != "" {
-		// Another replica's unresolved issuance holds the binding too.
+		// An unknown issuance whose orphan Vault cannot revoke, held by any
+		// replica, closes the binding.
 		if quarantined, err := m.journal.DatabaseBindingQuarantined(ctx, binding); err != nil || quarantined {
-			failure = fmt.Errorf("database binding cleanup incomplete: unknown issuance requires operator reconciliation")
+			failure = errors.New("database binding cleanup incomplete: Vault cannot revoke an orphan lease under this role")
 		}
 	}
 	return failure
 }
+
+// unknownState is where one check left an unknown issuance.
+type unknownState int
+
+const (
+	// unknownUnavailable: the check could not finish (a journal or Vault
+	// call failed or timed out, or the minter is stopping), or Vault refused
+	// an orphan's revocation for the first time. Nothing changes: an open
+	// binding stays open and a closed one stays closed.
+	unknownUnavailable unknownState = iota
+	// unknownPending: a complete check found no orphan Vault refuses to
+	// revoke, but leases the journal does not account for yet. The record
+	// stays; a closed binding reopens.
+	unknownPending
+	// unknownCleared: Vault holds no credential from it; the record is closed.
+	unknownCleared
+	// unknownStuck: Vault refused to revoke an orphan lease under the role on
+	// two checks in a row, a database fault. Only this closes the binding.
+	unknownStuck
+)
+
+// orphanAge is how old an unaccounted lease must be, by Vault's clock, before
+// the broker treats it as an orphan rather than another replica's issuance
+// still on its way to the journal: the issuance limit plus a minute of skew.
+func (m *DurableLeaseMinter) orphanAge() time.Duration { return m.opts.IssueTimeout + time.Minute }
+
+// credentialPath is one mount and role whose unknown issuances share a check.
+type credentialPath struct{ mount, role string }
+
+// pathCheck is the outcome of one check of a credential path, shared by every
+// unknown issuance under it.
+type pathCheck struct {
+	listed, unaccounted, young, refused int
+	unavailable                         bool
+	shared                              bool // not a Gatehouse role: never listed
+}
+
+// gatehouseRolePrefix names the Vault roles only Gatehouse uses. Orphan
+// listing and revocation touch no other role, whatever Vault's policy allows:
+// a shared role's list holds other clients' leases, and revoking one as an
+// orphan would end that client's sessions.
+const gatehouseRolePrefix = "gatehouse-"
+
+func gatehouseRole(role string) bool { return strings.HasPrefix(role, gatehouseRolePrefix) }
+
+// state is where this check leaves an issuance that Vault refused to revoke
+// an orphan for on refusals checks in a row (zero when it did not refuse).
+func (c pathCheck) state(refusals int) unknownState {
+	switch {
+	case refusals >= 2:
+		return unknownStuck
+	case refusals == 1 || c.unavailable || c.shared:
+		return unknownUnavailable
+	case c.unaccounted > 0:
+		return unknownPending
+	}
+	return unknownCleared
+}
+
+// checkUnknowns runs one pass of the automatic check of this replica's unknown
+// issuances (lost credential responses). It proves, without an operator, that
+// no credential from one remains:
+//
+//  1. its child token has been dead, revoked by this process or past its
+//     maximum lifetime, for UnknownSettle by the database clock, so no request
+//     made with it can still register a lease; and
+//  2. Vault's lease list for the record's credential path, read after that,
+//     holds no lease the fleet's journal does not account for.
+//
+// Vault deletes a lease only after the database engine has removed its user,
+// and keeps a failing or irrevocable revocation listed, so a credential from
+// this issuance that still exists would be listed and unaccounted. Vault
+// returns a credential only after registering its lease, so one that was never
+// registered was never handed to anyone. Token revocation success alone proves
+// nothing (Vault queues lease revocation) and neither does elapsed lifetime;
+// both only decide when the list is worth reading.
+//
+// An unaccounted lease older than orphanAge under the role is an orphan: every
+// live session's lease is journaled before it is returned. The broker revokes
+// it by path. Vault refusing that revocation on two checks in a row means the
+// database refuses to drop the role: the state is unknownStuck and the binding
+// closes. A timeout, a transport error or an overloaded Vault is a blip and
+// changes nothing. A younger lease may be another replica's issuance, so the
+// check waits. Only roles named gatehouse-* are ever listed or revoked, in
+// code as well as in Vault's policy, so no other client's lease is revoked
+// here even if the policy is widened.
+//
+// Each journal or Vault call of a check runs on its own deadline, so a slow
+// call cannot use up the others' time; a fence or Close still ends it. The
+// work per pass does not grow with the square of the backlog: one read
+// of the settled set, one lease list per mount and role, one read of the
+// fleet's journal, and per issuance only its own state change. A closed
+// binding reopens only after a complete check, never on an error or a stop.
+//
+// An unresolved record does not close its binding: the lost credential's
+// password reached no agent and no session, so reopening grants no one access
+// to it. It is logged on every check until it clears. It runs outside m.mu:
+// the list comes before the journal read, so a lease a live session issues
+// meanwhile is either journaled or too young to revoke, on this replica as on
+// any other.
+func (m *DurableLeaseMinter) checkUnknowns() {
+	m.checkMu.Lock()
+	defer m.checkMu.Unlock()
+	if m.ctx.Err() != nil || m.untilFence(time.Now()) <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
+	err := m.journal.CheckDatabaseCleanupOwner(ctx, m.owner)
+	var records []store.DatabaseCleanup
+	if err == nil {
+		records, err = m.journal.ListOwnedDatabaseCleanup(ctx, m.owner)
+	}
+	cancel()
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	current := make(map[string]bool)
+	var due []store.DatabaseCleanup
+	for _, record := range records {
+		if record.LeaseID != "" {
+			continue
+		}
+		current[record.Accessor] = true
+		if record.Mount == "" || record.Role == "" {
+			// A mark an older build wrote for any unknown issuance. Such a
+			// record cannot be checked until a request for its binding adopts
+			// a mount and role, and an unknown issuance alone never closes a
+			// binding.
+			if record.Quarantined {
+				ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
+				_ = m.journal.ReleaseDatabaseCleanupQuarantine(ctx, m.owner, record.Accessor)
+				cancel()
+			}
+			continue
+		}
+		if last, ok := m.checked[record.Accessor]; !ok || now.Sub(last) >= m.opts.UnknownRecheck {
+			due = append(due, record)
+		}
+	}
+	for accessor := range m.checked {
+		if !current[accessor] {
+			delete(m.checked, accessor)
+		}
+	}
+	for accessor := range m.refused {
+		if !current[accessor] {
+			delete(m.refused, accessor)
+		}
+	}
+	if len(due) == 0 {
+		return
+	}
+	ctx, cancel = context.WithTimeout(m.ctx, leaseRevokeTimeout)
+	settled, err := m.journal.SettledDatabaseCleanup(ctx, m.owner, m.opts.UnknownSettle)
+	cancel()
+	if err != nil {
+		return
+	}
+	ready := make(map[string]bool, len(settled))
+	for _, record := range settled {
+		ready[record.Accessor] = true
+	}
+	groups := make(map[credentialPath][]store.DatabaseCleanup)
+	var paths []credentialPath
+	for _, record := range due {
+		if !ready[record.Accessor] {
+			continue
+		}
+		m.checked[record.Accessor] = now
+		path := credentialPath{record.Mount, record.Role}
+		if _, ok := groups[path]; !ok {
+			paths = append(paths, path)
+		}
+		groups[path] = append(groups[path], record)
+	}
+	if len(paths) == 0 {
+		return
+	}
+	// Every list comes before the journal read: a lease issued meanwhile by
+	// a live session is then either journaled or still unaccounted.
+	listed := make(map[credentialPath][]string, len(paths))
+	failed := make(map[credentialPath]bool)
+	for _, path := range paths {
+		if !gatehouseRole(path.role) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
+		leases, err := m.client.ListDatabaseLeases(ctx, path.mount, path.role)
+		cancel()
+		if err != nil {
+			failed[path] = true
+			continue
+		}
+		listed[path] = leases
+	}
+	known := make(map[string]bool)
+	ctx, cancel = context.WithTimeout(m.ctx, leaseRevokeTimeout)
+	fleet, err := m.journal.ListDatabaseCleanup(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
+	for _, other := range fleet {
+		if other.LeaseID != "" {
+			known[other.LeaseID] = true
+		}
+	}
+	for _, path := range paths {
+		var check pathCheck
+		switch {
+		case !gatehouseRole(path.role):
+			check.shared = true
+		case failed[path]:
+			check.unavailable = true
+		default:
+			check = m.checkPath(path, listed[path], known)
+		}
+		m.settlePath(path, groups[path], check, now)
+	}
+}
+
+// checkPath revokes the orphans among a credential path's unaccounted leases,
+// each on its own deadline.
+func (m *DurableLeaseMinter) checkPath(path credentialPath, leases []string, known map[string]bool) pathCheck {
+	check := pathCheck{listed: len(leases)}
+	prefix, err := hashicorp.DatabaseLeasePrefix(path.mount, path.role)
+	if err != nil || !gatehouseRole(path.role) {
+		return pathCheck{shared: true}
+	}
+	for _, lease := range leases {
+		if known[lease] || !strings.HasPrefix(lease, prefix) {
+			continue
+		}
+		check.unaccounted++
+		ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
+		issued, err := m.client.DatabaseLeaseIssued(ctx, lease)
+		cancel()
+		switch {
+		case errors.Is(err, hashicorp.ErrLeaseGone):
+			continue
+		case err != nil:
+			check.unavailable = true
+			continue
+		case time.Since(issued) < m.orphanAge():
+			check.young++
+			continue
+		}
+		ctx, cancel = context.WithTimeout(m.ctx, leaseRevokeTimeout)
+		err = m.client.RevokeDatabaseLeaseConfirmed(ctx, lease)
+		cancel()
+		switch {
+		case errors.Is(err, hashicorp.ErrLeaseRevokeRefused):
+			check.refused++
+		case err != nil:
+			check.unavailable = true
+		}
+	}
+	return check
+}
+
+// settlePath applies one credential path's check to each unknown issuance
+// under it.
+func (m *DurableLeaseMinter) settlePath(path credentialPath, records []store.DatabaseCleanup, check pathCheck, now time.Time) {
+	prefix, _ := hashicorp.DatabaseLeasePrefix(path.mount, path.role)
+	log := m.opts.Logger.With(slog.String("lease_prefix", prefix), slog.Int("unknown_issuances", len(records)))
+	counts := make(map[unknownState]int)
+	for _, record := range records {
+		refusals := 0
+		if check.refused > 0 {
+			m.refused[record.Accessor]++
+			refusals = m.refused[record.Accessor]
+		} else if !check.unavailable {
+			delete(m.refused, record.Accessor)
+		}
+		state := check.state(refusals)
+		ctx, cancel := context.WithTimeout(m.ctx, leaseRevokeTimeout)
+		switch state {
+		case unknownStuck:
+			if !record.Quarantined && m.journal.QuarantineDatabaseCleanup(ctx, m.owner, record.Accessor) != nil {
+				state = unknownUnavailable
+			}
+		case unknownPending:
+			if record.Quarantined && m.journal.ReleaseDatabaseCleanupQuarantine(ctx, m.owner, record.Accessor) != nil {
+				state = unknownUnavailable
+			}
+		case unknownCleared:
+			evidence, _ := json.Marshal(map[string]any{
+				"verification": "automated_vault_lease_absence", "checked_at": now.UTC().Format(time.RFC3339Nano),
+				"lease_prefix": prefix, "listed_leases": check.listed, "settle_seconds": int(m.opts.UnknownSettle / time.Second),
+			})
+			if m.journal.ConfirmDatabaseCleanup(ctx, m.owner, record.Accessor, string(evidence)) != nil {
+				state = unknownUnavailable
+			} else {
+				delete(m.checked, record.Accessor)
+				delete(m.refused, record.Accessor)
+			}
+		}
+		cancel()
+		counts[state]++
+	}
+	switch {
+	case counts[unknownStuck] > 0:
+		log.Error("pgproxy: unknown database issuance stuck: Vault refused to revoke an orphan lease under this role on two checks in a row; the database refuses to drop it",
+			slog.Int("unrevocable", check.refused), slog.Int("closed", counts[unknownStuck]))
+	case check.refused > 0:
+		log.Warn("pgproxy: unknown database issuance unresolved: Vault refused to revoke an orphan lease under this role; the database closes if the next check is refused too",
+			slog.Int("unrevocable", check.refused))
+	case check.shared:
+		log.Warn("pgproxy: unknown database issuance unresolved: the role is not a Gatehouse role (" + gatehouseRolePrefix + "*), so the broker never lists or revokes its leases; an operator closes the record")
+	case check.unavailable:
+		log.Warn("pgproxy: unknown database issuance unresolved: Vault or the journal did not answer; nothing changes until a check completes")
+	case check.unaccounted > 0:
+		log.Warn("pgproxy: unknown database issuance unresolved: Vault holds leases the journal does not account for yet",
+			slog.Int("unaccounted", check.unaccounted), slog.Int("too_young_to_revoke", check.young))
+	}
+	if counts[unknownCleared] > 0 {
+		log.Info("pgproxy: unknown database issuance cleared: Vault holds no unaccounted lease for it", slog.Int("cleared", counts[unknownCleared]))
+	}
+}
+
+// errDraining refuses an issuance once Close has begun.
+var errDraining = errors.New("database broker is stopping")
 
 func (m *DurableLeaseMinter) Mint(ctx context.Context, scope AgentScope, svc *DatabaseService) (*Lease, error) {
 	if svc == nil || scope.VaultID == "" || svc.Name == "" {
@@ -427,18 +794,65 @@ func (m *DurableLeaseMinter) Mint(ctx context.Context, scope AgentScope, svc *Da
 		return nil, err
 	}
 	defer m.mu.Unlock()
+	if m.draining.Load() {
+		return nil, errDraining
+	}
 	if m.ctx.Err() != nil || m.untilFence(time.Now()) <= 0 {
 		return nil, fmt.Errorf("database cleanup authority unavailable")
 	}
 	binding := databaseBinding(scope.VaultID, svc)
+	m.adoptLegacy(ctx, binding, svc)
 	if err := m.reconcile(ctx, binding); err != nil {
 		return nil, err
 	}
+	return m.issue(ctx, scope, svc, binding)
+}
+
+// adoptLegacy brings this binding's unknown issuances from before records kept
+// their credential path into the automatic check. They take the binding's
+// current mount and role, and a token expiry of now plus TokenTTL: the record
+// already existed, so its child token was created before now, and no child
+// token can outlive TokenTTL, the lifetime every build has requested and the
+// one the Vault policy admits. If the binding had moved to another role between
+// the lost request and now, a lease under the old role would not be seen; Vault
+// revokes that lease when its child token expires, so only a lease whose
+// revocation also failed could remain, held by no one. Requires m.mu.
+func (m *DurableLeaseMinter) adoptLegacy(ctx context.Context, binding string, svc *DatabaseService) {
+	if svc.Mount == "" || svc.Role == "" {
+		return
+	}
+	records, err := m.journal.ListOwnedDatabaseCleanup(ctx, m.owner)
+	if err != nil {
+		return
+	}
+	for _, record := range records {
+		if record.Binding != binding || record.LeaseID != "" || record.Mount != "" {
+			continue
+		}
+		if m.journal.AdoptDatabaseCleanup(ctx, m.owner, record.Accessor, svc.Mount, svc.Role, m.opts.TokenTTL) == nil {
+			m.opts.Logger.Info("pgproxy: unknown database issuance from an older build adopted for the automatic check",
+				slog.String("binding", binding), slog.Time("check_after", time.Now().Add(m.opts.TokenTTL+m.opts.UnknownSettle)))
+		}
+	}
+}
+
+// issue runs one issuance, from child token to journaled lease, under its own
+// deadline. A caller that leaves partway, or a graceful Close, does not cut it
+// short: stopped between the credential read and the lease write, it would
+// leave an unknown issuance that closes the binding for everyone. Only
+// IssueTimeout or a fence ends it early. If the caller left in the meantime,
+// the credential it no longer wants is revoked here. Requires m.mu.
+func (m *DurableLeaseMinter) issue(caller context.Context, scope AgentScope, svc *DatabaseService, binding string) (*Lease, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(caller), m.opts.IssueTimeout)
+	defer cancel()
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
 	session, err := m.client.NewDatabaseSession(ctx, svc.Mount, svc.Role, m.opts.TokenTTL)
 	if err != nil {
 		return nil, err
 	}
-	record := store.DatabaseCleanup{Accessor: session.Accessor, Binding: binding, ActorID: scope.ActorID, WorkloadID: scope.WorkloadID}
+	record := store.DatabaseCleanup{Accessor: session.Accessor, Binding: binding, ActorID: scope.ActorID, WorkloadID: scope.WorkloadID,
+		Mount: svc.Mount, Role: svc.Role, TokenTTL: m.opts.TokenTTL}
 	if err := m.journal.AddDatabaseCleanup(ctx, m.owner, record); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), leaseRevokeTimeout)
 		defer cleanupCancel()
@@ -451,11 +865,14 @@ func (m *DurableLeaseMinter) Mint(ctx context.Context, scope AgentScope, svc *Da
 		// Vault may have issued a credential whose response was lost. This
 		// process still holds the child token, and revoking it with its own
 		// token revokes every lease it issued, that one included. The durable
-		// record stays, so the binding is quarantined until database-backed
-		// reconciliation confirms that no issued role or session remains.
+		// record stays, so the binding is quarantined until Vault's lease list
+		// or an operator shows that no issued credential remains. A confirmed
+		// revocation starts the settle wait now rather than at token expiry.
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), leaseRevokeTimeout)
 		defer cleanupCancel()
-		_ = session.Revoke(cleanupCtx)
+		if session.Revoke(cleanupCtx) == nil {
+			_ = m.journal.MarkDatabaseCleanupTokenRevoked(cleanupCtx, m.owner, session.Accessor)
+		}
 		_ = m.reconcile(cleanupCtx, binding)
 		return nil, err
 	}
@@ -465,6 +882,16 @@ func (m *DurableLeaseMinter) Mint(ctx context.Context, scope AgentScope, svc *Da
 		_ = m.client.RevokeDatabaseLeaseConfirmed(cleanupCtx, credential.LeaseID)
 		_ = session.Revoke(cleanupCtx)
 		return nil, fmt.Errorf("persist issued database lease: %w", err)
+	}
+	if err := caller.Err(); err != nil {
+		// The lease is journaled, so a failed revoke here is retried by path.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), leaseRevokeTimeout)
+		defer cleanupCancel()
+		if m.client.RevokeDatabaseLeaseConfirmed(cleanupCtx, credential.LeaseID) == nil {
+			_ = session.Revoke(cleanupCtx)
+			_ = m.journal.DeleteDatabaseCleanup(cleanupCtx, session.Accessor)
+		}
+		return nil, err
 	}
 	expiry := credential.ExpiresAt(issued)
 	if expiry.After(session.ExpiresAt) {
@@ -525,6 +952,10 @@ func (m *DurableLeaseMinter) Revoke(ctx context.Context, id string) error {
 	return m.journal.DeleteDatabaseCleanup(ctx, lease.accessor)
 }
 
+// BeginDrain starts the drain at the start of shutdown: readiness turns false
+// and no new issuance starts, while one under way finishes. Close drains too.
+func (m *DurableLeaseMinter) BeginDrain() { m.draining.Store(true) }
+
 // Close runs after the broker stops sessions. Failed records remain durable for
 // the next owner. Caller context bounds waiting and all shutdown cleanup.
 // However that goes, the owner row is released last, on its own short
@@ -532,6 +963,13 @@ func (m *DurableLeaseMinter) Revoke(ctx context.Context, id string) error {
 // once instead of waiting out the row; records still held become claimable.
 func (m *DurableLeaseMinter) Close(ctx context.Context) error {
 	defer func() { _ = m.release() }()
+	// Drain: no new issuance starts, and one under way finishes and journals
+	// its lease before authority ends. Canceling it mid-read is what leaves an
+	// unknown issuance behind.
+	m.BeginDrain()
+	if err := m.lock(ctx); err == nil {
+		m.mu.Unlock()
+	}
 	m.cancel()
 	select {
 	case <-m.done:
