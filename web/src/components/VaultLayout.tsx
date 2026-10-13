@@ -3,7 +3,21 @@ import { Link, Outlet, useLocation, useNavigate, useRouteContext } from "@tansta
 import type { AuthContext, VaultContext } from "../router";
 import Navbar from "./Navbar";
 
-type VaultTab = "proposals" | "logs" | "services" | "credentials" | "users" | "agents" | "tokens" | "settings";
+// Source of truth for vault tab ids: the union and active-tab lookup derive
+// from it. An id must equal its route path segment. New tab = entry here plus
+// a NavItem.
+const VAULT_TABS = [
+  "services",
+  "credentials",
+  "proposals",
+  "logs",
+  "users",
+  "agents",
+  "tokens",
+  "settings",
+] as const;
+
+type VaultTab = (typeof VAULT_TABS)[number];
 
 interface NavItem {
   id: VaultTab;
@@ -71,7 +85,7 @@ export default function VaultLayout() {
   // Derive active tab from current URL path
   const pathSegments = location.pathname.split("/");
   const lastSegment = pathSegments[pathSegments.length - 1] as VaultTab;
-  const activeTab: VaultTab = ["proposals", "logs", "services", "credentials", "users", "agents", "tokens", "settings"].includes(lastSegment)
+  const activeTab: VaultTab = (VAULT_TABS as readonly string[]).includes(lastSegment)
     ? lastSegment
     : "services";
 
