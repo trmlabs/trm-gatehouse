@@ -131,7 +131,12 @@ func TestGitHubAPIEntries(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs", "", "pool-a", ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments", "", "pool-a", ErrUnlisted},
 		{"PATCH", "/repos/trmlabs/trm-b2b/issues/12", "", "pool-a", ErrUnlisted},
-		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "", "pool-a", ErrUnlisted},
+		// pr.read also lists a pull request's files and compares two refs: code
+		// the pool can already clone.
+		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "", "pool-a", nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/main...feature", "", "pool-a", nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/abc1234/status", "", "pool-a", ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/pulls", "", "pool-b", ErrPool},
 		{"POST", "/user/repos", "", "pool-a", ErrUnlisted},
 	} {
@@ -200,6 +205,27 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/actions/artifacts/9/zip", "", "actions-download", "actions", true, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments", "environment=preview-1&sha=abc", "deployments", "deployments", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments/4/statuses", "", "deployments", "deployments", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/runs/9", "exclude_pull_requests=true", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/preview-k8s.yml", "", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/277393220", "", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123456789abcdef0123456789abcdef01234567/status", "", "statuses", "statuses", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/statuses", "per_page=100", "statuses", "statuses", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=unit&filter=latest&per_page=100", "checks", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9", "", "checks", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "per_page=100", "checks", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "per_page=100&page=2", "read-pull", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/staging...0123abc", "", "compare", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/main...staging", "per_page=1", "compare", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/staging..0123abc", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/a....b", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/staging...", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/main/status", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc", "", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/statuses/0123abc", "", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/check-runs", "", "", "", false, ErrUnlisted},
+		{"PATCH", "/repos/trmlabs/trm-b2b/check-runs/9", "", "", "", false, ErrMethod},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/runs/9", "exclude_pull_requests=true&x=1", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/actions/workflows/preview-k8s.yml/dispatches", "", "", "", false, ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/actions/runs/9/rerun", "", "", "", false, ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/../runs", "", "", "", false, ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/secrets", "", "", "", false, ErrUnlisted},
@@ -223,7 +249,7 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 	if m, _, _ := c.GitHubAPIMatch("api.github.com", 443, "PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", "pool-a"); m.CommentID != 5 || m.Target != 0 || fmt.Sprint(m.HeadPrefixes) != "[cursor/ factory/]" {
 		t.Errorf("edit comment: %+v", m)
 	}
-	for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments"} {
+	for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments", "checks", "statuses"} {
 		if !c.GitGranted(42, "trmlabs/trm-b2b", scope) {
 			t.Errorf("GitGranted %s = false", scope)
 		}
@@ -287,10 +313,12 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"GET actions/runs", "GET actions/runs/1", "GET actions/runs/1/jobs", "GET actions/runs/1/artifacts", "GET actions/runs/1/logs",
 		"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip",
 		"GET deployments", "GET deployments/1", "GET deployments/1/statuses",
+		"GET actions/workflows/ci.yml", "GET pulls/1/files", "GET compare/main...feature", "GET commits/abc1234/status",
+		"GET commits/abc1234/statuses", "GET commits/abc1234/check-runs", "GET check-runs/1", "GET check-runs/1/annotations",
 	}
 	want := map[string][]string{
 		"pr.open":    {"POST pulls"},
-		"pr.read":    {"GET pulls/1"},
+		"pr.read":    {"GET pulls/1", "GET pulls/1/files", "GET compare/main...feature"},
 		"pr.list":    {"GET pulls", "GET issues/1/comments"},
 		"pr.comment": {"POST issues/1/comments", "POST pulls/1/comments", "POST pulls/1/comments/2/replies"},
 		"pr.edit":    {"PATCH pulls/1", "PATCH issues/comments/2"},
@@ -298,7 +326,9 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"pr.ready":   {"POST pulls/1/ready"},
 		"dispatch":   {"POST dispatches"},
 		"actions.read": {"GET actions/runs", "GET actions/runs/1", "GET actions/runs/1/jobs", "GET actions/runs/1/artifacts", "GET actions/runs/1/logs",
-			"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip"},
+			"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip",
+			"GET actions/workflows/ci.yml", "GET commits/abc1234/status", "GET commits/abc1234/statuses", "GET commits/abc1234/check-runs",
+			"GET check-runs/1", "GET check-runs/1/annotations"},
 		"deployments.read": {"GET deployments", "GET deployments/1", "GET deployments/1/statuses"},
 	}
 	if len(want) != len(githubOperations) {
@@ -325,16 +355,24 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 				continue
 			}
 			got = append(got, sample)
-			if m.Operation != op || m.Permissions != githubOperations[op] {
-				t.Errorf("%s %s: operation %q scope %q", op, sample, m.Operation, m.Permissions)
+			scope := githubOperations[op]
+			switch {
+			case strings.Contains(sample, "check-runs"):
+				scope = "checks"
+			case strings.HasPrefix(sample, "GET commits/"):
+				scope = "statuses"
+			}
+			if m.Operation != op || m.Permissions != scope {
+				t.Errorf("%s %s: operation %q scope %q, want %q", op, sample, m.Operation, m.Permissions, scope)
 			}
 		}
 		if fmt.Sprint(got) != fmt.Sprint(routes) {
 			t.Errorf("%s opens %v, want %v", op, got, routes)
 		}
-		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments"} {
-			if c.GitGranted(42, "trmlabs/trm-b2b", scope) != (githubOperations[op] == scope) {
-				t.Errorf("%s: GitGranted(%s) = %v", op, scope, githubOperations[op] != scope)
+		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments", "checks", "statuses"} {
+			want := githubOperations[op] == scope || contains(githubRouteScopes[op], scope)
+			if c.GitGranted(42, "trmlabs/trm-b2b", scope) != want {
+				t.Errorf("%s: GitGranted(%s) = %v", op, scope, !want)
 			}
 		}
 	}

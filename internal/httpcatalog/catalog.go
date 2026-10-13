@@ -120,8 +120,16 @@ var githubOperations = map[string]string{
 	"pr.label":         "pull-requests",  // POST /issues/{n}/labels, listed labels only, in reach
 	"pr.ready":         "pull-requests",  // mark a draft in reach ready (one GraphQL mutation)
 	"dispatch":         "contents-write", // POST /dispatches, listed event types only
-	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts
+	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts; a commit's check runs and statuses
 	"deployments.read": "deployments",    // deployments and their statuses
+}
+
+// githubRouteScopes are the scopes an operation's routes need besides its own
+// (githubOperations): actions.read also reads a commit's check runs and
+// statuses, the CI results GitHub keeps outside Actions, each with a token
+// holding only that permission.
+var githubRouteScopes = map[string][]string{
+	"actions.read": {"checks", "statuses"},
 }
 
 // operations returns the repository's operations, the default when unset.
@@ -139,7 +147,7 @@ func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
 // token scope.
 func (r GitRepo) grantsScope(scope string) bool {
 	for _, op := range r.operations() {
-		if githubOperations[op] == scope {
+		if githubOperations[op] == scope || contains(githubRouteScopes[op], scope) {
 			return true
 		}
 	}
@@ -752,7 +760,8 @@ type GitRequest struct {
 	// Query is the request's query string, rebuilt from its allowed keys.
 	Query string
 	// Permissions is the token scope the route needs: "pull-requests",
-	// "contents-write" (a repository dispatch), "actions" or "deployments".
+	// "contents-write" (a repository dispatch), "actions", "deployments",
+	// "checks" or "statuses".
 	Permissions string
 	// Download marks a route GitHub answers with a redirect to a signed
 	// download URL, which the broker follows itself without the token.
@@ -868,8 +877,12 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !ok {
 				return GitRequest{}, true, ErrUnlisted
 			}
+			permissions := githubOperations[route.op]
+			if route.scope != "" {
+				permissions = route.scope
+			}
 			matched := GitRequest{Entry: e, Repo: r, Write: method != http.MethodGet, Route: route.name, Operation: route.op, Method: method,
-				Query: query, Permissions: githubOperations[route.op], Download: route.download, CommentID: route.comment}
+				Query: query, Permissions: permissions, Download: route.download, CommentID: route.comment}
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
@@ -921,6 +934,7 @@ type githubRoute struct {
 	target, comment  int64    // the pull request a write acts on; the comment an edit targets
 	query            []string // the query keys allowed, each at most once
 	download         bool
+	scope            string // the token scope when not the operation's own (githubRouteScopes)
 }
 
 func (g githubRoute) granted(r GitRepo) bool { return r.Allows(g.op) }
@@ -931,11 +945,23 @@ var (
 	commentQuery    = []string{"page", "per_page", "since"}
 	runQuery        = []string{"branch", "created", "event", "exclude_pull_requests", "head_sha", "page", "per_page", "status"}
 	jobQuery        = []string{"filter", "page", "per_page"}
+	checkRunQuery   = []string{"app_id", "check_name", "filter", "page", "per_page", "status"}
 	artifactQuery   = []string{"name", "page", "per_page"}
 	deploymentQuery = []string{"environment", "page", "per_page", "ref", "sha", "task"}
 	workflowFile    = regexp.MustCompile(`^([1-9][0-9]{0,11}|[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.ya?ml)$`)
 	queryValue      = regexp.MustCompile(`^[A-Za-z0-9 _.,:/+-]{0,200}$`)
+	commitSHA       = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+	// compareRef is one side of a compare: a branch name or a commit, with no
+	// slash (a branch with one is not served) and never "..".
+	compareRef = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$`)
 )
+
+// compareRange reports whether s is "base...head" with two plain refs.
+func compareRange(s string) bool {
+	base, head, ok := strings.Cut(s, "...")
+	return ok && compareRef.MatchString(base) && compareRef.MatchString(head) &&
+		!strings.Contains(base, "..") && !strings.Contains(head, "..")
+}
 
 // githubAPIRoutes returns the routes for a path below /repos/{owner}/{repo}/,
 // one per method, each naming the operation that opens it; none when the
@@ -965,6 +991,18 @@ func githubAPIRoutes(rest []string) []githubRoute {
 	case n == 2 && rest[0] == "pulls" && number(rest[1]) > 0:
 		return []githubRoute{{name: "read-pull", method: http.MethodGet, op: "pr.read"},
 			{name: "edit-pull", method: http.MethodPatch, op: "pr.edit", target: number(rest[1])}}
+	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "files":
+		return []githubRoute{{name: "read-pull", method: http.MethodGet, op: "pr.read", query: pageQuery}}
+	case n == 2 && rest[0] == "compare" && compareRange(rest[1]):
+		return []githubRoute{{name: "compare", method: http.MethodGet, op: "pr.read", query: pageQuery}}
+	case n == 3 && rest[0] == "commits" && commitSHA.MatchString(rest[1]) && (rest[2] == "status" || rest[2] == "statuses"):
+		return []githubRoute{{name: "statuses", method: http.MethodGet, op: "actions.read", query: pageQuery, scope: "statuses"}}
+	case n == 3 && rest[0] == "commits" && commitSHA.MatchString(rest[1]) && rest[2] == "check-runs":
+		return []githubRoute{{name: "checks", method: http.MethodGet, op: "actions.read", query: checkRunQuery, scope: "checks"}}
+	case n == 2 && rest[0] == "check-runs" && number(rest[1]) > 0:
+		return []githubRoute{{name: "checks", method: http.MethodGet, op: "actions.read", scope: "checks"}}
+	case n == 3 && rest[0] == "check-runs" && number(rest[1]) > 0 && rest[2] == "annotations":
+		return []githubRoute{{name: "checks", method: http.MethodGet, op: "actions.read", query: pageQuery, scope: "checks"}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "ready":
 		// Not a GitHub REST route: GitHub marks a draft ready only through
 		// GraphQL, so the broker makes that one mutation for this path.
@@ -991,7 +1029,7 @@ func githubAPIRoutes(rest []string) []githubRoute {
 		case n == 2 && rest[1] == "runs":
 			return read(runQuery)
 		case n == 3 && rest[1] == "runs" && number(rest[2]) > 0:
-			return read(nil)
+			return read([]string{"exclude_pull_requests"})
 		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "jobs":
 			return read(jobQuery)
 		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "artifacts":
@@ -1000,6 +1038,8 @@ func githubAPIRoutes(rest []string) []githubRoute {
 			return download
 		case n == 4 && rest[1] == "workflows" && workflowFile.MatchString(rest[2]) && rest[3] == "runs":
 			return read(runQuery)
+		case n == 3 && rest[1] == "workflows" && workflowFile.MatchString(rest[2]):
+			return read(nil)
 		case n == 3 && rest[1] == "jobs" && number(rest[2]) > 0:
 			return read(nil)
 		case n == 4 && rest[1] == "jobs" && number(rest[2]) > 0 && rest[3] == "logs":
@@ -1134,8 +1174,8 @@ func (c Catalog) Entries() []Entry { return append([]Entry(nil), c.entries...) }
 // GitGranted reports whether some entry still lets the installation's tokens
 // reach repo at a scope: "contents-read" (a git entry), "contents-write" (a git
 // entry with write access, or a github-api repository with dispatch),
-// "pull-requests", "actions" or "deployments" (a github-api repository with an
-// operation that needs that scope).
+// "pull-requests", "actions", "deployments", "checks" or "statuses" (a
+// github-api repository with an operation that needs that scope).
 func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
@@ -1158,7 +1198,7 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 
 // GitScope returns every repository the catalog lists for an installation,
 // and whether any github-api entry on it opens pull requests, reads Actions
-// or reads deployments.
+// (and so check runs and commit statuses) or reads deployments.
 func (c Catalog) GitScope(installation int64) (repos []string, pullRequests, actions, deployments bool) {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {

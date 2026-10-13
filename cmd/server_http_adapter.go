@@ -202,7 +202,8 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 		}
 		minter := &githubapp.Minter{Signer: signer, API: api, Log: srv.Logger(), ScopeMode: scopeMode, Scope: func(installation int64) githubapp.Scope {
 			repos, pullRequests, actions, deployments := source.Current().GitScope(installation)
-			return githubapp.Scope{Repos: repos, PullRequests: pullRequests, Actions: actions, Deployments: deployments}
+			// actions.read also reads check runs and commit statuses.
+			return githubapp.Scope{Repos: repos, PullRequests: pullRequests, Actions: actions, Deployments: deployments, Checks: actions, Statuses: actions}
 		}}
 		adapter.GitTokens = minter
 		// A catalog change that removes or narrows a repository revokes the
@@ -261,6 +262,10 @@ func gitScope(p githubapp.Permissions) string {
 		return "actions"
 	case p.Deployments == "read":
 		return "deployments"
+	case p.Checks == "read":
+		return "checks"
+	case p.Statuses == "read":
+		return "statuses"
 	case p.PullRequests == "write":
 		return "pull-requests"
 	case p.Contents == "write":
