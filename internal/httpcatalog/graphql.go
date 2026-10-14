@@ -201,7 +201,7 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 	c := &graphqlCheck{vars: vars, defaults: defaults}
 	c.selections(op.SelectionSet)
 	for _, f := range doc.Fragments {
-		if len(f.Directives) > 0 {
+		if len(f.Directives) > 0 || graphqlContentTypes[f.TypeCondition] {
 			c.fail(ErrGraphQLUnmapped)
 		}
 		c.selections(f.SelectionSet)
@@ -371,6 +371,16 @@ func value(v *ast.Value, vars map[string]any, defaults func(string) *ast.Value) 
 	return nil, ErrGraphQLShape // floats: no allowed argument takes one
 }
 
+// graphqlContentFields and graphqlContentTypes reach a repository's files,
+// which only a git entry grants. The broker's GraphQL token has no contents
+// permission, so GitHub refuses them anyway; they are refused here too, at
+// any depth, so that stays true if the token's scope ever widens. gh reads
+// none of them.
+var (
+	graphqlContentFields = map[string]bool{"object": true, "file": true, "entries": true, "tree": true, "readme": true}
+	graphqlContentTypes  = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
+)
+
 // graphqlCheck walks every selection as written: no directives, no
 // introspection beyond __typename, no argument named twice, aliases counted,
 // and every first or last at most maxGraphQLPage.
@@ -397,6 +407,9 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			if strings.HasPrefix(s.Name, "__") && s.Name != "__typename" {
 				c.fail(ErrGraphQLIntrospection)
 			}
+			if graphqlContentFields[s.Name] {
+				c.fail(ErrGraphQLUnmapped)
+			}
 			if s.Alias != "" && s.Alias != s.Name {
 				c.aliases++
 			}
@@ -418,7 +431,7 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			}
 			c.selections(s.SelectionSet)
 		case *ast.InlineFragment:
-			if len(s.Directives) > 0 {
+			if len(s.Directives) > 0 || graphqlContentTypes[s.TypeCondition] {
 				c.fail(ErrGraphQLUnmapped)
 			}
 			c.selections(s.SelectionSet)

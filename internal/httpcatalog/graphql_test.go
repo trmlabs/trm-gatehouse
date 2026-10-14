@@ -250,20 +250,41 @@ func TestGraphQLRebuildsTheRequest(t *testing.T) {
 	}
 }
 
-// Below a mapped field any selection is allowed, so a query that could read
-// pull requests or repository contents needs pr.read, and the request's
-// operations say so. (Contents stay out of reach: the broker's GraphQL token
-// has no contents permission.)
+// Below a mapped field any selection is allowed, so every query needs
+// pr.read: pull requests can be read from a label or a commit.
 func TestGraphQLQueriesNeedPullRequestRead(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for _, inner := range []string{
 		`labels(first: 100) { nodes { pullRequests(first: 100) { nodes { body } } } }`,
-		`defaultBranchRef { target { ... on Commit { file(path: "secrets.env") { object { ... on Blob { text } } } } } }`,
-		`pullRequest(number: 1) { repository { object(expression: "HEAD:main.go") { ... on Blob { text } } } }`,
+		`defaultBranchRef { target { ... on Commit { associatedPullRequests(first: 5) { nodes { body } } } } }`,
 	} {
 		got, err := ParseGitHubGraphQL(graphqlBody(`query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { `+inner+` } }`, vars))
 		if err != nil || !strings.Contains(strings.Join(got.Operations, " "), "pr.read") {
 			t.Errorf("%s: %v %v", inner, got.Operations, err)
+		}
+	}
+}
+
+// Files are a git entry's grant: every field or type that reads them is
+// refused at any depth (and the GraphQL token has no contents permission).
+func TestGraphQLRefusesRepositoryContents(t *testing.T) {
+	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
+	for _, inner := range []string{
+		`defaultBranchRef { target { ... on Commit { file(path: "secrets.env") { object { ... on Blob { text } } } } } }`,
+		`pullRequest(number: 1) { repository { object(expression: "HEAD:main.go") { ... on Blob { text } } } }`,
+		`pullRequest(number: 1) { headRef { target { ... on Commit { tree { entries { name } } } } } }`,
+		`pullRequest(number: 1) { mergeCommit { tree { id } } }`,
+		`pullRequest(number: 1) { baseRepository { readme: object(expression: "HEAD:README.md") { id } } }`,
+		`pullRequest(number: 1) { headRef { target { ...b } } }`,
+		`pullRequest(number: 1) { headRef { target { ... on Tree { id } } } }`,
+	} {
+		query := `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ` + inner + ` } }`
+		if strings.Contains(inner, "...b") {
+			query += ` fragment b on Blob { text }`
+		}
+		_, err := ParseGitHubGraphQL(graphqlBody(query, vars))
+		if !errors.Is(err, ErrGraphQLUnmapped) {
+			t.Errorf("%s: %v, want graphql_unmapped", inner, err)
 		}
 	}
 }
