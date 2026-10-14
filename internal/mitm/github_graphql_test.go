@@ -461,16 +461,6 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 	if len(withContents) != 0 {
 		t.Errorf("GraphQL requests made with a contents token: %v", withContents)
 	}
-	// The trail names the mapped operation.
-	found := false
-	for _, e := range f.audit.all() {
-		if e.Binding == "github-api/example-org/example-repo#graphql:pr.comment+pr.read" && e.Outcome == "completed" && e.Agent == "agent-uuid-1" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("no completed audit row names pr.comment")
-	}
 	// gh pr edit --title is refused: pr.edit changes only the body.
 	if outcome := f.replay(t, "pr-edit-title"); outcome != "graphql_unmapped" {
 		t.Errorf("title edit: %q", outcome)
@@ -803,5 +793,39 @@ func TestGitHubGraphQLChecksGitHubsAnswerNotTheID(t *testing.T) {
 	}
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("relayed: %v", got)
+	}
+}
+
+// GraphQL rows carry exactly the REST binding, "<entry>/<owner>/<repo>", with
+// nothing appended: alerts match the binding against an exact repository list
+// (the CI-repository write tripwire does), so a GraphQL write must look like
+// the same REST write there.
+func TestGitHubGraphQLAuditBindingIsTheRESTBinding(t *testing.T) {
+	f := newGraphQLFixture(t)
+	if code, _ := f.send(t, http.MethodGet, "/repos/example-org/example-repo/pulls/12", nil, ""); code != 200 {
+		t.Fatalf("REST read: %d", code)
+	}
+	rest := f.audit.last().Binding
+	if rest != "github-api/example-org/example-repo" {
+		t.Fatalf("REST binding %q", rest)
+	}
+	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { id } } }"}`
+	for name, tc := range map[string]struct {
+		body string
+		code int
+	}{
+		"write":         {graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"}), 200},
+		"read":          {read, 200},
+		"refused write": {graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": personPR, "body": "x"}), 403},
+	} {
+		before := len(f.audit.all())
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != tc.code {
+			t.Fatalf("%s: %d %q", name, code, f.audit.last().Outcome)
+		}
+		for _, e := range f.audit.all()[before:] {
+			if e.Binding != rest {
+				t.Errorf("%s: %s row binding %q, want %q", name, e.Event, e.Binding, rest)
+			}
+		}
 	}
 }

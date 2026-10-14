@@ -92,6 +92,19 @@ type GitHubGraphQL struct {
 	// Answer, when set, is the broker's own reply to gh's schema feature
 	// detection; nothing reaches GitHub.
 	Answer []byte
+	// Write is the mutation's operation (pr.comment and so on); empty for a
+	// query.
+	Write string
+}
+
+// AuditOperation is the one operation an audit row names for the request:
+// the write a mutation makes, or "graphql" for a read, so an alert on
+// writes matches a GraphQL write exactly as the same REST write.
+func (g GitHubGraphQL) AuditOperation() string {
+	if g.Write != "" {
+		return g.Write
+	}
+	return "graphql"
 }
 
 // GraphQLTarget is a node ID the request acts on, and what it must be.
@@ -252,7 +265,7 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 			return GitHubGraphQL{}, err
 		}
 	case ast.Mutation:
-		if err := mutationRoot(op.SelectionSet, vars, ops, &out.Targets); err != nil {
+		if err := mutationRoot(op.SelectionSet, vars, ops, &out.Targets, &out.Write); err != nil {
 			return GitHubGraphQL{}, err
 		}
 	default: // subscriptions
@@ -702,7 +715,7 @@ func searchArgs(args map[string]any) (string, bool) {
 // mutationRoot maps the one mutation to its operation and node IDs. Its input
 // must be a variable: GitHub then reads the very JSON value checked here, not
 // a literal its own lexer might read differently.
-func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool, targets *[]GraphQLTarget) error {
+func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool, targets *[]GraphQLTarget, write *string) error {
 	if len(set) != 1 {
 		return ErrGraphQLUnmapped
 	}
@@ -735,6 +748,7 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 		}
 	}
 	ops[m.op] = true
+	*write = m.op
 	// A mutation's payload is a selection like any query's: from it a pull
 	// request, its comments or the repository's other pull requests can be
 	// read. Anything beyond __typename and clientMutationId needs pr.read.

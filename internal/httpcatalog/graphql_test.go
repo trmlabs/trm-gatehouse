@@ -319,3 +319,28 @@ func TestGraphQLRefusesWhatCannotBePrintedFaithfully(t *testing.T) {
 		t.Fatalf("control character: %v, want graphql_shape", err)
 	}
 }
+
+// An audit row names one operation: the write a mutation makes, or graphql
+// for a read, never the read a payload adds.
+func TestGraphQLAuditOperation(t *testing.T) {
+	for fixture, want := range map[string][]string{
+		"pr-comment":        {"graphql", "pr.comment"},
+		"pr-edit-body":      {"graphql", "graphql", "pr.edit"},
+		"pr-edit-add-label": {"graphql", "graphql", "graphql", "pr.label"},
+		"pr-ready":          {"graphql", "pr.ready"},
+		"pr-list":           {"graphql"},
+	} {
+		var got []string
+		for _, r := range readGhFixture(t, fixture).Requests {
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			req, err := ParseGitHubGraphQL([]byte(body))
+			if err != nil {
+				t.Fatalf("%s: %v", fixture, err)
+			}
+			got = append(got, req.AuditOperation())
+		}
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("%s: %v, want %v", fixture, got, want)
+		}
+	}
+}

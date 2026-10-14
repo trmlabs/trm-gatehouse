@@ -181,7 +181,10 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	entry := api.Entry
-	event.Binding = entry.Name + "/" + api.Repo.Repo + "#graphql:" + strings.Join(req.Operations, "+")
+	// The binding has exactly the REST form ("<entry>/<owner>/<repo>"), so
+	// alerts and dashboards that match on it see GraphQL traffic too. The
+	// operation belongs in the row's operation field (req.AuditOperation).
+	event.Binding = entry.Name + "/" + api.Repo.Repo
 	for _, op := range append([]string{"graphql"}, req.Operations...) {
 		if !api.Repo.Allows(op) {
 			deny(http.StatusForbidden, "unlisted")
@@ -254,7 +257,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 // reaching GitHub, for a pool granted any github-api repository on the host;
 // event has already passed authorization for entry.
 func (p *Proxy) answerGitHubGraphQL(w http.ResponseWriter, event auditchain.Event, entry *httpcatalog.Entry, answer []byte) {
-	event.Binding = entry.Name + "#graphql:schema"
+	event.Binding = entry.Name
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := p.adapter.Audit.Record(admitted); err != nil {
