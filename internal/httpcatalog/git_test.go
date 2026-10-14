@@ -402,3 +402,36 @@ func TestGitHubAPICodeReadsNeedClone(t *testing.T) {
 		t.Errorf("reading a pull request still needs no git entry: %v %+v", err, m)
 	}
 }
+
+// A code read picks its git entry the way a clone does: the git entry on the
+// git host (github.com for api.github.com) that lists the repository, which the
+// catalog allows only once per host, and nothing when that entry does not grant
+// the pool. An entry on another host is never used.
+func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
+	entry := func(name, host, pool string) string {
+		return `{"name":"` + name + `","host":"` + host + `","kind":"git","pools":["` + pool + `"],
+			"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/trm-b2b","access":"read"}]}}`
+	}
+	match := func(entries ...string) (GitRequest, error) {
+		t.Helper()
+		c, err := Parse([]byte(`{"entries":[` + strings.Join(append(entries, apiEntry), ",") + `]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, _, err := c.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/trmlabs/trm-b2b/compare/main...feature", "", "pool-a")
+		return m, err
+	}
+	// An entry on another host comes first in the catalog; the github.com one is used.
+	if m, err := match(entry("elsewhere", "git.example.com", "pool-a"), entry("github", "github.com", "pool-a")); err != nil || m.CloneEntry == nil || m.CloneEntry.Name != "github" {
+		t.Errorf("git host entry: %v %+v", err, m.CloneEntry)
+	}
+	// The github.com entry does not grant the pool: a clone gets ErrPool, so no
+	// code read, even though another host's entry grants it.
+	if _, err := match(entry("elsewhere", "git.example.com", "pool-a"), entry("github", "github.com", "pool-b")); !errors.Is(err, ErrUnlisted) {
+		t.Errorf("git host entry without the pool: %v", err)
+	}
+	// Only another host lists the repository.
+	if _, err := match(entry("elsewhere", "git.example.com", "pool-a")); !errors.Is(err, ErrUnlisted) {
+		t.Errorf("git entry on another host only: %v", err)
+	}
+}

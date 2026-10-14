@@ -27,6 +27,7 @@ import (
 // contents read and pull_requests write, as GitHub needs to open one.
 type apiFixture struct {
 	client  *http.Client
+	host    string // the API host; example.com when unset
 	port    int
 	audit   *adapterAudit
 	mu      sync.Mutex
@@ -134,7 +135,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 func (f *apiFixture) post(t *testing.T, method, path, auth, body string) (int, string) {
 	t.Helper()
-	r, _ := http.NewRequest(method, "https://example.com:"+strconv.Itoa(f.port)+path, strings.NewReader(body))
+	host := f.host
+	if host == "" {
+		host = "example.com"
+	}
+	r, _ := http.NewRequest(method, "https://"+host+":"+strconv.Itoa(f.port)+path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/vnd.github+json")
 	if auth != "" {

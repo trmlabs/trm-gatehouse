@@ -135,11 +135,14 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	t.Cleanup(github.Close)
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(github.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
-	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
+	// The API on api.example.com and git on example.com, as api.github.com
+	// and github.com: a code read uses the git entry on the matching host.
+	f.host = "api.example.com"
+	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api",
 		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
 		"operations":["pr.open","pr.read","pr.list","pr.comment","pr.edit","pr.label","pr.ready","dispatch","actions.read","deployments.read"],
 		"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"]}]}},
-		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
+		{"name":"github","host":"example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
 		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +158,7 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	p.upstream.TLSClientConfig.ServerName = "example.com" // the test server's certificate name
 	addr := strings.TrimPrefix(github.URL, "https://")
 	p.upstream.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)

@@ -897,7 +897,7 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 				// A file list or compare returns code: only for a pool whose git
 				// entry lets it clone the repository, and only for a requester
 				// that entry authorizes (its tier and groups).
-				if matched.CloneEntry = c.cloneEntry(repo, pool); matched.CloneEntry == nil {
+				if matched.CloneEntry = c.cloneEntry(host, repo, pool); matched.CloneEntry == nil {
 					return GitRequest{}, true, ErrUnlisted
 				}
 			}
@@ -1243,18 +1243,26 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 	return s
 }
 
-// cloneEntry returns the git entry that lets the pool fetch the repository,
-// or nil.
-func (c Catalog) cloneEntry(repo, pool string) *Entry {
+// cloneEntry returns the git entry a clone of repo would use, chosen the way
+// GitMatch chooses it: the first git entry on the git host that lists the
+// repository, or nil when there is none or it does not grant the pool (where a
+// clone would get ErrPool). The git host is the API host without its "api."
+// label, as github.com is for api.github.com.
+func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
+	gitHost := strings.TrimPrefix(apiHost, "api.")
 	for i := range c.entries {
 		e := &c.entries[i]
-		if e.Kind != "git" || e.Git == nil || !contains(e.Pools, pool) {
+		if e.Kind != "git" || e.Git == nil || e.Host != gitHost {
 			continue
 		}
 		for _, r := range e.Git.Repos {
-			if r.Repo == repo {
-				return e
+			if r.Repo != repo {
+				continue
 			}
+			if !contains(e.Pools, pool) {
+				return nil
+			}
+			return e
 		}
 	}
 	return nil

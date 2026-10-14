@@ -50,9 +50,9 @@ func TestGitHubAPICodeReadsNeedTheCloneEntrysAuthorization(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"pools":[
 	  {"name":"claude","namespace":"n","serviceAccount":"claude","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}],
 	 "entries":[
-	  {"name":"github-api","host":"example.com","port":%d,"kind":"github-api","pools":["claude"],
+	  {"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api","pools":["claude"],
 	   "git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write"}]}},
-	  {"name":"github","host":"git.example.com","kind":"git","pools":["claude"],"tier":"T1","requires":["`+authzGroup+`"],
+	  {"name":"github","host":"example.com","kind":"git","pools":["claude"],"tier":"T1","requires":["`+authzGroup+`"],
 	   "git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"read"}]}}]}`, port)))
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +72,7 @@ func TestGitHubAPICodeReadsNeedTheCloneEntrysAuthorization(t *testing.T) {
 			GitTokens:    &githubapp.Minter{Signer: rsaSigner{key}, API: github.URL, Client: github.Client()}}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	p.upstream.TLSClientConfig.ServerName = "example.com" // the test server's certificate name
 	addr := strings.TrimPrefix(github.URL, "https://")
 	p.upstream.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
@@ -80,7 +81,7 @@ func TestGitHubAPICodeReadsNeedTheCloneEntrysAuthorization(t *testing.T) {
 		client := newTrustingClient(proxyURL, url.User("workload-token"), roots)
 		defer client.CloseIdleConnections()
 		client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{SessionHeader: {session}}
-		r, _ := http.NewRequest("GET", "https://example.com:"+strconv.Itoa(port)+path, nil)
+		r, _ := http.NewRequest("GET", "https://api.example.com:"+strconv.Itoa(port)+path, nil)
 		resp, err := client.Do(r)
 		if err != nil {
 			t.Fatal(err)

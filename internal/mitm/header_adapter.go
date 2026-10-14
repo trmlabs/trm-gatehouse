@@ -177,7 +177,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
 		// A code-returning route also needs the git entry it relies on to
-		// authorize this requester, so it never reaches past a clone.
+		// authorize this requester, so it never reaches past a clone. That
+		// second check runs last and overwrites the event's tier, decision and
+		// groups, so a files or compare audit row names the github-api binding
+		// with the git entry's tier and groups. That is intended: both entries
+		// admitted the request, and the git entry is what guards the code.
 		if !refused(api.Entry, err) && (api.CloneEntry == nil || !refused(api.CloneEntry, nil)) {
 			p.forwardGitHubAPI(w, r, target, scope, event, api, err)
 		}
