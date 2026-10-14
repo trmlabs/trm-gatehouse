@@ -17,7 +17,8 @@ import (
 
 // FileSource reads a JSON directory on every lookup. It stands in for Entra
 // in tests and fixtures: {"subjects": {"<sso subject>": {"objectID": "...",
-// "enabled": true, "groups": ["<group id>", ...]}}}.
+// "enabled": true, "groups": ["<group id>", ...], "department": "..."}}};
+// department is optional.
 type FileSource struct{ Path string }
 
 func (f FileSource) Lookup(_ context.Context, subject string, groups []string) (Person, error) {
@@ -27,9 +28,10 @@ func (f FileSource) Lookup(_ context.Context, subject string, groups []string) (
 	}
 	var dir struct {
 		Subjects map[string]struct {
-			ObjectID string   `json:"objectID"`
-			Enabled  bool     `json:"enabled"`
-			Groups   []string `json:"groups"`
+			ObjectID   string   `json:"objectID"`
+			Enabled    bool     `json:"enabled"`
+			Groups     []string `json:"groups"`
+			Department string   `json:"department"`
 		} `json:"subjects"`
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -41,7 +43,7 @@ func (f FileSource) Lookup(_ context.Context, subject string, groups []string) (
 	if !ok {
 		return Person{}, errors.New("subject not in directory")
 	}
-	return Person{ObjectID: user.ObjectID, Enabled: user.Enabled, MemberOf: intersect(groups, user.Groups)}, nil
+	return Person{ObjectID: user.ObjectID, Enabled: user.Enabled, MemberOf: intersect(groups, user.Groups), Department: user.Department}, nil
 }
 
 func intersect(asked, have []string) []string {
@@ -87,11 +89,14 @@ func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string
 		}
 	}
 	var user struct {
-		ID      string `json:"id"`
-		UPN     string `json:"userPrincipalName"`
-		Enabled *bool  `json:"accountEnabled"`
+		ID         string `json:"id"`
+		UPN        string `json:"userPrincipalName"`
+		Enabled    *bool  `json:"accountEnabled"`
+		Department string `json:"department"`
 	}
-	path := "/users/" + url.PathEscape(subject) + "?$select=id,userPrincipalName,accountEnabled"
+	// department is read for the audit trail only; User.Read.All already
+	// covers it, so no new permission is needed.
+	path := "/users/" + url.PathEscape(subject) + "?$select=id,userPrincipalName,accountEnabled,department"
 	if g.SubjectIsObjectID && !objectID.MatchString(subject) {
 		return Person{}, errors.New("subject is not an object ID")
 	}
@@ -113,7 +118,7 @@ func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string
 		}
 		memberOf = append(memberOf, intersect(batch, member.Value)...)
 	}
-	return Person{ObjectID: user.ID, Enabled: *user.Enabled, MemberOf: memberOf}, nil
+	return Person{ObjectID: user.ID, Enabled: *user.Enabled, MemberOf: memberOf, Department: user.Department}, nil
 }
 
 func (g GraphSource) call(ctx context.Context, method, path string, body []byte, out any) error {

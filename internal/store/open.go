@@ -1,9 +1,17 @@
 package store
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
+	"os"
 )
+
+// ErrSQLiteMovedToSharedStore refuses a SQLite start after the store was
+// copied to the shared store: the copy renames the file to <name>.migrated,
+// and opening the path again would create a new, empty store.
+var ErrSQLiteMovedToSharedStore = errors.New("local store was moved to the shared store")
 
 // StoreConfig carries the parameters for OpenStore.
 // If DatabaseURL is non-empty it takes precedence over SQLitePath.
@@ -29,6 +37,13 @@ func OpenStore(cfg StoreConfig) (Store, error) {
 			if err != nil {
 				return nil, fmt.Errorf("resolving default db path: %w", err)
 			}
+		}
+		// Before Open, which would create the file.
+		switch _, err := os.Stat(path + ".migrated"); {
+		case err == nil:
+			return nil, fmt.Errorf("%w: %s.migrated exists, so this store was copied to the shared store; set DATABASE_URL or DATABASE_URL_FILE instead of starting on an empty local store", ErrSQLiteMovedToSharedStore, path)
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("checking for %s.migrated: %w", path, err)
 		}
 		return Open(path)
 	}

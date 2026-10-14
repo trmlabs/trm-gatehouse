@@ -63,7 +63,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		f.mu.Lock()
 		scope := f.minted[token]
 		f.mu.Unlock()
-		if scope != `trmlabs/trm-b2b|{"contents":"read","metadata":"read","pull_requests":"write"}` {
+		if scope != `trmlabs/example-app|{"contents":"read","metadata":"read","pull_requests":"write"}` {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -83,12 +83,12 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			// 12 is the pool's own pull request; 13 comes from another pool's branch,
 			// 14 from a fork; 20 is an issue, not a pull request.
 			switch r.URL.Path {
-			case "/repos/trmlabs/trm-b2b/pulls/12":
-				fmt.Fprintf(w, `{"number":12,"state":"open","received":%d,"head":{"ref":"cursor/pool-agent/x","repo":{"full_name":"trmlabs/trm-b2b"}}}`, len(body))
-			case "/repos/trmlabs/trm-b2b/pulls/13":
-				fmt.Fprint(w, `{"number":13,"head":{"ref":"cursor/other-pool/x","repo":{"full_name":"trmlabs/trm-b2b"}}}`)
-			case "/repos/trmlabs/trm-b2b/pulls/14":
-				fmt.Fprint(w, `{"number":14,"head":{"ref":"cursor/pool-agent/x","repo":{"full_name":"someone/trm-b2b"}}}`)
+			case "/repos/trmlabs/example-app/pulls/12":
+				fmt.Fprintf(w, `{"number":12,"state":"open","received":%d,"head":{"ref":"cursor/pool-agent/x","repo":{"full_name":"trmlabs/example-app"}}}`, len(body))
+			case "/repos/trmlabs/example-app/pulls/13":
+				fmt.Fprint(w, `{"number":13,"head":{"ref":"cursor/other-pool/x","repo":{"full_name":"trmlabs/example-app"}}}`)
+			case "/repos/trmlabs/example-app/pulls/14":
+				fmt.Fprint(w, `{"number":14,"head":{"ref":"cursor/pool-agent/x","repo":{"full_name":"someone/example-app"}}}`)
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -106,9 +106,9 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	f.port, _ = strconv.Atoi(portText)
 	// The pool pushes only under cursor/pool-agent/, so it opens pull requests only from there.
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
-		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/trm-b2b","access":"write"}]}},
+		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/example-app","access":"write"}]}},
 		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
-		"repos":[{"repo":"trmlabs/trm-b2b","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
+		"repos":[{"repo":"trmlabs/example-app","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,10 +155,10 @@ func (f *apiFixture) post(t *testing.T, method, path, auth, body string) (int, s
 func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 	f := newAPIFixture(t)
 	for _, tc := range []struct{ path, auth, body string }{
-		{"/repos/trmlabs/trm-b2b/pulls", "token " + githubTokenPlaceholder, `{"title":"agent change","head":"cursor/pool-agent/x","base":"main"}`}, // gh sends "token"
-		{"/repos/trmlabs/trm-b2b/issues/12/comments", "Bearer " + githubTokenPlaceholder, `{"body":"note"}`},
-		{"/repos/trmlabs/trm-b2b/pulls/12/comments", "", `{"body":"note","commit_id":"abc","path":"a.go","line":1}`},
-		{"/repos/trmlabs/trm-b2b/pulls/12/comments/99/replies", "", `{"body":"note"}`},
+		{"/repos/trmlabs/example-app/pulls", "token " + githubTokenPlaceholder, `{"title":"agent change","head":"cursor/pool-agent/x","base":"main"}`}, // gh sends "token"
+		{"/repos/trmlabs/example-app/issues/12/comments", "Bearer " + githubTokenPlaceholder, `{"body":"note"}`},
+		{"/repos/trmlabs/example-app/pulls/12/comments", "", `{"body":"note","commit_id":"abc","path":"a.go","line":1}`},
+		{"/repos/trmlabs/example-app/pulls/12/comments/99/replies", "", `{"body":"note"}`},
 	} {
 		if code, body := f.post(t, "POST", tc.path, tc.auth, tc.body); code != 201 || !strings.Contains(body, `"number":12`) {
 			t.Fatalf("%s: %d %s", tc.path, code, body)
@@ -171,11 +171,11 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	if e := f.audit.last(); e.Binding != "github-api/trmlabs/trm-b2b" || e.Outcome != "completed" || e.Status != 201 {
+	if e := f.audit.last(); e.Binding != "github-api/trmlabs/example-app" || e.Outcome != "completed" || e.Status != 201 || e.Operation != "pr.comment" {
 		t.Fatalf("audit: %+v", e)
 	}
 	// GitHub receives the request rebuilt from the checked fields, not the worker's bytes.
-	if code, _ := f.post(t, "POST", "/repos/trmlabs/trm-b2b/pulls", "", "{ \"head\" : \"cursor/pool-agent/y\", \"base\":\"main\", \"draft\":true, \"title\":\"t\", \"body\":\"b\" }"); code != 201 {
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/pulls", "", "{ \"head\" : \"cursor/pool-agent/y\", \"base\":\"main\", \"draft\":true, \"title\":\"t\", \"body\":\"b\" }"); code != 201 {
 		t.Fatalf("create: %d", code)
 	}
 	f.mu.Lock()
@@ -188,7 +188,7 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 	f.mu.Lock()
 	before := f.reads
 	f.mu.Unlock()
-	r, _ := http.NewRequest(http.MethodGet, "https://example.com:"+strconv.Itoa(f.port)+"/repos/trmlabs/trm-b2b/pulls/12", nil)
+	r, _ := http.NewRequest(http.MethodGet, "https://example.com:"+strconv.Itoa(f.port)+"/repos/trmlabs/example-app/pulls/12", nil)
 	resp, err := f.client.Do(r)
 	if err != nil {
 		t.Fatal(err)
@@ -208,10 +208,10 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 func TestGitHubAPICommentsOnlyOnThePoolsPullRequests(t *testing.T) {
 	f := newAPIFixture(t)
 	for _, path := range []string{
-		"/repos/trmlabs/trm-b2b/issues/13/comments",
-		"/repos/trmlabs/trm-b2b/pulls/14/comments",
-		"/repos/trmlabs/trm-b2b/issues/20/comments",
-		"/repos/trmlabs/trm-b2b/pulls/13/comments/99/replies",
+		"/repos/trmlabs/example-app/issues/13/comments",
+		"/repos/trmlabs/example-app/pulls/14/comments",
+		"/repos/trmlabs/example-app/issues/20/comments",
+		"/repos/trmlabs/example-app/pulls/13/comments/99/replies",
 	} {
 		if code, _ := f.post(t, "POST", path, "", `{"body":"note"}`); code != 403 || f.audit.last().Outcome != "comment_target" {
 			t.Fatalf("%s: code=%d outcome=%q", path, code, f.audit.last().Outcome)
@@ -223,7 +223,7 @@ func TestGitHubAPICommentsOnlyOnThePoolsPullRequests(t *testing.T) {
 	if created != 0 {
 		t.Fatalf("GitHub received %d refused comments", created)
 	}
-	if code, _ := f.post(t, "POST", "/repos/trmlabs/trm-b2b/issues/12/comments", "", `{"body":"note"}`); code != 201 {
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/12/comments", "", `{"body":"note"}`); code != 201 {
 		t.Fatalf("comment on the pool's own pull request: %d", code)
 	}
 }
@@ -233,40 +233,53 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, path, auth, body, outcome string
 	}{
-		{"approve a review", "POST", "/repos/trmlabs/trm-b2b/pulls/12/reviews", "", `{"event":"APPROVE"}`, "unlisted"},
-		{"merge", "PUT", "/repos/trmlabs/trm-b2b/pulls/12/merge", "", `{}`, "unlisted"},
+		{"approve a review", "POST", "/repos/trmlabs/example-app/pulls/12/reviews", "", `{"event":"APPROVE"}`, "unlisted"},
+		{"merge", "PUT", "/repos/trmlabs/example-app/pulls/12/merge", "", `{}`, "unlisted"},
 		{"another repository", "POST", "/repos/trmlabs/other/pulls", "", `{}`, "unlisted"},
 		// The default operations: no list, edit, label, ready, dispatch, Actions or deployments.
-		{"list pull requests", "GET", "/repos/trmlabs/trm-b2b/pulls", "", "", "method"},
-		{"update a pull request", "PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", `{"body":"b"}`, "method"},
-		{"delete a pull request", "DELETE", "/repos/trmlabs/trm-b2b/pulls/12", "", "", "method"},
-		{"mark ready", "POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "", "unlisted"},
-		{"edit a comment", "PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", `{"body":"b"}`, "unlisted"},
-		{"labels without a grant", "POST", "/repos/trmlabs/trm-b2b/issues/12/labels", "", `{"labels":["x"]}`, "unlisted"},
-		{"dispatch without a grant", "POST", "/repos/trmlabs/trm-b2b/dispatches", "", `{"event_type":"x"}`, "unlisted"},
-		{"actions without a grant", "GET", "/repos/trmlabs/trm-b2b/actions/runs", "", "", "unlisted"},
-		{"deployments without a grant", "GET", "/repos/trmlabs/trm-b2b/deployments", "", "", "unlisted"},
-		{"run a workflow", "POST", "/repos/trmlabs/trm-b2b/actions/workflows/ci.yml/dispatches", "", `{"ref":"main"}`, "unlisted"},
-		{"read with a body", "GET", "/repos/trmlabs/trm-b2b/pulls/12", "", `{"x":1}`, "request_shape"},
-		{"head outside the pool", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/other/x","base":"main"}`, "head"},
-		{"head is the prefix itself", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/","base":"main"}`, "head"},
-		{"head from a fork", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"someone:cursor/pool-agent/x","base":"main"}`, "head"},
-		{"head escapes the prefix", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/../main","base":"main"}`, "head"},
-		{"head from another repository", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","head_repo":"trmlabs/other","base":"main"}`, "head"},
-		{"pull request from an issue", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"issue":7,"head":"cursor/pool-agent/x","base":"main"}`, "head"},
-		{"no head", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"base":"main"}`, "head"},
-		{"duplicate head", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","head":"main","base":"main"}`, "head"},
-		{"case-variant head", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","Head":"main","base":"main"}`, "head"},
-		{"unknown field", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","base":"main","maintainer_can_modify":true}`, "head"},
-		{"null head", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":null,"base":"main"}`, "head"},
-		{"head not a string", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":["cursor/pool-agent/x"],"base":"main"}`, "head"},
-		{"trailing data", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}{"head":"main"}`, "head"},
-		{"worker token", "POST", "/repos/trmlabs/trm-b2b/pulls", "token ghp_workersupplied", `{}`, "credential_header"},
-		{"placeholder in body", "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"body":"__vault_GITHUB_TOKEN__"}`, "placeholder_misplaced"},
+		{"list pull requests", "GET", "/repos/trmlabs/example-app/pulls", "", "", "method"},
+		{"update a pull request", "PATCH", "/repos/trmlabs/example-app/pulls/12", "", `{"body":"b"}`, "method"},
+		{"delete a pull request", "DELETE", "/repos/trmlabs/example-app/pulls/12", "", "", "method"},
+		{"mark ready", "POST", "/repos/trmlabs/example-app/pulls/12/ready", "", "", "unlisted"},
+		{"edit a comment", "PATCH", "/repos/trmlabs/example-app/issues/comments/5", "", `{"body":"b"}`, "unlisted"},
+		{"labels without a grant", "POST", "/repos/trmlabs/example-app/issues/12/labels", "", `{"labels":["x"]}`, "unlisted"},
+		{"dispatch without a grant", "POST", "/repos/trmlabs/example-app/dispatches", "", `{"event_type":"x"}`, "unlisted"},
+		{"actions without a grant", "GET", "/repos/trmlabs/example-app/actions/runs", "", "", "unlisted"},
+		{"deployments without a grant", "GET", "/repos/trmlabs/example-app/deployments", "", "", "unlisted"},
+		{"run a workflow", "POST", "/repos/trmlabs/example-app/actions/workflows/ci.yml/dispatches", "", `{"ref":"main"}`, "unlisted"},
+		{"read with a body", "GET", "/repos/trmlabs/example-app/pulls/12", "", `{"x":1}`, "request_shape"},
+		{"head outside the pool", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/other/x","base":"main"}`, "head"},
+		{"head is the prefix itself", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/","base":"main"}`, "head"},
+		{"head from a fork", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"someone:cursor/pool-agent/x","base":"main"}`, "head"},
+		{"head escapes the prefix", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/../main","base":"main"}`, "head"},
+		{"head from another repository", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","head_repo":"trmlabs/other","base":"main"}`, "head"},
+		{"pull request from an issue", "POST", "/repos/trmlabs/example-app/pulls", "", `{"issue":7,"head":"cursor/pool-agent/x","base":"main"}`, "head"},
+		{"no head", "POST", "/repos/trmlabs/example-app/pulls", "", `{"base":"main"}`, "head"},
+		{"duplicate head", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","head":"main","base":"main"}`, "head"},
+		{"case-variant head", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","Head":"main","base":"main"}`, "head"},
+		{"unknown field", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","base":"main","maintainer_can_modify":true}`, "head"},
+		{"null head", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":null,"base":"main"}`, "head"},
+		{"head not a string", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":["cursor/pool-agent/x"],"base":"main"}`, "head"},
+		{"trailing data", "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}{"head":"main"}`, "head"},
+		{"worker token", "POST", "/repos/trmlabs/example-app/pulls", "token ghp_workersupplied", `{}`, "credential_header"},
+		{"placeholder in body", "POST", "/repos/trmlabs/example-app/pulls", "", `{"body":"__vault_GITHUB_TOKEN__"}`, "placeholder_misplaced"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if code, _ := f.post(t, tc.method, tc.path, tc.auth, tc.body); code < 400 || f.audit.last().Outcome != tc.outcome {
 				t.Fatalf("code=%d outcome=%q", code, f.audit.last().Outcome)
+			}
+			// A refusal past route matching names its operation; an unlisted
+			// path has none, and the row never carries the path.
+			want := ""
+			switch tc.outcome {
+			case "unlisted", "method":
+			case "request_shape":
+				want = "pr.read"
+			default:
+				want = "pr.open"
+			}
+			if got := f.audit.last().Operation; got != want {
+				t.Fatalf("operation=%q, want %q", got, want)
 			}
 		})
 	}
@@ -279,7 +292,40 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	f.mu.Lock()
 	f.echo = true
 	f.mu.Unlock()
-	if code, _ := f.post(t, "POST", "/repos/trmlabs/trm-b2b/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}`); code == 201 || f.audit.last().Outcome != "secret_echo" {
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}`); code == 201 || f.audit.last().Outcome != "secret_echo" {
 		t.Fatalf("token echo not blocked: %d %+v", code, f.audit.last())
+	}
+}
+
+// A GitHub GraphQL request no route admits is refused before GitHub sees it,
+// and a refusal that names an operation names "graphql", so those refusals can
+// be counted apart from other unlisted paths. Which handler refuses it, and so
+// whether the row carries the operation, is left to the GraphQL handler.
+func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
+	f := newAPIFixture(t)
+	if code, _ := f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code < 400 {
+		t.Fatalf("GraphQL was not refused: %d", code)
+	}
+	e := f.audit.last()
+	if e.Event != "denied" || e.Status < 400 || (e.Operation != "" && e.Operation != "graphql") {
+		t.Fatalf("audit: %+v", e)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.last != "" || len(f.minted) != 0 {
+		t.Fatalf("a refused GraphQL request reached GitHub: minted %v, body %q", f.minted, f.last)
+	}
+}
+
+// An unmatched GitHub GraphQL path is named "graphql"; a matched route keeps
+// its own operation, and any other unmatched path names none.
+func TestGitHubAPIOperationNamesGraphQL(t *testing.T) {
+	for path, want := range map[string]string{"/graphql": "graphql", "/api/graphql": "graphql", "/repos/o/r/pulls": ""} {
+		if got := githubAPIOperation(httpcatalog.GitRequest{}, path); got != want {
+			t.Errorf("%s: operation %q, want %q", path, got, want)
+		}
+	}
+	if got := githubAPIOperation(httpcatalog.GitRequest{Operation: "pr.comment"}, "/graphql"); got != "pr.comment" {
+		t.Errorf("a matched route's operation became %q", got)
 	}
 }

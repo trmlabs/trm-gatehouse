@@ -786,11 +786,20 @@ func (m *DurableLeaseMinter) Mint(ctx context.Context, scope AgentScope, svc *Da
 	if svc == nil || scope.VaultID == "" || svc.Name == "" {
 		return nil, fmt.Errorf("database binding is required")
 	}
+	// A drain refuses with errDraining, never with the cancellation Close
+	// causes: Close cancels m.ctx after it begins the drain, and AfterFunc
+	// may already have canceled ctx by the time the lock is tried.
+	if m.draining.Load() {
+		return nil, errDraining
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer stop()
 	if err := m.lock(ctx); err != nil {
+		if m.draining.Load() {
+			return nil, errDraining
+		}
 		return nil, err
 	}
 	defer m.mu.Unlock()
