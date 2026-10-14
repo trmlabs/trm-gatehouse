@@ -2,13 +2,16 @@ package netguard
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -179,7 +182,8 @@ func SafeDialContext(allowPrivate bool) func(ctx context.Context, network, addr 
 	if !allowPrivate {
 		allowed = AllowlistFromEnv()
 	}
-	return withEgressRanges(newSafeDialer(allowPrivate, allowed), os.Getenv("AGENT_VAULT_EGRESS_RANGES")).DialContext
+	return withEgressRanges(newSafeDialer(allowPrivate, allowed), os.Getenv("AGENT_VAULT_EGRESS_RANGES"),
+		os.Getenv("AGENT_VAULT_EGRESS_RANGES_FILE")).DialContext
 }
 
 func newSafeDialer(allowPrivate bool, allowed []net.IPNet) *net.Dialer {
@@ -220,17 +224,30 @@ func checkDialAddress(address string, allowPrivate bool, allowed []net.IPNet) er
 // checked in the same ControlContext hook as the network policy, on each
 // address right before connect. An empty setting leaves d unchanged; a set
 // but unparseable one allows nothing rather than everything.
-func withEgressRanges(d *net.Dialer, setting string) *net.Dialer {
-	if strings.TrimSpace(setting) == "" {
+//
+// file, when set (AGENT_VAULT_EGRESS_RANGES_FILE), names a file of single
+// addresses that also count as egress ranges, re-read while the process runs:
+// a job resolves the catalog's host names and writes it, so a host's addresses
+// live outside the deployment's configuration and can change without a
+// restart. Setting it confines d even when setting is empty. See fileRanges.
+func withEgressRanges(d *net.Dialer, setting, file string) *net.Dialer {
+	if strings.TrimSpace(setting) == "" && strings.TrimSpace(file) == "" {
 		return d
 	}
 	egress := ParseCIDRList(setting, "AGENT_VAULT_EGRESS_RANGES")
+	var extra *fileRanges
+	if strings.TrimSpace(file) != "" {
+		extra = sharedFileRanges(strings.TrimSpace(file))
+	}
 	policy := d.ControlContext
 	d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
 		if err := policy(ctx, network, address, c); err != nil {
 			return err
 		}
 		err := checkEgressAddress(address, egress)
+		if err != nil && extra != nil && checkEgressAddress(address, extra.current()) == nil {
+			err = nil
+		}
 		if err != nil {
 			slog.Warn("netguard: dial attempt outside egress ranges refused", //nolint:gosec // G706: structured slog attrs, handlers quote control chars
 				slog.String("address", address), slog.String("error", err.Error()))
@@ -238,6 +255,91 @@ func withEgressRanges(d *net.Dialer, setting string) *net.Dialer {
 		return err
 	}
 	return d
+}
+
+// fileRangesInterval is how long a read of the egress ranges file is reused.
+const fileRangesInterval = 5 * time.Second
+
+// fileRanges holds the addresses read from an egress ranges file. The file
+// lists single addresses (an IPv4 or IPv6 address, or one with /32 or /128),
+// separated by commas, spaces or new lines, with # comments. A missing file
+// adds nothing, since the job that writes it may not have run yet. A file with
+// any other entry (a wider range, a name, garbage) is refused whole and the
+// last good set stays, so a bad write never widens egress and never cuts
+// working connections. The private and metadata blocks apply to these
+// addresses as to every other.
+type fileRanges struct {
+	path    string
+	mu      sync.Mutex
+	read    time.Time
+	content string
+	nets    []net.IPNet
+	now     func() time.Time
+}
+
+var fileRangesByPath sync.Map // path -> *fileRanges
+
+func sharedFileRanges(path string) *fileRanges {
+	f, _ := fileRangesByPath.LoadOrStore(path, &fileRanges{path: path, now: time.Now})
+	return f.(*fileRanges)
+}
+
+func (f *fileRanges) current() []net.IPNet {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.read.IsZero() && f.now().Sub(f.read) < fileRangesInterval {
+		return f.nets
+	}
+	f.read = f.now()
+	data, err := os.ReadFile(f.path) //nolint:gosec // G703: the path is the operator's AGENT_VAULT_EGRESS_RANGES_FILE setting, not request input
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if f.content != "" {
+			slog.Warn("netguard: egress ranges file is gone; keeping the last addresses read", slog.String("path", f.path)) //nolint:gosec // G706: structured slog attrs
+		}
+		return f.nets
+	case err != nil:
+		slog.Warn("netguard: egress ranges file unreadable; keeping the last addresses read", //nolint:gosec // G706: structured slog attrs
+			slog.String("path", f.path), slog.String("error", err.Error()))
+		return f.nets
+	case string(data) == f.content:
+		return f.nets
+	}
+	nets, err := parseHostAddresses(string(data))
+	if err != nil {
+		slog.Warn("netguard: egress ranges file refused; keeping the last addresses read", //nolint:gosec // G706: structured slog attrs
+			slog.String("path", f.path), slog.String("error", err.Error()))
+		return f.nets
+	}
+	f.content, f.nets = string(data), nets
+	slog.Info("netguard: egress ranges file read", slog.String("path", f.path), slog.Int("addresses", len(nets))) //nolint:gosec // G706: structured slog attrs
+	return f.nets
+}
+
+// parseHostAddresses parses an egress ranges file: single addresses only.
+func parseHostAddresses(raw string) ([]net.IPNet, error) {
+	var out []net.IPNet
+	for _, line := range strings.Split(raw, "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		for _, field := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
+			prefix, err := netip.ParsePrefix(field)
+			if err != nil {
+				addr, aerr := netip.ParseAddr(field)
+				if aerr != nil || addr.Zone() != "" {
+					return nil, fmt.Errorf("entry %q is not an address", field)
+				}
+				prefix = netip.PrefixFrom(addr, addr.BitLen())
+			}
+			if prefix.Bits() != prefix.Addr().BitLen() {
+				return nil, fmt.Errorf("entry %q is a range; only single addresses are allowed", field)
+			}
+			addr := prefix.Addr().Unmap()
+			out = append(out, net.IPNet{IP: addr.AsSlice(), Mask: net.CIDRMask(addr.BitLen(), addr.BitLen())})
+		}
+	}
+	return out, nil
 }
 
 // checkEgressAddress reports an error unless the ip:port the dialer is about

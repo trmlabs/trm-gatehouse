@@ -89,6 +89,8 @@ The person is that login, looked up as the Entra user principal name, when its d
 
 The broker's network policy allows the approved data-plane ranges once. Inside the broker, `AGENT_VAULT_EGRESS_RANGES` (comma-separated CIDRs) confines every resolved destination address to those ranges, public or private. An unparseable value allows nothing. A destination is reachable only when its host is in the catalog and its address is in these ranges. A new database in an existing range needs no network change. Only a new range needs a second change, in the broker's network policy.
 
+For hosts whose addresses move (a SaaS API behind a CDN), `AGENT_VAULT_EGRESS_RANGES_FILE` names a file of single addresses (one per line, or comma or space separated, `#` comments) that also count as egress ranges. The broker re-reads it at most every 5 seconds, so a job that resolves the catalog's host names can keep it current without a restart or an address in the deployment's configuration. A missing file adds nothing; a file with anything but single addresses (a range, a name) is refused whole and the last good set stays. Setting only the file confines egress to it. The private and metadata blocks apply to these addresses as to every other.
+
 ## One secret per entry
 
 Under `AGENT_VAULT_CATALOG_VAULT_PREFIX=<mount>/<prefix>`:
