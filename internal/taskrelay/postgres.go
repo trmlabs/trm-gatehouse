@@ -530,6 +530,7 @@ var refusalsByReason = map[string]refusal{
 	"account_disabled":         {"42501", "Gatehouse: this person's account is disabled"},
 	"not_entitled":             {"42501", "Gatehouse: this person is not entitled to this database"},
 	"session_unexpected":       {"42501", "Gatehouse: this pool takes no runner session, but one was sent"},
+	"session_missing":          {"42501", "Gatehouse: this pool needs the person behind the run, but no run token was sent; retry shortly"},
 	"session_unverifiable":     {"42501", "Gatehouse could not verify this runner session"},
 	"session_token":            {"42501", "Gatehouse: this runner session's token was refused"},
 	"session_pool":             {"42501", "Gatehouse: this runner session belongs to another pool"},

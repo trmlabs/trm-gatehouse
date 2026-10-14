@@ -84,9 +84,13 @@ func TestCursorPodIsPinnedToItsFirstOwner(t *testing.T) {
 	if _, refusal := Resolve(ctx, cursorPool, "alice-1", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, b); refusal != "session_pod_mismatch" {
 		t.Fatalf("alice's token on another Pod: %q", refusal)
 	}
-	// A run with no mappable person still owns its Pod; it just names nobody.
-	if who, refusal := Resolve(ctx, cursorPool, "no-mail", Claims{Pod: "pod-c", ClaimedRun: "bc-4"}, runs, b); refusal != "" || who.Kind != "none" {
+	// A run with no mappable person still owns its Pod, but names nobody, so
+	// its requests are refused rather than served as the pool.
+	if who, refusal := Resolve(ctx, cursorPool, "no-mail", Claims{Pod: "pod-c", ClaimedRun: "bc-4"}, runs, b); refusal != "no_person" || who.Kind != "none" {
 		t.Fatalf("no email: %q %+v", refusal, who)
+	}
+	if _, refusal := Resolve(ctx, cursorPool, "alice-1", Claims{Pod: "pod-c", ClaimedRun: "bc-1"}, runs, b); refusal != "session_pod_mismatch" {
+		t.Fatalf("alice's token on the no-email Pod: %q", refusal)
 	}
 	if _, refusal := Resolve(ctx, cursorPool, "team", Claims{Pod: "pod-d", ClaimedRun: "bc-5"}, runs, b); refusal != "session_token" {
 		t.Fatalf("no owner: %q", refusal)
@@ -110,9 +114,14 @@ func TestCursorRefusals(t *testing.T) {
 	if _, refusal := Resolve(ctx, claude, "alice-1", Claims{Pod: "pod-a"}, runs, b); refusal != "session_unverifiable" {
 		t.Errorf("Cursor token on a Claude pool: %q", refusal)
 	}
-	// No token: no person, T0 only.
-	if who, refusal := Resolve(ctx, cursorPool, "", Claims{Pod: "pod-a"}, runs, nil); refusal != "" || who.Kind != "none" {
+	// No token: every request on a Cursor person pool names a person, T0 included.
+	if who, refusal := Resolve(ctx, cursorPool, "", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, runs, b); refusal != "session_missing" || who.Kind != "none" {
 		t.Errorf("no token: %q %+v", refusal, who)
+	}
+	// A Cursor service account's run names no person.
+	service := cursorRuns{"svc": {Kind: runnerid.KindAgent, Subject: "service_account:9", Owner: "service_account:9", Run: "bc-9"}}
+	if who, refusal := Resolve(ctx, cursorPool, "svc", Claims{Pod: "pod-s", ClaimedRun: "bc-9"}, service, b); refusal != "no_person" || who.Kind != "none" {
+		t.Errorf("service account run: %q %+v", refusal, who)
 	}
 	if _, refusal := Resolve(ctx, cursorPool, "alice-1", Claims{Pod: "", ClaimedRun: "bc-1"}, runs, b); refusal != "session_unbindable" {
 		t.Errorf("no Pod: %q", refusal)
