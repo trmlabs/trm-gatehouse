@@ -61,11 +61,11 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-list-head", [][]string{list}, nil},
 		{"pr-list-limit-200", [][]string{list}, nil},
 		{"pr-status", [][]string{list}, nil},
-		{"pr-comment", [][]string{read, {"pr.comment"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-comment", [][]string{read, {"pr.comment", "pr.read"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-edit-body", [][]string{read, read, {"pr.edit"}}, [][]GraphQLTarget{nil, nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-edit-add-label", [][]string{read, read, {"pr.label", "pr.read"}, {"pr.label"}},
 			[][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequestWrite}, {fixtureLabel, TargetLabel}}}},
-		{"pr-ready", [][]string{read, {"pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-ready", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
 		{"pr-checks-json", [][]string{read, read}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequest}}}},
 	} {
@@ -290,5 +290,32 @@ func TestGraphQLRefusesRepositoryContents(t *testing.T) {
 		if !errors.Is(err, ErrGraphQLUnmapped) {
 			t.Errorf("%s: %v, want graphql_unmapped", inner, err)
 		}
+	}
+}
+
+// A mutation's payload is read like a query: anything beyond __typename and
+// clientMutationId needs pr.read, so a write grant alone reads nothing.
+func TestGraphQLMutationPayloadNeedsPullRequestRead(t *testing.T) {
+	input := map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}
+	for payload, want := range map[string]string{
+		`clientMutationId`:             "pr.comment",
+		`__typename clientMutationId`:  "pr.comment",
+		`commentEdge { node { url } }`: "pr.comment pr.read",
+		`subject { ... on PullRequest { repository { pullRequests(first: 1) { nodes { body comments(first: 1) { nodes { body } } } } } } }`: "pr.comment pr.read",
+	} {
+		got, err := ParseGitHubGraphQL(graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { `+payload+` } }`, input))
+		if err != nil || strings.Join(got.Operations, " ") != want {
+			t.Errorf("%s: %v %v, want %s", payload, got.Operations, err, want)
+		}
+	}
+}
+
+// GitHub receives the parsed document printed again, and only when that
+// print reads back as itself: a string the printer cannot write faithfully
+// (a control character) is refused rather than sent changed.
+func TestGraphQLRefusesWhatCannotBePrintedFaithfully(t *testing.T) {
+	body := []byte(`{"query":"query { repository(owner: \"o\", name: \"r\") { pullRequests(headRefName: \"x\\u0007\", first: 1) { totalCount } } }"}`)
+	if _, err := ParseGitHubGraphQL(body); !errors.Is(err, ErrGraphQLShape) {
+		t.Fatalf("control character: %v, want graphql_shape", err)
 	}
 }

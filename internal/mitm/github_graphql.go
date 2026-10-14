@@ -51,6 +51,19 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(http.StatusServiceUnavailable, "token_unavailable")
 		return
 	}
+	// GraphQL is opt-in per repository (the graphql operation), so a catalog
+	// entry written for REST does not widen when the broker serves GraphQL.
+	var optedIn []httpcatalog.GitRequest
+	for _, g := range granted {
+		if g.Repo.Allows("graphql") {
+			optedIn = append(optedIn, g)
+		}
+	}
+	if len(optedIn) == 0 {
+		deny(http.StatusForbidden, "unlisted")
+		return
+	}
+	granted = optedIn
 	// Only entries the request passes authorization for are considered,
 	// before any token is minted or GitHub asked (the rule forwardCatalog
 	// states for every credential). The first one authorizes into the logged
@@ -169,7 +182,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	}
 	entry := api.Entry
 	event.Binding = entry.Name + "/" + api.Repo.Repo + "#graphql:" + strings.Join(req.Operations, "+")
-	for _, op := range req.Operations {
+	for _, op := range append([]string{"graphql"}, req.Operations...) {
 		if !api.Repo.Allows(op) {
 			deny(http.StatusForbidden, "unlisted")
 			return

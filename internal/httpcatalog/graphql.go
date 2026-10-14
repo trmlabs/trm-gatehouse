@@ -15,8 +15,9 @@ import (
 )
 
 // GitHub's GraphQL API (POST /graphql) is served the same way as its REST
-// routes: never passed through. Each request is parsed, every top-level field
-// or mutation must map to a repository operation (githubOperations), and
+// routes, for repositories that list the graphql operation: never passed
+// through. Each request is parsed, every top-level field or mutation must map
+// to a repository operation (githubOperations), and
 // GitHub receives the parsed document printed again with its variables
 // re-encoded, so GitHub executes exactly what was checked. The fields mapped
 // are the ones gh 2.x sends for pr view, list, status, checks, comment, edit
@@ -33,9 +34,10 @@ import (
 //	addLabelsToLabelable(input: $input)          pr.label
 //	markPullRequestReadyForReview(input: $input) pr.ready
 //
-// Every query also needs pr.read, since below those fields any selection is
-// allowed within the limits here and pull requests are reachable from most
-// of them. The token GitHub sees is minted for the one repository with pull
+// Every query also needs pr.read, as does a mutation whose payload selects
+// more than __typename or clientMutationId, since below those fields any
+// selection is allowed within the limits here and pull requests are reachable
+// from most of them. The token GitHub sees is minted for the one repository with pull
 // requests and no contents, so a nested field reaches neither another private
 // repository nor files and history (a git entry's grant). Node IDs (a
 // mutation's target, node's id) do not name their repository; the broker
@@ -108,8 +110,8 @@ const (
 )
 
 // githubSchemaFeatures answers gh's pull request feature detection, the only
-// introspection it sends to github.com (two queries of __type(name)
-// { fields(includeDeprecated: true) { name } }). The broker replies itself with
+// introspection it sends to github.com: two queries, covering the three types
+// below, of __type(name) { fields(includeDeprecated: true) { name } }. The broker replies itself with
 // the fields gh looks for, all present on github.com, so introspection never
 // reaches GitHub.
 var githubSchemaFeatures = map[string][]string{
@@ -380,7 +382,7 @@ func value(v *ast.Value, vars map[string]any, defaults func(string) *ast.Value) 
 var (
 	graphqlContentFields = map[string]bool{"object": true, "file": true, "entries": true, "tree": true, "readme": true,
 		"contributingGuidelines": true, "codeOfConduct": true, "pullRequestTemplates": true, "issueTemplates": true}
-	graphqlContentTypes  = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
+	graphqlContentTypes = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
 )
 
 // graphqlCheck walks every selection as written: no directives, no
@@ -733,6 +735,14 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 		}
 	}
 	ops[m.op] = true
+	// A mutation's payload is a selection like any query's: from it a pull
+	// request, its comments or the repository's other pull requests can be
+	// read. Anything beyond __typename and clientMutationId needs pr.read.
+	for _, sel := range f.SelectionSet {
+		if field, ok := sel.(*ast.Field); !ok || field.Name != "__typename" && field.Name != "clientMutationId" {
+			ops["pr.read"] = true
+		}
+	}
 	*targets = append(*targets, GraphQLTarget{ID: input[m.target].(string), Kind: TargetPullRequestWrite})
 	if m.labels {
 		labels, ok := input["labelIds"].([]any)

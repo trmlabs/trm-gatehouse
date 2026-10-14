@@ -289,6 +289,7 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"GET deployments", "GET deployments/1", "GET deployments/1/statuses",
 	}
 	want := map[string][]string{
+		"graphql":    nil, // POST /graphql only (graphql_test.go); no REST route
 		"pr.open":    {"POST pulls"},
 		"pr.read":    {"GET pulls/1"},
 		"pr.list":    {"GET pulls", "GET issues/1/comments"},

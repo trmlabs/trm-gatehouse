@@ -79,6 +79,7 @@ type graphqlFixture struct {
 	failRepo     string   // this repository's read answers 502 ("*": every one)
 	withContents []string // GraphQL requests made with a token holding contents
 	person       bool     // pool-agent is a claude-session pool; requests come as alice
+	mintedFor    []string // the repository of every token minted
 }
 
 type swapCatalog struct {
@@ -99,25 +100,32 @@ var (
 	preview    = nodeID("LA", 1000, 501)
 	deployProd = nodeID("LA", 1000, 502)
 	otherLabel = nodeID("LA", 2000, 503)
+	publicPR   = nodeID("PR", 1000, 77)
 )
 
-type fakeNode struct{ typ, repo, headRepo, headRef, name string }
+type fakeNode struct {
+	typ, repo, headRepo, headRef, name string
+	public                             bool // GitHub shows it to any token
+}
 
 var fakeNodes = map[string]fakeNode{
-	ownPR:      {"PullRequest", "example-repo", "example-repo", "cursor/pool-agent/x", ""},
-	prefixPR:   {"PullRequest", "example-repo", "example-repo", "factory/fix", ""},
-	personPR:   {"PullRequest", "example-repo", "example-repo", "person/x", ""},
-	forkPR:     {"PullRequest", "example-repo", "someone/example-repo", "cursor/pool-agent/y", ""},
-	readPR:     {"PullRequest", "read-repo", "read-repo", "cursor/pool-agent/z", ""},
-	secretPR:   {"PullRequest", "secret-repo", "secret-repo", "cursor/pool-agent/x", ""},
-	preview:    {"Label", "example-repo", "", "", "preview"},
-	deployProd: {"Label", "example-repo", "", "", "deploy-prod"},
-	otherLabel: {"Label", "read-repo", "", "", "preview"},
+	ownPR:      {"PullRequest", "example-repo", "example-repo", "cursor/pool-agent/x", "", false},
+	prefixPR:   {"PullRequest", "example-repo", "example-repo", "factory/fix", "", false},
+	personPR:   {"PullRequest", "example-repo", "example-repo", "person/x", "", false},
+	forkPR:     {"PullRequest", "example-repo", "someone/example-repo", "cursor/pool-agent/y", "", false},
+	readPR:     {"PullRequest", "read-repo", "read-repo", "cursor/pool-agent/z", "", false},
+	secretPR:   {"PullRequest", "secret-repo", "secret-repo", "cursor/pool-agent/x", "", false},
+	preview:    {"Label", "example-repo", "", "", "preview", false},
+	deployProd: {"Label", "example-repo", "", "", "deploy-prod", false},
+	otherLabel: {"Label", "read-repo", "", "", "preview", false},
+	// Its ID names example-repo, but GitHub answers with a public
+	// repository's pull request, which any token can see.
+	publicPR: {"PullRequest", "public-repo", "public-repo", "cursor/pool-agent/x", "", true},
 }
 
 const graphqlCatalogTemplate = `{%s"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
 	"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[%s,
-	{"repo":"example-org/read-repo","access":"write","operations":["pr.read","pr.list"]}]}},
+	{"repo":"example-org/read-repo","access":"write","operations":["graphql","pr.read","pr.list"]}]}},
 	{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
 	"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]},
 	{"repo":"example-org/read-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`
@@ -125,6 +133,7 @@ const graphqlCatalogTemplate = `{%s"entries":[{"name":"github-api","host":"examp
 // exampleRepo is example-repo's catalog entry with these operations; labels
 // and pull request prefixes come with the operations that need them.
 func exampleRepo(ops ...string) string {
+	ops = append([]string{"graphql"}, ops...) // every test repository opts into GraphQL
 	repo := map[string]any{"repo": "example-org/example-repo", "access": "write", "operations": ops}
 	for _, op := range ops {
 		switch op {
@@ -140,6 +149,18 @@ func exampleRepo(ops ...string) string {
 }
 
 var allPullRequestOps = []string{"pr.open", "pr.read", "pr.list", "pr.comment", "pr.edit", "pr.label", "pr.ready"}
+
+// useRaw serves a whole catalog; %[1]d in it is the fake's port.
+func (f *graphqlFixture) useRaw(t *testing.T, catalog string) {
+	t.Helper()
+	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(catalog, f.port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.catalog.mu.Lock()
+	f.catalog.c = c
+	f.catalog.mu.Unlock()
+}
 
 func (f *graphqlFixture) use(t *testing.T, ops ...string) {
 	t.Helper()
@@ -182,6 +203,7 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 			seq++
 			token := fmt.Sprintf("ghs_syntheticgraphqltoken%06d", seq)
 			f.minted[token] = body.Repositories[0]
+			f.mintedFor = append(f.mintedFor, body.Repositories[0])
 			f.contents[token] = body.Permissions["contents"]
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
@@ -239,7 +261,7 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 			nodes := []any{}
 			for _, id := range req.Variables.IDs {
 				n, ok := fakeNodes[id]
-				if !ok || n.repo != repo { // invisible to this repository's token
+				if !ok || n.repo != repo && !n.public { // invisible to this repository's token
 					nodes = append(nodes, nil)
 					continue
 				}
@@ -304,7 +326,9 @@ func (f *graphqlFixture) send(t *testing.T, method, path string, headers map[str
 	if r.Header.Get("Content-Type") == "" {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	r.Header.Set("Authorization", "token "+githubTokenPlaceholder)
+	if r.Header.Get("Authorization") == "" {
+		r.Header.Set("Authorization", "token "+githubTokenPlaceholder)
+	}
 	resp, err := f.client.Do(r)
 	if err != nil {
 		return 0, err.Error()
@@ -440,7 +464,7 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 	// The trail names the mapped operation.
 	found := false
 	for _, e := range f.audit.all() {
-		if e.Binding == "github-api/example-org/example-repo#graphql:pr.comment" && e.Outcome == "completed" && e.Agent == "agent-uuid-1" {
+		if e.Binding == "github-api/example-org/example-repo#graphql:pr.comment+pr.read" && e.Outcome == "completed" && e.Agent == "agent-uuid-1" {
 			found = true
 		}
 	}
@@ -653,4 +677,131 @@ func TestGitHubGraphQLAuditNamesThePerson(t *testing.T) {
 		t.Fatalf("feature detection: %d %q", code, f.audit.last().Outcome)
 	}
 	sameAuthorization("feature detection", rest)
+}
+
+// GraphQL is opt-in per repository: an entry written for REST alone (no
+// graphql operation) keeps its REST routes and gets no GraphQL at all, not
+// even the broker's feature-detection answer.
+func TestGitHubGraphQLIsOptIn(t *testing.T) {
+	f := newGraphQLFixture(t)
+	f.useRaw(t, `{"entries":[{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],
+		"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write","operations":["pr.read","pr.list","pr.comment"]}]}},
+		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`)
+	for _, c := range ghCommands {
+		outcome := f.replay(t, c.fixture)
+		if c.fixture == "pr-diff" { // REST
+			if outcome != "" {
+				t.Errorf("REST pr diff refused: %q", outcome)
+			}
+			continue
+		}
+		if outcome != "unlisted" {
+			t.Errorf("%s without graphql: %q, want unlisted", c.fixture, outcome)
+		}
+	}
+	feature := `{"query":"query PullRequest_fields2{WorkflowRun: __type(name: \"WorkflowRun\"){fields(includeDeprecated: true){name}}}"}`
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, feature); code != 403 || f.audit.last().Outcome != "unlisted" {
+		t.Errorf("feature detection without graphql: %d %q", code, f.audit.last().Outcome)
+	}
+	if got := f.relayed(); len(got) != 0 {
+		t.Fatalf("GitHub received GraphQL without the opt-in: %v", got)
+	}
+}
+
+// A write grant reads nothing: a mutation whose payload reads pull requests
+// needs pr.read, so an entry with only pr.comment may comment but not read
+// through the comment's payload.
+func TestGitHubGraphQLMutationPayloadNeedsRead(t *testing.T) {
+	f := newGraphQLFixture(t)
+	f.use(t, "pr.comment")
+	reading := `{"query":"mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { repository { pullRequests(first: 1) { nodes { body comments(first: 1) { nodes { body } } } } } } } } }",` +
+		`"variables":{"input":{"subjectId":"` + ownPR + `","body":"x"}}}`
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, reading); code != 403 || f.audit.last().Outcome != "unlisted" {
+		t.Fatalf("payload read with pr.comment alone: %d %q", code, f.audit.last().Outcome)
+	}
+	if got := f.relayed(); len(got) != 0 {
+		t.Fatalf("relayed: %v", got)
+	}
+	plain := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, plain); code != 200 {
+		t.Fatalf("comment with pr.comment alone: %d %q", code, f.audit.last().Outcome)
+	}
+}
+
+// The candidate filter runs authorization before any token is minted or
+// GitHub asked: an entry this request cannot use (T1, and the broker has no
+// entitlement source, so alice holds no group) gets no token and no lookup,
+// even when the node ID names its repository.
+func TestGitHubGraphQLAuthorizesBeforeLookups(t *testing.T) {
+	f := newGraphQLFixtureFor(t, true)
+	f.useRaw(t, `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}],"entries":[
+		{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],
+		"git":{"appID":7,"installationID":42,"repos":[`+exampleRepo(allPullRequestOps...)+`]}},
+		{"name":"github-api-t1","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],"tier":"T1","requires":["`+authzGroup+`"],
+		"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/secret-repo","access":"write","operations":["graphql","pr.read","pr.comment"],"pullRequestPrefixes":["cursor/"]}]}},
+		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`)
+	body := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": secretPR, "body": "x"})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 403 {
+		t.Fatalf("comment on the T1 entry's repository: %d %q", code, f.audit.last().Outcome)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, repo := range f.mintedFor {
+		if repo == "secret-repo" {
+			t.Fatal("a token was minted for an entry the request does not authorize")
+		}
+	}
+	if len(f.received) != 0 {
+		t.Fatalf("relayed: %v", f.received)
+	}
+}
+
+// A worker's own token is refused on /graphql, as on REST.
+func TestGitHubGraphQLRefusesAWorkersOwnToken(t *testing.T) {
+	f := newGraphQLFixture(t)
+	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { id } } }"}`
+	for _, auth := range []string{"Bearer ghp_aworkersowntoken", "token " + githubTokenPlaceholder + "x", "Basic eDp5"} {
+		if code, _ := f.send(t, http.MethodPost, "/graphql", map[string]string{"Authorization": auth}, read); code != 400 || f.audit.last().Outcome != "credential_header" {
+			t.Errorf("%q: %d %q", auth, code, f.audit.last().Outcome)
+		}
+	}
+	if got := f.relayed(); len(got) != 0 {
+		t.Fatalf("relayed: %v", got)
+	}
+}
+
+// The body is read up to the largest limit among the pool's entries, then
+// held to the chosen entry's own limit.
+func TestGitHubGraphQLHoldsTheChosenEntrysSizeLimit(t *testing.T) {
+	f := newGraphQLFixture(t)
+	f.useRaw(t, `{"entries":[
+		{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],
+		"git":{"appID":7,"installationID":42,"repos":[`+exampleRepo(allPullRequestOps...)+`]}},
+		{"name":"github-api-small","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],"maxRequestBytes":1024,
+		"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/read-repo","access":"write","operations":["graphql","pr.read","pr.list"]}]}}]}`)
+	padded := func(repo string) string {
+		return `{"query":"query { repository(owner: \"example-org\", name: \"` + repo + `\") { pullRequest(number: 5) { id } } }","variables":{"pad":"` + strings.Repeat("p", 2048) + `"}}`
+	}
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, padded("read-repo")); code != 413 || f.audit.last().Outcome != "request_too_large" {
+		t.Fatalf("2 KiB to the 1 KiB entry: %d %q", code, f.audit.last().Outcome)
+	}
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, padded("example-repo")); code != 200 {
+		t.Fatalf("2 KiB to the 1 MiB entry: %d %q", code, f.audit.last().Outcome)
+	}
+}
+
+// GitHub's answer decides, not the ID: an ID naming example-repo that GitHub
+// resolves to a public repository's pull request (visible to any token) is
+// refused.
+func TestGitHubGraphQLChecksGitHubsAnswerNotTheID(t *testing.T) {
+	f := newGraphQLFixture(t)
+	body := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": publicPR, "body": "x"})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 403 || f.audit.last().Outcome != "comment_target" {
+		t.Fatalf("public repository's pull request: %d %q", code, f.audit.last().Outcome)
+	}
+	if got := f.relayed(); len(got) != 0 {
+		t.Fatalf("relayed: %v", got)
+	}
 }

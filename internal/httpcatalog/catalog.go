@@ -112,6 +112,11 @@ var DefaultGitHubOperations = []string{"pr.open", "pr.read", "pr.comment"}
 // operations come from, and the token scope each needs (see GitGranted). The
 // routes each one opens are in githubAPIRoutes.
 var githubOperations = map[string]string{
+	// graphql opts a repository into POST /graphql (graphql.go), where each
+	// field still needs its own operation and pr.read also covers a pull
+	// request's comments, reviews and review threads. Opt-in, so no existing
+	// entry widens when the broker starts serving GraphQL.
+	"graphql":          "pull-requests",
 	"pr.open":          "pull-requests",  // POST /pulls, head under the pool's push prefixes
 	"pr.read":          "pull-requests",  // GET /pulls/{n}
 	"pr.list":          "pull-requests",  // GET /pulls, GET /issues/{n}/comments
