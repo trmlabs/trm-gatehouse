@@ -176,7 +176,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
-		if !refused(api.Entry, err) {
+		// A code-returning route also needs the git entry it relies on to
+		// authorize this requester, so it never reaches past a clone.
+		if !refused(api.Entry, err) && (api.CloneEntry == nil || !refused(api.CloneEntry, nil)) {
 			p.forwardGitHubAPI(w, r, target, scope, event, api, err)
 		}
 		return

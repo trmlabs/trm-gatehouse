@@ -211,6 +211,7 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123456789abcdef0123456789abcdef01234567/status", "", "statuses", "statuses", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/statuses", "per_page=100", "statuses", "statuses", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=unit&filter=latest&per_page=100", "check-runs", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=build+%28ubuntu-latest%29", "check-runs", "checks", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9", "", "check-run", "checks", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "per_page=100", "check-annotations", "checks", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "per_page=100&page=2", "pull-files", "pull-requests", false, nil},
@@ -390,14 +391,14 @@ func TestGitHubAPICodeReadsNeedClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/repos/trmlabs/trm-b2b/pulls/12/files", "/repos/trmlabs/trm-b2b/compare/main...feature"} {
-		if m, _, err := withGit.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); err != nil || m.Operation != "pr.read" {
+		if m, _, err := withGit.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); err != nil || m.Operation != "pr.read" || m.CloneEntry == nil || m.CloneEntry.Kind != "git" {
 			t.Errorf("%s with a git entry: %v %+v", path, err, m)
 		}
 		if _, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); !errors.Is(err, ErrUnlisted) {
 			t.Errorf("%s without a git entry: %v", path, err)
 		}
 	}
-	if _, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a"); err != nil {
-		t.Errorf("reading a pull request still needs no git entry: %v", err)
+	if m, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a"); err != nil || m.CloneEntry != nil {
+		t.Errorf("reading a pull request still needs no git entry: %v %+v", err, m)
 	}
 }

@@ -745,6 +745,10 @@ type GitRequest struct {
 	// CommentsOn is the pull request number a comment request targets: the
 	// broker comments only on a pull request whose head is one of HeadPrefixes.
 	CommentsOn int64
+	// CloneEntry is the git entry a code-returning route (a pull request's
+	// files, a compare) relies on. The broker authorizes the requester against
+	// it as well as Entry, so a code read never reaches further than a clone.
+	CloneEntry *Entry
 	// The fields below describe every github-api request. Route names it
 	// (see githubAPIRoutes), Operation is the repository operation that opened
 	// it, and Method is the one method it was matched with.
@@ -829,9 +833,12 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 // read pull requests, read and post comments, and, on a pull request whose
 // head is under the pool's push prefixes or the repository's
 // PullRequestPrefixes, comment, edit the body, edit the App's own comment and
-// mark it ready. Labels, repository dispatch, Actions reads and deployment
-// reads exist only where the repository grants them. Reviews, merges, pushes
-// through the API and everything else are unlisted.
+// mark it ready. A pull request's files and a compare return code, so they
+// exist only for a pool whose git entry can clone the repository, which the
+// broker then authorizes too (CloneEntry). Labels, repository dispatch, Actions
+// reads (with check runs and commit statuses) and deployment reads exist only
+// where the repository grants them. Reviews, merges, pushes through the API
+// and everything else are unlisted.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -886,10 +893,13 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
-			if route.code && !c.canClone(repo, pool) {
+			if route.code {
 				// A file list or compare returns code: only for a pool whose git
-				// entry already lets it clone the repository.
-				return GitRequest{}, true, ErrUnlisted
+				// entry lets it clone the repository, and only for a requester
+				// that entry authorizes (its tier and groups).
+				if matched.CloneEntry = c.cloneEntry(repo, pool); matched.CloneEntry == nil {
+					return GitRequest{}, true, ErrUnlisted
+				}
 			}
 			switch {
 			case route.name == "open-pull":
@@ -955,7 +965,7 @@ var (
 	artifactQuery   = []string{"name", "page", "per_page"}
 	deploymentQuery = []string{"environment", "page", "per_page", "ref", "sha", "task"}
 	workflowFile    = regexp.MustCompile(`^([1-9][0-9]{0,11}|[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.ya?ml)$`)
-	queryValue      = regexp.MustCompile(`^[A-Za-z0-9 _.,:/+-]{0,200}$`)
+	queryValue      = regexp.MustCompile(`^[A-Za-z0-9 _.,:/+()-]{0,200}$`) // () for matrix job names such as `build (ubuntu-latest)`
 	commitSHA       = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 	// compareRef is one side of a compare: a branch name or a commit, with no
 	// slash (a branch with one is not served) and never "..".
@@ -1233,19 +1243,21 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 	return s
 }
 
-// canClone reports whether a git entry lets the pool fetch the repository.
-func (c Catalog) canClone(repo, pool string) bool {
-	for _, e := range c.entries {
+// cloneEntry returns the git entry that lets the pool fetch the repository,
+// or nil.
+func (c Catalog) cloneEntry(repo, pool string) *Entry {
+	for i := range c.entries {
+		e := &c.entries[i]
 		if e.Kind != "git" || e.Git == nil || !contains(e.Pools, pool) {
 			continue
 		}
 		for _, r := range e.Git.Repos {
 			if r.Repo == repo {
-				return true
+				return e
 			}
 		}
 	}
-	return false
+	return nil
 }
 
 // clusterLocal reports whether host is a Kubernetes Service name, the only
