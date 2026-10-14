@@ -829,3 +829,41 @@ func TestGitHubGraphQLAuditBindingIsTheRESTBinding(t *testing.T) {
 		}
 	}
 }
+
+// A pull request's file list over GraphQL takes the clone grant REST takes:
+// refused for a pool whose git entry may not clone the repository, and for a
+// requester that git entry does not authorize; served with both.
+func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
+	files := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { files(first: 10) { nodes { path } } } } }"}`
+	f := newGraphQLFixture(t) // its git entry is on git.example.com: no clone of example.com's repositories
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, files); code != 403 || f.audit.last().Outcome != "unlisted" {
+		t.Fatalf("no clone grant: %d %q", code, f.audit.last().Outcome)
+	}
+	if got := f.relayed(); len(got) != 0 {
+		t.Fatalf("relayed without the clone grant: %v", got)
+	}
+	cloneable := `{%s"entries":[{"name":"github-api","host":"example.com","port":%%[1]d,"kind":"github-api","pools":["pool-agent"],
+		"git":{"appID":7,"installationID":42,"repos":[` + exampleRepo(allPullRequestOps...) + `]}},
+		{"name":"github","host":"example.com","kind":"git","pools":["pool-agent"]%s,"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`
+	f.useRaw(t, fmt.Sprintf(cloneable, "", ""))
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, files); code != 200 {
+		t.Fatalf("with the clone grant: %d %q", code, f.audit.last().Outcome)
+	}
+	// A git entry the requester cannot use (T1, and no entitlement source)
+	// refuses the file list though the API entry allows the query.
+	p := newGraphQLFixtureFor(t, true)
+	p.useRaw(t, fmt.Sprintf(cloneable,
+		`"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}],`,
+		`,"tier":"T1","requires":["`+authzGroup+`"]`))
+	if code, _ := p.send(t, http.MethodPost, "/graphql", nil, files); code != 403 || p.audit.last().Binding != "github" {
+		t.Fatalf("clone entry not authorized: %d %q binding %q", code, p.audit.last().Outcome, p.audit.last().Binding)
+	}
+	if got := p.relayed(); len(got) != 0 {
+		t.Fatalf("relayed without authorization on the clone entry: %v", got)
+	}
+	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { title } } }"}`
+	if code, _ := p.send(t, http.MethodPost, "/graphql", nil, read); code != 200 {
+		t.Fatalf("a read without files on the same catalog: %d %q", code, p.audit.last().Outcome)
+	}
+}

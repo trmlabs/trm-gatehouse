@@ -1316,6 +1316,13 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 // stands in for it.
 const cloneGitPort = 443
 
+// GitHubCloneEntry is cloneEntry for a GraphQL request that reads a pull
+// request's files: the git entry the requester must also pass, or nil when
+// the pool may not clone the repository.
+func (c Catalog) GitHubCloneEntry(apiHost, repo, pool string) *Entry {
+	return c.cloneEntry(strings.ToLower(apiHost), strings.ToLower(repo), pool)
+}
+
 // cloneEntry returns the git entry a clone of repo would use, chosen the way
 // GitMatch chooses it: the git entry on the git host and port that lists the
 // repository (the catalog allows one per host and port), or nil when there is

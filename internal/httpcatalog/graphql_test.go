@@ -345,3 +345,41 @@ func TestGraphQLAuditOperation(t *testing.T) {
 		}
 	}
 }
+
+// A request that reads which files a pull request changes is marked Code,
+// for the clone grant REST asks for the same list; gh's default commands
+// read none.
+func TestGraphQLMarksFileListsAsCode(t *testing.T) {
+	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
+	for inner, want := range map[string]bool{
+		`pullRequest(number: 1) { files(first: 100) { nodes { path additions deletions } } }`: true,
+		`pullRequest(number: 1) { reviewThreads(first: 10) { nodes { path } } }`:              true,
+		`pullRequest(number: 1) { ...f }`:                                                     true,
+		`pullRequest(number: 1) { changedFiles additions deletions title }`:                   false,
+		`pullRequests(first: 5) { nodes { number headRefName } }`:                             false,
+	} {
+		query := `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ` + inner + ` } }`
+		if strings.Contains(inner, "...f") {
+			query += ` fragment f on PullRequest { files(first: 1) { nodes { path } } }`
+		}
+		got, err := ParseGitHubGraphQL(graphqlBody(query, vars))
+		if err != nil || got.Code != want {
+			t.Errorf("%s: code %v err %v, want %v", inner, got.Code, err, want)
+		}
+	}
+	files, _ := filepath.Glob("testdata/gh/*.json")
+	for _, f := range files {
+		var fx ghFixture
+		data, _ := os.ReadFile(f)
+		_ = json.Unmarshal(data, &fx)
+		for _, r := range fx.Requests {
+			if r.Path != "/graphql" {
+				continue
+			}
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			if got, err := ParseGitHubGraphQL([]byte(body)); err == nil && got.Code {
+				t.Errorf("%s: a gh default command reads file lists", filepath.Base(f))
+			}
+		}
+	}
+}

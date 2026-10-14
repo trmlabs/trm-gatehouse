@@ -180,6 +180,19 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	case !authorizeInto(api.Entry):
 		return
 	}
+	if req.Code {
+		// A pull request's file list is code-adjacent: as for REST, only a
+		// pool whose git entry may clone the repository, for a requester that
+		// entry authorizes too.
+		clone := catalog.GitHubCloneEntry(host, api.Repo.Repo, scope.Pool)
+		if clone == nil {
+			deny(http.StatusForbidden, "unlisted")
+			return
+		}
+		if !authorizeInto(clone) {
+			return
+		}
+	}
 	entry := api.Entry
 	// The binding has exactly the REST form ("<entry>/<owner>/<repo>"), so
 	// alerts and dashboards that match on it see GraphQL traffic too. The

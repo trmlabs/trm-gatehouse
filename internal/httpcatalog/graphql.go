@@ -95,6 +95,11 @@ type GitHubGraphQL struct {
 	// Write is the mutation's operation (pr.comment and so on); empty for a
 	// query.
 	Write string
+	// Code marks a request that reads which files a pull request changes
+	// (graphqlPathFields): as for REST's pull request files, it is served only
+	// to a pool whose git entry may clone the repository, for a requester that
+	// entry authorizes.
+	Code bool
 }
 
 // AuditOperation is the one operation an audit row names for the request:
@@ -252,7 +257,7 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 		return GitHubGraphQL{}, ErrGraphQLLimit
 	}
 
-	out := GitHubGraphQL{}
+	out := GitHubGraphQL{Code: c.code}
 	ops := map[string]bool{}
 	repos := map[string]bool{}
 	switch op.Operation {
@@ -399,6 +404,12 @@ var (
 	graphqlContentTypes = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
 )
 
+// graphqlPathFields name the files a pull request changes (its file list, a
+// review comment's or thread's path). They are allowed, but only with the
+// clone grant REST asks for the same list (GitHubGraphQL.Code). The type
+// PullRequestChangedFile is reached only through files.
+var graphqlPathFields = map[string]bool{"files": true, "path": true}
+
 // graphqlCheck walks every selection as written: no directives, no
 // introspection beyond __typename, no argument named twice, aliases counted,
 // and every first or last at most maxGraphQLPage.
@@ -406,6 +417,7 @@ type graphqlCheck struct {
 	vars     map[string]any
 	defaults func(string) *ast.Value
 	aliases  int
+	code     bool // a field of graphqlPathFields appears
 	err      error
 }
 
@@ -427,6 +439,9 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			}
 			if graphqlContentFields[s.Name] {
 				c.fail(ErrGraphQLUnmapped)
+			}
+			if graphqlPathFields[s.Name] {
+				c.code = true
 			}
 			if s.Alias != "" && s.Alias != s.Name {
 				c.aliases++
