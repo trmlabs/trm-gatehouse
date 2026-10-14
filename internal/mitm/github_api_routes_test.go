@@ -195,8 +195,8 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 		{"GET", routeRepo + "/deployments?environment=preview-30", "", "GET " + routeRepo + "/deployments?environment=preview-30"},
 		{"POST", routeRepo + "/pulls/30/ready", "", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_thirty"}}`},
 		{"POST", routeRepo + "/pulls/12/ready", "{}", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_twelve"}}`},
-		// The reads gh run list, view and watch and the eval preview gates make.
-		{"GET", routeRepo + "/actions/workflows/preview-k8s.yml", "", "GET " + routeRepo + "/actions/workflows/preview-k8s.yml"},
+		// The reads gh run list, view and watch make, and a CI verifier's reads of a commit.
+		{"GET", routeRepo + "/actions/workflows/ci.yml", "", "GET " + routeRepo + "/actions/workflows/ci.yml"},
 		{"GET", routeRepo + "/actions/runs/9?exclude_pull_requests=true", "", "GET " + routeRepo + "/actions/runs/9?exclude_pull_requests=true"},
 		{"GET", routeRepo + "/check-runs/9/annotations?per_page=100", "", "GET " + routeRepo + "/check-runs/9/annotations?per_page=100"},
 		{"GET", routeRepo + "/commits/0123abc/check-runs?filter=latest", "", "GET " + routeRepo + "/commits/0123abc/check-runs?filter=latest"},

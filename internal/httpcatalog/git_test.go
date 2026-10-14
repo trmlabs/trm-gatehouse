@@ -206,8 +206,8 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/deployments", "environment=preview-1&sha=abc", "deployments", "deployments", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments/4/statuses", "", "deployments", "deployments", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs/9", "exclude_pull_requests=true", "actions", "actions", false, nil},
-		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/preview-k8s.yml", "", "actions", "actions", false, nil},
-		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/277393220", "", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/ci.yml", "", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/1234", "", "actions", "actions", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123456789abcdef0123456789abcdef01234567/status", "", "statuses", "statuses", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/statuses", "per_page=100", "statuses", "statuses", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=unit&filter=latest&per_page=100", "check-runs", "checks", false, nil},
@@ -225,7 +225,7 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"POST", "/repos/trmlabs/trm-b2b/check-runs", "", "", "", false, ErrUnlisted},
 		{"PATCH", "/repos/trmlabs/trm-b2b/check-runs/9", "", "", "", false, ErrMethod},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs/9", "exclude_pull_requests=true&x=1", "", "", false, ErrUnlisted},
-		{"POST", "/repos/trmlabs/trm-b2b/actions/workflows/preview-k8s.yml/dispatches", "", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/actions/workflows/ci.yml/dispatches", "", "", "", false, ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/actions/runs/9/rerun", "", "", "", false, ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/../runs", "", "", "", false, ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/secrets", "", "", "", false, ErrUnlisted},
@@ -254,8 +254,8 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 			t.Errorf("GitGranted %s = false", scope)
 		}
 	}
-	if repos, pullRequests, actions, deployments := c.GitScope(42); len(repos) != 3 || !pullRequests || !actions || !deployments {
-		t.Errorf("GitScope = %v %v %v %v", repos, pullRequests, actions, deployments)
+	if s := c.GitScope(42); len(s.Repos) != 3 || !s.PullRequests || !s.Actions || !s.Deployments || !s.Checks || !s.Statuses {
+		t.Errorf("GitScope = %+v", s)
 	}
 	for name, doc := range map[string]string{
 		"operations on a git entry": strings.Replace(gitEntry, `"access":"write"`, `"access":"write","operations":["pr.read"]`, 1),

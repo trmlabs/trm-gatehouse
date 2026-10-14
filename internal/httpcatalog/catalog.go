@@ -1202,24 +1202,35 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	return false
 }
 
+// GitHubScope is what the catalog lets one installation's tokens reach: its
+// repositories and whether any github-api entry on it needs each token scope.
+type GitHubScope struct {
+	Repos                                                []string
+	PullRequests, Actions, Deployments, Checks, Statuses bool
+}
+
 // GitScope returns every repository the catalog lists for an installation,
-// and whether any github-api entry on it opens pull requests, reads Actions
-// (and so check runs and commit statuses) or reads deployments.
-func (c Catalog) GitScope(installation int64) (repos []string, pullRequests, actions, deployments bool) {
+// and whether any github-api entry on it opens pull requests, reads Actions,
+// reads deployments, or reads check runs or commit statuses (which
+// actions.read also does).
+func (c Catalog) GitScope(installation int64) GitHubScope {
+	var s GitHubScope
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
 			continue
 		}
 		for _, r := range e.Git.Repos {
-			repos = append(repos, r.Repo)
+			s.Repos = append(s.Repos, r.Repo)
 			if e.Kind == "github-api" {
-				pullRequests = pullRequests || r.grantsScope("pull-requests")
-				actions = actions || r.grantsScope("actions")
-				deployments = deployments || r.grantsScope("deployments")
+				s.PullRequests = s.PullRequests || r.grantsScope("pull-requests")
+				s.Actions = s.Actions || r.grantsScope("actions")
+				s.Deployments = s.Deployments || r.grantsScope("deployments")
+				s.Checks = s.Checks || r.grantsScope("checks")
+				s.Statuses = s.Statuses || r.grantsScope("statuses")
 			}
 		}
 	}
-	return repos, pullRequests, actions, deployments
+	return s
 }
 
 // canClone reports whether a git entry lets the pool fetch the repository.
