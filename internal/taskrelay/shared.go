@@ -281,9 +281,10 @@ func (p *agentPod) attest(s *SharedConfig, now time.Time) (workloadidentity.Atte
 	// is never looked up, and the requester is read from the Pod. Both are
 	// written by whoever creates or updates the Pod, so the boundary is that
 	// only the controller may create Pods in an agent namespace and no one may
-	// change their owner references or requester afterwards. The deployment
-	// enforces that with admission policy, as for pool Pods; RBAC alone does
-	// not hold it, since a cluster-wide grant includes Pod creation.
+	// change their owner references or requester afterwards. A deployment
+	// must enforce that with admission policy, as for pool Pods; Gatehouse
+	// does not ship that policy, and RBAC alone does not hold it, since a
+	// cluster-wide grant includes Pod creation.
 	owner := ""
 	for _, o := range m.OwnerReferences {
 		if o.Controller != nil && *o.Controller {

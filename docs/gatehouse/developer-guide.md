@@ -12,9 +12,9 @@ behind the agent when there is one.
 
 Keep the catalog in a reviewed repository and have your deployment pipeline
 write it to Vault (see [broker catalog](broker-catalog.md) for where the broker
-reads it). You add one entry in one pull request, the pipeline creates the
-Vault access the entry needs, and Gatehouse picks up the change within 30
-seconds with no restart. Check an entry locally first, with an `agent-vault`
+reads it). You add one entry in one pull request, grant the broker read on the
+entry's Vault paths in the same change, and Gatehouse picks up the change
+within 30 seconds with no restart. Check an entry locally first, with an `agent-vault`
 binary built from this repository:
 
 ```sh
@@ -31,8 +31,8 @@ agent-vault broker-catalog validate --require-pools --environment staging catalo
 | A web app as a test user | `browser-session` | A test user and an Auth0 login client. See [browser sessions](browser-session.md). |
 
 A catalog defines its pools, then its entries. This example passes
-`agent-vault broker-catalog validate --require-pools` once the `REPLACE`
-value and the group ID are real:
+`agent-vault broker-catalog validate --require-pools --environment staging`
+once the `REPLACE` value and the group ID are real:
 
 ```yaml
 pools:
@@ -85,9 +85,9 @@ catalog, and checks again on every request.
 
 | Tier | Who may use it |
 |---|---|
-| T0 (default) | Any worker in a granted pool, including Cursor's, which has no person behind its agents |
-| T1 | A verified person in every group the entry `requires`, from a Claude pool; or an automation pool whose fixed groups include them all. Never Cursor. |
-| T2 | As T1, from a Claude pool only, with the groups granted for a limited time |
+| T0 (default) | Any worker in a granted pool, including a pool with no person behind its agents |
+| T1 | A verified person in every group the entry `requires`, from a person pool (a Claude session, a Cursor run or an agent-sandbox Pod that names the person); or an automation pool whose fixed groups include them all. Never a pool with no person behind it. |
+| T2 | As T1, from a person pool only, with the groups granted for a limited time |
 
 `gcp` entries are always T1 or T2. Gatehouse looks up a person's groups in
 Microsoft Entra ID once a deployment turns that lookup on, and caches them for
@@ -127,11 +127,18 @@ Pick the Gatehouse pool in Cursor's environment picker and use the standard
 connection strings and environment variables the pool's worker template sets;
 there is no SDK.
 
-- **Tier T0 only:** Cursor does not tell Gatehouse who started a task, so a
-  Cursor pool has no person behind it and a ceiling of T0. A catalog that
-  grants a Cursor pool an entry above T0 is refused when Gatehouse loads it.
-- **Group-limited entries:** use a Claude pool, where Gatehouse verifies the
-  person and checks their groups on each request.
+- **Worker pools (`pod-token`):** Gatehouse checks the worker Pod but not who
+  started the task, so the pool has no person behind it and a ceiling of T0.
+  A catalog that grants such a pool an entry above T0 is refused when
+  Gatehouse loads it.
+- **No group control on a worker pool:** anyone who can use the self-hosted
+  machines can pick any pool, so grant a worker pool only data every such
+  person may read.
+- **Person pools (`cursor-session`):** Gatehouse names the person who started
+  each run from Cursor's signed identity token (see
+  [who a Cursor run names](broker-catalog.md#who-a-cursor-run-names)), so the
+  pool may hold T1 and T2 entries. Every request must name a person, T0
+  included.
 
 ## Every refusal names its cause
 

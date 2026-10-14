@@ -16,7 +16,9 @@ import (
 // Names that must not appear, by the SHA-256 of the lowercase token, so this
 // file does not publish them itself. A token is a run of letters, digits, "_"
 // and "-", so a dotted host is checked one label at a time. An IPv4 range in
-// CIDR form is checked whole.
+// CIDR form is checked whole. The hashes are unsalted and the names short, so
+// anyone can confirm a guess: this keeps names out of the tree, it does not
+// hide them.
 var deniedTokens = map[string]string{
 	"ca67af247429a62b379e673e63927761de1dbbff441abc4805a0a060d4d33ff6": "internal domain",
 	"e14b2129a1f577184e79a136d011d4a904319500b7cbc952a6d6e03da7fb7eee": "cloud project",
@@ -176,6 +178,11 @@ func TestProblems(t *testing.T) {
 		if got := len(problems("x.go", line)) > 0; got != want {
 			t.Errorf("%s: flagged %v, want %v", line, got, want)
 		}
+	}
+	deniedTokens["9e6315b575452645a6015715848fb021d608cf0175b569c923b5ad3145d241dc"] = "test range" // 198.51.100.0/24
+	defer delete(deniedTokens, "9e6315b575452645a6015715848fb021d608cf0175b569c923b5ad3145d241dc")
+	if len(problems("x.go", `"sourceCIDRs": ["198.51.100.0/24"]`)) == 0 {
+		t.Error("a denied range is not flagged")
 	}
 	if got := cidr.FindAllString(`"sourceCIDRs": ["192.0.2.0/28", "10.0.0.1"]`, -1); len(got) != 1 || got[0] != "192.0.2.0/28" {
 		t.Errorf("CIDR ranges found = %q, want only 192.0.2.0/28", got)

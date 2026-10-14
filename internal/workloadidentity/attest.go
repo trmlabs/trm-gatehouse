@@ -345,9 +345,9 @@ func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, now time.Time)
 	// it: anyone who may create Pods under this service account in this
 	// namespace can name an approved controller. That right is the boundary,
 	// and RBAC alone does not hold it, since a cluster-wide grant includes it.
-	// The deployment holds it with admission policy: only the pool controller
-	// creates Pods in the worker namespace, and only it changes their owner
-	// references. Controllers always set blockOwnerDeletion, so it is
+	// A deployment must hold it with admission policy: only the pool
+	// controller creates Pods in the worker namespace, and only it changes
+	// their owner references. Gatehouse does not ship that policy. Controllers always set blockOwnerDeletion, so it is
 	// required; it adds a check only where the
 	// OwnerReferencesPermissionEnforcement admission plugin is enabled, and
 	// the boundary does not depend on that.

@@ -46,7 +46,7 @@ Gatehouse release, and no version is supported for security fixes yet
 
 | Part | State |
 |---|---|
-| HTTP API keys, PostgreSQL logins and GitHub | Running in TRM's staging environment for two agent platforms. HTTP and PostgreSQL are also tested against a real secrets manager and database in the [local demo](#try-it-in-5-minutes) |
+| HTTP API keys, PostgreSQL logins and GitHub | Used in the maintainers' pre-production environment. HTTP and PostgreSQL are also tested against a real secrets manager and database in the [local demo](#try-it-in-5-minutes) |
 | Google Cloud and browser sign-in | Built and tested on `main` |
 | Limiting an entry to people in named groups | Built. Off until a deployment turns on the directory lookup, which supports Microsoft Entra ID only |
 | Upstream Agent Vault features (vaults, web UI, proposals, TypeScript SDK) | Inherited unchanged. Gatehouse's strict profile does not use them |
@@ -64,13 +64,9 @@ docker build -f examples/credential-proxy/Dockerfile -t credential-proxy-verific
 docker run --rm --network none credential-proxy-verification
 ```
 
-The build takes about a minute and a half and the run about three. The last
-lines read:
-
-```text
-PASS: local HTTP and PostgreSQL fixtures.
-Deployment acceptance still requires the actual runtime identity, encrypted ingress and bypass checks.
-```
+The build takes about a minute and a half and the run about three. The run
+ends with `PASS: local HTTP and PostgreSQL fixtures.`, a list of what it
+proved, and a reminder that a real deployment needs more checks.
 
 A nonzero exit is a failure. Some tests print a skip line asking for extra
 settings; those cover setups the container does not include.
