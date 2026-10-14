@@ -33,22 +33,28 @@ import (
 //	addLabelsToLabelable(input: $input)          pr.label
 //	markPullRequestReadyForReview(input: $input) pr.ready
 //
-// Below those fields any selection is allowed within the limits here: the
-// token GitHub sees is minted for the one repository and its pull requests,
-// so a nested field cannot reach another private repository. Node IDs (a
+// Every query also needs pr.read, since below those fields any selection is
+// allowed within the limits here and pull requests are reachable from most
+// of them. The token GitHub sees is minted for the one repository with pull
+// requests and no contents, so a nested field reaches neither another private
+// repository nor files and history (a git entry's grant). Node IDs (a
 // mutation's target, node's id) do not name their repository; the broker
 // resolves each one before sending (GraphQLTarget).
 
 // Limits on one GraphQL request. gh's largest document (pr view) is about 3
-// KiB, 13 levels deep, with about 130 fields once fragments are expanded.
+// KiB, 13 levels deep, with about 150 fields once fragments are expanded.
+// The request limit bounds what one GraphQL request costs the App
+// installation's hourly budget (GitHub charges a point per 100), which every
+// pool shares.
 const (
 	maxGraphQLDocument = 64 << 10
 	maxGraphQLTokens   = 10000
 	maxGraphQLAliases  = 10
 	maxGraphQLDepth    = 20
 	maxGraphQLFields   = 1000
-	maxGraphQLPage     = 100 // first and last, GitHub's own maximum
-	maxGraphQLLabels   = 100
+	maxGraphQLRequests = 2000 // GitHub's cost estimate, in its own unit: gh's largest (pr view by branch) is about 210
+	maxGraphQLPage     = 100  // first and last, GitHub's own maximum
+	maxGraphQLLabels   = 99   // with the pull request, at most 100 IDs: nodes(ids) takes no more
 )
 
 // GraphQL refusals, each with the audit outcome and status it answers with.
@@ -209,12 +215,24 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 	if c.aliases > maxGraphQLAliases {
 		return GitHubGraphQL{}, ErrGraphQLLimit
 	}
-	m := &graphqlMeasure{frags: frags, memo: map[string]graphqlShape{}, open: map[string]bool{}}
+	m := &graphqlMeasure{frags: frags, memo: map[string]graphqlShape{}, open: map[string]bool{}, page: func(f *ast.Field) int64 {
+		var n int64 = 1
+		for _, a := range f.Arguments {
+			if a.Name == "first" || a.Name == "last" {
+				if v, err := value(a.Value, vars, defaults); err == nil {
+					if num, ok := v.(json.Number); ok {
+						n, _ = num.Int64() // checked above: a whole number up to maxGraphQLPage
+					}
+				}
+			}
+		}
+		return n
+	}}
 	shape, err := m.set(op.SelectionSet)
 	if err != nil {
 		return GitHubGraphQL{}, err
 	}
-	if shape.depth > maxGraphQLDepth || shape.fields > maxGraphQLFields {
+	if shape.depth > maxGraphQLDepth || shape.fields > maxGraphQLFields || shape.requests > maxGraphQLRequests {
 		return GitHubGraphQL{}, ErrGraphQLLimit
 	}
 
@@ -223,6 +241,10 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 	repos := map[string]bool{}
 	switch op.Operation {
 	case ast.Query:
+		// Below a mapped field any selection is allowed, and from any of them
+		// a pull request can be read (a label's pullRequests, a commit's
+		// associatedPullRequests), so every query also needs pr.read.
+		ops["pr.read"] = true
 		if err := queryRoot(op.SelectionSet, vars, defaults, ops, repos, &out.Targets); err != nil {
 			return GitHubGraphQL{}, err
 		}
@@ -419,15 +441,20 @@ func pageSize(v any) bool {
 	return err == nil && i >= 0 && i <= maxGraphQLPage
 }
 
-type graphqlShape struct{ depth, fields int }
+// graphqlShape is a selection's depth, its field count, and GitHub's rate
+// limit estimate in requests: each connection (a field with first or last)
+// is one request per parent it is read under, and a page of n multiplies
+// everything below it by n.
+type graphqlShape struct{ depth, fields, requests int }
 
 // graphqlMeasure measures the selection tree with every fragment expanded,
 // each fragment once (memo), refusing a fragment that spreads itself or is
-// not defined.
+// not defined. page is a field's first or last, 1 without either.
 type graphqlMeasure struct {
 	frags map[string]*ast.FragmentDefinition
 	memo  map[string]graphqlShape
 	open  map[string]bool
+	page  func(*ast.Field) int64
 }
 
 func (m *graphqlMeasure) set(set ast.SelectionSet) (graphqlShape, error) {
@@ -435,6 +462,7 @@ func (m *graphqlMeasure) set(set ast.SelectionSet) (graphqlShape, error) {
 	add := func(s graphqlShape) {
 		out.depth = max(out.depth, s.depth)
 		out.fields = min(out.fields+s.fields, math.MaxInt32) // saturates; any total past the limit is refused
+		out.requests = min(out.requests+s.requests, math.MaxInt32)
 	}
 	for _, s := range set {
 		switch s := s.(type) {
@@ -443,7 +471,11 @@ func (m *graphqlMeasure) set(set ast.SelectionSet) (graphqlShape, error) {
 			if err != nil {
 				return out, err
 			}
-			add(graphqlShape{depth: inner.depth + 1, fields: inner.fields + 1})
+			requests := int64(inner.requests)
+			if hasPage(s) {
+				requests = 1 + m.page(s)*requests
+			}
+			add(graphqlShape{depth: inner.depth + 1, fields: inner.fields + 1, requests: int(min(requests, math.MaxInt32))})
 		case *ast.InlineFragment:
 			inner, err := m.set(s.SelectionSet)
 			if err != nil {
@@ -470,6 +502,10 @@ func (m *graphqlMeasure) set(set ast.SelectionSet) (graphqlShape, error) {
 		}
 	}
 	return out, nil
+}
+
+func hasPage(f *ast.Field) bool {
+	return f.Arguments.ForName("first") != nil || f.Arguments.ForName("last") != nil
 }
 
 // featureDetection recognizes gh's schema feature detection: a query of
@@ -622,15 +658,21 @@ func searchArgs(args map[string]any) (string, bool) {
 	}
 	repo := ""
 	for _, term := range strings.Fields(query) {
-		key, v, found := strings.Cut(strings.ToLower(term), ":")
+		if strings.ContainsAny(term, "()") {
+			return "", false // grouping could hide a qualifier from this reading
+		}
+		negated := strings.HasPrefix(term, "-")
+		key, v, found := strings.Cut(strings.TrimLeft(strings.ToLower(term), "-"), ":")
 		switch {
 		case !found:
+		case negated && (key == "repo" || key == "org" || key == "user" || key == "owner"):
+			return "", false
 		case key == "repo":
 			if repo != "" {
 				return "", false
 			}
 			repo = v
-		case key == "org", key == "user", key == "owner", key == "-repo":
+		case key == "org", key == "user", key == "owner":
 			return "", false
 		}
 		if strings.ContainsAny(term, `"'`) {

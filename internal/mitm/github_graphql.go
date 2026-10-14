@@ -20,6 +20,13 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
+// graphqlPermissions is every GraphQL token's scope: pull requests, and no
+// contents. Below a mapped field GraphQL can reach a repository's files and
+// history, which only a git entry grants; without contents GitHub refuses
+// those fields. (REST's pull request token carries contents read for opening
+// pull requests, which GraphQL here never does.)
+var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
+
 // forwardGitHubGraphQL serves POST /graphql on a github-api host. The request
 // is parsed and mapped to repository operations (httpcatalog
 // ParseGitHubGraphQL), so one catalog decides REST and GraphQL alike: the
@@ -32,6 +39,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	catalog httpcatalog.Catalog, granted []httpcatalog.GitRequest, refused func(*httpcatalog.Entry, error) bool) {
 	a := p.adapter
 	deny := func(status int, outcome string) { p.adapterDeny(w, event, target, status, outcome) }
+	var releases []func()
 	switch {
 	case len(granted) == 0:
 		deny(http.StatusForbidden, "pool")
@@ -56,16 +64,16 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(http.StatusBadRequest, "credential_header")
 		return
 	}
-	var limit int64
+	var sizeLimit int64
 	for _, g := range granted {
-		limit = max(limit, g.Entry.MaxRequestBytes)
+		sizeLimit = max(sizeLimit, g.Entry.MaxRequestBytes)
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	body, err := io.ReadAll(io.LimitReader(r.Body, sizeLimit+1))
 	switch {
 	case err != nil:
 		deny(http.StatusBadRequest, "request_shape")
 		return
-	case int64(len(body)) > limit:
+	case int64(len(body)) > sizeLimit:
 		deny(http.StatusRequestEntityTooLarge, "request_too_large")
 		return
 	case bytes.Contains(body, []byte(placeholderMarker)):
@@ -81,15 +89,55 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(refusal.Status, refusal.Outcome)
 		return
 	}
+	// Only entries the request passes authorization for are considered, and
+	// before any token is minted or GitHub asked (the rule forwardCatalog
+	// states for every credential).
+	var authorized []httpcatalog.GitRequest
+	for _, g := range granted {
+		probe := event
+		if p.authorize(r.Context(), scope, g.Entry, &probe) == "" {
+			authorized = append(authorized, g)
+		}
+	}
+	if len(authorized) == 0 {
+		refused(granted[0].Entry, nil) // records the refusal and its reason
+		return
+	}
 	if req.Answer != nil {
-		p.answerGitHubGraphQL(w, event, granted[0].Entry, req.Answer, refused)
+		p.answerGitHubGraphQL(w, event, authorized[0].Entry, req.Answer, refused)
 		return
 	}
 
+	// The rate limit applies before any lookup too, per entry as for REST.
+	limited := map[string]bool{}
+	limit := func(name string) bool {
+		if limited[name] {
+			return true
+		}
+		enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), name)
+		if !enf.Allowed {
+			return false
+		}
+		limited[name] = true
+		releases = append(releases, enf.Release)
+		return true
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
 	repo := req.Repo
 	if repo == "" {
+		for _, g := range authorized {
+			if !limit(g.Entry.Name) {
+				deny(http.StatusTooManyRequests, "rate_limited")
+				return
+			}
+		}
 		var outcome string
-		if repo, outcome = p.nodesRepository(r, target, expected, granted, req); outcome != "" {
+		if repo, outcome = p.nodesRepository(r, target, expected, authorized, req); outcome != "" {
 			deny(lookupStatus(outcome), outcome)
 			return
 		}
@@ -118,14 +166,12 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(http.StatusRequestEntityTooLarge, "request_too_large")
 		return
 	}
-	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
-	if !enf.Allowed {
+	if !limit(entry.Name) {
 		deny(http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	defer enf.Release()
 	app := githubapp.App{AppID: entry.Git.AppID, InstallationID: entry.Git.InstallationID}
-	permissions := githubapp.PullRequestsWrite // every mapped operation is a pull request operation
+	permissions := graphqlPermissions
 	token, err := a.GitTokens.Token(r.Context(), app, api.Repo.Repo, permissions)
 	if err != nil {
 		deny(http.StatusServiceUnavailable, "token_unavailable")
@@ -238,7 +284,7 @@ func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []
 		}
 		want = id
 	}
-	candidates := 0
+	candidates, failed := 0, false
 	for _, g := range granted {
 		allowed := true
 		for _, op := range req.Operations {
@@ -250,14 +296,18 @@ func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []
 		candidates++
 		id, ok := p.repositoryDatabaseID(r, target, host, g)
 		if !ok {
-			return "", "target_lookup"
+			failed = true // another repository may still match
+			continue
 		}
 		if id == want {
 			return g.Repo.Repo, ""
 		}
 	}
-	if candidates == 0 {
+	switch {
+	case candidates == 0:
 		return "", "unlisted" // no repository here grants the operation
+	case failed:
+		return "", "target_lookup" // the one that failed may have been it
 	}
 	return "", refusal
 }
@@ -316,7 +366,7 @@ func (p *Proxy) repositoryDatabaseID(r *http.Request, target, host string, g htt
 		return id, true
 	}
 	app := githubapp.App{AppID: g.Entry.Git.AppID, InstallationID: g.Entry.Git.InstallationID}
-	token, err := p.adapter.GitTokens.Token(r.Context(), app, g.Repo.Repo, githubapp.PullRequestsWrite)
+	token, err := p.adapter.GitTokens.Token(r.Context(), app, g.Repo.Repo, graphqlPermissions)
 	if err != nil {
 		return 0, false
 	}
@@ -356,7 +406,7 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 	facts := map[string]nodeFact{}
 	var missing []string
 	for _, t := range req.Targets {
-		if f, ok := p.graphql.node(t.ID); ok {
+		if f, ok := p.graphql.node(target, t.ID); ok {
 			facts[t.ID] = f
 		} else if !containsString(missing, t.ID) {
 			missing = append(missing, t.ID)
@@ -380,7 +430,7 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 		}
 		status, ok := p.githubGraphQL(r, target, host, token, nodesLookup, map[string]any{"ids": missing}, &reply)
 		if status == http.StatusUnauthorized {
-			p.adapter.GitTokens.Invalidate(app, api.Repo.Repo, githubapp.PullRequestsWrite)
+			p.adapter.GitTokens.Invalidate(app, api.Repo.Repo, graphqlPermissions)
 		}
 		if !ok || len(reply.Data.Nodes) != len(missing) {
 			return "target_lookup"
@@ -394,7 +444,7 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 				f.HeadRepo = n.HeadRepository.NameWithOwner
 			}
 			facts[missing[i]] = f
-			p.graphql.storeNode(missing[i], f)
+			p.graphql.storeNode(target, missing[i], f)
 		}
 	}
 	for _, t := range req.Targets {
@@ -447,14 +497,17 @@ func (p *Proxy) githubGraphQL(r *http.Request, target, host, token, query string
 }
 
 // graphqlLookups caches what the broker learned from GitHub: node facts for
-// five minutes (a label can be renamed) and repository database IDs for an
-// hour. Only answers GitHub gave are kept, never a failure, and each map is
+// five minutes (so a renamed label keeps its old name in the check for up to
+// that long) and repository database IDs for an hour. Only answers GitHub gave are kept, never a failure, and each map is
 // bounded, so a flood of IDs costs lookups, not memory.
 type graphqlLookups struct {
 	mu    sync.Mutex
-	nodes map[string]cachedNode
+	nodes map[nodeKey]cachedNode
 	repos map[repositoryKey]cachedRepository
 }
+
+// nodeKey is a node ID on one GitHub host (host:port).
+type nodeKey struct{ host, id string }
 
 type repositoryKey struct {
 	installation int64
@@ -479,24 +532,24 @@ const (
 	graphqlCacheSweep = 1024 // entries examined when a full map needs room
 )
 
-func (c *graphqlLookups) node(id string) (nodeFact, bool) {
+func (c *graphqlLookups) node(host, id string) (nodeFact, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	n, ok := c.nodes[id]
+	n, ok := c.nodes[nodeKey{host, id}]
 	if !ok || time.Now().After(n.expires) {
 		return nodeFact{}, false
 	}
 	return n.fact, true
 }
 
-func (c *graphqlLookups) storeNode(id string, f nodeFact) {
+func (c *graphqlLookups) storeNode(host, id string, f nodeFact) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.nodes == nil {
-		c.nodes = map[string]cachedNode{}
+		c.nodes = map[nodeKey]cachedNode{}
 	}
 	makeRoom(c.nodes, maxCachedNodes, func(n cachedNode) time.Time { return n.expires })
-	c.nodes[id] = cachedNode{fact: f, expires: time.Now().Add(nodeFactTTL)}
+	c.nodes[nodeKey{host, id}] = cachedNode{fact: f, expires: time.Now().Add(nodeFactTTL)}
 }
 
 func (c *graphqlLookups) repository(key repositoryKey) (int64, bool) {

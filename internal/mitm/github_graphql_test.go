@@ -62,17 +62,19 @@ func TestNodeRepositoryID(t *testing.T) {
 // (3000, not listed). Each token answers only for the repository it was
 // minted for, as GitHub's do, and the fake records what GitHub received.
 type graphqlFixture struct {
-	client   *http.Client
-	port     int
-	audit    *adapterAudit
-	catalog  *swapCatalog
-	mu       sync.Mutex
-	minted   map[string]string // token -> repository name
-	received []string          // relayed GraphQL bodies (not the broker's lookups)
-	nextIDs  []string          // X-Github-Next-Global-ID on relayed requests
-	lookups  int
-	failNode bool // the node lookup answers 502
-	failRepo bool // the repository read answers 502
+	client       *http.Client
+	port         int
+	audit        *adapterAudit
+	catalog      *swapCatalog
+	mu           sync.Mutex
+	minted       map[string]string // token -> repository name
+	contents     map[string]string // token -> its contents permission
+	received     []string          // relayed GraphQL bodies (not the broker's lookups)
+	nextIDs      []string          // X-Github-Next-Global-ID on relayed requests
+	lookups      int
+	failNode     bool     // the node lookup answers 502
+	failRepo     string   // this repository's read answers 502 ("*": every one)
+	withContents []string // GraphQL requests made with a token holding contents
 }
 
 type swapCatalog struct {
@@ -148,7 +150,7 @@ func (f *graphqlFixture) use(t *testing.T, ops ...string) {
 
 func newGraphQLFixture(t *testing.T) *graphqlFixture {
 	t.Helper()
-	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}}
+	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}, contents: map[string]string{}}
 	repoIDs := map[string]int{"example-repo": 1000, "read-repo": 2000, "secret-repo": 3000}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +168,7 @@ func newGraphQLFixture(t *testing.T) *graphqlFixture {
 			seq++
 			token := fmt.Sprintf("ghs_syntheticgraphqltoken%06d", seq)
 			f.minted[token] = body.Repositories[0]
+			f.contents[token] = body.Permissions["contents"]
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -173,8 +176,12 @@ func newGraphQLFixture(t *testing.T) *graphqlFixture {
 			return
 		}
 		f.mu.Lock()
-		repo, ok := f.minted[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		repo, ok := f.minted[token]
 		failNode, failRepo := f.failNode, f.failRepo
+		if r.URL.Path == "/graphql" && f.contents[token] != "" {
+			f.withContents = append(f.withContents, repo)
+		}
 		f.mu.Unlock()
 		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -184,7 +191,7 @@ func newGraphQLFixture(t *testing.T) *graphqlFixture {
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/example-org/") {
 			name := strings.TrimPrefix(r.URL.Path, "/repos/example-org/")
 			switch {
-			case failRepo:
+			case failRepo == "*" || failRepo == name:
 				w.WriteHeader(http.StatusBadGateway)
 			case name == repo:
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": repoIDs[repo], "full_name": "example-org/" + repo})
@@ -314,11 +321,11 @@ var ghCommands = []struct {
 	{"pr-view-comments", []string{"pr.read"}},
 	{"pr-view-json", []string{"pr.read"}},
 	{"pr-view-branch", []string{"pr.read", "pr.list"}},
-	{"pr-list", []string{"pr.list"}},
-	{"pr-list-all-json", []string{"pr.list"}},
-	{"pr-list-head", []string{"pr.list"}},
-	{"pr-list-limit-200", []string{"pr.list"}},
-	{"pr-status", []string{"pr.list"}},
+	{"pr-list", []string{"pr.read", "pr.list"}}, // every query also needs pr.read
+	{"pr-list-all-json", []string{"pr.read", "pr.list"}},
+	{"pr-list-head", []string{"pr.read", "pr.list"}},
+	{"pr-list-limit-200", []string{"pr.read", "pr.list"}},
+	{"pr-status", []string{"pr.read", "pr.list"}},
 	{"pr-comment", []string{"pr.read", "pr.comment"}},
 	{"pr-edit-body", []string{"pr.read", "pr.edit"}},
 	{"pr-edit-add-label", []string{"pr.read", "pr.label"}},
@@ -403,6 +410,14 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 			t.Fatalf("relayed without X-Github-Next-Global-ID: %s", body)
 		}
 	}
+	// No GraphQL request carried a token with contents: nested fields can
+	// reach files and history, which only a git entry grants.
+	f.mu.Lock()
+	withContents := f.withContents
+	f.mu.Unlock()
+	if len(withContents) != 0 {
+		t.Errorf("GraphQL requests made with a contents token: %v", withContents)
+	}
 	// The trail names the mapped operation.
 	found := false
 	for _, e := range f.audit.all() {
@@ -481,13 +496,13 @@ func TestGitHubGraphQLLookupFailureRefuses(t *testing.T) {
 	f := newGraphQLFixture(t)
 	body := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"})
 	f.mu.Lock()
-	f.failRepo = true
+	f.failRepo = "*"
 	f.mu.Unlock()
 	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 503 || f.audit.last().Outcome != "target_lookup" {
 		t.Fatalf("repository lookup failed: %d %q", code, f.audit.last().Outcome)
 	}
 	f.mu.Lock()
-	f.failRepo, f.failNode = false, true
+	f.failRepo, f.failNode = "", true
 	f.mu.Unlock()
 	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 503 || f.audit.last().Outcome != "target_lookup" {
 		t.Fatalf("node lookup failed: %d %q", code, f.audit.last().Outcome)
@@ -556,5 +571,24 @@ func TestGitHubGraphQLRefusesShapes(t *testing.T) {
 	}
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("GitHub received refused requests: %v", got)
+	}
+}
+
+// One listed repository GitHub cannot answer for does not stop requests for
+// the others.
+func TestGitHubGraphQLSkipsAFailedRepository(t *testing.T) {
+	f := newGraphQLFixture(t)
+	f.mu.Lock()
+	f.failRepo = "example-repo"
+	f.mu.Unlock()
+	read, _ := json.Marshal(map[string]any{"query": `query($id: ID!) { node(id: $id) { ... on PullRequest { number } } }`, "variables": map[string]any{"id": readPR}})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, string(read)); code != 200 {
+		t.Fatalf("read-repo's pull request with example-repo unreadable: %d %q", code, f.audit.last().Outcome)
+	}
+	// An ID that matches none of the readable repositories still refuses as
+	// unknown, since the unreadable one may hold it.
+	ghost, _ := json.Marshal(map[string]any{"query": `query($id: ID!) { node(id: $id) { ... on PullRequest { number } } }`, "variables": map[string]any{"id": ghostPR}})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, string(ghost)); code != 503 || f.audit.last().Outcome != "target_lookup" {
+		t.Fatalf("unmatched ID with a repository unreadable: %d %q", code, f.audit.last().Outcome)
 	}
 }

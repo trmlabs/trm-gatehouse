@@ -45,7 +45,7 @@ const (
 func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 	const repo = "example-org/example-repo"
 	read := []string{"pr.read"}
-	list := []string{"pr.list"}
+	list := []string{"pr.list", "pr.read"} // every query also needs pr.read
 	for _, tc := range []struct {
 		fixture string
 		want    [][]string // per GraphQL request: its operations; nil for the broker's own answer
@@ -63,7 +63,7 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-status", [][]string{list}, nil},
 		{"pr-comment", [][]string{read, {"pr.comment"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-edit-body", [][]string{read, read, {"pr.edit"}}, [][]GraphQLTarget{nil, nil, {{fixturePR, TargetPullRequestWrite}}}},
-		{"pr-edit-add-label", [][]string{read, read, {"pr.label"}, {"pr.label"}},
+		{"pr-edit-add-label", [][]string{read, read, {"pr.label", "pr.read"}, {"pr.label"}},
 			[][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequestWrite}, {fixtureLabel, TargetLabel}}}},
 		{"pr-ready", [][]string{read, {"pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
@@ -162,6 +162,9 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"nodes", graphqlBody(`query { nodes(ids: ["PR_kwDNA-jNB9A"]) { id } }`, nil), ErrGraphQLUnmapped},
 		{"search without a repository", graphqlBody(`query { search(query: "is:pr author:@me", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search across an organization", graphqlBody(`query { search(query: "repo:o/r org:o", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search with a grouped qualifier", graphqlBody(`query { search(query: "repo:o/r (org:p)", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search with a grouped repository", graphqlBody(`query { search(query: "repo:o/r (repo:p/s)", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search excluding a repository", graphqlBody(`query { search(query: "is:pr -repo:o/r", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search two repositories", graphqlBody(`query { search(query: "repo:o/r repo:o/s", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search code", graphqlBody(`query { search(query: "repo:o/r token", type: REPOSITORY, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"merge", graphqlBody(`mutation($input: MergePullRequestInput!) { mergePullRequest(input: $input) { clientMutationId } }`,
@@ -178,6 +181,14 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"comment without a target", comment(map[string]any{"body": "x"}), ErrGraphQLUnmapped},
 		{"comment with a number target", comment(map[string]any{"subjectId": 12, "body": "x"}), ErrGraphQLUnmapped},
 		{"comment input not an object", graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }`, map[string]any{"input": "x"}), ErrGraphQLUnmapped},
+		{"too many labels", graphqlBody(`mutation($input: AddLabelsToLabelableInput!) { addLabelsToLabelable(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"labelableId": "PR_kwDNA-jNB9A", "labelIds": func() []any {
+				out := make([]any, 100)
+				for i := range out {
+					out[i] = "LA_kwDNA-jNB9E"
+				}
+				return out
+			}()}}), ErrGraphQLUnmapped},
 		{"label without labels", graphqlBody(`mutation($input: AddLabelsToLabelableInput!) { addLabelsToLabelable(input: $input) { clientMutationId } }`,
 			map[string]any{"input": map[string]any{"labelableId": "PR_kwDNA-jNB9A", "labelIds": []any{}}}), ErrGraphQLUnmapped},
 		{"label ID not a list", graphqlBody(`mutation($input: AddLabelsToLabelableInput!) { addLabelsToLabelable(input: $input) { clientMutationId } }`,
@@ -198,6 +209,10 @@ func TestGraphQLRefusals(t *testing.T) {
 			` fragment f2 on Actor { `+strings.Repeat(`...f3 `, 10)+`}`+
 			` fragment f3 on Actor { login url resourcePath avatarUrl login url resourcePath avatarUrl login url }`, repoVars), ErrGraphQLLimit},
 
+		{"request fan-out", graphqlBody(repoQuery(`pullRequests(first: 100) { nodes { reviews(first: 100) { totalCount } `+
+			`commits(first: 100) { nodes { commit { a: associatedPullRequests(first: 1) { totalCount } b: history(first: 1) { totalCount } } } } `+
+			`comments(first: 100) { totalCount } } }`), repoVars), ErrGraphQLLimit},
+
 		{"schema introspection", graphqlBody(`query { __schema { types { name } } }`, nil), ErrGraphQLIntrospection},
 		{"type of another name", graphqlBody(`query { __type(name: "Repository") { fields(includeDeprecated: true) { name } } }`, nil), ErrGraphQLIntrospection},
 		{"type with more fields", graphqlBody(`query { __type(name: "PullRequest") { fields(includeDeprecated: true) { name args { name } } } }`, nil), ErrGraphQLIntrospection},
@@ -216,8 +231,8 @@ func TestGraphQLRefusals(t *testing.T) {
 	}
 }
 
-// A variable the document does not declare never reaches GitHub, and a
-// literal or default argument is checked as GitHub would read it.
+// A variable the document does not declare never reaches GitHub, nor do
+// comments or the operation name; the repository is read case-insensitively.
 func TestGraphQLRebuildsTheRequest(t *testing.T) {
 	body := []byte(`{"query":"query Q($owner: String!, $repo: String!) {\n  repository(owner: $owner, name: $repo) { pullRequest(number: 1) { id } } # comment\n}",` +
 		`"variables":{"owner":"Example-Org","repo":"example-repo","extra":"dropped"},"operationName":"Q"}`)
@@ -232,5 +247,23 @@ func TestGraphQLRebuildsTheRequest(t *testing.T) {
 	answer, err := ParseGitHubGraphQL(graphqlBody(`query PullRequest_fields2{WorkflowRun: __type(name: "WorkflowRun"){fields(includeDeprecated: true){name}}}`, nil))
 	if err != nil || string(answer.Answer) != `{"data":{"WorkflowRun":{"fields":[{"name":"event"}]}}}` {
 		t.Fatalf("feature detection: %v %s", err, answer.Answer)
+	}
+}
+
+// Below a mapped field any selection is allowed, so a query that could read
+// pull requests or repository contents needs pr.read, and the request's
+// operations say so. (Contents stay out of reach: the broker's GraphQL token
+// has no contents permission.)
+func TestGraphQLQueriesNeedPullRequestRead(t *testing.T) {
+	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
+	for _, inner := range []string{
+		`labels(first: 100) { nodes { pullRequests(first: 100) { nodes { body } } } }`,
+		`defaultBranchRef { target { ... on Commit { file(path: "secrets.env") { object { ... on Blob { text } } } } } }`,
+		`pullRequest(number: 1) { repository { object(expression: "HEAD:main.go") { ... on Blob { text } } } }`,
+	} {
+		got, err := ParseGitHubGraphQL(graphqlBody(`query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { `+inner+` } }`, vars))
+		if err != nil || !strings.Contains(strings.Join(got.Operations, " "), "pr.read") {
+			t.Errorf("%s: %v %v", inner, got.Operations, err)
+		}
 	}
 }
