@@ -123,7 +123,7 @@ func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (Browser
 type accessClaims struct {
 	Sub   string          `json:"sub"`
 	OrgID string          `json:"org_id"`
-	Email string          `json:"https://trmlabs.com/email"` // set by the staging tenant's login action
+	Email string          `json:"https://trmlabs.com/email"` // set by the tenant's login action
 	Aud   json.RawMessage `json:"aud"`
 	Exp   int64           `json:"exp"`
 }

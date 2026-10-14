@@ -36,7 +36,7 @@ type SharedConfig struct {
 	// agent Pod, such as Sandbox and agents.x-k8s.io/v1beta1.
 	OwnerKind       string `json:"ownerKind"`
 	OwnerAPIVersion string `json:"ownerAPIVersion"`
-	// ImagePrefixes maps a namespace to the agent-sandbox repository path its
+	// ImagePrefixes maps a namespace to the agent image registry path its
 	// agents' images are pulled from (see imagerule.ValidPrefix). ImageDigests
 	// are exact digests allowed in every namespace, for containers the
 	// platform injects. Each container must match one or the other, judged on

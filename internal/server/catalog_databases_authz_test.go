@@ -52,9 +52,9 @@ func TestCatalogDatabaseResolverAppliesTheAuthorizationModel(t *testing.T) {
 	  {"name":"cursor","namespace":"n","serviceAccount":"cursor"},
 	  {"name":"claude","namespace":"n","serviceAccount":"claude","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T2"}],
 	 "entries":[
-	  {"name":"open","kind":"postgres","host":"db.example","pools":["cursor","claude"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
-	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}},
-	  {"name":"t2db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T2","requires":["` + t2Group + `"],"postgres":{"database":"t2db","mount":"database","role":"staging.us.crunchy.t2-readonly"}}]}`))
+	  {"name":"open","kind":"postgres","host":"db.example","pools":["cursor","claude"],"postgres":{"database":"open","mount":"database","role":"staging.us.example.open-readonly"}},
+	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.example.t1-readonly"}},
+	  {"name":"t2db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T2","requires":["` + t2Group + `"],"postgres":{"database":"t2db","mount":"database","role":"staging.us.example.t2-readonly"}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +120,8 @@ func TestCatalogDatabaseResolverFreshT2AdmissionsAndPurge(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"pools":[
 	  {"name":"claude","namespace":"n","serviceAccount":"claude","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T2"}],
 	 "entries":[
-	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}},
-	  {"name":"t2db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T2","requires":["` + t2Group + `"],"postgres":{"database":"t2db","mount":"database","role":"staging.us.crunchy.t2-readonly"}}]}`))
+	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.example.t1-readonly"}},
+	  {"name":"t2db","kind":"postgres","host":"db.example","pools":["claude"],"tier":"T2","requires":["` + t2Group + `"],"postgres":{"database":"t2db","mount":"database","role":"staging.us.example.t2-readonly"}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,8 +168,8 @@ func TestCatalogDatabaseResolverAuthorizesTheAttestedPerson(t *testing.T) {
 	 "pools":[{"name":"developers","namespace":"developers","serviceAccount":"sandbox","identity":"attested-person","ceiling":"T2"},
 	  {"name":"shared","namespace":"shared","serviceAccount":"sandbox"}],
 	 "entries":[
-	  {"name":"open","kind":"postgres","host":"db.example","pools":["developers","shared"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
-	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["developers"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}}]}`))
+	  {"name":"open","kind":"postgres","host":"db.example","pools":["developers","shared"],"postgres":{"database":"open","mount":"database","role":"staging.us.example.open-readonly"}},
+	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["developers"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.example.t1-readonly"}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}

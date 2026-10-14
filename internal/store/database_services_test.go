@@ -94,15 +94,15 @@ func TestDatabaseServiceUpsertIsIdempotentByName(t *testing.T) {
 	ctx := context.Background()
 	ns, _ := s.CreateVault(ctx, "db-upsert")
 
-	first, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "crunchy"))
+	first, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "example-db"))
 	if err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 
 	// Re-upsert the same name with changed coordinates: same row (id + created_at
 	// preserved), fields overwritten in place, not a duplicate.
-	changed := sampleService(ns.ID, "crunchy")
-	changed.Upstream = "crunchy.internal:5433"
+	changed := sampleService(ns.ID, "example-db")
+	changed.Upstream = "db.example:5433"
 	changed.Role = "rw"
 	changed.MaxConns = 25
 	second, err := s.UpsertDatabaseService(ctx, changed)
@@ -115,7 +115,7 @@ func TestDatabaseServiceUpsertIsIdempotentByName(t *testing.T) {
 	if !second.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("expected created_at preserved, got %v vs %v", second.CreatedAt, first.CreatedAt)
 	}
-	if second.Upstream != "crunchy.internal:5433" || second.Role != "rw" || second.MaxConns != 25 {
+	if second.Upstream != "db.example:5433" || second.Role != "rw" || second.MaxConns != 25 {
 		t.Fatalf("expected fields overwritten, got %+v", second)
 	}
 

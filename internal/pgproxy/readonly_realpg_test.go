@@ -64,7 +64,7 @@ func TestRealPostgres_ReadOnlyLoginRefusesTemporaryObjects(t *testing.T) {
 		lease := &Lease{ID: "lease-" + randomHex(4), Username: role, Password: pw, ExpiresAt: time.Now().Add(time.Hour)}
 		_, addr := startBroker(t, Options{
 			Auth:      &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-uuid-1", WorkloadID: "pod-1", Pool: "cursor"}},
-			Databases: &fakeResolver{svc: &DatabaseService{Name: "core", Addr: u.Host, Database: u.Path[1:], Mount: "database", Role: "staging.us.crunchy.core-readonly", SSLMode: "disable", ReadOnly: readOnly}},
+			Databases: &fakeResolver{svc: &DatabaseService{Name: "app", Addr: u.Host, Database: u.Path[1:], Mount: "database", Role: "staging.us.example.app-readonly", SSLMode: "disable", ReadOnly: readOnly}},
 			Leases:    &fakeMinter{lease: lease},
 			Pool:      pool,
 		})
@@ -72,7 +72,7 @@ func TestRealPostgres_ReadOnlyLoginRefusesTemporaryObjects(t *testing.T) {
 	}
 	connect := func(addr string) *pgx.Conn {
 		host, port, _ := net.SplitHostPort(addr)
-		conn, err := pgx.Connect(ctx, fmt.Sprintf("host=%s port=%s user=workload password=agent-token dbname=core sslmode=disable", host, port))
+		conn, err := pgx.Connect(ctx, fmt.Sprintf("host=%s port=%s user=workload password=agent-token dbname=app sslmode=disable", host, port))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -202,7 +202,7 @@ func TestRealPostgres_ReadOnlyLoginRefusesTemporaryObjects(t *testing.T) {
 		// lexer arrive together. The second is held until the first is
 		// answered, and the answer's ParameterStatus ends the session, so
 		// the hidden ALTER ROLE never runs.
-		raw := openAgentSession(t, addr, "agent-token", "core")
+		raw := openAgentSession(t, addr, "agent-token", "app")
 		raw.fe.Send(&pgproto3.Query{String: "SELECT set_config('standard_conforming_' || 'strings', 'off', false)"})
 		raw.fe.Send(&pgproto3.Query{String: `SELECT 'x\' , ' ; ALTER ROLE CURRENT_USER SET work_mem = 7777; --'`})
 		if err := raw.fe.Flush(); err != nil {

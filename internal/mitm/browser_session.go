@@ -58,8 +58,8 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
-	// Upgrades (WebSocket) are refused until an app needs them; the staging
-	// app streams over fetch, which passes as an ordinary response.
+	// Upgrades (WebSocket) are refused until an app needs them; an app that
+	// streams over fetch passes as an ordinary response.
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
 		unsafeBrowserPath(r.URL.Path, b.Seed) || containsPlaceholder(r.URL.RawQuery) || r.Header.Get("Upgrade") != "" ||
 		r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 {

@@ -31,6 +31,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/hashicorp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/imagerule"
 	"github.com/Infisical/agent-vault/internal/infisical"
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/netguard"
@@ -115,6 +116,9 @@ var serverCmd = &cobra.Command{
 		}
 		startupRetry = window
 		if err := checkShutdownSeconds(os.Getenv); err != nil {
+			return err
+		}
+		if err := imagerule.SetRegistry(os.Getenv(imagerule.RegistryEnv)); err != nil {
 			return err
 		}
 		logger := buildLogger(logLevel)
