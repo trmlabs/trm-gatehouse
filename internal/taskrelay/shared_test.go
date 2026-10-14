@@ -588,7 +588,7 @@ func TestStagingSharedConfig(t *testing.T) {
 				"profiles": map[string]any{"example-agents": "example-agents-profile",
 					"example-developers": "example-developers-profile"},
 				"imagePrefixes": map[string]any{
-					"example-agents":      "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/orion/",
+					"example-agents":     "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/orion/",
 					"example-developers": "us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/"},
 				"imageDigests": []any{}, "ownerKind": "Sandbox", "ownerAPIVersion": "agents.x-k8s.io/v1beta1", "maxPodSeconds": 28800},
 		}

@@ -201,7 +201,10 @@ func TestMinterCachesSharesAndRefreshes(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, _ = m.Token(context.Background(), app, "trmlabs/example-app", ContentsWrite) }()
+		go func() {
+			defer wg.Done()
+			_, _ = m.Token(context.Background(), app, "trmlabs/example-app", ContentsWrite)
+		}()
 	}
 	wg.Wait()
 	if g.mints.Load() != 1 {
