@@ -480,3 +480,20 @@ func TestBeginDrainStopsReadinessAndNewIssuance(t *testing.T) {
 		t.Fatalf("issuance while draining: %v", err)
 	}
 }
+
+// Once Close has run, every issuance is refused as draining. The minter's
+// ended context must not surface as the caller's own cancellation instead.
+func TestDurableLeaseIssuanceAfterCloseIsAlwaysDraining(t *testing.T) {
+	client, st, _ := durableFixture(t)
+	m := newDurableForTest(t, client, st)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2000; i++ {
+		if _, err := m.Mint(context.Background(), AgentScope{VaultID: "vault"}, drainService); !errors.Is(err, errDraining) {
+			t.Fatalf("issuance %d after close returned %v", i, err)
+		}
+	}
+}
