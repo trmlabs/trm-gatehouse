@@ -107,6 +107,7 @@ func Session(ctx context.Context) string {
 type Requester struct {
 	Kind, Subject, ObjectID, TokenSHA256 string
 	Tier, Decision, Groups               string
+	Department                           string // directory department, audit only
 	CacheAgeSec                          int64
 }
 

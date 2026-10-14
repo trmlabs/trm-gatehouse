@@ -32,10 +32,15 @@ func (f *fakeSource) Lookup(_ context.Context, _ string, groups []string) (Perso
 }
 
 func TestDecide(t *testing.T) {
-	member := &fakeSource{person: Person{ObjectID: "oid", Enabled: true, MemberOf: []string{g1}}}
+	member := &fakeSource{person: Person{ObjectID: "oid", Enabled: true, MemberOf: []string{g1}, Department: "Engineering"}}
 	t1 := Entry{Tier: "T1", Requires: []string{g1}}
 	claude := Pool{Identity: "claude-session", Ceiling: "T1"}
 	alice := Requester{Kind: "person", Subject: "sso|alice"}
+	// The department rides along with the lookup for the audit trail; it
+	// never changes a decision.
+	if d := Decide(context.Background(), &Cache{Source: member}, claude, t1, alice); !d.Allowed || d.Department != "Engineering" {
+		t.Fatalf("member decision %+v; want allowed with the directory department", d)
+	}
 	cases := []struct {
 		name    string
 		source  Source
@@ -108,9 +113,9 @@ func TestCacheBoundsOffboardingAndNeverCachesErrors(t *testing.T) {
 
 func TestFileSource(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dir.json")
-	_ = os.WriteFile(path, []byte(`{"subjects":{"sso|alice":{"objectID":"oid","enabled":true,"groups":["`+g1+`"]}}}`), 0o600)
+	_ = os.WriteFile(path, []byte(`{"subjects":{"sso|alice":{"objectID":"oid","enabled":true,"groups":["`+g1+`"],"department":"Security"}}}`), 0o600)
 	p, err := FileSource{Path: path}.Lookup(context.Background(), "sso|alice", []string{g1, "other"})
-	if err != nil || !p.Enabled || len(p.MemberOf) != 1 {
+	if err != nil || !p.Enabled || len(p.MemberOf) != 1 || p.Department != "Security" {
 		t.Fatalf("%+v %v", p, err)
 	}
 	if _, err := (FileSource{Path: path}).Lookup(context.Background(), "sso|bob", nil); err == nil {
@@ -128,7 +133,11 @@ func TestGraphSource(t *testing.T) {
 		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/users/alice@example.test":
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": user, "userPrincipalName": "Alice@example.test", "accountEnabled": true})
+			if r.URL.Query().Get("$select") != "id,userPrincipalName,accountEnabled,department" {
+				w.WriteHeader(400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": user, "userPrincipalName": "Alice@example.test", "accountEnabled": true, "department": "Security"})
 		case r.Method == http.MethodGet && r.URL.Path == "/users/"+user:
 			// Graph resolves an object ID too; its UPN is not the subject.
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": user, "userPrincipalName": "alice@example.test", "accountEnabled": true})
@@ -150,7 +159,7 @@ func TestGraphSource(t *testing.T) {
 	defer srv.Close()
 	g := GraphSource{Endpoint: srv.URL, Client: srv.Client(), Token: func(context.Context) (string, error) { return "app-token", nil }}
 	p, err := g.Lookup(context.Background(), "alice@example.test", []string{g1})
-	if err != nil || p.ObjectID != user || len(p.MemberOf) != 1 {
+	if err != nil || p.ObjectID != user || len(p.MemberOf) != 1 || p.Department != "Security" {
 		t.Fatalf("%+v %v", p, err)
 	}
 	if _, err := g.Lookup(context.Background(), "bob@example.test", []string{g1}); err == nil {

@@ -78,6 +78,13 @@ type Requester struct {
 // the live Pod (session_run). And since runs on one Pod share its workspace, a
 // cursor-session Pod is also pinned to the first run owner it presents: a run
 // by anyone else on that Pod is refused (session_pod_owner).
+//
+// A cursor-oidc profile decides for the person behind each run, so every
+// request on it must name one, T0 included: a request with no token
+// (session_missing) or whose run names no person, such as a Cursor service
+// account's or an owner outside the configured domains (no_person), is
+// refused, never served as the pool. The refusal is that one request's: other
+// Pods, and other requests on the same Pod, are decided on their own token.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
 	pod, claimedRun := claims.Pod, claims.ClaimedRun
 	who := Requester{Kind: "none"}
@@ -100,12 +107,15 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 			who.Kind = "workload"
 		}
 	case httpcatalog.RequesterSessionJWT, httpcatalog.RequesterCursorOIDC:
+		cursor := requester == httpcatalog.RequesterCursorOIDC
+		if session == "" && cursor {
+			return who, "session_missing"
+		}
 		if session == "" {
 			return who, ""
 		}
 		var s runnerid.Session
 		var err error
-		cursor := requester == httpcatalog.RequesterCursorOIDC
 		if cv, ok := v.(CursorVerifier); cursor && ok {
 			s, err = cv.VerifyCursor(ctx, session)
 		} else if v != nil && !cursor {
@@ -148,6 +158,9 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 			}
 			if owner != s.Owner {
 				return who, "session_pod_owner"
+			}
+			if s.Kind != runnerid.KindPerson || s.Subject == "" {
+				return who, "no_person"
 			}
 		}
 		who.Kind, who.Subject = string(s.Kind), s.Subject

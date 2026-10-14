@@ -54,6 +54,9 @@ type heldLogin struct {
 	renewedAt  time.Time
 	pending    int
 	children   map[string]time.Time
+	// revokeWarned: a failed revoke of this login was already logged as a
+	// warning; later retries log at debug, so one stuck login is one warning.
+	revokeWarned bool
 }
 
 // mintUntil is the end of the window in which new sessions may use this login.
@@ -448,19 +451,33 @@ func (c *Client) renewLogin(ctx context.Context, l *heldLogin, now time.Time) {
 
 // revokeIdle revokes each older login as soon as its last session has ended.
 // A transient failure is retried at the next tick until the login's maximum
-// lifetime, when Vault ends it anyway. A login whose policy does not grant
-// revoke-self is released at once: it holds no session, and it ends at its
-// maximum lifetime.
+// lifetime, when Vault ends it anyway; the first failure of a login is a
+// warning naming its class, and the retries after it log at debug. A login
+// whose policy does not grant revoke-self is released at once: it holds no
+// session, and it ends at its maximum lifetime.
 func (c *Client) revokeIdle(ctx context.Context) {
 	for _, l := range c.logins.idle(c.clock()) {
-		switch c.revokeLogin(ctx, l) {
+		result, failure := c.revokeLogin(ctx, l)
+		switch result {
 		case loginRevoked:
 			c.logger.Info("vault older login revoked")
 		case loginRevokeRefused:
 			c.logger.Info("vault older login released: its policy does not grant revoke-self, so it ends at its maximum lifetime")
 		default:
+			// idle handed this login to this call alone; once requeued, another
+			// tick or session end may take it, so read and set the flag first.
+			warned := l.revokeWarned
+			l.revokeWarned = true
 			c.logins.requeue(l)
-			c.logger.Warn("vault older login revoke failed; retrying")
+			attrs := []any{slog.String("class", failure.class)}
+			if failure.status != 0 {
+				attrs = append(attrs, slog.Int("status", failure.status))
+			}
+			if warned {
+				c.logger.Debug("vault older login revoke failed again; retrying", attrs...)
+				continue
+			}
+			c.logger.Warn("vault older login revoke failed; retrying until it revokes or reaches its maximum lifetime", attrs...)
 		}
 	}
 }
@@ -473,22 +490,34 @@ const (
 	loginRevokeRefused // Vault answered 403: no revoke-self in the login's policy
 )
 
-func (c *Client) revokeLogin(ctx context.Context, l *heldLogin) loginRevokeResult {
+// loginRevokeFailure classifies a failed revoke for the log, from a fixed set:
+// "client" (no API client), "timeout", "status" (Vault answered with status)
+// or "network". It never carries Vault's message or the token.
+type loginRevokeFailure struct {
+	class  string
+	status int
+}
+
+func (c *Client) revokeLogin(ctx context.Context, l *heldLogin) (loginRevokeResult, loginRevokeFailure) {
 	api, err := tokenAPI(c.api, l.token)
 	if err != nil {
-		return loginRevokeFailed
+		return loginRevokeFailed, loginRevokeFailure{class: "client"}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, reauthCallTimeout)
 	defer cancel()
 	err = api.Auth().Token().RevokeSelfWithContext(callCtx, "")
-	var refused *vaultapi.ResponseError
+	var answered *vaultapi.ResponseError
 	switch {
 	case err == nil:
-		return loginRevoked
-	case errors.As(err, &refused) && refused.StatusCode == http.StatusForbidden:
-		return loginRevokeRefused
+		return loginRevoked, loginRevokeFailure{}
+	case errors.As(err, &answered) && answered.StatusCode == http.StatusForbidden:
+		return loginRevokeRefused, loginRevokeFailure{}
+	case errors.As(err, &answered):
+		return loginRevokeFailed, loginRevokeFailure{class: "status", status: answered.StatusCode}
+	case errors.Is(err, context.DeadlineExceeded) || callCtx.Err() != nil:
+		return loginRevokeFailed, loginRevokeFailure{class: "timeout"}
 	default:
-		return loginRevokeFailed
+		return loginRevokeFailed, loginRevokeFailure{class: "network"}
 	}
 }
 
@@ -512,7 +541,7 @@ func (c *Client) CloseContext(ctx context.Context) {
 		return
 	}
 	for _, l := range c.logins.drain() {
-		switch c.revokeLogin(ctx, l) {
+		switch result, _ := c.revokeLogin(ctx, l); result {
 		case loginRevokeRefused:
 			c.logger.Info("vault login left to expire at close: its policy does not grant revoke-self")
 		case loginRevokeFailed:

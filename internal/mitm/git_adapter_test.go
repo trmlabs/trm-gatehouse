@@ -259,13 +259,19 @@ func TestGitCloneAndPushThroughBrokerWithoutAToken(t *testing.T) {
 		}
 	}
 	completed := 0
+	operations := map[string]int{}
 	for _, e := range f.audit.all() {
 		if e.Event == auditchain.EventHTTPResponse && e.Binding == "github/trmlabs/trm-b2b" && e.Outcome == "completed" && e.PodUID == "pod-uid-1" {
 			completed++
+			operations[e.Operation]++
 		}
 	}
 	if completed < 4 {
 		t.Fatalf("audit recorded %d completed git calls", completed)
+	}
+	// Each row names its git service: the clone fetches, the push pushes.
+	if operations["git.fetch"] == 0 || operations["git.push"] == 0 || len(operations) != 2 {
+		t.Fatalf("operations %v, want git.fetch and git.push only", operations)
 	}
 }
 
