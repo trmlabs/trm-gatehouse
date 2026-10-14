@@ -137,8 +137,8 @@ for an HTTP API:
 The broker reloads the catalog every 30 seconds. An entry that fails
 validation is left out and logged while the rest of the new version applies,
 so a bad edit takes that entry offline; it does not leave the old version of
-the entry serving. Only a catalog that cannot be read at all keeps the last
-good one in force. The agent cannot widen an entry; only the next reviewed
+the entry serving. Only a catalog that cannot be read at all, or whose kept
+parts still fail validation as a whole, keeps the last good one in force. The agent cannot widen an entry; only the next reviewed
 change can. Check a catalog before you propose it (`--environment` names the
 environment every database role must be for, and is required when the catalog
 has database entries):
@@ -152,7 +152,7 @@ has database entries):
 | Destination | The agent sends | Gatehouse adds |
 |---|---|---|
 | HTTP APIs | A placeholder in the key header | The real key, for the entry's host, paths and methods only |
-| PostgreSQL | A placeholder password | A short-lived database login: by default a fresh one per connection, removed when it closes; with [pooling](docs/gatehouse/postgres-pooling.md) on, a few shared logins per pool and database that rotate in the background |
+| PostgreSQL | A placeholder password | A short-lived database login: by default a fresh one per connection, removed when it closes; with [pooling](docs/gatehouse/postgres-pooling.md) on, one shared login per pool and database that rotates in the background |
 | GitHub repositories (clone, push) | Nothing | A short-lived GitHub App token for one repository. Pushes can be limited to branch prefixes |
 | GitHub pull requests, Actions and deployments | A placeholder token, or none | The same App token, limited to the operations the entry lists |
 | Google Cloud Storage and BigQuery | A placeholder token | A short-lived token narrowed to one bucket prefix, or to one service account |
