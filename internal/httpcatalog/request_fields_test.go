@@ -23,15 +23,22 @@ func slackCatalog(t *testing.T) *Entry {
 func TestRequestFieldsLoadRules(t *testing.T) {
 	slackCatalog(t)
 	for name, doc := range map[string]string{
-		"slack without a channel rule": strings.Replace(slackEntry, `,"requestFields":[{"name":"channel","values":["C0123456789","C0987654321"]}]`, ``, 1),
-		"slack with another rule only": strings.Replace(slackEntry, `"name":"channel"`, `"name":"thread_ts"`, 1),
-		"a direct message":             strings.Replace(slackEntry, `"C0987654321"`, `"D0987654321"`, 1),
-		"a group conversation":         strings.Replace(slackEntry, `"C0987654321"`, `"G0987654321"`, 1),
-		"a person":                     strings.Replace(slackEntry, `"C0987654321"`, `"U0987654321"`, 1),
-		"a channel name":               strings.Replace(slackEntry, `"C0987654321"`, `"#general"`, 1),
-		"no values":                    strings.Replace(slackEntry, `"values":["C0123456789","C0987654321"]`, `"values":[]`, 1),
-		"a repeated value":             strings.Replace(slackEntry, `"C0987654321"`, `"C0123456789"`, 1),
-		"a repeated field":             strings.Replace(slackEntry, `}]}`, `},{"name":"channel","values":["C0123456789"]}]}`, 1),
+		"slack without a channel rule":  strings.Replace(slackEntry, `,"requestFields":[{"name":"channel","values":["C0123456789","C0987654321"]}]`, ``, 1),
+		"slack with another rule only":  strings.Replace(slackEntry, `"name":"channel"`, `"name":"thread_ts"`, 1),
+		"a direct message":              strings.Replace(slackEntry, `"C0987654321"`, `"D0987654321"`, 1),
+		"a group conversation":          strings.Replace(slackEntry, `"C0987654321"`, `"G0987654321"`, 1),
+		"a person":                      strings.Replace(slackEntry, `"C0987654321"`, `"U0987654321"`, 1),
+		"a channel name":                strings.Replace(slackEntry, `"C0987654321"`, `"general"`, 1),
+		"all of the Web API":            strings.Replace(slackEntry, `"/api/chat.postMessage","/api/chat.update"`, `"/api"`, 1),
+		"the whole host":                strings.Replace(slackEntry, `"/api/chat.postMessage","/api/chat.update"`, `"/"`, 1),
+		"a file upload":                 strings.Replace(slackEntry, `"/api/chat.update"`, `"/api/files.completeUploadExternal"`, 1),
+		"an invite":                     strings.Replace(slackEntry, `"/api/chat.update"`, `"/api/conversations.invite"`, 1),
+		"an ephemeral message":          strings.Replace(slackEntry, `"/api/chat.update"`, `"/api/chat.postEphemeral"`, 1),
+		"a subdomain without the rule":  strings.Replace(strings.Replace(slackEntry, `"host":"slack.com"`, `"host":"api.slack.com"`, 1), `,"requestFields":[{"name":"channel","values":["C0123456789","C0987654321"]}]`, ``, 1),
+		"a subdomain with another path": strings.Replace(strings.Replace(slackEntry, `"host":"slack.com"`, `"host":"api.slack.com"`, 1), `"/api/chat.update"`, `"/api/chat.postEphemeral"`, 1),
+		"no values":                     strings.Replace(slackEntry, `"values":["C0123456789","C0987654321"]`, `"values":[]`, 1),
+		"a repeated value":              strings.Replace(slackEntry, `"C0987654321"`, `"C0123456789"`, 1),
+		"a repeated field":              strings.Replace(slackEntry, `}]}`, `},{"name":"channel","values":["C0123456789"]}]}`, 1),
 		"on a non-header entry": `{"name":"g","kind":"git","host":"github.com","pools":["pool-a"],"requestFields":[{"name":"x","values":["y"]}],
 			"git":{"appID":1,"installationID":2,"repos":[{"repo":"example-org/example-app","access":"read"}]}}`,
 	} {
@@ -43,6 +50,29 @@ func TestRequestFieldsLoadRules(t *testing.T) {
 	other := strings.NewReplacer(`"host":"slack.com"`, `"host":"api.linear.app"`, `"name":"channel"`, `"name":"teamId"`).Replace(slackEntry)
 	if _, err := Parse([]byte(`{"entries":[` + other + `]}`)); err != nil {
 		t.Errorf("non-Slack entry: %v", err)
+	}
+}
+
+// A Slack entry reaches only the listed message methods. A method that names
+// a person or another conversation outside channel is never matched.
+func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
+	c, err := Parse([]byte(`{"entries":[` + slackEntry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/chat.postMessage", "/api/chat.update"} {
+		if _, err := c.Match("slack.com", 443, "POST", path, "pool-a"); err != nil {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
+	for _, path := range []string{"/api/files.completeUploadExternal", "/api/conversations.invite", "/api/chat.postEphemeral", "/api/chat.postMessageX", "/api"} {
+		if _, err := c.Match("slack.com", 443, "POST", path, "pool-a"); !errors.Is(err, ErrUnlisted) {
+			t.Errorf("%s: err=%v, want unlisted", path, err)
+		}
+	}
+	sub := strings.Replace(slackEntry, `"host":"slack.com"`, `"host":"api.slack.com"`, 1)
+	if _, err := Parse([]byte(`{"entries":[` + sub + `]}`)); err != nil {
+		t.Errorf("subdomain with the rule and listed methods: %v", err)
 	}
 }
 
@@ -58,7 +88,9 @@ func TestRequestFieldsCheckRequests(t *testing.T) {
 	}{
 		{"listed channel in JSON", "", json, `{"channel":"C0123456789","text":"run done"}`, true},
 		{"second listed channel", "", json, `{"text":"x","channel":"C0987654321","blocks":[{"channel":"D1"}]}`, true},
-		{"escaped key and value", "", json, `{"channel":"C0123456789"}`, true},
+		{"escaped key and value", "", json, `{"\u0063hannel":"\u0043\u0030123456789"}`, true},
+		{"escaped unlisted value", "", json, `{"channel":"\u0044\u0030123456789"}`, false},
+		{"escaped duplicate key", "", json, `{"channel":"C0123456789","\u0063hannel":"D0123456789"}`, false},
 		{"listed channel in a form", "", form, "channel=C0123456789&text=hi", true},
 		{"listed channel in the query", "channel=C0123456789", nil, "", true},
 		{"unlisted channel", "", json, `{"channel":"C1111111111"}`, false},
@@ -75,6 +107,10 @@ func TestRequestFieldsCheckRequests(t *testing.T) {
 		{"no content type", "", nil, `{"channel":"C0123456789"}`, false},
 		{"two content types", "", []string{"application/json", "application/x-www-form-urlencoded"}, `{"channel":"C0123456789"}`, false},
 		{"semicolon query", "channel=C0123456789;channel=D1", nil, "", false},
+		{"array key in the query", "channel=C0123456789&channel[]=D0123456789", nil, "", false},
+		{"indexed key in a form", "", form, "channel=C0123456789&channel[0]=D0123456789", false},
+		{"array key in the query beside a form", "channel[]=D0123456789", form, "channel=C0123456789", false},
+		{"a longer unrelated name", "channel_name=x", json, `{"channel":"C0123456789"}`, true},
 	} {
 		err := e.CheckRequestFields(tc.query, tc.types, []byte(tc.body))
 		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrRequestField)) {

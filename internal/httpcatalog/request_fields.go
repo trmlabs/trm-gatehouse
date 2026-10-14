@@ -30,6 +30,13 @@ var (
 	slackChannel = regexp.MustCompile(`^C[A-Z0-9]{8,20}$`)
 )
 
+// slackMethods are the only Slack Web API paths an entry may list. Each takes
+// one channel and posts or edits a message there. Other methods name a person
+// or a second conversation in another parameter (files.completeUploadExternal
+// channel_id, conversations.invite users, chat.postEphemeral user), which the
+// channel rule would not see.
+var slackMethods = map[string]bool{"/api/chat.postMessage": true, "/api/chat.update": true}
+
 // ErrRequestField is a request whose limited parameters are missing,
 // repeated, placed twice or not listed, or whose body cannot be read safely.
 var ErrRequestField = errors.New("request field not allowed")
@@ -58,8 +65,15 @@ func (e *Entry) normalizeRequestFields() error {
 			}
 		}
 	}
-	if slackHost(e.Host) && !seen["channel"] {
-		return errors.New("a Slack entry must limit channel to listed channel IDs (requestFields)")
+	if slackHost(e.Host) {
+		if !seen["channel"] {
+			return errors.New("a Slack entry must limit channel to listed channel IDs (requestFields)")
+		}
+		for _, p := range e.PathPrefixes {
+			if !slackMethods[p] {
+				return fmt.Errorf("slack path %q is not allowed; list only /api/chat.postMessage and /api/chat.update", p)
+			}
+		}
 	}
 	return nil
 }
@@ -102,6 +116,15 @@ func (e *Entry) CheckRequestFields(rawQuery string, contentTypes []string, body 
 		}
 	}
 	for _, f := range e.RequestFields {
+		// Some parsers fold channel[] or channel[0] into channel; a key like
+		// that beside the limited one could name a second conversation.
+		for _, values := range []url.Values{query, form} {
+			for key := range values {
+				if key != f.Name && strings.HasPrefix(key, f.Name+"[") {
+					return ErrRequestField
+				}
+			}
+		}
 		var found []string
 		found = append(found, query[f.Name]...)
 		found = append(found, form[f.Name]...)
