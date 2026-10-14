@@ -121,6 +121,7 @@ var serverCmd = &cobra.Command{
 		if err := imagerule.SetRegistry(os.Getenv(imagerule.RegistryEnv)); err != nil {
 			return err
 		}
+		httpcatalog.EmailClaim.Store(os.Getenv("AGENT_VAULT_AUTOMATED_AUTH_EMAIL_CLAIM"))
 		logger := buildLogger(logLevel)
 
 		// --- Detached child path: read master key + initialized flag from stdin pipe ---

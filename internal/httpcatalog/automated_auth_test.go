@@ -302,7 +302,7 @@ func fakeAutomatedAuth(t *testing.T) (*automatedFake, *http.Client) {
 		access := fmt.Sprintf("synthetic-access-token-%d", n)
 		if f.jwt.Load() {
 			payload, _ := json.Marshal(map[string]any{"sub": "auth0|qa-user", "org_id": f.org.Load(), "aud": json.RawMessage(f.aud.Load().(string)), "exp": exp.Unix(),
-				"https://trmlabs.com/email": automatedSecrets["email"], "permissions": []string{"read:cases"}})
+				"https://example.com/email": automatedSecrets["email"], "permissions": []string{"read:cases"}})
 			access = "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + "." + access
 		}
 		out := map[string]any{"accessToken": access, "refreshToken": syntheticRefresh, "target": "https://app.example.com/",
@@ -476,12 +476,21 @@ func TestAutomatedAuthSignInCachesAndRevokes(t *testing.T) {
 // Without a top-level ID token (automated-auth's password sign-in returns
 // none), the claims come from the access token and the seed is not read.
 func TestAutomatedAuthClaimsFromAccessToken(t *testing.T) {
-	fake, client := fakeAutomatedAuth(t)
-	fake.idOrg.Store("")
-	tokens := &Auth0Tokens{Keys: &Keys{Vault: automatedVault{}}, Client: client, AutomatedAuth: client}
-	token, err := tokens.Token(context.Background(), automatedEntry(t))
-	if err != nil || !reflect.DeepEqual(token.Claims, map[string]any{"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": automatedSecrets["email"]}) {
-		t.Fatalf("claims: %v %v", token.Claims, err)
+	t.Cleanup(func() { EmailClaim.Store("") })
+	for claim, want := range map[string]map[string]any{
+		// The fake names the email in a namespaced claim, so the default
+		// "email" finds none.
+		"":                          {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
+		"https://example.com/email": {"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": automatedSecrets["email"]},
+	} {
+		EmailClaim.Store(claim)
+		fake, client := fakeAutomatedAuth(t)
+		fake.idOrg.Store("")
+		tokens := &Auth0Tokens{Keys: &Keys{Vault: automatedVault{}}, Client: client, AutomatedAuth: client}
+		token, err := tokens.Token(context.Background(), automatedEntry(t))
+		if err != nil || !reflect.DeepEqual(token.Claims, want) {
+			t.Fatalf("claim %q: %v %v", claim, token.Claims, err)
+		}
 	}
 }
 

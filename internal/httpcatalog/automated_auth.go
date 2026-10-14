@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +20,7 @@ const maxAutomatedAuthResponse = 256 << 10
 // revokeBackoff is the wait before the one retry of a failed revocation.
 var revokeBackoff = 500 * time.Millisecond
 
-// automatedAuthLogin signs the test user in through TRM's automated-auth
+// automatedAuthLogin signs the test user in through an automated-auth
 // service, which drives the app's Universal Login with the entry's Auth0
 // organization. The service key and the user's email and password come from
 // Vault on each sign-in and are never cached here. The broker keeps the
@@ -123,9 +124,22 @@ func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (Browser
 type accessClaims struct {
 	Sub   string          `json:"sub"`
 	OrgID string          `json:"org_id"`
-	Email string          `json:"https://trmlabs.com/email"` // set by the tenant's login action
+	Email string          `json:"-"` // read from the EmailClaim claim
 	Aud   json.RawMessage `json:"aud"`
 	Exp   int64           `json:"exp"`
+}
+
+// EmailClaim, when set (AGENT_VAULT_AUTOMATED_AUTH_EMAIL_CLAIM), names the
+// access token claim that holds the user's email; unset, it is "email". A
+// tenant that adds the email through a login action usually namespaces it,
+// such as "https://example.com/email".
+var EmailClaim atomic.Value // string
+
+func emailClaim() string {
+	if c, _ := EmailClaim.Load().(string); c != "" {
+		return c
+	}
+	return "email"
 }
 
 // hasAudience reports whether aud, a string or a list, names audience.
@@ -160,6 +174,13 @@ func accessTokenClaims(token string) (accessClaims, error) {
 	var c accessClaims
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return accessClaims{}, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &all); err != nil {
+		return accessClaims{}, err
+	}
+	if raw, ok := all[emailClaim()]; ok {
+		_ = json.Unmarshal(raw, &c.Email) // a claim that is not a string is left out
 	}
 	return c, nil
 }
