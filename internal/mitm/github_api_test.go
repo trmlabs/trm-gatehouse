@@ -312,7 +312,7 @@ func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
 		t.Fatalf("GraphQL was not refused: %d", code)
 	}
 	e := f.audit.last()
-	if e.Event != "denied" || e.Status < 400 || (e.Operation != "" && e.Operation != "graphql") {
+	if e.Event != "denied" || e.Status < 400 || e.Operation != "graphql" {
 		t.Fatalf("audit: %+v", e)
 	}
 	f.mu.Lock()

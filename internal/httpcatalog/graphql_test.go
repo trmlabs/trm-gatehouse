@@ -3,6 +3,7 @@ package httpcatalog
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -380,6 +381,32 @@ func TestGraphQLMarksFileListsAsCode(t *testing.T) {
 			if got, err := ParseGitHubGraphQL([]byte(body)); err == nil && got.Code {
 				t.Errorf("%s: a gh default command reads file lists", filepath.Base(f))
 			}
+		}
+	}
+}
+
+// A request reading check status is marked Checks, for the checks and
+// statuses scopes; gh's default view, status and checks read it, list and
+// the mutations do not.
+func TestGraphQLMarksCheckStatusReads(t *testing.T) {
+	for fixture, want := range map[string][]bool{
+		"pr-view-number": {true, false},
+		"pr-status":      {true},
+		"pr-checks":      {false, false, false, true},
+		"pr-list":        {false},
+		"pr-comment":     {false, false},
+	} {
+		var got []bool
+		for _, r := range readGhFixture(t, fixture).Requests {
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			req, err := ParseGitHubGraphQL([]byte(body))
+			if err != nil {
+				t.Fatalf("%s: %v", fixture, err)
+			}
+			got = append(got, req.Checks)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: %v, want %v", fixture, got, want)
 		}
 	}
 }

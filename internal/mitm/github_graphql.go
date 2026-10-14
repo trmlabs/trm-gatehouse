@@ -20,7 +20,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// graphqlPermissions is every GraphQL token's scope: pull requests, and no
+// graphqlPermissions is every GraphQL token's base scope: pull requests, and no
 // contents. Below a mapped field GraphQL can reach a repository's files and
 // history, which only a git entry grants; without contents GitHub refuses
 // those fields. (REST's pull request token carries contents read for opening
@@ -38,6 +38,9 @@ var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
 func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, target, host string, port int, scope *brokercore.ProxyScope, event auditchain.Event,
 	catalog httpcatalog.Catalog, granted []httpcatalog.GitRequest) {
 	a := p.adapter
+	// Every row names one operation: "graphql" until the request is parsed,
+	// then the write a mutation makes (req.AuditOperation).
+	event.Operation = "graphql"
 	deny := func(status int, outcome string) { p.adapterDeny(w, event, target, status, outcome) }
 	var releases []func()
 	switch {
@@ -136,6 +139,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(refusal.Status, refusal.Outcome)
 		return
 	}
+	event.Operation = req.AuditOperation()
 	if req.Answer != nil {
 		p.answerGitHubGraphQL(w, event, authorized[0].Entry, req.Answer)
 		return
@@ -213,13 +217,26 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	app := githubapp.App{AppID: entry.Git.AppID, InstallationID: entry.Git.InstallationID}
+	// Check status needs checks and statuses read, which a repository grants
+	// with actions.read (as for REST's check run and status routes); a
+	// request that reads none gets the pull request scope alone.
 	permissions := graphqlPermissions
+	if req.Checks && api.Repo.GrantsScope("checks") && api.Repo.GrantsScope("statuses") {
+		permissions.Checks, permissions.Statuses = "read", "read"
+	}
 	token, err := a.GitTokens.Token(r.Context(), app, api.Repo.Repo, permissions)
 	if err != nil {
 		deny(http.StatusServiceUnavailable, "token_unavailable")
 		return
 	}
-	if outcome := p.checkGraphQLTargets(r, target, expected, app, api, token.Value(), req); outcome != "" {
+	lookupToken := token // the node lookup needs the pull request scope only
+	if permissions != graphqlPermissions {
+		if lookupToken, err = a.GitTokens.Token(r.Context(), app, api.Repo.Repo, graphqlPermissions); err != nil {
+			deny(http.StatusServiceUnavailable, "token_unavailable")
+			return
+		}
+	}
+	if outcome := p.checkGraphQLTargets(r, target, expected, app, api, lookupToken.Value(), req); outcome != "" {
 		deny(lookupStatus(outcome), outcome)
 		return
 	}

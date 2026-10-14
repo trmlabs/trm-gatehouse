@@ -95,6 +95,10 @@ type GitHubGraphQL struct {
 	// Write is the mutation's operation (pr.comment and so on); empty for a
 	// query.
 	Write string
+	// Checks marks a request that reads check status (graphqlCheckFields):
+	// its token also carries checks and statuses read where the repository
+	// grants them (actions.read), as REST's check run and status routes.
+	Checks bool
 	// Code marks a request that reads which files a pull request changes
 	// (graphqlPathFields): as for REST's pull request files, it is served only
 	// to a pool whose git entry may clone the repository, for a requester that
@@ -257,7 +261,7 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 		return GitHubGraphQL{}, ErrGraphQLLimit
 	}
 
-	out := GitHubGraphQL{Code: c.code}
+	out := GitHubGraphQL{Code: c.code, Checks: c.checks}
 	ops := map[string]bool{}
 	repos := map[string]bool{}
 	switch op.Operation {
@@ -410,6 +414,11 @@ var (
 // PullRequestChangedFile is reached only through files.
 var graphqlPathFields = map[string]bool{"files": true, "path": true}
 
+// graphqlCheckFields read a commit's check runs and statuses (gh pr view,
+// status and checks read statusCheckRollup), which GitHub serves only to a
+// token with checks and statuses read (GitHubGraphQL.Checks).
+var graphqlCheckFields = map[string]bool{"statusCheckRollup": true, "checkSuites": true, "checkRuns": true}
+
 // graphqlCheck walks every selection as written: no directives, no
 // introspection beyond __typename, no argument named twice, aliases counted,
 // and every first or last at most maxGraphQLPage.
@@ -418,6 +427,7 @@ type graphqlCheck struct {
 	defaults func(string) *ast.Value
 	aliases  int
 	code     bool // a field of graphqlPathFields appears
+	checks   bool // a field of graphqlCheckFields appears
 	err      error
 }
 
@@ -442,6 +452,9 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			}
 			if graphqlPathFields[s.Name] {
 				c.code = true
+			}
+			if graphqlCheckFields[s.Name] {
+				c.checks = true
 			}
 			if s.Alias != "" && s.Alias != s.Name {
 				c.aliases++

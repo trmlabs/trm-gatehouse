@@ -70,10 +70,12 @@ type graphqlFixture struct {
 	audit        *adapterAudit
 	catalog      *swapCatalog
 	mu           sync.Mutex
-	minted       map[string]string // token -> repository name
-	contents     map[string]string // token -> its contents permission
-	received     []string          // relayed GraphQL bodies (not the broker's lookups)
-	nextIDs      []string          // X-Github-Next-Global-ID on relayed requests
+	minted       map[string]string            // token -> repository name
+	contents     map[string]string            // token -> its contents permission
+	perms        map[string]map[string]string // token -> every permission it was minted with
+	relayedPerms []map[string]string          // the token permissions of each relayed request
+	received     []string                     // relayed GraphQL bodies (not the broker's lookups)
+	nextIDs      []string                     // X-Github-Next-Global-ID on relayed requests
 	lookups      int
 	failNode     bool     // the node lookup answers 502
 	failRepo     string   // this repository's read answers 502 ("*": every one)
@@ -185,7 +187,7 @@ func newGraphQLFixture(t *testing.T) *graphqlFixture { return newGraphQLFixtureF
 // each request carries the runner session of "alice".
 func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 	t.Helper()
-	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}, contents: map[string]string{}, person: person}
+	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}, contents: map[string]string{}, perms: map[string]map[string]string{}, person: person}
 	repoIDs := map[string]int{"example-repo": 1000, "read-repo": 2000, "secret-repo": 3000}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +207,7 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 			f.minted[token] = body.Repositories[0]
 			f.mintedFor = append(f.mintedFor, body.Repositories[0])
 			f.contents[token] = body.Permissions["contents"]
+			f.perms[token] = body.Permissions
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -282,6 +285,7 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 		}
 		f.mu.Lock()
 		f.received = append(f.received, repo+" "+string(body))
+		f.relayedPerms = append(f.relayedPerms, f.perms[token])
 		f.nextIDs = append(f.nextIDs, r.Header.Get("X-Github-Next-Global-ID"))
 		f.mu.Unlock()
 		fmt.Fprint(w, `{"data":{}}`)
@@ -797,9 +801,8 @@ func TestGitHubGraphQLChecksGitHubsAnswerNotTheID(t *testing.T) {
 }
 
 // GraphQL rows carry exactly the REST binding, "<entry>/<owner>/<repo>", with
-// nothing appended: alerts match the binding against an exact repository list
-// (the CI-repository write tripwire does), so a GraphQL write must look like
-// the same REST write there.
+// nothing appended: an alert that matches the binding against an exact
+// repository list must see a GraphQL write like the same REST write.
 func TestGitHubGraphQLAuditBindingIsTheRESTBinding(t *testing.T) {
 	f := newGraphQLFixture(t)
 	if code, _ := f.send(t, http.MethodGet, "/repos/example-org/example-repo/pulls/12", nil, ""); code != 200 {
@@ -865,5 +868,65 @@ func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { title } } }"}`
 	if code, _ := p.send(t, http.MethodPost, "/graphql", nil, read); code != 200 {
 		t.Fatalf("a read without files on the same catalog: %d %q", code, p.audit.last().Outcome)
+	}
+}
+
+// Each GraphQL row names one operation, as a REST row does: the write a
+// mutation makes, even though it also needs pr.read, and "graphql" for a read
+// or a request refused before it was parsed. An alert on writes then matches
+// a GraphQL write exactly as the same REST write, and never a read.
+func TestGitHubGraphQLAuditNamesOneOperation(t *testing.T) {
+	f := newGraphQLFixture(t)
+	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { title } } }"}`
+	labels := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { labels(first: 100) { nodes { id name } } } }"}`
+	for _, tc := range []struct {
+		name, body, want string
+		code             int
+	}{
+		{"comment", graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"}), "pr.comment", 200},
+		{"ready", graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput", map[string]any{"pullRequestId": prefixPR}), "pr.ready", 200},
+		{"read", read, "graphql", 200},
+		{"labels lookup", labels, "graphql", 200},
+		{"refused comment", graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": personPR, "body": "x"}), "pr.comment", 403},
+		{"refused before parsing", `query { x }`, "graphql", 400},
+	} {
+		before := len(f.audit.all())
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != tc.code {
+			t.Fatalf("%s: %d %q", tc.name, code, f.audit.last().Outcome)
+		}
+		for _, e := range f.audit.all()[before:] {
+			if e.Operation != tc.want {
+				t.Errorf("%s: %s row operation %q, want %q", tc.name, e.Event, e.Operation, tc.want)
+			}
+		}
+	}
+}
+
+// Reading check status takes checks and statuses read on the token, exactly
+// when the repository grants actions.read, as REST's check run and status
+// routes do; never contents. A request reading no check status gets the pull
+// request scope alone.
+func TestGitHubGraphQLCheckStatusScopes(t *testing.T) {
+	for _, grantsActions := range []bool{true, false} {
+		f := newGraphQLFixture(t)
+		ops := append([]string{}, allPullRequestOps...)
+		if grantsActions {
+			ops = append(ops, "actions.read")
+		}
+		f.use(t, ops...)
+		for _, fixture := range []string{"pr-view-number", "pr-checks", "pr-status", "pr-list"} {
+			if outcome := f.replay(t, fixture); outcome != "" {
+				t.Fatalf("%s (actions.read %v): refused %q", fixture, grantsActions, outcome)
+			}
+		}
+		f.mu.Lock()
+		for i, body := range f.received {
+			perms := f.relayedPerms[i]
+			wantChecks := grantsActions && strings.Contains(body, "statusCheckRollup")
+			if (perms["checks"] == "read") != wantChecks || (perms["statuses"] == "read") != wantChecks || perms["contents"] != "" || perms["pull_requests"] != "write" {
+				t.Errorf("actions.read %v: %v for %.120s", grantsActions, perms, body)
+			}
+		}
+		f.mu.Unlock()
 	}
 }

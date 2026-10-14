@@ -153,6 +153,10 @@ func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
 
 // grantsScope reports whether any of the repository's operations needs a
 // token scope.
+// GrantsScope reports whether the repository's operations need a token scope
+// ("pull-requests", "checks", "statuses" and so on), as grantsScope.
+func (r GitRepo) GrantsScope(scope string) bool { return r.grantsScope(scope) }
+
 func (r GitRepo) grantsScope(scope string) bool {
 	for _, op := range r.operations() {
 		if githubOperations[op] == scope || contains(githubRouteScopes[op], scope) {
