@@ -39,6 +39,8 @@ type Permissions struct {
 	PullRequests string // "" or "write"
 	Actions      string // "" or "read"
 	Deployments  string // "" or "read"
+	Checks       string // "" or "read"
+	Statuses     string // "" or "read"
 }
 
 // ContentsRead and ContentsWrite are the git fetch and push scopes;
@@ -53,11 +55,16 @@ var (
 	// DeploymentsRead reads deployments and their statuses.
 	ActionsRead     = Permissions{Actions: "read"}
 	DeploymentsRead = Permissions{Deployments: "read"}
+	// ChecksRead reads a commit's check runs and their annotations;
+	// StatusesRead reads a commit's statuses.
+	ChecksRead   = Permissions{Checks: "read"}
+	StatusesRead = Permissions{Statuses: "read"}
 )
 
 func (p Permissions) valid() bool {
 	return (p.Contents == "" || p.Contents == "read" || p.Contents == "write") && (p.PullRequests == "" || p.PullRequests == "write") &&
-		(p.Actions == "" || p.Actions == "read") && (p.Deployments == "" || p.Deployments == "read") && p != Permissions{}
+		(p.Actions == "" || p.Actions == "read") && (p.Deployments == "" || p.Deployments == "read") &&
+		(p.Checks == "" || p.Checks == "read") && (p.Statuses == "" || p.Statuses == "read") && p != Permissions{}
 }
 
 func (p Permissions) request() map[string]string {
@@ -74,6 +81,12 @@ func (p Permissions) request() map[string]string {
 	if p.Deployments != "" {
 		out["deployments"] = p.Deployments
 	}
+	if p.Checks != "" {
+		out["checks"] = p.Checks
+	}
+	if p.Statuses != "" {
+		out["statuses"] = p.Statuses
+	}
 	return out
 }
 
@@ -87,8 +100,8 @@ type Token struct {
 
 func (t Token) Value() string { return t.value }
 func (t Token) String() string {
-	return fmt.Sprintf("github-token(%s contents=%s pull_requests=%s actions=%s deployments=%s)", t.Repo,
-		t.Permissions.Contents, t.Permissions.PullRequests, t.Permissions.Actions, t.Permissions.Deployments)
+	return fmt.Sprintf("github-token(%s contents=%s pull_requests=%s actions=%s deployments=%s checks=%s statuses=%s)", t.Repo,
+		t.Permissions.Contents, t.Permissions.PullRequests, t.Permissions.Actions, t.Permissions.Deployments, t.Permissions.Checks, t.Permissions.Statuses)
 }
 func (t Token) GoString() string           { return t.String() }
 func (t Token) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(t.String())) }

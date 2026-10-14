@@ -205,6 +205,10 @@ func routePermissions(scope string) githubapp.Permissions {
 		return githubapp.ActionsRead
 	case "deployments":
 		return githubapp.DeploymentsRead
+	case "checks":
+		return githubapp.ChecksRead
+	case "statuses":
+		return githubapp.StatusesRead
 	}
 	return githubapp.PullRequestsWrite
 }

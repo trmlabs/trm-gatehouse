@@ -242,14 +242,14 @@ func TestGitScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repos, pullRequests, actions, deployments := c.GitScope(42); fmt.Sprint(repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !pullRequests || actions || deployments {
-		t.Errorf("GitScope(42) = %v, %v", repos, pullRequests)
+	if s := c.GitScope(42); fmt.Sprint(s.Repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !s.PullRequests || s.Actions || s.Deployments || s.Checks || s.Statuses {
+		t.Errorf("GitScope(42) = %+v", s)
 	}
-	if repos, pullRequests, _, _ := c.GitScope(43); fmt.Sprint(repos) != "[trmlabs/c]" || pullRequests {
-		t.Errorf("GitScope(43) = %v, %v", repos, pullRequests)
+	if s := c.GitScope(43); fmt.Sprint(s.Repos) != "[trmlabs/c]" || s.PullRequests {
+		t.Errorf("GitScope(43) = %+v", s)
 	}
-	if repos, _, _, _ := c.GitScope(44); repos != nil {
-		t.Errorf("GitScope(44) = %v", repos)
+	if s := c.GitScope(44); s.Repos != nil {
+		t.Errorf("GitScope(44) = %+v", s)
 	}
 }
 

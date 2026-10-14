@@ -65,15 +65,17 @@ A `github-api` entry lets agents work with pull requests in listed repositories,
 | Operation | Routes | Token scope |
 |---|---|---|
 | `pr.open` | `POST /pulls`, from a branch under the pool's own push prefixes (its `git` entry's `refPrefixes`) | `pull_requests: write`, `contents: read` |
-| `pr.read` | `GET /pulls/{n}` | same |
+| `pr.read` | `GET /pulls/{n}`; and, only for a pool whose `git` entry can clone the repository (they return code), `GET /pulls/{n}/files` and `GET /compare/{base}...{head}` (two refs with no slash; query `page`, `per_page`). The broker authorizes the requester against that `git` entry too, so a code read never reaches a person the clone would refuse | same |
 | `pr.list` | `GET /pulls` (query `state`, `head`, `base`, `sort`, `direction`, `page`, `per_page`), `GET /issues/{n}/comments` (query `since`, `page`, `per_page`) | same |
 | `pr.comment` | `POST /issues/{n}/comments` and `POST .../comments/{id}/replies` with `{"body": ...}` only; `POST /pulls/{n}/comments` with `body` plus `commit_id`, `path`, `line`, `side`, `start_line`, `start_side`, `subject_type` or `position` (never `in_reply_to`); on a pull request in reach | same |
 | `pr.edit` | `PATCH /pulls/{n}` with `{"body": ...}` only, on a pull request in reach (never its state, base or title); `PATCH /issues/comments/{id}` on a comment the App itself made there | same |
 | `pr.label` | `POST /issues/{n}/labels` on a pull request in reach, with only the repository's `labels` | same |
 | `pr.ready` | `POST /pulls/{n}/ready` marks a draft in reach ready. Not a GitHub REST route: GitHub does this only through GraphQL, so the broker sends that one mutation | same |
 | `dispatch` | `POST /dispatches` with one of the repository's `dispatchEvents` and an optional `client_payload` object. GitHub runs the matching workflows from the default branch | `contents: write` |
-| `actions.read` | Workflow runs, jobs, logs and artifacts. For a log or artifact download the broker follows GitHub's redirect to its signed download host itself, without the token; the broker's network policy must allow those hosts | `actions: read` |
+| `actions.read` | Workflows, workflow runs, jobs, logs and artifacts (what `gh run list`, `view`, `watch` and `download` read). For a log or artifact download the broker follows GitHub's redirect to its signed download host itself, without the token; the broker's network policy must allow those hosts. Also a commit's statuses (`GET /commits/{sha}/status` and `/statuses`) and check runs (`GET /commits/{sha}/check-runs`, `GET /check-runs/{id}` and its annotations), by commit SHA only, each with a token holding only that permission | `actions: read`; `statuses: read`; `checks: read` |
 | `deployments.read` | Deployments and their statuses | `deployments: read` |
+
+The App and each installation must hold `checks: read` and `statuses: read` for the check run and commit status routes, and `actions: read` and `deployments: read` for theirs; without a permission only its routes fail (503 `token_unavailable`).
 
 A pull request is in reach when its head is a branch of the same repository under the pool's own push prefixes, or under the repository's `pullRequestPrefixes` (branch names ending in `/`, for pull requests another agent or a person opened). `labels` come only with `pr.label` and `dispatchEvents` only with `dispatch`; `pullRequestPrefixes` need an operation that acts on an existing pull request. Any other path, method or query key is refused. Each token is minted for one repository with only the scope its operation needs, and always `metadata: read`. A write body is JSON, limited to 1 MiB, and GitHub receives it rebuilt from the checked fields; a placeholder anywhere in it is refused. The worker sends no token, or the placeholder `__vault_GITHUB_TOKEN__`, so `gh api` works with `GH_TOKEN=__vault_GITHUB_TOKEN__`. Other `gh` commands use GraphQL and are refused. A worker's own token is refused.
 

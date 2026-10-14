@@ -38,10 +38,12 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	f := &routesFixture{apiFixture: &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}}}
 	const pr = `{"contents":"read","metadata":"read","pull_requests":"write"}`
 	need := map[string]string{
-		"pulls": pr, "issues": pr, "graphql": pr,
+		"pulls": pr, "issues": pr, "graphql": pr, "compare": pr,
 		"dispatches":  `{"contents":"write","metadata":"read"}`,
 		"actions":     `{"actions":"read","metadata":"read"}`,
 		"deployments": `{"deployments":"read","metadata":"read"}`,
+		"check-runs":  `{"checks":"read","metadata":"read"}`,
+		"commits":     `{"metadata":"read","statuses":"read"}`,
 	}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +74,9 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 		kind := "graphql"
 		if parts := strings.Split(r.URL.Path, "/"); len(parts) >= 5 {
 			kind = parts[4]
+		}
+		if kind == "commits" && strings.HasSuffix(r.URL.Path, "/check-runs") {
+			kind = "check-runs"
 		}
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
@@ -130,11 +135,14 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	t.Cleanup(github.Close)
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(github.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
-	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
+	// The API on api.example.com and git on example.com, as api.github.com
+	// and github.com: a code read uses the git entry on the matching host.
+	f.host = "api.example.com"
+	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api",
 		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
 		"operations":["pr.open","pr.read","pr.list","pr.comment","pr.edit","pr.label","pr.ready","dispatch","actions.read","deployments.read"],
 		"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"]}]}},
-		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
+		{"name":"github","host":"example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
 		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +158,7 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	p.upstream.TLSClientConfig.ServerName = "example.com" // the test server's certificate name
 	addr := strings.TrimPrefix(github.URL, "https://")
 	p.upstream.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
@@ -190,6 +199,14 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 		{"GET", routeRepo + "/deployments?environment=preview-30", "", "GET " + routeRepo + "/deployments?environment=preview-30"},
 		{"POST", routeRepo + "/pulls/30/ready", "", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_thirty"}}`},
 		{"POST", routeRepo + "/pulls/12/ready", "{}", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_twelve"}}`},
+		// The reads gh run list, view and watch make, and a CI verifier's reads of a commit.
+		{"GET", routeRepo + "/actions/workflows/ci.yml", "", "GET " + routeRepo + "/actions/workflows/ci.yml"},
+		{"GET", routeRepo + "/actions/runs/9?exclude_pull_requests=true", "", "GET " + routeRepo + "/actions/runs/9?exclude_pull_requests=true"},
+		{"GET", routeRepo + "/check-runs/9/annotations?per_page=100", "", "GET " + routeRepo + "/check-runs/9/annotations?per_page=100"},
+		{"GET", routeRepo + "/commits/0123abc/check-runs?filter=latest", "", "GET " + routeRepo + "/commits/0123abc/check-runs?filter=latest"},
+		{"GET", routeRepo + "/commits/0123abc/status", "", "GET " + routeRepo + "/commits/0123abc/status"},
+		{"GET", routeRepo + "/compare/staging...0123abc", "", "GET " + routeRepo + "/compare/staging...0123abc"},
+		{"GET", routeRepo + "/pulls/30/files?per_page=100", "", "GET " + routeRepo + "/pulls/30/files?per_page=100"},
 	} {
 		code, body := f.post(t, tc.method, tc.path, "Bearer "+githubTokenPlaceholder, tc.body)
 		if code != 200 || f.last() != tc.want || f.audit.last().Outcome != "completed" {
@@ -203,8 +220,8 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 		scopes[s] = true
 	}
 	f.mu.Unlock()
-	if len(scopes) != 4 {
-		t.Errorf("minted scopes %v, want four", scopes)
+	if len(scopes) != 6 {
+		t.Errorf("minted scopes %v, want six", scopes)
 	}
 }
 
@@ -254,6 +271,10 @@ func TestGitHubAPIRoutesRefuseOtherTargets(t *testing.T) {
 		{"GET", routeRepo + "/actions/runs/9/logs?x=1", "", "unlisted"},
 		{"POST", routeRepo + "/actions/runs/9/rerun", "", "unlisted"},
 		{"GET", "/repos/example-org/example-repo/actions/secrets", "", "unlisted"},
+		{"GET", routeRepo + "/commits/main/status", "", "unlisted"},
+		{"GET", routeRepo + "/compare/staging..main", "", "unlisted"},
+		{"POST", routeRepo + "/statuses/0123abc", `{"state":"success"}`, "unlisted"},
+		{"GET", routeRepo + "/actions/runs/9?exclude_pull_requests=true&x=1", "", "unlisted"},
 	} {
 		if code, _ := f.post(t, tc.method, tc.path, "", tc.body); code < 400 || f.audit.last().Outcome != tc.outcome {
 			t.Errorf("%s %s %s: code=%d outcome=%q, want %q", tc.method, tc.path, tc.body, code, f.audit.last().Outcome, tc.outcome)
