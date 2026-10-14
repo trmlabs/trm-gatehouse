@@ -151,12 +151,11 @@ func (r GitRepo) operations() []string {
 // Allows reports whether a github-api repository grants an operation.
 func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
 
-// grantsScope reports whether any of the repository's operations needs a
-// token scope.
-// GrantsScope reports whether the repository's operations need a token scope
-// ("pull-requests", "checks", "statuses" and so on), as grantsScope.
+// GrantsScope is grantsScope for callers outside the catalog (GraphQL tokens).
 func (r GitRepo) GrantsScope(scope string) bool { return r.grantsScope(scope) }
 
+// grantsScope reports whether any of the repository's operations needs a
+// token scope.
 func (r GitRepo) grantsScope(scope string) bool {
 	for _, op := range r.operations() {
 		if githubOperations[op] == scope || contains(githubRouteScopes[op], scope) {
