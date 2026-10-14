@@ -51,7 +51,7 @@ agent entirely.
 | PostgreSQL databases | A placeholder password | A temporary database login issued by HashiCorp Vault, revoked when no longer needed |
 | HTTP APIs | A placeholder in the key header, or no key | The real key, for the catalog's host, paths and methods only |
 | GitHub repositories (clone, push) | Nothing | A short-lived GitHub App token for that one repository; pushes can be limited to branch prefixes |
-| GitHub pull requests, Actions runs and deployments | A placeholder token, or none | The same App token, for the pull request API and, where the catalog grants them, Actions and deployment reads |
+| GitHub pull requests, Actions runs, checks and deployments | A placeholder token, or none | The same App token, for the pull request API and, where the catalog grants them, Actions, check run, commit status and deployment reads |
 | Google Cloud (Cloud Storage, BigQuery) | A placeholder token | A short-lived token narrowed to one bucket prefix or one service account |
 | Staging web apps as a test user | Nothing | A sign-in for the test user; the browser holds only placeholders |
 

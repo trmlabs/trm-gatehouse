@@ -1,6 +1,7 @@
 package hashicorp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -275,6 +276,73 @@ func TestJWTOlderLoginRevokeIsRetried(t *testing.T) {
 	h.advance(time.Minute)
 	if _, _, revoked := h.vault.snapshot(); len(revoked) != 1 || revoked[0] != "parent-1" {
 		t.Fatalf("revoked=%v; a failed revoke must be retried", revoked)
+	}
+}
+
+// A login whose revoke keeps failing is one warning naming the failure's
+// class and status, not one every tick; the retries log at debug.
+func TestJWTOlderLoginRevokeFailureWarnsOncePerLogin(t *testing.T) {
+	h := newJWTHarness(t, 3600, defaultReauthOptions())
+	var logs bytes.Buffer
+	h.c.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.vault.mu.Lock()
+	h.vault.failRevokes = 5
+	h.vault.mu.Unlock()
+	h.advance(27 * time.Minute) // refresh, then five failed revokes and a success
+	var warnings, retries int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		switch {
+		case strings.HasPrefix(msg, "vault older login revoke failed; retrying"):
+			warnings++
+			if rec["level"] != "WARN" || rec["class"] != "status" || rec["status"] != float64(500) {
+				t.Errorf("warning %v; want WARN with class status and status 500", rec)
+			}
+		case strings.HasPrefix(msg, "vault older login revoke failed again"):
+			retries++
+			if rec["level"] != "DEBUG" {
+				t.Errorf("retry logged at %v; want DEBUG", rec["level"])
+			}
+		}
+		if strings.Contains(line, "parent-") {
+			t.Fatalf("a log line carries a token: %s", line)
+		}
+	}
+	if warnings != 1 || retries != 4 {
+		t.Fatalf("warnings=%d retries=%d; want one warning, then four debug retries", warnings, retries)
+	}
+	if _, _, revoked := h.vault.snapshot(); len(revoked) != 1 {
+		t.Fatalf("revoked=%v; the login must still be revoked once Vault answers", revoked)
+	}
+}
+
+// Revokes run from the tick and from every session end, so several may retry
+// the same failing login at once: still one warning, and no data race. A
+// canceled context fails each revoke at once, so the retries overlap.
+func TestJWTOlderLoginRevokeFailureWarnsOnceUnderConcurrentRetries(t *testing.T) {
+	h := newJWTHarness(t, 3600, defaultReauthOptions())
+	var logs bytes.Buffer // the JSON handler serializes its writes
+	h.c.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.advance(20 * time.Minute) // refresh; the older login's first revoke is left to the goroutines
+	failing, cancel := context.WithCancel(context.Background())
+	cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				h.c.revokeIdle(failing)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := strings.Count(logs.String(), "vault older login revoke failed; retrying"); n != 1 {
+		t.Fatalf("warnings=%d; want one for the login", n)
 	}
 }
 

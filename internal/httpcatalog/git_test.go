@@ -131,7 +131,12 @@ func TestGitHubAPIEntries(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs", "", "pool-a", ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments", "", "pool-a", ErrUnlisted},
 		{"PATCH", "/repos/trmlabs/trm-b2b/issues/12", "", "pool-a", ErrUnlisted},
-		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "", "pool-a", ErrUnlisted},
+		// pr.read also lists a pull request's files and compares two refs: code
+		// the pool can already clone.
+		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "", "pool-a", nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/main...feature", "", "pool-a", nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/abc1234/status", "", "pool-a", ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/pulls", "", "pool-b", ErrPool},
 		{"POST", "/user/repos", "", "pool-a", ErrUnlisted},
 	} {
@@ -200,6 +205,28 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/actions/artifacts/9/zip", "", "actions-download", "actions", true, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments", "environment=preview-1&sha=abc", "deployments", "deployments", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/deployments/4/statuses", "", "deployments", "deployments", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/runs/9", "exclude_pull_requests=true", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/ci.yml", "", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/1234", "", "actions", "actions", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123456789abcdef0123456789abcdef01234567/status", "", "statuses", "statuses", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/statuses", "per_page=100", "statuses", "statuses", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=unit&filter=latest&per_page=100", "check-runs", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc/check-runs", "check_name=build+%28ubuntu-latest%29", "check-runs", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9", "", "check-run", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/check-runs/9/annotations", "per_page=100", "check-annotations", "checks", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/pulls/12/files", "per_page=100&page=2", "pull-files", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/staging...0123abc", "", "compare", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/main...staging", "per_page=1", "compare", "pull-requests", false, nil},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/staging..0123abc", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/a....b", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/compare/staging...", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/main/status", "", "", "", false, ErrUnlisted},
+		{"GET", "/repos/trmlabs/trm-b2b/commits/0123abc", "", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/statuses/0123abc", "", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/check-runs", "", "", "", false, ErrUnlisted},
+		{"PATCH", "/repos/trmlabs/trm-b2b/check-runs/9", "", "", "", false, ErrMethod},
+		{"GET", "/repos/trmlabs/trm-b2b/actions/runs/9", "exclude_pull_requests=true&x=1", "", "", false, ErrUnlisted},
+		{"POST", "/repos/trmlabs/trm-b2b/actions/workflows/ci.yml/dispatches", "", "", "", false, ErrUnlisted},
 		{"POST", "/repos/trmlabs/trm-b2b/actions/runs/9/rerun", "", "", "", false, ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/workflows/../runs", "", "", "", false, ErrUnlisted},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/secrets", "", "", "", false, ErrUnlisted},
@@ -223,13 +250,13 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 	if m, _, _ := c.GitHubAPIMatch("api.github.com", 443, "PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", "pool-a"); m.CommentID != 5 || m.Target != 0 || fmt.Sprint(m.HeadPrefixes) != "[cursor/ factory/]" {
 		t.Errorf("edit comment: %+v", m)
 	}
-	for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments"} {
+	for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments", "checks", "statuses"} {
 		if !c.GitGranted(42, "trmlabs/trm-b2b", scope) {
 			t.Errorf("GitGranted %s = false", scope)
 		}
 	}
-	if repos, pullRequests, actions, deployments := c.GitScope(42); len(repos) != 3 || !pullRequests || !actions || !deployments {
-		t.Errorf("GitScope = %v %v %v %v", repos, pullRequests, actions, deployments)
+	if s := c.GitScope(42); len(s.Repos) != 3 || !s.PullRequests || !s.Actions || !s.Deployments || !s.Checks || !s.Statuses {
+		t.Errorf("GitScope = %+v", s)
 	}
 	for name, doc := range map[string]string{
 		"operations on a git entry": strings.Replace(gitEntry, `"access":"write"`, `"access":"write","operations":["pr.read"]`, 1),
@@ -287,11 +314,13 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"GET actions/runs", "GET actions/runs/1", "GET actions/runs/1/jobs", "GET actions/runs/1/artifacts", "GET actions/runs/1/logs",
 		"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip",
 		"GET deployments", "GET deployments/1", "GET deployments/1/statuses",
+		"GET actions/workflows/ci.yml", "GET pulls/1/files", "GET compare/main...feature", "GET commits/abc1234/status",
+		"GET commits/abc1234/statuses", "GET commits/abc1234/check-runs", "GET check-runs/1", "GET check-runs/1/annotations",
 	}
 	want := map[string][]string{
 		"graphql":    nil, // POST /graphql only (graphql_test.go); no REST route
 		"pr.open":    {"POST pulls"},
-		"pr.read":    {"GET pulls/1"},
+		"pr.read":    {"GET pulls/1"}, // files and compare also need a git entry (TestGitHubAPICodeReadsNeedClone)
 		"pr.list":    {"GET pulls", "GET issues/1/comments"},
 		"pr.comment": {"POST issues/1/comments", "POST pulls/1/comments", "POST pulls/1/comments/2/replies"},
 		"pr.edit":    {"PATCH pulls/1", "PATCH issues/comments/2"},
@@ -299,7 +328,9 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"pr.ready":   {"POST pulls/1/ready"},
 		"dispatch":   {"POST dispatches"},
 		"actions.read": {"GET actions/runs", "GET actions/runs/1", "GET actions/runs/1/jobs", "GET actions/runs/1/artifacts", "GET actions/runs/1/logs",
-			"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip"},
+			"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip",
+			"GET actions/workflows/ci.yml", "GET commits/abc1234/status", "GET commits/abc1234/statuses", "GET commits/abc1234/check-runs",
+			"GET check-runs/1", "GET check-runs/1/annotations"},
 		"deployments.read": {"GET deployments", "GET deployments/1", "GET deployments/1/statuses"},
 	}
 	if len(want) != len(githubOperations) {
@@ -326,17 +357,91 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 				continue
 			}
 			got = append(got, sample)
-			if m.Operation != op || m.Permissions != githubOperations[op] {
-				t.Errorf("%s %s: operation %q scope %q", op, sample, m.Operation, m.Permissions)
+			scope := githubOperations[op]
+			switch {
+			case strings.Contains(sample, "check-runs"):
+				scope = "checks"
+			case strings.HasPrefix(sample, "GET commits/"):
+				scope = "statuses"
+			}
+			if m.Operation != op || m.Permissions != scope {
+				t.Errorf("%s %s: operation %q scope %q, want %q", op, sample, m.Operation, m.Permissions, scope)
 			}
 		}
 		if fmt.Sprint(got) != fmt.Sprint(routes) {
 			t.Errorf("%s opens %v, want %v", op, got, routes)
 		}
-		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments"} {
-			if c.GitGranted(42, "trmlabs/trm-b2b", scope) != (githubOperations[op] == scope) {
-				t.Errorf("%s: GitGranted(%s) = %v", op, scope, githubOperations[op] != scope)
+		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments", "checks", "statuses"} {
+			want := githubOperations[op] == scope || contains(githubRouteScopes[op], scope)
+			if c.GitGranted(42, "trmlabs/trm-b2b", scope) != want {
+				t.Errorf("%s: GitGranted(%s) = %v", op, scope, !want)
 			}
 		}
+	}
+}
+
+// A pull request's files and a compare return code, so they open only for a
+// pool whose git entry can already clone the repository.
+func TestGitHubAPICodeReadsNeedClone(t *testing.T) {
+	withGit, err := Parse([]byte(`{"entries":[` + gitEntry + `,` + apiEntry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alone, err := Parse([]byte(`{"entries":[` + apiEntry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/repos/trmlabs/trm-b2b/pulls/12/files", "/repos/trmlabs/trm-b2b/compare/main...feature"} {
+		if m, _, err := withGit.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); err != nil || m.Operation != "pr.read" || m.CloneEntry == nil || m.CloneEntry.Kind != "git" {
+			t.Errorf("%s with a git entry: %v %+v", path, err, m)
+		}
+		if _, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", path, "", "pool-a"); !errors.Is(err, ErrUnlisted) {
+			t.Errorf("%s without a git entry: %v", path, err)
+		}
+	}
+	if m, _, err := alone.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/trmlabs/trm-b2b/pulls/12", "", "pool-a"); err != nil || m.CloneEntry != nil {
+		t.Errorf("reading a pull request still needs no git entry: %v %+v", err, m)
+	}
+}
+
+// A code read picks its git entry the way a clone does: the git entry on the
+// git host (github.com for api.github.com) that lists the repository, which the
+// catalog allows only once per host, and nothing when that entry does not grant
+// the pool. An entry on another host is never used.
+func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
+	entry := func(name, host, pool string) string {
+		return `{"name":"` + name + `","host":"` + host + `","kind":"git","pools":["` + pool + `"],
+			"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/trm-b2b","access":"read"}]}}`
+	}
+	match := func(entries ...string) (GitRequest, error) {
+		t.Helper()
+		c, err := Parse([]byte(`{"entries":[` + strings.Join(append(entries, apiEntry), ",") + `]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, _, err := c.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/trmlabs/trm-b2b/compare/main...feature", "", "pool-a")
+		return m, err
+	}
+	// An entry on another host comes first in the catalog; the github.com one is used.
+	if m, err := match(entry("elsewhere", "git.example.com", "pool-a"), entry("github", "github.com", "pool-a")); err != nil || m.CloneEntry == nil || m.CloneEntry.Name != "github" {
+		t.Errorf("git host entry: %v %+v", err, m.CloneEntry)
+	}
+	// The github.com entry does not grant the pool: a clone gets ErrPool, so no
+	// code read, even though another host's entry grants it.
+	if _, err := match(entry("elsewhere", "git.example.com", "pool-a"), entry("github", "github.com", "pool-b")); !errors.Is(err, ErrUnlisted) {
+		t.Errorf("git host entry without the pool: %v", err)
+	}
+	// Only another host lists the repository.
+	if _, err := match(entry("elsewhere", "git.example.com", "pool-a")); !errors.Is(err, ErrUnlisted) {
+		t.Errorf("git entry on another host only: %v", err)
+	}
+	// Another port on the git host is a different endpoint: an entry there,
+	// listed first, never stands in for the clone entry on 443.
+	altPort := strings.Replace(entry("alt-port", "github.com", "pool-a"), `"host":"github.com"`, `"host":"github.com","port":8443`, 1)
+	if m, err := match(altPort, entry("github", "github.com", "pool-a")); err != nil || m.CloneEntry == nil || m.CloneEntry.Name != "github" {
+		t.Errorf("alternate port listed first: %v %+v", err, m.CloneEntry)
+	}
+	if _, err := match(altPort); !errors.Is(err, ErrUnlisted) {
+		t.Errorf("only an alternate port lists the repository: %v", err)
 	}
 }

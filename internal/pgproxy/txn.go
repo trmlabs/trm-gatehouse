@@ -133,9 +133,10 @@ func pooledKey(scope AgentScope, svc *DatabaseService) poolKey {
 }
 
 // servePooled runs a client session on the shared pool. It returns when the
-// client leaves, the session is terminated, or the pool fails it.
+// client leaves, the session is terminated, or the pool fails it. authenticated
+// is when the client authenticated; session_open records the time since.
 func (b *Broker) servePooled(ctx context.Context, conn net.Conn, backend *pgproto3.Backend, scope AgentScope, svc *DatabaseService, token, hint, requested string, peer netip.Addr,
-	startupParams map[string]string, event auditchain.Event) {
+	startupParams map[string]string, event auditchain.Event, authenticated time.Time) {
 	key := pooledKey(scope, svc)
 	s := &pooledSession{b: b, key: key, vaultID: scope.VaultID, svc: *svc, client: conn, backend: backend, event: event,
 		params: map[string]string{}, txStatus: 'I', statements: map[string]clientStatement{}}
@@ -188,6 +189,7 @@ func (b *Broker) servePooled(ctx context.Context, conn net.Conn, backend *pgprot
 
 	opened := event
 	opened.Event, opened.Outcome = auditchain.EventSessionOpen, "admitted"
+	opened.Duration = time.Since(authenticated).Milliseconds()
 	if err := b.auditRecord(opened); err != nil {
 		return
 	}

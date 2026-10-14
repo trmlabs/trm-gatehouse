@@ -237,6 +237,8 @@ func TestScopeWarnsOnWiderSettings(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"pull requests":        func(g *scopeGitHub) { g.permissions["pull_requests"] = "write" },
 		"workflows":            func(g *scopeGitHub) { g.permissions["workflows"] = "write" },
+		"checks read":          func(g *scopeGitHub) { g.permissions["checks"] = "read" },
+		"statuses read":        func(g *scopeGitHub) { g.permissions["statuses"] = "read" },
 		"administration read":  func(g *scopeGitHub) { g.permissions["administration"] = "read" },
 		"metadata write":       func(g *scopeGitHub) { g.permissions["metadata"] = "write" },
 		"suspended":            func(g *scopeGitHub) { g.suspended = true },
@@ -272,6 +274,26 @@ func TestScopeAllowsPullRequestsOnlyWithAGitHubAPIEntry(t *testing.T) {
 	m.Scope = func(int64) Scope { return Scope{Repos: []string{"trmlabs/trm-b2b"}, PullRequests: true} }
 	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", PullRequestsWrite); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// An Actions read grant also reads check runs and commit statuses, so an
+// installation holding them is not reported.
+func TestScopeAllowsChecksAndStatusesWithActions(t *testing.T) {
+	g, m := newScopeGitHub(t)
+	var logs bytes.Buffer
+	m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	g.permissions["actions"], g.permissions["checks"], g.permissions["statuses"] = "read", "read", "read"
+	m.Scope = func(int64) Scope {
+		return Scope{Repos: []string{"trmlabs/trm-b2b"}, Actions: true, Checks: true, Statuses: true}
+	}
+	for _, p := range []Permissions{ActionsRead, ChecksRead, StatusesRead} {
+		if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", p); err != nil {
+			t.Fatalf("%+v: %v", p, err)
+		}
+	}
+	if strings.Contains(logs.String(), "github app installation scope") {
+		t.Fatalf("reported: %s", logs.String())
 	}
 }
 

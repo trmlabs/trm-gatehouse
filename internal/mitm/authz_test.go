@@ -39,7 +39,7 @@ func (d directory) Lookup(_ context.Context, subject string, groups []string) (e
 			}
 		}
 	}
-	return entitlement.Person{ObjectID: "oid-" + subject, Enabled: true, MemberOf: member}, nil
+	return entitlement.Person{ObjectID: "oid-" + subject, Enabled: true, MemberOf: member, Department: " Engineering   Ops"}, nil
 }
 
 func authzProxy(t *testing.T) (*Proxy, *httpcatalog.Entry, *httpcatalog.Entry) {
@@ -92,7 +92,7 @@ func TestAuthorizeModel(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
-		if c.token == "alice" && c.pool == "claude" && (event.Requester != "sso|alice" || event.RequesterOID != "oid-sso|alice" || event.TokenSHA256 != "aa" || event.Decision != "entitled") {
+		if c.token == "alice" && c.pool == "claude" && (event.Requester != "sso|alice" || event.RequesterOID != "oid-sso|alice" || event.TokenSHA256 != "aa" || event.Decision != "entitled" || event.RequesterDepartment != "Engineering Ops") {
 			t.Errorf("%s: audit fields %+v", c.name, event)
 		}
 	}
