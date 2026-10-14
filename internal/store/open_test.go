@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func TestOpenStoreRefusesWhenTheMarkerCannotBeChecked(t *testing.T) {
 		_ = db.Close()
 		t.Fatal("OpenStore opened a store whose marker could not be checked")
 	}
-	if errors.Is(err, ErrSQLiteMovedToSharedStore) {
-		t.Fatalf("got the moved-store error for an unreadable directory: %v", err)
+	if errors.Is(err, ErrSQLiteMovedToSharedStore) || !strings.Contains(err.Error(), "checking for") {
+		t.Fatalf("an unreadable directory did not fail the marker check: %v", err)
 	}
 }
