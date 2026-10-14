@@ -277,9 +277,13 @@ func (p *agentPod) attest(s *SharedConfig, now time.Time) (workloadidentity.Atte
 		len(p.Spec.EphemeralContainers) != 0 || len(p.Status.ContainerStatuses) == 0 || s.Profiles[m.Namespace] == "" {
 		return a, false
 	}
-	// The controller reference names the agent's own controller object. Only
-	// the controller may create Pods in an agent namespace; that right is the
-	// boundary, as for pool Pods.
+	// The controller reference names the agent's own controller object, which
+	// is never looked up, and the requester is read from the Pod. Both are
+	// written by whoever creates or updates the Pod, so the boundary is that
+	// only the controller may create Pods in an agent namespace and no one may
+	// change their owner references or requester afterwards. The deployment
+	// enforces that with admission policy, as for pool Pods; RBAC alone does
+	// not hold it, since a cluster-wide grant includes Pod creation.
 	owner := ""
 	for _, o := range m.OwnerReferences {
 		if o.Controller != nil && *o.Controller {
