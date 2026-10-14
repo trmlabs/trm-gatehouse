@@ -464,16 +464,19 @@ func (c *Client) revokeIdle(ctx context.Context) {
 		case loginRevokeRefused:
 			c.logger.Info("vault older login released: its policy does not grant revoke-self, so it ends at its maximum lifetime")
 		default:
+			// idle handed this login to this call alone; once requeued, another
+			// tick or session end may take it, so read and set the flag first.
+			warned := l.revokeWarned
+			l.revokeWarned = true
 			c.logins.requeue(l)
 			attrs := []any{slog.String("class", failure.class)}
 			if failure.status != 0 {
 				attrs = append(attrs, slog.Int("status", failure.status))
 			}
-			if l.revokeWarned {
+			if warned {
 				c.logger.Debug("vault older login revoke failed again; retrying", attrs...)
 				continue
 			}
-			l.revokeWarned = true
 			c.logger.Warn("vault older login revoke failed; retrying until it revokes or reaches its maximum lifetime", attrs...)
 		}
 	}

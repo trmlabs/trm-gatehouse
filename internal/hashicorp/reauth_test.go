@@ -320,6 +320,32 @@ func TestJWTOlderLoginRevokeFailureWarnsOncePerLogin(t *testing.T) {
 	}
 }
 
+// Revokes run from the tick and from every session end, so several may retry
+// the same failing login at once: still one warning, and no data race. A
+// canceled context fails each revoke at once, so the retries overlap.
+func TestJWTOlderLoginRevokeFailureWarnsOnceUnderConcurrentRetries(t *testing.T) {
+	h := newJWTHarness(t, 3600, defaultReauthOptions())
+	var logs bytes.Buffer // the JSON handler serializes its writes
+	h.c.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.advance(20 * time.Minute) // refresh; the older login's first revoke is left to the goroutines
+	failing, cancel := context.WithCancel(context.Background())
+	cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				h.c.revokeIdle(failing)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := strings.Count(logs.String(), "vault older login revoke failed; retrying"); n != 1 {
+		t.Fatalf("warnings=%d; want one for the login", n)
+	}
+}
+
 func TestJWTCloseRevokesLoginsWithoutSessions(t *testing.T) {
 	h := newJWTHarness(t, 4*3600, defaultReauthOptions())
 	held := h.mustSession()

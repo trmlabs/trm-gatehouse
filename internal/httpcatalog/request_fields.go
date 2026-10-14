@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/url"
 	"regexp"
@@ -24,9 +25,10 @@ type RequestField struct {
 var (
 	requestFieldName  = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 	requestFieldValue = regexp.MustCompile(`^[A-Za-z0-9_.:@/+-]{1,200}$`)
-	// slackChannel is a public or private channel ID. D (direct message), G
-	// (group conversation or legacy private channel), U and W (a person, which
-	// Slack turns into a direct message) are never listable.
+	// slackChannel admits only IDs starting with C, which keeps out D (direct
+	// message), G (group conversation or legacy private channel), U and W (a
+	// person, which Slack turns into a direct message). The prefix is Slack's
+	// convention, not a guarantee of the conversation's type.
 	slackChannel = regexp.MustCompile(`^C[A-Z0-9]{8,20}$`)
 )
 
@@ -171,7 +173,9 @@ func uniqueObject(body []byte) (map[string]json.RawMessage, error) {
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
 		return nil, errors.New("not an object")
 	}
-	if _, err := dec.Token(); err == nil {
+	// Only whitespace may follow: a second value and bytes the decoder
+	// rejects (x, ], a comma, NUL) are both trailing data.
+	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("trailing data")
 	}
 	return out, nil
