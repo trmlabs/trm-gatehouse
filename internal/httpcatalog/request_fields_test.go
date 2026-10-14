@@ -33,7 +33,7 @@ func TestRequestFieldsLoadRules(t *testing.T) {
 		"a repeated value":             strings.Replace(slackEntry, `"C0987654321"`, `"C0123456789"`, 1),
 		"a repeated field":             strings.Replace(slackEntry, `}]}`, `},{"name":"channel","values":["C0123456789"]}]}`, 1),
 		"on a non-header entry": `{"name":"g","kind":"git","host":"github.com","pools":["pool-a"],"requestFields":[{"name":"x","values":["y"]}],
-			"git":{"appID":1,"installationID":2,"repos":[{"repo":"trmlabs/trm-b2b","access":"read"}]}}`,
+			"git":{"appID":1,"installationID":2,"repos":[{"repo":"example-org/example-app","access":"read"}]}}`,
 	} {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil {
 			t.Errorf("%s accepted", name)
