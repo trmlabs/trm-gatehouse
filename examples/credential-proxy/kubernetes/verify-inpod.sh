@@ -128,4 +128,4 @@ kubectl -n combined exec broker -- touch /tmp/combined-agent-complete
 if ! wait "$fixture_pid"; then fixture_pid=; cat "$scratch/broker.log"; exit 1; fi
 fixture_pid=
 cat "$scratch/broker.log"
-printf 'PASS: separate caller pod, real projected proof, TLS broker workflows, and observed Calico denial of direct HTTP/Vault/PostgreSQL routes by pod/service IP. Destinations colocated in broker fixture; TRM deployment and storage/rollback acceptance remain open.\n'
+printf 'PASS: separate caller pod, real projected proof, TLS broker workflows, and observed Calico denial of direct HTTP/Vault/PostgreSQL routes by pod/service IP. Destinations colocated in broker fixture; a real deployment still needs its own storage and rollback acceptance.\n'

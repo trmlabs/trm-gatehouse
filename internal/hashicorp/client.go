@@ -231,7 +231,7 @@ func login(ctx context.Context, api *vaultapi.Client, method AuthMethod) (time.D
 		return ttl, nil
 	case AuthAppRole:
 		// AppRole is commonly mounted at a non-default path on Enterprise/HCP
-		// (e.g. auth/prod-approle). VAULT_APPROLE_MOUNT overrides the default.
+		// (e.g. auth/example-approle). VAULT_APPROLE_MOUNT overrides the default.
 		mount := strings.Trim(strings.TrimSpace(os.Getenv("VAULT_APPROLE_MOUNT")), "/")
 		if mount == "" {
 			mount = "approle"

@@ -75,7 +75,7 @@ func (li *liveIssuer) publish(keys ...*signer) {
 // domain is the remote trust domain for this issuer, with an optional
 // fallback set.
 func (li *liveIssuer) domain(fallback ...*signer) TrustDomain {
-	td := TrustDomain{Name: "agent-sandbox", Issuer: remoteIssuer, Audience: "gatehouse-edge", Keys: "remote", JWKSURL: li.srv.URL + "/jwks", CAFile: li.ca}
+	td := TrustDomain{Name: "agent-sandbox", Issuer: remoteIssuer, Audience: "example-edge", Keys: "remote", JWKSURL: li.srv.URL + "/jwks", CAFile: li.ca}
 	if len(fallback) != 0 {
 		var keys []map[string]any
 		for _, k := range fallback {
@@ -131,11 +131,11 @@ func (c *clock) Add(d time.Duration) {
 // edgeClaims is a token the remote cluster issued to its proxy at time now.
 func edgeClaims(now time.Time) claims {
 	var c claims
-	c.Issuer, c.Subject, c.Audience = remoteIssuer, "system:serviceaccount:gatehouse-edge:gatehouse-edge", []string{"gatehouse-edge"}
+	c.Issuer, c.Subject, c.Audience = remoteIssuer, "system:serviceaccount:example-edge:example-edge", []string{"example-edge"}
 	c.Issued = now.Unix() - 1
 	c.Expires = c.Issued + 600
-	c.Kubernetes.Namespace = "gatehouse-edge"
-	c.Kubernetes.ServiceAccount.Name, c.Kubernetes.ServiceAccount.UID = "gatehouse-edge", "edge-account-uid"
+	c.Kubernetes.Namespace = "example-edge"
+	c.Kubernetes.ServiceAccount.Name, c.Kubernetes.ServiceAccount.UID = "example-edge", "edge-account-uid"
 	c.Kubernetes.Pod.Name, c.Kubernetes.Pod.UID = "gatehouse-edge-7d9", "edge-pod-uid"
 	return c
 }

@@ -23,24 +23,24 @@ The PostgreSQL broker can record every session in a tamper-evident trail. Each r
 
 ## Configure
 
-1. Keep the HMAC key on the `gatehouse` KV version 2 mount. Create it without the value touching a file, an argument or shell history: `openssl rand -base64 32 | vault kv put gatehouse/audit-hmac key=-`.
-2. Create the signing key: `vault write transit/keys/gatehouse-audit type=ed25519`.
-3. Give the broker's Vault role a sign-only Transit policy for that one key, plus read on the HMAC key. In TRM's Vault this is a trm-infra change, which waits until the PR freeze lifts:
+1. Keep the HMAC key on the `gatehouse` KV version 2 mount. Create it without the value touching a file, an argument or shell history: `openssl rand -base64 32 | vault kv put gatehouse/example-audit-hmac key=-`.
+2. Create the signing key: `vault write transit/keys/example-audit-signing type=ed25519`.
+3. Give the broker's Vault role a sign-only Transit policy for that one key, plus read on the HMAC key:
 
    ```hcl
-   path "transit/sign/gatehouse-audit" { capabilities = ["update"] }
-   path "gatehouse/data/audit-hmac"    { capabilities = ["read"] }
+   path "transit/sign/example-audit-signing" { capabilities = ["update"] }
+   path "gatehouse/data/example-audit-hmac"   { capabilities = ["read"] }
    ```
 
-   The broker gets no `transit/keys`, `export` or `rotate` access. Grant the verifier `read` on `gatehouse/data/audit-hmac` (including versions) and on `transit/keys/gatehouse-audit`.
-4. Set `AGENT_VAULT_AUDIT_CHAIN=1`, `AGENT_VAULT_AUDIT_HMAC_PATH=audit-hmac`, `AGENT_VAULT_AUDIT_TRANSIT_KEY=gatehouse-audit` and `AGENT_VAULT_AUDIT_REPLICA` to the Pod name (from the downward API). The HMAC mount defaults to `gatehouse`.
+   The broker gets no `transit/keys`, `export` or `rotate` access. Grant the verifier `read` on `gatehouse/data/example-audit-hmac` (including versions) and on `transit/keys/example-audit-signing`.
+4. Set `AGENT_VAULT_AUDIT_CHAIN=1`, `AGENT_VAULT_AUDIT_HMAC_PATH=example-audit-hmac`, `AGENT_VAULT_AUDIT_TRANSIT_KEY=example-audit-signing` and `AGENT_VAULT_AUDIT_REPLICA` to the Pod name (from the downward API). The HMAC mount defaults to `gatehouse`.
 5. Route rows with the Cloud Logging filter `jsonPayload.type="gatehouse.audit.v1"` to a bucket with locked retention.
 
 ## Verify
 
 ```
 agent-vault audit heads > heads.jsonl
-agent-vault audit verify --hmac-path audit-hmac --transit-key gatehouse-audit --heads heads.jsonl --input export.jsonl
+agent-vault audit verify --hmac-path example-audit-hmac --transit-key example-audit-signing --heads heads.jsonl --input export.jsonl
 ```
 
 `audit heads` reads the store (`DATABASE_URL`) and prints each replica's current boot and newest persisted checkpoint; it prints no secrets. Take it after the export so the export can reach every head. The input is newline-delimited rows, bare or as exported Cloud Logging entries. Rows are checked in input order per replica chain. If the export does not preserve order, add `--sort-by-seq`: a moved row then cannot be reported as a reorder, but it still cannot hide an edit, because sequence numbers and links are inside the MAC. The command prints each finding and exits 1 on any finding or an empty input:

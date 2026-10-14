@@ -163,7 +163,7 @@ func TestMinterAcceptsStatelessTokens(t *testing.T) {
 		g, srv := newFakeGitHub(t)
 		g.token = func(seq int32) string { return statelessToken(fmt.Sprintf("ghs_stateless%04d", seq), n) }
 		m := newMinter(g, srv, nil)
-		token, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead)
+		token, err := m.Token(context.Background(), app, "trmlabs/example-app", ContentsRead)
 		if err != nil {
 			t.Fatalf("%d-character token: %v", n, err)
 		}
@@ -181,14 +181,14 @@ func TestMinterRequestsOnlyOneRepoAndMinimumPermissions(t *testing.T) {
 		ContentsWrite:     {"contents": "write", "metadata": "read"},
 		PullRequestsWrite: {"contents": "read", "pull_requests": "write", "metadata": "read"},
 	} {
-		token, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", permissions)
+		token, err := m.Token(context.Background(), app, "trmlabs/example-app", permissions)
 		if err != nil || !strings.HasPrefix(token.Value(), "ghs_") {
 			t.Fatalf("mint %+v: %v", permissions, err)
 		}
 		g.mu.Lock()
 		body := g.lastBody
 		g.mu.Unlock()
-		if fmt.Sprint(body["permissions"]) != fmt.Sprint(want) || fmt.Sprint(body["repositories"]) != "[trm-b2b]" {
+		if fmt.Sprint(body["permissions"]) != fmt.Sprint(want) || fmt.Sprint(body["repositories"]) != "[example-app]" {
 			t.Fatalf("requested %v", body)
 		}
 	}
@@ -201,20 +201,20 @@ func TestMinterCachesSharesAndRefreshes(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, _ = m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsWrite) }()
+		go func() { defer wg.Done(); _, _ = m.Token(context.Background(), app, "trmlabs/example-app", ContentsWrite) }()
 	}
 	wg.Wait()
 	if g.mints.Load() != 1 {
 		t.Fatalf("20 concurrent requests minted %d tokens", g.mints.Load())
 	}
-	if _, err := m.Token(context.Background(), app, "TRMLABS/trm-b2b", ContentsRead); err != nil || g.mints.Load() != 2 {
+	if _, err := m.Token(context.Background(), app, "TRMLABS/example-app", ContentsRead); err != nil || g.mints.Load() != 2 {
 		t.Fatal("read and write tokens must be separate")
 	}
 	now = now.Add(51 * time.Minute)
 	g.mu.Lock()
 	g.expires = now.Add(time.Hour)
 	g.mu.Unlock()
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsWrite); err != nil || g.mints.Load() != 3 {
+	if _, err := m.Token(context.Background(), app, "trmlabs/example-app", ContentsWrite); err != nil || g.mints.Load() != 3 {
 		t.Fatalf("token not refreshed ten minutes before expiry: mints=%d", g.mints.Load())
 	}
 }
@@ -223,7 +223,7 @@ func TestMinterRefusesAndRevokesAWiderToken(t *testing.T) {
 	g, srv := newFakeGitHub(t)
 	g.extraPerm = true
 	m := newMinter(g, srv, nil)
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); !errors.Is(err, ErrUnavailable) || g.revokes.Load() != 1 {
+	if _, err := m.Token(context.Background(), app, "trmlabs/example-app", ContentsRead); !errors.Is(err, ErrUnavailable) || g.revokes.Load() != 1 {
 		t.Fatalf("wide token: err=%v revokes=%d", err, g.revokes.Load())
 	}
 }

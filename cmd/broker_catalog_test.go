@@ -11,7 +11,7 @@ import (
 const exampleCatalogYAML = `pools:
   - {name: cursor, namespace: cursor-agents, serviceAccount: cursor-worker}
 entries:
-  - name: b2bcore
+  - name: examplecore
     kind: postgres
     host: p.abc.db.postgresbridge.com
     pools: [cursor]

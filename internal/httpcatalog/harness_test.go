@@ -297,7 +297,7 @@ func TestCustomerAndDeveloperSandboxProfiles(t *testing.T) {
 // A proxy-attested harness may admit images by an agent-sandbox repository
 // path instead of digests; two harnesses may never claim overlapping paths.
 func TestHarnessImagePrefixes(t *testing.T) {
-	const orion = "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/orion/"
+	const orion = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/orion/"
 	c := harnessCatalog()
 	id := harnessAt(c, 2)["identity"].(map[string]any)
 	id["imagePrefix"] = orion
@@ -310,7 +310,7 @@ func TestHarnessImagePrefixes(t *testing.T) {
 			harnessAt(c, 0)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/cursor/"
 		},
 		"another project": func(c map[string]any) {
-			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/other/agent-sandbox-images-staging/orion/"
+			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/other/example-images/orion/"
 		},
 		"the whole project": func(c map[string]any) {
 			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/"
@@ -321,7 +321,7 @@ func TestHarnessImagePrefixes(t *testing.T) {
 			_ = json.Unmarshal(b, &second)
 			second["name"] = "agent-sandbox-2"
 			second["identity"].(map[string]any)["namespaces"] = []any{"other-sandboxes"}
-			second["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/"
+			second["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/"
 			second["authorization"] = map[string]any{"mode": "pool", "poolName": "sandboxes-2"}
 			c["harnesses"] = append(c["harnesses"].([]any), second)
 			c["pools"] = append(c["pools"].([]any), map[string]any{"name": "sandboxes-2", "namespace": "other-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})

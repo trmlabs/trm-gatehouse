@@ -1,0 +1,16 @@
+Gatehouse
+Copyright (c) 2026 TRM Labs
+
+Gatehouse is a fork of Agent Vault by Infisical
+(https://github.com/Infisical/agent-vault).
+Copyright (c) 2022 Infisical Inc.
+
+Agent Vault is licensed under the MIT license. Gatehouse keeps that license
+and Infisical's copyright notice in the LICENSE file. TRM Labs' changes are
+offered under the same MIT terms.
+
+Gatehouse is maintained by TRM Labs. It is not an Infisical product, and
+Infisical has not reviewed or endorsed it.
+
+Third-party components keep their own licenses, as recorded in go.mod,
+web/package.json and the other dependency manifests in this repository.

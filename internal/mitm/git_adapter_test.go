@@ -66,7 +66,7 @@ func newGitFixture(t *testing.T) *gitFixture {
 	}
 	f := &gitFixture{root: t.TempDir(), work: t.TempDir(), home: t.TempDir(), audit: &adapterAudit{}, minted: map[string]string{}}
 	env := f.env()
-	for _, repo := range []string{"trmlabs/trm-b2b", "trmlabs/docs", "trmlabs/secret"} {
+	for _, repo := range []string{"trmlabs/example-app", "trmlabs/docs", "trmlabs/secret"} {
 		bare := filepath.Join(f.root, repo+".git")
 		if out, err := runGit(t, f.root, env, "init", "--bare", "--initial-branch=main", bare); err != nil {
 			t.Fatal(out)
@@ -128,7 +128,7 @@ func newGitFixture(t *testing.T) *gitFixture {
 	f.port, _ = strconv.Atoi(portText)
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github","host":"example.com","port":%d,"kind":"git","pools":["pool-agent"],
 		"git":{"appID":7,"installationID":42,"repos":[
-			{"repo":"trmlabs/trm-b2b","access":"write","refPrefixes":["refs/heads/cursor/"]},
+			{"repo":"trmlabs/example-app","access":"write","refPrefixes":["refs/heads/cursor/"]},
 			{"repo":"trmlabs/docs","access":"read"}]}}]}`, f.port)))
 	if err != nil {
 		t.Fatal(err)
@@ -212,8 +212,8 @@ func (f *gitFixture) tokens() []string {
 
 func TestGitCloneAndPushThroughBrokerWithoutAToken(t *testing.T) {
 	f := newGitFixture(t)
-	clone := filepath.Join(f.work, "trm-b2b")
-	out, err := f.git(t, f.work, "clone", f.remote("trmlabs/trm-b2b"), clone)
+	clone := filepath.Join(f.work, "example-app")
+	out, err := f.git(t, f.work, "clone", f.remote("trmlabs/example-app"), clone)
 	if err != nil {
 		t.Fatalf("clone: %s", out)
 	}
@@ -237,7 +237,7 @@ func TestGitCloneAndPushThroughBrokerWithoutAToken(t *testing.T) {
 	if out, err := f.git(t, clone, "push", "origin", "cursor/feature"); err != nil {
 		t.Fatalf("push to an allowed prefix: %s", out)
 	}
-	if f.bareRef(t, "trmlabs/trm-b2b", "refs/heads/cursor/feature") == "" {
+	if f.bareRef(t, "trmlabs/example-app", "refs/heads/cursor/feature") == "" {
 		t.Fatal("pushed branch missing upstream")
 	}
 	f.mu.Lock()
@@ -260,7 +260,7 @@ func TestGitCloneAndPushThroughBrokerWithoutAToken(t *testing.T) {
 	}
 	completed := 0
 	for _, e := range f.audit.all() {
-		if e.Event == auditchain.EventHTTPResponse && e.Binding == "github/trmlabs/trm-b2b" && e.Outcome == "completed" && e.PodUID == "pod-uid-1" {
+		if e.Event == auditchain.EventHTTPResponse && e.Binding == "github/trmlabs/example-app" && e.Outcome == "completed" && e.PodUID == "pod-uid-1" {
 			completed++
 		}
 	}
@@ -271,11 +271,11 @@ func TestGitCloneAndPushThroughBrokerWithoutAToken(t *testing.T) {
 
 func TestGitPushesOutsideTheBindingAreRefused(t *testing.T) {
 	f := newGitFixture(t)
-	clone := filepath.Join(f.work, "trm-b2b")
-	if out, err := f.git(t, f.work, "clone", f.remote("trmlabs/trm-b2b"), clone); err != nil {
+	clone := filepath.Join(f.work, "example-app")
+	if out, err := f.git(t, f.work, "clone", f.remote("trmlabs/example-app"), clone); err != nil {
 		t.Fatal(out)
 	}
-	before := f.bareRef(t, "trmlabs/trm-b2b", "refs/heads/main")
+	before := f.bareRef(t, "trmlabs/example-app", "refs/heads/main")
 	if out, err := f.git(t, clone, "commit", "--allow-empty", "-m", "direct to main"); err != nil {
 		t.Fatal(out)
 	}
@@ -289,7 +289,7 @@ func TestGitPushesOutsideTheBindingAreRefused(t *testing.T) {
 	f.mu.Lock()
 	reached := f.receivePacks - packsBefore
 	f.mu.Unlock()
-	if reached != 0 || f.bareRef(t, "trmlabs/trm-b2b", "refs/heads/main") != before || f.audit.last().Outcome != "ref_outside_binding" {
+	if reached != 0 || f.bareRef(t, "trmlabs/example-app", "refs/heads/main") != before || f.audit.last().Outcome != "ref_outside_binding" {
 		t.Fatalf("push to main reached GitHub %d times, or main changed: %+v", reached, f.audit.last())
 	}
 	if out, err := f.git(t, clone, "push", "origin", "HEAD:refs/tags/v9"); err == nil {
@@ -318,7 +318,7 @@ func TestGitPushesOutsideTheBindingAreRefused(t *testing.T) {
 
 func TestGitRequestsCarryingACredentialAreRefused(t *testing.T) {
 	f := newGitFixture(t)
-	out, err := f.git(t, f.work, "-c", "http.extraHeader=Authorization: Basic d29ya2VyOnRva2Vu", "ls-remote", f.remote("trmlabs/trm-b2b"))
+	out, err := f.git(t, f.work, "-c", "http.extraHeader=Authorization: Basic d29ya2VyOnRva2Vu", "ls-remote", f.remote("trmlabs/example-app"))
 	if err == nil || f.audit.last().Outcome != "credential_header" {
 		t.Fatalf("worker credential forwarded: %s %+v", out, f.audit.last())
 	}

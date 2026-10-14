@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Inherited from Infisical's Agent Vault. This installs upstream Agent Vault
+# release binaries from Infisical/agent-vault, not Gatehouse. Gatehouse has no
+# release yet; build it from source (see README.md).
+#
 # Agent Vault installer
 # Usage: curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh
 #

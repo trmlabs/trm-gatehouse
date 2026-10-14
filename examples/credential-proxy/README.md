@@ -6,7 +6,7 @@ reads or issues credentials through Vault, and refuses requests it cannot
 safely authorize or record.
 
 This directory supplies local verification and a proposed deployment profile.
-It does not establish that a TRM production deployment has passed acceptance.
+It does not establish that any production deployment has passed acceptance.
 
 For a managed Kubernetes sandbox that must hold **no identity credential**, use
 [the separate task relay](task-relay/README.md). Its operator-owned pairing maps
@@ -121,7 +121,7 @@ value outside those bounds is dropped, so the upstream default or the Vault
 role's setting applies. This closes the startup packet as a way to clear or
 extend a role-level limit such as `statement_timeout`; an in-session `SET`
 remains governed by the role's SQL permissions.
-Follow [database recovery](database-recovery.md) before clearing a quarantine.
+Follow [database recovery](../../docs/gatehouse/database-recovery.md) before clearing a quarantine.
 
 ## Deployment requirements
 

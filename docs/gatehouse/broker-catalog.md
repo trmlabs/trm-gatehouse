@@ -1,12 +1,12 @@
 # Broker catalog
 
-The broker catalog is the one list of everything workers may reach through the broker: databases, HTTP services, git repositories and the GitHub pull request API, each granted to named worker pools. Adding a destination is one entry in one reviewed file. Terraform writes the catalog to Vault, and the broker picks up the new version within 30 seconds, with no restart.
+The broker catalog is the one list of everything workers may reach through the broker: databases, HTTP services, git repositories and the GitHub pull request API, each granted to named worker pools. Adding a destination is one entry in one reviewed file. Your deployment pipeline writes the catalog to Vault, and the broker picks up the new version within 30 seconds, with no restart.
 
 ## Where it lives and how it loads
 
-- **Source:** a YAML file in trm-infra, next to the Vault roles and key paths its entries use, so one Atlantis pull request creates both. The `gatehouse-catalog` module validates it at plan time and writes it as JSON to the KV version 2 secret `gatehouse/catalog`, field `catalog`.
-- **Broker:** `AGENT_VAULT_CATALOG_VAULT_PATH=gatehouse/catalog`. The broker polls every 30 seconds. A new version replaces the old one atomically, and the next request or connection uses it. See [When a catalog is bad or Vault is down](#when-a-catalog-is-bad-or-vault-is-down) for what happens to a bad entry and to a start without Vault.
-- **One secret per entry:** `AGENT_VAULT_CATALOG_VAULT_PREFIX=gatehouse/catalog` reads the same catalog split so no single secret holds all of it, which is how a catalog grows past Vault's size limit for one secret. The layout is below. Set this or `AGENT_VAULT_CATALOG_VAULT_PATH`, never both; the single document stays accepted while catalogs move.
+- **Source:** a YAML file in a reviewed repository, ideally next to the Vault roles and key paths its entries use, so one pull request creates both. Validate it in CI and write it as JSON to a KV version 2 secret, field `catalog`.
+- **Broker:** `AGENT_VAULT_CATALOG_VAULT_PATH=<mount>/<path>`, for example `gatehouse/agents-catalog`. The broker polls every 30 seconds. A new version replaces the old one atomically, and the next request or connection uses it. See [When a catalog is bad or Vault is down](#when-a-catalog-is-bad-or-vault-is-down) for what happens to a bad entry and to a start without Vault.
+- **One secret per entry:** `AGENT_VAULT_CATALOG_VAULT_PREFIX=<mount>/<prefix>` reads the same catalog split so no single secret holds all of it, which is how a catalog grows past Vault's size limit for one secret. The layout is below. Set this or `AGENT_VAULT_CATALOG_VAULT_PATH`, never both; the single document stays accepted while catalogs move.
 - **Fixed file:** `AGENT_VAULT_HTTP_CATALOG_FILE` still works for local fixtures. It is read once at start.
 
 ## Format
@@ -15,18 +15,18 @@ The broker catalog is the one list of everything workers may reach through the b
 pools:
   - {name: cursor-agents, namespace: cursor-agents, serviceAccount: cursor-worker}
 entries:
-  - name: b2bcore                     # the database name a worker connects to
+  - name: appdb                       # the database name a worker connects to
     kind: postgres
-    host: p.abc.db.postgresbridge.com
+    host: db.example.com
     pools: [cursor-agents]
-    postgres: {database: core, mount: database, role: staging.us.crunchy.core-readonly}
-  - name: serpapi
-    host: serpapi.com
+    postgres: {database: app, mount: database, role: staging.us.example.app-readonly}
+  - name: search-api
+    host: api.example.com
     pathPrefixes: [/search]
     methods: [GET]
     header: X-Api-Key
-    placeholder: __vault_SERPAPI_KEY__
-    key: {mount: gatehouse, path: vendors/serpapi, field: key}
+    placeholder: __vault_SEARCH_KEY__
+    key: {mount: gatehouse, path: vendors/search-api, field: key}
     pools: [cursor-agents]
 ```
 
@@ -83,7 +83,7 @@ The person is that login, looked up as the Entra user principal name, when its d
 
 ## Validation
 
-`agent-vault broker-catalog validate catalog.yaml --require-pools --allowed-host-suffix .postgresbridge.com --allowed-host-suffix serpapi.com` runs the broker's own parser. It checks the schema, exact hosts with no wildcards or IP addresses, unique routes, methods, key locations and pool grants, and keeps every host inside the allowed domains. Run it in CI before Atlantis applies. For CI without access to this repository, `Dockerfile.catalog-validator` builds the same command into a small image (glibc base with a shell, so it can serve as a CI job container), at the broker's reviewed commit, through the same build, review, publish and Artifact Registry mirror path as the broker image; pin it by digest.
+`agent-vault broker-catalog validate catalog.yaml --require-pools --allowed-host-suffix .example.com` runs the broker's own parser. It checks the schema, exact hosts with no wildcards or IP addresses, unique routes, methods, key locations and pool grants, and keeps every host inside the allowed domains. Run it in CI before the catalog is written to Vault. For CI without access to this repository, `Dockerfile.catalog-validator` builds the same command into a small image (glibc base with a shell, so it can serve as a CI job container), at the broker's reviewed commit; pin it by digest.
 
 ## Egress
 

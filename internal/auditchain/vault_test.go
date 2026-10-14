@@ -34,7 +34,7 @@ func newFakeVault(t *testing.T) (*fakeVault, *vaultapi.Client) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		write := func(data map[string]any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": data}) }
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/secret/data/gatehouse/audit-hmac":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/secret/data/gatehouse/example-audit-hmac":
 			version := len(f.hmac)
 			if v := r.URL.Query().Get("version"); v != "" {
 				version = int(v[0] - '0')
@@ -45,13 +45,13 @@ func newFakeVault(t *testing.T) (*fakeVault, *vaultapi.Client) {
 				return
 			}
 			write(map[string]any{"data": map[string]any{"key": base64.StdEncoding.EncodeToString(key)}, "metadata": map[string]any{"version": version}})
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/transit/sign/gatehouse-audit":
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/transit/sign/example-audit-signing":
 			var body struct{ Input string }
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			input, _ := base64.StdEncoding.DecodeString(body.Input)
 			f.signs++
 			write(map[string]any{"signature": "vault:v1:" + base64.StdEncoding.EncodeToString(ed25519.Sign(f.private, input))})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/transit/keys/gatehouse-audit":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/transit/keys/example-audit-signing":
 			write(map[string]any{"type": "ed25519", "keys": map[string]any{"1": map[string]any{"public_key": base64.StdEncoding.EncodeToString(f.public)}}})
 		default:
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -73,8 +73,8 @@ func newFakeVault(t *testing.T) (*fakeVault, *vaultapi.Client) {
 // it using only historical key reads and the exported public key.
 func TestVaultBackedChainVerifies(t *testing.T) {
 	fake, client := newFakeVault(t)
-	keys := KVKeys{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/audit-hmac", Field: "key"}
-	signer := TransitSigner{Vault: client.Logical(), Mount: "transit", Key: "gatehouse-audit"}
+	keys := KVKeys{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/example-audit-hmac", Field: "key"}
+	signer := TransitSigner{Vault: client.Logical(), Mount: "transit", Key: "example-audit-signing"}
 	key, err := keys.Current(context.Background())
 	if err != nil || key.Version != 2 {
 		t.Fatalf("current key: %v %v", key, err)
@@ -108,15 +108,15 @@ func TestVaultAdaptersFailWithoutDisclosure(t *testing.T) {
 	_, client := newFakeVault(t)
 	for _, k := range []KVKeys{
 		{Vault: client.Logical(), Mount: "secret", Path: "missing", Field: "key"},
-		{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/audit-hmac", Field: "absent"},
+		{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/example-audit-hmac", Field: "absent"},
 		{Vault: client.Logical(), Mount: "secret", Path: "../escape", Field: "key"},
-		{Mount: "secret", Path: "gatehouse/audit-hmac", Field: "key"},
+		{Mount: "secret", Path: "gatehouse/example-audit-hmac", Field: "key"},
 	} {
 		if _, err := k.Current(context.Background()); err == nil || strings.Contains(err.Error(), "synthetic") || strings.Contains(err.Error(), "ERERER") {
 			t.Fatalf("unexpected result for %+v: %v", k.Path, err)
 		}
 	}
-	keys := KVKeys{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/audit-hmac", Field: "key"}
+	keys := KVKeys{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/example-audit-hmac", Field: "key"}
 	if _, err := keys.Version(context.Background(), 9); err == nil {
 		t.Fatal("missing version returned a key")
 	}
