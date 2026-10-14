@@ -179,8 +179,9 @@ func TestProblems(t *testing.T) {
 			t.Errorf("%s: flagged %v, want %v", line, got, want)
 		}
 	}
-	deniedTokens["9e6315b575452645a6015715848fb021d608cf0175b569c923b5ad3145d241dc"] = "test range" // 198.51.100.0/24
-	defer delete(deniedTokens, "9e6315b575452645a6015715848fb021d608cf0175b569c923b5ad3145d241dc")
+	sum := sha256.Sum256([]byte("198.51.100.0/24"))
+	deniedTokens[hex.EncodeToString(sum[:])] = "test range"
+	defer delete(deniedTokens, hex.EncodeToString(sum[:]))
 	if len(problems("x.go", `"sourceCIDRs": ["198.51.100.0/24"]`)) == 0 {
 		t.Error("a denied range is not flagged")
 	}
