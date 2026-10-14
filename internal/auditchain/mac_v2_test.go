@@ -72,7 +72,7 @@ func authzFixture(t *testing.T) (*fixture, string) {
 	if err := f.chain.Record(Event{Event: EventDenied, Pool: "claude", Binding: "vault/core", Outcome: "not_entitled",
 		RequesterKind: "person", RequesterOID: "oid-1", TokenSHA256: "ab", Tier: "T1", Decision: "not_entitled", Groups: "11111111-2222-3333-4444-555555555555", CacheAgeSec: 3,
 		Kid: "invalid", KidSHA256: "0123456789ab", Peer: "10.0.0.5",
-		Operation: "pr.open", Database: "b2bcore", RequesterDepartment: "Security & IT"}); err != nil {
+		Operation: "pr.open", Database: "examplecore", RequesterDepartment: "Security & IT"}); err != nil {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
@@ -94,7 +94,7 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 		"peer":       {`"peer":"10.0.0.5"`, `"peer":"10.0.0.6"`},
 		"version":    {`"macVersion":6`, `"macVersion":5`},
 		"operation":  {`"operation":"pr.open"`, `"operation":"pr.read"`},
-		"database":   {`"database":"b2bcore"`, `"database":"b2btm2"`},
+		"database":   {`"database":"examplecore"`, `"database":"exampletm2"`},
 		"department": {`"requesterDepartment":"Security \u0026 IT"`, `"requesterDepartment":"Engineering"`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -126,7 +126,7 @@ func TestV1RowsCannotCarryAuthorizationOrDowngrade(t *testing.T) {
 		"v3 row with a notAfter":   func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
 		"v4 row with a target":     func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
 		"v5 row with an operation": func(r *Row) { r.MACVersion, r.Operation = 5, "pr.open" },
-		"v5 row with a database":   func(r *Row) { r.MACVersion, r.Database = 5, "b2bcore" },
+		"v5 row with a database":   func(r *Row) { r.MACVersion, r.Database = 5, "examplecore" },
 		"v5 row with a department": func(r *Row) { r.MACVersion, r.RequesterDepartment = 5, "Engineering" },
 		"plain downgrade":          func(*Row) {},
 		"unknown version":          func(r *Row) { r.MACVersion = 9 },
@@ -315,7 +315,7 @@ func TestRefusalTargetIsCoveredAndBounded(t *testing.T) {
 func TestDatabaseFieldAdmitsOnlyPlainNames(t *testing.T) {
 	for in, want := range map[string]string{
 		"":                      "",
-		"b2bcore":               "b2bcore",
+		"examplecore":           "examplecore",
 		"audit_log-2.v1":        "audit_log-2.v1",
 		"has space":             "invalid",
 		`quote"d`:               "invalid",
