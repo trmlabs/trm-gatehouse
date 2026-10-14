@@ -109,7 +109,8 @@ The agent runs with an ordinary proxy setting and connection string. Where a
 credential would go, it sends a placeholder such as `__vault_API_KEY__`:
 
 ```sh
-curl https://api.example.com/v1/search -H "X-Api-Key: __vault_API_KEY__"
+export API_KEY=__vault_API_KEY__   # all the agent ever holds
+curl -H "X-Api-Key: $API_KEY" https://api.example.com/v1/search
 ```
 
 Gatehouse runs seven checks in order, and the first failure stops the request
