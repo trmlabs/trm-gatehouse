@@ -297,14 +297,35 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	}
 }
 
-// A GitHub GraphQL request no route admits is recorded as "graphql", so those
-// refusals can be counted apart from other unlisted paths.
+// A GitHub GraphQL request no route admits is refused before GitHub sees it,
+// and a refusal that names an operation names "graphql", so those refusals can
+// be counted apart from other unlisted paths. Which handler refuses it, and so
+// whether the row carries the operation, is left to the GraphQL handler.
 func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
 	f := newAPIFixture(t)
 	if code, _ := f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code < 400 {
 		t.Fatalf("GraphQL was not refused: %d", code)
 	}
-	if e := f.audit.last(); e.Outcome != "unlisted" || e.Operation != "graphql" {
+	e := f.audit.last()
+	if e.Event != "denied" || e.Status < 400 || (e.Operation != "" && e.Operation != "graphql") {
 		t.Fatalf("audit: %+v", e)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.last != "" || len(f.minted) != 0 {
+		t.Fatalf("a refused GraphQL request reached GitHub: minted %v, body %q", f.minted, f.last)
+	}
+}
+
+// An unmatched GitHub GraphQL path is named "graphql"; a matched route keeps
+// its own operation, and any other unmatched path names none.
+func TestGitHubAPIOperationNamesGraphQL(t *testing.T) {
+	for path, want := range map[string]string{"/graphql": "graphql", "/api/graphql": "graphql", "/repos/o/r/pulls": ""} {
+		if got := githubAPIOperation(httpcatalog.GitRequest{}, path); got != want {
+			t.Errorf("%s: operation %q, want %q", path, got, want)
+		}
+	}
+	if got := githubAPIOperation(httpcatalog.GitRequest{Operation: "pr.comment"}, "/graphql"); got != "pr.comment" {
+		t.Errorf("a matched route's operation became %q", got)
 	}
 }
