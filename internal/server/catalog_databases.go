@@ -53,7 +53,7 @@ func (r catalogDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgpr
 			decideCtx = entitlement.WithRecheck(ctx)
 		}
 		d := authorize.Decide(decideCtx, r.entitlements, pool, *entry, who)
-		record.Tier, record.Decision, record.ObjectID = d.Tier, d.Outcome, d.ObjectID
+		record.Tier, record.Decision, record.ObjectID, record.Department = d.Tier, d.Outcome, d.ObjectID, d.Department
 		record.Groups, record.CacheAgeSec = strings.Join(d.Groups, ","), int64(d.CacheAge.Seconds())
 		if !d.Allowed {
 			refusal = d.Outcome

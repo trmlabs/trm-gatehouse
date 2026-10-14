@@ -212,7 +212,7 @@ their admitted proof or task deadline. Reconnect to use a rotated proof.
 From this checkout:
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./internal/taskrelay ./internal/pgproxy ./internal/mitm ./cmd
+GOTOOLCHAIN=go1.26.9 go test -race -count=1 ./internal/taskrelay ./internal/pgproxy ./internal/mitm ./cmd
 ```
 
 The relay tests use local TLS listeners, a synthetic Kubernetes API and synthetic

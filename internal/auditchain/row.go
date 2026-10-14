@@ -69,14 +69,27 @@ type Row struct {
 	// Refusals: the host, and port when given, the caller asked for, in
 	// canonical lower-case form, or "invalid" when it is not a DNS name or IP
 	// address. Never a path, query or header.
-	Target    string `json:"target,omitempty"`
-	Method    string `json:"method,omitempty"`     // HTTP rows only
-	Status    int    `json:"status,omitempty"`     // HTTP response rows: upstream or broker status
-	Duration  int64  `json:"durationMs,omitempty"` // transaction rows: milliseconds from first message to completion; HTTP response rows: from admission to the end of the response, or the length of a refresh-token revocation
-	SignedSeq uint64 `json:"signedSeq,omitempty"`  // checkpoint: the chain head it signs
-	SignedMAC string `json:"signedMAC,omitempty"`
-	Signature string `json:"signature,omitempty"` // checkpoint: Transit "vault:vN:..." signature
-	PrevKey   int    `json:"prevKeyVersion,omitempty"`
+	Target string `json:"target,omitempty"`
+	// Operation is what an HTTP row asked to do, from the broker's fixed
+	// vocabulary: a github-api repository operation such as "pr.open",
+	// "git.fetch" or "git.push", or "graphql" for a GitHub GraphQL request no
+	// route admits. Never a path or body.
+	Operation string `json:"operation,omitempty"`
+	// Database is the database name a refused PostgreSQL session asked for,
+	// before any catalog entry matched it, or "invalid" when it is not a plain
+	// name (see DatabaseField).
+	Database string `json:"database,omitempty"`
+	// RequesterDepartment is the person's Entra department, as the directory
+	// lookup that decided an entry returned it (see DepartmentField). Present
+	// only when an entry needed that lookup.
+	RequesterDepartment string `json:"requesterDepartment,omitempty"`
+	Method              string `json:"method,omitempty"`     // HTTP rows only
+	Status              int    `json:"status,omitempty"`     // HTTP response rows: upstream or broker status
+	Duration            int64  `json:"durationMs,omitempty"` // transaction rows: milliseconds from first message to completion; HTTP response rows: from admission to the end of the response, or the length of a refresh-token revocation; session_open rows: from authentication to admission (queues, credential mint and upstream connect)
+	SignedSeq           uint64 `json:"signedSeq,omitempty"`  // checkpoint: the chain head it signs
+	SignedMAC           string `json:"signedMAC,omitempty"`
+	Signature           string `json:"signature,omitempty"` // checkpoint: Transit "vault:vN:..." signature
+	PrevKey             int    `json:"prevKeyVersion,omitempty"`
 	// chain_start: the previous boot and its last persisted checkpoint row,
 	// so a deleted boot or a truncated tail is detectable.
 	PrevBoot          uint64 `json:"prevBoot,omitempty"`
@@ -86,22 +99,24 @@ type Row struct {
 	Prev              string `json:"prev"`
 	// MACVersion selects the MAC input: absent (0) is v1, written before the
 	// authorization fields existed; 2 adds them; 3 adds the signing-key
-	// refusal fields; 4 adds the proxy certificate fields; MACVersionCurrent
-	// (5) adds the refused target and covers every field.
+	// refusal fields; 4 adds the proxy certificate fields; 5 adds the refused
+	// target; MACVersionCurrent (6) adds the operation, the refused database
+	// and the requester's department, and covers every field.
 	MACVersion int    `json:"macVersion,omitempty"`
 	MAC        string `json:"mac"`
 }
 
 // MACVersionCurrent is the MAC input every new row uses.
-const MACVersionCurrent = 5
+const MACVersionCurrent = 6
 
 // macInput encodes every field except MAC with explicit lengths, so no two
 // distinct rows share an input regardless of field contents. Version 2 adds
 // the authorization fields and the version itself, and version 3 the
 // signing-key refusal fields, and version 4 the proxy certificate fields, and
-// version 5 the refused target. Older versions are kept only to verify rows
-// written before them, and a row carrying a field its version's MAC does not
-// cover fails verification (see v2Only through v5Only).
+// version 5 the refused target, and version 6 the operation, the refused
+// database and the requester's department. Older versions are kept only to
+// verify rows written before them, and a row carrying a field its version's
+// MAC does not cover fails verification (see v2Only through v6Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,
@@ -127,7 +142,11 @@ func (r Row) macInput() []byte {
 		return lengthPrefixed("gatehouse-audit-v4", fields...)
 	}
 	fields = append(fields, r.Target)
-	return lengthPrefixed("gatehouse-audit-v5", fields...)
+	if r.MACVersion < 6 {
+		return lengthPrefixed("gatehouse-audit-v5", fields...)
+	}
+	fields = append(fields, r.Operation, r.Database, r.RequesterDepartment)
+	return lengthPrefixed("gatehouse-audit-v6", fields...)
 }
 
 // v2Only reports whether a row sets a field that only the v2 MAC covers.
@@ -144,6 +163,11 @@ func (r Row) v4Only() bool { return r.Serial != "" || r.NotAfter != "" || r.DNSN
 
 // v5Only reports whether a row sets a field that only the v5 MAC covers.
 func (r Row) v5Only() bool { return r.Target != "" }
+
+// v6Only reports whether a row sets a field that only the v6 MAC covers.
+func (r Row) v6Only() bool {
+	return r.Operation != "" || r.Database != "" || r.RequesterDepartment != ""
+}
 
 func (r Row) computeMAC(key []byte) string {
 	h := hmac.New(sha256.New, key)

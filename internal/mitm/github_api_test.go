@@ -27,6 +27,7 @@ import (
 // contents read and pull_requests write, as GitHub needs to open one.
 type apiFixture struct {
 	client  *http.Client
+	host    string // the API host; example.com when unset
 	port    int
 	audit   *adapterAudit
 	mu      sync.Mutex
@@ -134,7 +135,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 func (f *apiFixture) post(t *testing.T, method, path, auth, body string) (int, string) {
 	t.Helper()
-	r, _ := http.NewRequest(method, "https://example.com:"+strconv.Itoa(f.port)+path, strings.NewReader(body))
+	host := f.host
+	if host == "" {
+		host = "example.com"
+	}
+	r, _ := http.NewRequest(method, "https://"+host+":"+strconv.Itoa(f.port)+path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/vnd.github+json")
 	if auth != "" {
@@ -171,7 +176,7 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	if e := f.audit.last(); e.Binding != "github-api/trmlabs/example-app" || e.Outcome != "completed" || e.Status != 201 {
+	if e := f.audit.last(); e.Binding != "github-api/trmlabs/example-app" || e.Outcome != "completed" || e.Status != 201 || e.Operation != "pr.comment" {
 		t.Fatalf("audit: %+v", e)
 	}
 	// GitHub receives the request rebuilt from the checked fields, not the worker's bytes.
@@ -268,6 +273,19 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 			if code, _ := f.post(t, tc.method, tc.path, tc.auth, tc.body); code < 400 || f.audit.last().Outcome != tc.outcome {
 				t.Fatalf("code=%d outcome=%q", code, f.audit.last().Outcome)
 			}
+			// A refusal past route matching names its operation; an unlisted
+			// path has none, and the row never carries the path.
+			want := ""
+			switch tc.outcome {
+			case "unlisted", "method":
+			case "request_shape":
+				want = "pr.read"
+			default:
+				want = "pr.open"
+			}
+			if got := f.audit.last().Operation; got != want {
+				t.Fatalf("operation=%q, want %q", got, want)
+			}
 		})
 	}
 	f.mu.Lock()
@@ -281,5 +299,38 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	f.mu.Unlock()
 	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}`); code == 201 || f.audit.last().Outcome != "secret_echo" {
 		t.Fatalf("token echo not blocked: %d %+v", code, f.audit.last())
+	}
+}
+
+// A GitHub GraphQL request no route admits is refused before GitHub sees it,
+// and a refusal that names an operation names "graphql", so those refusals can
+// be counted apart from other unlisted paths. Which handler refuses it, and so
+// whether the row carries the operation, is left to the GraphQL handler.
+func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
+	f := newAPIFixture(t)
+	if code, _ := f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code < 400 {
+		t.Fatalf("GraphQL was not refused: %d", code)
+	}
+	e := f.audit.last()
+	if e.Event != "denied" || e.Status < 400 || (e.Operation != "" && e.Operation != "graphql") {
+		t.Fatalf("audit: %+v", e)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.last != "" || len(f.minted) != 0 {
+		t.Fatalf("a refused GraphQL request reached GitHub: minted %v, body %q", f.minted, f.last)
+	}
+}
+
+// An unmatched GitHub GraphQL path is named "graphql"; a matched route keeps
+// its own operation, and any other unmatched path names none.
+func TestGitHubAPIOperationNamesGraphQL(t *testing.T) {
+	for path, want := range map[string]string{"/graphql": "graphql", "/api/graphql": "graphql", "/repos/o/r/pulls": ""} {
+		if got := githubAPIOperation(httpcatalog.GitRequest{}, path); got != want {
+			t.Errorf("%s: operation %q, want %q", path, got, want)
+		}
+	}
+	if got := githubAPIOperation(httpcatalog.GitRequest{Operation: "pr.comment"}, "/graphql"); got != "pr.comment" {
+		t.Errorf("a matched route's operation became %q", got)
 	}
 }

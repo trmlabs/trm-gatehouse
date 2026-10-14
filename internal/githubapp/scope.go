@@ -17,12 +17,14 @@ import (
 
 // Scope is what the catalog lets one installation's tokens reach: its
 // repositories ("owner/name") and whether any entry opens pull requests,
-// reads Actions or reads deployments.
+// reads Actions, reads deployments, reads check runs or reads commit statuses.
 type Scope struct {
 	Repos        []string
 	PullRequests bool
 	Actions      bool
 	Deployments  bool
+	Checks       bool
+	Statuses     bool
 }
 
 // ScopeMode is what the broker does about an installation's reach.
@@ -200,8 +202,9 @@ func (m *Minter) checkScope(ctx context.Context, app App) error {
 // verifyScope finds reach beyond the catalog (an installation on all
 // repositories, any repository the catalog does not list, or a repository list
 // that cannot be read) and settings wider than the catalog needs (a
-// permission other than metadata read, contents and, only with a github-api
-// entry, pull requests write; a suspension; another App's installation). A
+// permission other than metadata read, contents, and only where a github-api
+// entry needs them, pull requests write and actions, deployments, checks and
+// statuses read; a suspension; another App's installation). A
 // catalog repository the installation lacks needs no check here: its mint
 // already fails.
 func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings {
@@ -249,7 +252,9 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 				name == "contents" && (level == "read" || level == "write"),
 				name == "pull_requests" && want.PullRequests && level == "write",
 				name == "actions" && want.Actions && level == "read",
-				name == "deployments" && want.Deployments && level == "read":
+				name == "deployments" && want.Deployments && level == "read",
+				name == "checks" && want.Checks && level == "read",
+				name == "statuses" && want.Statuses && level == "read":
 			default:
 				f.settings = append(f.settings, "holds "+name+" "+level)
 			}

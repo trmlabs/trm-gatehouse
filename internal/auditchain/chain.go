@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Infisical/agent-vault/internal/store"
 )
@@ -81,9 +83,14 @@ type Event struct {
 	NotAfter string
 	DNSNames string // comma-separated lower-case DNS names the certificate holds
 	Target   string // refusals: see Row; set it with TargetField
-	Method   string
-	Status   int
-	Duration int64 // milliseconds
+	// Operation, Database and RequesterDepartment: see Row. Set Database with
+	// DatabaseField and RequesterDepartment with DepartmentField.
+	Operation           string
+	Database            string
+	RequesterDepartment string
+	Method              string
+	Status              int
+	Duration            int64 // milliseconds
 }
 
 var (
@@ -196,6 +203,15 @@ func (e Event) Validate() error {
 	if e.Target != "" && TargetField(e.Target) != e.Target {
 		return ErrInvalidEvent
 	}
+	if e.Operation != "" && !operationName.MatchString(e.Operation) {
+		return ErrInvalidEvent
+	}
+	if e.Database != "" && DatabaseField(e.Database) != e.Database {
+		return ErrInvalidEvent
+	}
+	if e.RequesterDepartment != "" && DepartmentField(e.RequesterDepartment) != e.RequesterDepartment {
+		return ErrInvalidEvent
+	}
 	if e.Serial != "" && !serialHex.MatchString(e.Serial) {
 		return ErrInvalidEvent
 	}
@@ -225,6 +241,51 @@ func dnsNameList(s string) bool {
 		}
 	}
 	return true
+}
+
+// operationName is an operation from the broker's own vocabulary: lower-case
+// words joined by dots, such as "pr.open" or "git.fetch".
+var operationName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,3}$`)
+
+// databaseName is a PostgreSQL database name an agent may ask for and a row
+// may carry: at most 63 bytes (NAMEDATALEN - 1) of letters, digits, "_", "-"
+// and ".".
+var databaseName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
+
+// DatabaseField returns a requested database name for a row's database: the
+// name itself when it is a plain name, or "invalid". The client chooses it,
+// so nothing else enters the row.
+func DatabaseField(name string) string {
+	if name == "" {
+		return ""
+	}
+	if !databaseName.MatchString(name) {
+		return "invalid"
+	}
+	return name
+}
+
+// maxDepartmentBytes bounds a department; Entra's limit is 64 characters.
+const maxDepartmentBytes = 256
+
+// DepartmentField returns a directory department for a row: trimmed, with
+// runs of white space as one space, or "invalid" when it is too long or holds
+// a control character, a quote or a backslash. Canonical input comes back
+// unchanged.
+func DepartmentField(department string) string {
+	department = strings.Join(strings.Fields(department), " ")
+	if department == "" {
+		return ""
+	}
+	if len(department) > maxDepartmentBytes || !utf8.ValidString(department) {
+		return "invalid"
+	}
+	for _, r := range department {
+		if unicode.IsControl(r) || r == '"' || r == '\\' || !unicode.IsPrint(r) {
+			return "invalid"
+		}
+	}
+	return department
 }
 
 // TargetField returns the canonical form of a requested host or host:port
@@ -283,6 +344,7 @@ func (c *Chain) Record(e Event) error {
 	_, err := c.appendLocked(Row{Event: e.Event, Pool: e.Pool, Agent: e.Agent, PodUID: e.PodUID, Binding: e.Binding, Session: e.Session, Outcome: e.Outcome, Requester: e.Requester,
 		RequesterKind: e.RequesterKind, RequesterOID: e.RequesterOID, TokenSHA256: e.TokenSHA256, Tier: e.Tier, Decision: e.Decision, Groups: e.Groups, CacheAgeSec: e.CacheAgeSec,
 		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
+		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment,
 		Method: e.Method, Status: e.Status, Duration: e.Duration})
 	return err
 }

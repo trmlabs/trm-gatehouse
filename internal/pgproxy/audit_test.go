@@ -1,6 +1,7 @@
 package pgproxy
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net"
@@ -202,5 +203,76 @@ func TestPreAuthDeniedRowsAreRateLimited(t *testing.T) {
 	}
 	if allowed != deniedPerSecond {
 		t.Fatalf("one second later allowed %d rows, want %d", allowed, deniedPerSecond)
+	}
+}
+
+// slowMinter takes delay to mint, as Vault role DDL can.
+type slowMinter struct {
+	*fakeMinter
+	delay time.Duration
+}
+
+func (m slowMinter) Mint(ctx context.Context, scope AgentScope, svc *DatabaseService) (*Lease, error) {
+	time.Sleep(m.delay)
+	return m.fakeMinter.Mint(ctx, scope, svc)
+}
+
+// departmentResolver admits and reports a person whose directory department
+// has stray white space.
+type departmentResolver struct{ svc *DatabaseService }
+
+func (r departmentResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _ string) (*DatabaseService, error) {
+	RecordRequester(ctx, Requester{Kind: "person", Subject: "user_1", Tier: "T1", Decision: "entitled", Department: "  Data   Science "})
+	return r.svc, nil
+}
+
+// session_open records how long admission took, the credential mint
+// included, and the person's department as the directory gave it.
+func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
+	lease := newLease()
+	upstream := startFakeUpstream(t, authTrust, lease.Password)
+	audit := &recordingAudit{}
+	_, addr := startBroker(t, Options{
+		Auth:      &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1"}},
+		Databases: departmentResolver{svc: &DatabaseService{Name: "analytics", Addr: upstream.addr(), Mount: "database", Role: "readonly"}},
+		Leases:    slowMinter{fakeMinter: &fakeMinter{lease: lease}, delay: 120 * time.Millisecond},
+		Audit:     audit,
+	})
+	if _, err := runAgentQuery(t, addr, "token", "appdb", "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return len(audit.recorded()) == 2 }, "session close row")
+	got := audit.recorded()
+	if got[0].Event != auditchain.EventSessionOpen || got[0].Duration < 120 || got[0].RequesterDepartment != "Data Science" {
+		t.Fatalf("session_open row: %+v; want durationMs of at least the mint and the canonical department", got[0])
+	}
+	if got[1].Duration != 0 {
+		t.Fatalf("session_close row carries a duration: %+v", got[1])
+	}
+}
+
+// A refusal before the catalog resolves a database names the database the
+// client asked for; a name that is not plain is recorded as "invalid".
+func TestBrokerRefusalNamesTheRequestedDatabase(t *testing.T) {
+	for asked, want := range map[string]string{"reporting": "reporting", "has space": "invalid"} {
+		audit := &recordingAudit{}
+		_, addr := startBroker(t, Options{
+			Auth:      &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1"}},
+			Databases: &fakeResolver{err: errors.New("no such database")},
+			Leases:    &fakeMinter{},
+			Audit:     audit,
+		})
+		_, _ = runAgentQuery(t, addr, "token", asked, "SELECT 1")
+		got := audit.recorded()
+		if len(got) != 1 || got[0].Outcome != "no_database" || got[0].Database != want || got[0].Binding != "" {
+			t.Fatalf("%q: refusal rows %+v; want no_database naming %q", asked, got, want)
+		}
+	}
+	// Once a binding names the database, the row carries no separate name.
+	audit := &recordingAudit{}
+	addr := auditedBroker(t, audit, &fakeMinter{mintErr: errors.New("vault down")}, "unused:5432", nil)
+	_, _ = runAgentQuery(t, addr, "token", "appdb", "SELECT 1")
+	if got := audit.recorded(); len(got) != 1 || got[0].Outcome != "credential" || got[0].Database != "" {
+		t.Fatalf("mint denial: %+v", got)
 	}
 }
