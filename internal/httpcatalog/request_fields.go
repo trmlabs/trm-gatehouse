@@ -32,12 +32,19 @@ var (
 	slackChannel = regexp.MustCompile(`^C[A-Z0-9]{8,20}$`)
 )
 
-// slackMethods are the only Slack Web API paths an entry may list. Each takes
-// one channel and posts or edits a message there. Other methods name a person
-// or a second conversation in another parameter (files.completeUploadExternal
-// channel_id, conversations.invite users, chat.postEphemeral user), which the
-// channel rule would not see.
-var slackMethods = map[string]bool{"/api/chat.postMessage": true, "/api/chat.update": true}
+// slackMethods are the only Slack Web API paths an entry may list. Each names
+// its one conversation in channel: it posts or edits a message, adds a
+// reaction, or reads a channel's messages or a thread. Other methods name a
+// person or a second conversation in another parameter
+// (files.completeUploadExternal channel_id, conversations.invite users,
+// chat.postEphemeral user), which the channel rule would not see.
+var slackMethods = map[string]bool{
+	"/api/chat.postMessage":      true,
+	"/api/chat.update":           true,
+	"/api/reactions.add":         true,
+	"/api/conversations.history": true,
+	"/api/conversations.replies": true,
+}
 
 // ErrRequestField is a request whose limited parameters are missing,
 // repeated, placed twice or not listed, or whose body cannot be read safely.
@@ -73,7 +80,7 @@ func (e *Entry) normalizeRequestFields() error {
 		}
 		for _, p := range e.PathPrefixes {
 			if !slackMethods[p] {
-				return fmt.Errorf("slack path %q is not allowed; list only /api/chat.postMessage and /api/chat.update", p)
+				return fmt.Errorf("slack path %q is not allowed; list only /api/chat.postMessage, /api/chat.update, /api/reactions.add, /api/conversations.history and /api/conversations.replies", p)
 			}
 		}
 	}

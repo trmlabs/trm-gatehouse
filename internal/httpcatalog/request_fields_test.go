@@ -65,6 +65,19 @@ func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 			t.Errorf("%s: %v", path, err)
 		}
 	}
+	// A reaction and the two channel reads also name their one conversation in
+	// channel, so an entry may list them.
+	read := strings.Replace(slackEntry, `"/api/chat.postMessage","/api/chat.update"`,
+		`"/api/reactions.add","/api/conversations.history","/api/conversations.replies"`, 1)
+	rc, err := Parse([]byte(`{"entries":[` + strings.Replace(read, `"methods":["POST"]`, `"methods":["GET","POST"]`, 1) + `]}`))
+	if err != nil {
+		t.Fatalf("reaction and read methods: %v", err)
+	}
+	for _, path := range []string{"/api/reactions.add", "/api/conversations.history", "/api/conversations.replies"} {
+		if _, err := rc.Match("slack.com", 443, "GET", path, "pool-a"); err != nil {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
 	for _, path := range []string{"/api/files.completeUploadExternal", "/api/conversations.invite", "/api/chat.postEphemeral", "/api/chat.postMessageX", "/api"} {
 		if _, err := c.Match("slack.com", 443, "POST", path, "pool-a"); !errors.Is(err, ErrUnlisted) {
 			t.Errorf("%s: err=%v, want unlisted", path, err)
