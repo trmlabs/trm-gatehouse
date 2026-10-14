@@ -21,9 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/authorize/authorizetest"
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 // nodeID builds a current-format GitHub node ID: prefix and base64url
@@ -75,6 +78,7 @@ type graphqlFixture struct {
 	failNode     bool     // the node lookup answers 502
 	failRepo     string   // this repository's read answers 502 ("*": every one)
 	withContents []string // GraphQL requests made with a token holding contents
+	person       bool     // pool-agent is a claude-session pool; requests come as alice
 }
 
 type swapCatalog struct {
@@ -111,7 +115,7 @@ var fakeNodes = map[string]fakeNode{
 	otherLabel: {"Label", "read-repo", "", "", "preview"},
 }
 
-const graphqlCatalogTemplate = `{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
+const graphqlCatalogTemplate = `{%s"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
 	"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[%s,
 	{"repo":"example-org/read-repo","access":"write","operations":["pr.read","pr.list"]}]}},
 	{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
@@ -139,7 +143,13 @@ var allPullRequestOps = []string{"pr.open", "pr.read", "pr.list", "pr.comment", 
 
 func (f *graphqlFixture) use(t *testing.T, ops ...string) {
 	t.Helper()
-	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(graphqlCatalogTemplate, f.port, exampleRepo(ops...))))
+	pools := ""
+	if f.person {
+		// pool-agent is a person pool: a Claude runner session names who
+		// stands behind each request.
+		pools = `"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc"}],`
+	}
+	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(graphqlCatalogTemplate, pools, f.port, exampleRepo(ops...))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,9 +158,13 @@ func (f *graphqlFixture) use(t *testing.T, ops ...string) {
 	f.catalog.mu.Unlock()
 }
 
-func newGraphQLFixture(t *testing.T) *graphqlFixture {
+func newGraphQLFixture(t *testing.T) *graphqlFixture { return newGraphQLFixtureFor(t, false) }
+
+// newGraphQLFixtureFor serves pool-agent as a person pool when person is set:
+// each request carries the runner session of "alice".
+func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 	t.Helper()
-	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}, contents: map[string]string{}}
+	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}, contents: map[string]string{}, person: person}
 	repoIDs := map[string]int{"example-repo": 1000, "read-repo": 2000, "secret-repo": 3000}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -262,7 +276,9 @@ func newGraphQLFixture(t *testing.T) *graphqlFixture {
 	scope := &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1"}
 	proxyURL, roots, p := setupProxy(t, validTokenResolver("workload-token", scope), &fakeCredProvider{}, func(o *Options) {
 		o.StrictCredentialProxy = true
-		o.HeaderAdapter = &HeaderAdapter{Catalog: f.catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter}
+		o.HeaderAdapter = &HeaderAdapter{Catalog: f.catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter,
+			Runner:   fakeRunner{"alice": {Kind: runnerid.KindPerson, Subject: "sso|alice", Pools: []string{"ccpool_abc"}, TokenSHA256: "aa"}},
+			Sessions: &authorizetest.MemBinder{}}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	addr := strings.TrimPrefix(github.URL, "https://")
@@ -270,6 +286,9 @@ func newGraphQLFixture(t *testing.T) *graphqlFixture {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
 	f.client = newTrustingClient(proxyURL, url.User("workload-token"), roots)
+	if person {
+		f.client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{SessionHeader: {"alice"}}
+	}
 	t.Cleanup(f.client.CloseIdleConnections)
 	return f
 }
@@ -591,4 +610,47 @@ func TestGitHubGraphQLSkipsAFailedRepository(t *testing.T) {
 	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, string(ghost)); code != 503 || f.audit.last().Outcome != "target_lookup" {
 		t.Fatalf("unmatched ID with a repository unreadable: %d %q", code, f.audit.last().Outcome)
 	}
+}
+
+// A GraphQL row names the person behind the request, with the tier and
+// decision, exactly as a REST row for the same pool does: on a write that
+// reached GitHub, on a refusal, and on the broker's own answer.
+func TestGitHubGraphQLAuditNamesThePerson(t *testing.T) {
+	f := newGraphQLFixtureFor(t, true)
+	sameAuthorization := func(what string, want auditchain.Event) {
+		t.Helper()
+		got := f.audit.last()
+		if got.Requester != want.Requester || got.RequesterKind != want.RequesterKind || got.Tier != want.Tier || got.Decision != want.Decision ||
+			got.TokenSHA256 != want.TokenSHA256 || got.Requester != "sso|alice" {
+			t.Errorf("%s: requester %q kind %q tier %q decision %q, want %q %q %q %q", what,
+				got.Requester, got.RequesterKind, got.Tier, got.Decision, want.Requester, want.RequesterKind, want.Tier, want.Decision)
+		}
+	}
+	if code, _ := f.send(t, http.MethodGet, "/repos/example-org/example-repo/pulls/12", nil, ""); code != 200 {
+		t.Fatalf("REST read: %d %q", code, f.audit.last().Outcome)
+	}
+	rest := f.audit.last()
+	comment := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, comment); code != 200 {
+		t.Fatalf("comment: %d %q", code, f.audit.last().Outcome)
+	}
+	sameAuthorization("completed comment", rest)
+	admitted := f.audit.all()
+	admittedRow := admitted[len(admitted)-2]
+	if admittedRow.Outcome != "admitted" || admittedRow.Requester != "sso|alice" {
+		t.Errorf("admitted row: %q %q", admittedRow.Outcome, admittedRow.Requester)
+	}
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": personPR, "body": "x"})); code != 403 {
+		t.Fatalf("refused comment: %d", code)
+	}
+	sameAuthorization("refused comment", rest)
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, `{"query":"query { __schema { types { name } } }"}`); code != 403 {
+		t.Fatalf("introspection: %d", code)
+	}
+	sameAuthorization("refused introspection", rest)
+	feature := `{"query":"query PullRequest_fields2{WorkflowRun: __type(name: \"WorkflowRun\"){fields(includeDeprecated: true){name}}}"}`
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, feature); code != 200 {
+		t.Fatalf("feature detection: %d %q", code, f.audit.last().Outcome)
+	}
+	sameAuthorization("feature detection", rest)
 }

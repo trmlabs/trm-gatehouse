@@ -36,7 +36,7 @@ var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
 // anything is sent, and any failed lookup refuses. GitHub receives the
 // rebuilt request with a token minted for that one repository.
 func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, target, host string, port int, scope *brokercore.ProxyScope, event auditchain.Event,
-	catalog httpcatalog.Catalog, granted []httpcatalog.GitRequest, refused func(*httpcatalog.Entry, error) bool) {
+	catalog httpcatalog.Catalog, granted []httpcatalog.GitRequest) {
 	a := p.adapter
 	deny := func(status int, outcome string) { p.adapterDeny(w, event, target, status, outcome) }
 	var releases []func()
@@ -49,6 +49,40 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		return
 	case a.GitTokens == nil:
 		deny(http.StatusServiceUnavailable, "token_unavailable")
+		return
+	}
+	// Only entries the request passes authorization for are considered,
+	// before any token is minted or GitHub asked (the rule forwardCatalog
+	// states for every credential). The first one authorizes into the logged
+	// event straight away, so even a refused request's row names the
+	// requester; the entry finally chosen authorizes into it again below.
+	var authorized []httpcatalog.GitRequest
+	for _, g := range granted {
+		probe := event
+		if p.authorize(r.Context(), scope, g.Entry, &probe) == "" {
+			authorized = append(authorized, g)
+		}
+	}
+	// authorizeInto runs the authorization model into the event this request
+	// logs, so its rows name the requester, tier and decision as REST rows do.
+	// It refuses (and reports false) when the entry does not authorize.
+	authorizeInto := func(entry *httpcatalog.Entry) bool {
+		if outcome := p.authorize(r.Context(), scope, entry, &event); outcome != "" {
+			event.Binding = entry.Name
+			deny(http.StatusForbidden, outcome)
+			return false
+		}
+		return true
+	}
+	if len(authorized) == 0 {
+		if authorizeInto(granted[0].Entry) {
+			// Authorization changed since the filter ran: refuse anyway, with
+			// a row, rather than answer with nothing.
+			deny(http.StatusForbidden, "refused")
+		}
+		return
+	}
+	if !authorizeInto(authorized[0].Entry) {
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
@@ -89,22 +123,8 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(refusal.Status, refusal.Outcome)
 		return
 	}
-	// Only entries the request passes authorization for are considered, and
-	// before any token is minted or GitHub asked (the rule forwardCatalog
-	// states for every credential).
-	var authorized []httpcatalog.GitRequest
-	for _, g := range granted {
-		probe := event
-		if p.authorize(r.Context(), scope, g.Entry, &probe) == "" {
-			authorized = append(authorized, g)
-		}
-	}
-	if len(authorized) == 0 {
-		refused(granted[0].Entry, nil) // records the refusal and its reason
-		return
-	}
 	if req.Answer != nil {
-		p.answerGitHubGraphQL(w, event, authorized[0].Entry, req.Answer, refused)
+		p.answerGitHubGraphQL(w, event, authorized[0].Entry, req.Answer)
 		return
 	}
 
@@ -130,28 +150,21 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 
 	repo := req.Repo
 	if repo == "" {
-		for _, g := range authorized {
-			if !limit(g.Entry.Name) {
-				deny(http.StatusTooManyRequests, "rate_limited")
-				return
-			}
-		}
 		var outcome string
-		if repo, outcome = p.nodesRepository(r, target, expected, authorized, req); outcome != "" {
+		if repo, outcome = p.nodesRepository(r, target, expected, authorized, req, limit); outcome != "" {
 			deny(lookupStatus(outcome), outcome)
 			return
 		}
 	}
 	api, err := catalog.GitHubAPIRepository(host, port, repo, scope.Pool)
-	if refused(api.Entry, err) {
-		return
-	}
 	switch {
 	case errors.Is(err, httpcatalog.ErrUnlisted):
 		deny(http.StatusForbidden, "unlisted")
 		return
 	case err != nil:
 		deny(http.StatusForbidden, "pool")
+		return
+	case !authorizeInto(api.Entry):
 		return
 	}
 	entry := api.Entry
@@ -225,11 +238,9 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 }
 
 // answerGitHubGraphQL replies to gh's schema feature detection without
-// reaching GitHub, for a pool granted any github-api repository on the host.
-func (p *Proxy) answerGitHubGraphQL(w http.ResponseWriter, event auditchain.Event, entry *httpcatalog.Entry, answer []byte, refused func(*httpcatalog.Entry, error) bool) {
-	if refused(entry, nil) {
-		return
-	}
+// reaching GitHub, for a pool granted any github-api repository on the host;
+// event has already passed authorization for entry.
+func (p *Proxy) answerGitHubGraphQL(w http.ResponseWriter, event auditchain.Event, entry *httpcatalog.Entry, answer []byte) {
 	event.Binding = entry.Name + "#graphql:schema"
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
@@ -250,6 +261,8 @@ func lookupStatus(outcome string) int {
 	switch outcome {
 	case "target_lookup":
 		return http.StatusServiceUnavailable
+	case "rate_limited":
+		return http.StatusTooManyRequests
 	case "request_shape":
 		return http.StatusBadRequest
 	}
@@ -274,7 +287,7 @@ func targetOutcomeFor(req httpcatalog.GitHubGraphQL) string {
 // ID with GitHub. An ID that names no such repository, or IDs naming more
 // than one, refuse; with no repository granting the operations at all, the
 // request is unlisted, as its REST route would be.
-func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []httpcatalog.GitRequest, req httpcatalog.GitHubGraphQL) (string, string) {
+func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []httpcatalog.GitRequest, req httpcatalog.GitHubGraphQL, limit func(string) bool) (string, string) {
 	refusal := targetOutcomeFor(req)
 	var want int64
 	for _, t := range req.Targets {
@@ -294,12 +307,20 @@ func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []
 			continue
 		}
 		candidates++
+		// An entry's rate limit is charged before the broker asks GitHub on
+		// its behalf, and for the entry that matches; a known ID costs none.
+		if _, known := p.graphql.repository(repositoryKey{g.Entry.Git.InstallationID, g.Repo.Repo}); !known && !limit(g.Entry.Name) {
+			return "", "rate_limited"
+		}
 		id, ok := p.repositoryDatabaseID(r, target, host, g)
 		if !ok {
 			failed = true // another repository may still match
 			continue
 		}
 		if id == want {
+			if !limit(g.Entry.Name) {
+				return "", "rate_limited"
+			}
 			return g.Repo.Repo, ""
 		}
 	}

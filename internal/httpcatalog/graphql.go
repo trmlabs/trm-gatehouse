@@ -221,7 +221,8 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 			if a.Name == "first" || a.Name == "last" {
 				if v, err := value(a.Value, vars, defaults); err == nil {
 					if num, ok := v.(json.Number); ok {
-						n, _ = num.Int64() // checked above: a whole number up to maxGraphQLPage
+						i, _ := num.Int64() // checked above: a whole number up to maxGraphQLPage
+						n = max(n, i)       // both given: count the larger, never less
 					}
 				}
 			}
