@@ -83,7 +83,7 @@ The person is that login, looked up as the Entra user principal name, when its d
 
 ## Validation
 
-`agent-vault broker-catalog validate catalog.yaml --require-pools --allowed-host-suffix .example.com` runs the broker's own parser. It checks the schema, exact hosts with no wildcards or IP addresses, unique routes, methods, key locations and pool grants, and keeps every host inside the allowed domains. Run it in CI before the catalog is written to Vault. For CI without access to this repository, `Dockerfile.catalog-validator` builds the same command into a small image (glibc base with a shell, so it can serve as a CI job container), at the broker's reviewed commit; pin it by digest.
+`agent-vault broker-catalog validate catalog.yaml --require-pools --environment staging --allowed-host-suffix .example.com` runs the broker's own parser (`--environment` is required when the catalog has database entries). It checks the schema, exact hosts with no wildcards or IP addresses, unique routes, methods, key locations and pool grants, and keeps every host inside the allowed domains. Run it in CI before the catalog is written to Vault. For CI without access to this repository, `Dockerfile.catalog-validator` builds the same command into a small image (glibc base with a shell, so it can serve as a CI job container), at the broker's reviewed commit; pin it by digest.
 
 ## Egress
 

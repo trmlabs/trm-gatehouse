@@ -77,7 +77,7 @@ What the run proves:
 - A key rotated in the secrets manager is used on the next request, and a deleted key is never sent.
 - A reply that echoes the key back, in plain text or a common encoding, is cut off.
 - Every attempt is recorded before the request leaves, and a dropped connection is recorded as an unknown outcome, never replayed.
-- Every database connection gets a fresh login that is removed when it closes, even after the broker crashes.
+- Without pooling (the default), every database connection gets a fresh login that is removed when it closes, even after the broker crashes.
 - A broker that loses its own login to the secrets manager stops serving and closes running queries.
 
 <details>
@@ -152,7 +152,7 @@ has database entries):
 | Destination | The agent sends | Gatehouse adds |
 |---|---|---|
 | HTTP APIs | A placeholder in the key header | The real key, for the entry's host, paths and methods only |
-| PostgreSQL | A placeholder password | A fresh database login for each connection, removed when the connection closes |
+| PostgreSQL | A placeholder password | A short-lived database login: by default a fresh one per connection, removed when it closes; with [pooling](docs/gatehouse/postgres-pooling.md) on, a few shared logins per pool and database that rotate in the background |
 | GitHub repositories (clone, push) | Nothing | A short-lived GitHub App token for one repository. Pushes can be limited to branch prefixes |
 | GitHub pull requests, Actions and deployments | A placeholder token, or none | The same App token, limited to the operations the entry lists |
 | Google Cloud Storage and BigQuery | A placeholder token | A short-lived token narrowed to one bucket prefix, or to one service account |

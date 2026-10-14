@@ -15,7 +15,7 @@ What this proved, against a real Vault and a real PostgreSQL:
   - A key rotated in Vault is used on the next request, and a deleted key is never sent.
   - A reply that echoes the key, in plain text or a common encoding, is cut off.
   - Every attempt is recorded before the request leaves; a dropped connection is recorded as unknown, never replayed.
-  - Each database connection gets a fresh login, removed when it closes, even after the broker is killed.
+  - Without pooling, each database connection gets a fresh login, removed when it closes, even after the broker is killed.
   - A broker that loses its own Vault login stops serving and ends running queries.
 Lines that say SKIP or "set AV_TEST_..." are optional tests that need setup this container does not include.
 
