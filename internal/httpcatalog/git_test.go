@@ -434,4 +434,13 @@ func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
 	if _, err := match(entry("elsewhere", "git.example.com", "pool-a")); !errors.Is(err, ErrUnlisted) {
 		t.Errorf("git entry on another host only: %v", err)
 	}
+	// Another port on the git host is a different endpoint: an entry there,
+	// listed first, never stands in for the clone entry on 443.
+	altPort := strings.Replace(entry("alt-port", "github.com", "pool-a"), `"host":"github.com"`, `"host":"github.com","port":8443`, 1)
+	if m, err := match(altPort, entry("github", "github.com", "pool-a")); err != nil || m.CloneEntry == nil || m.CloneEntry.Name != "github" {
+		t.Errorf("alternate port listed first: %v %+v", err, m.CloneEntry)
+	}
+	if _, err := match(altPort); !errors.Is(err, ErrUnlisted) {
+		t.Errorf("only an alternate port lists the repository: %v", err)
+	}
 }

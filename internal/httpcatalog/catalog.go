@@ -1243,16 +1243,22 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 	return s
 }
 
+// cloneGitPort is the port a clone uses: git over HTTPS on 443. An entry for
+// the same repository on another port is a different endpoint and never
+// stands in for it.
+const cloneGitPort = 443
+
 // cloneEntry returns the git entry a clone of repo would use, chosen the way
-// GitMatch chooses it: the first git entry on the git host that lists the
-// repository, or nil when there is none or it does not grant the pool (where a
-// clone would get ErrPool). The git host is the API host without its "api."
-// label, as github.com is for api.github.com.
+// GitMatch chooses it: the git entry on the git host and port that lists the
+// repository (the catalog allows one per host and port), or nil when there is
+// none or it does not grant the pool (where a clone would get ErrPool). The git
+// host is the API host without its "api." label, as github.com is for
+// api.github.com, and the port is cloneGitPort.
 func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
 	gitHost := strings.TrimPrefix(apiHost, "api.")
 	for i := range c.entries {
 		e := &c.entries[i]
-		if e.Kind != "git" || e.Git == nil || e.Host != gitHost {
+		if e.Kind != "git" || e.Git == nil || e.Host != gitHost || e.Port != cloneGitPort {
 			continue
 		}
 		for _, r := range e.Git.Repos {

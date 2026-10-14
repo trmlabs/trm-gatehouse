@@ -26,7 +26,8 @@ import (
 
 // A pull request's file list and a compare return code, so they need the git
 // entry they rely on to authorize the requester too. Here the git entry is T1
-// and needs a group; the github-api entry is T0. A person outside the group
+// and needs a group; the github-api entry is T0, and a T0 git entry for the
+// same repository on another port (listed first) must not stand in for it. A person outside the group
 // reads the pull request but not its files or a compare; a member reads all.
 func TestGitHubAPICodeReadsNeedTheCloneEntrysAuthorization(t *testing.T) {
 	audit := &adapterAudit{}
@@ -52,6 +53,8 @@ func TestGitHubAPICodeReadsNeedTheCloneEntrysAuthorization(t *testing.T) {
 	 "entries":[
 	  {"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api","pools":["claude"],
 	   "git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write"}]}},
+	  {"name":"github-alt-port","host":"example.com","port":8443,"kind":"git","pools":["claude"],
+	   "git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"read"}]}},
 	  {"name":"github","host":"example.com","kind":"git","pools":["claude"],"tier":"T1","requires":["`+authzGroup+`"],
 	   "git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"read"}]}}]}`, port)))
 	if err != nil {
