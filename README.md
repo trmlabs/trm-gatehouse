@@ -113,11 +113,11 @@ Gatehouse runs seven checks in order, and the first failure stops the request
 before anything reaches the destination:
 
 1. **Verify the caller.** Something outside the sandbox proves which workload is calling, and when there is one, which person started it.
-2. **Check the request.** Cookies and headers the entry does not expect are refused.
+2. **Check the request.** Cookies and headers the entry does not allow are dropped, and a placeholder anywhere but the entry's own header is refused.
 3. **Match the catalog and fetch the key.** The host, path and method must match an entry granted to the caller's pool.
 4. **Swap in the key.** The placeholder is replaced in the one header the entry names.
 5. **Log the attempt.** The audit record is written before anything leaves.
-6. **Forward the request and screen the reply.** A reply that contains the key is cut off. Gatehouse does not follow redirects, so a credential never reaches a new host.
+6. **Forward the request and screen the reply.** A reply that contains the key is cut off. Gatehouse never follows a redirect with the credential, so a credential never reaches a new host. The one redirect it follows, to GitHub's signed download links for Actions logs and artifacts, carries no token.
 7. **Log the outcome.** The result is recorded before the agent gets the reply.
 
 Every destination is one entry in one reviewed catalog. This is a whole entry
@@ -134,13 +134,17 @@ for an HTTP API:
   pools: [research-agents]
 ```
 
-The broker reloads the catalog every 30 seconds. A version that fails
-validation never replaces the last good one, and the agent cannot widen an
-entry; only the next reviewed change can. Check a catalog before you propose
-it:
+The broker reloads the catalog every 30 seconds. An entry that fails
+validation is left out and logged while the rest of the new version applies,
+so a bad edit takes that entry offline; it does not leave the old version of
+the entry serving. Only a catalog that cannot be read at all keeps the last
+good one in force. The agent cannot widen an entry; only the next reviewed
+change can. Check a catalog before you propose it (`--environment` names the
+environment every database role must be for, and is required when the catalog
+has database entries):
 
 ```sh
-./agent-vault broker-catalog validate --require-pools catalog.yaml
+./agent-vault broker-catalog validate --require-pools --environment staging catalog.yaml
 ```
 
 ## What agents can reach
@@ -162,9 +166,9 @@ already sign:
 
 | Agent runtime | How it reaches Gatehouse | Who the audit names |
 |---|---|---|
-| Kubernetes Pods | A sidecar on the Pod's loopback address presents the Pod's own service account token. Gatehouse checks the live Pod, its owner and its exact image | The pool, or the person when the runtime signs a session token that names them |
+| Kubernetes Pods | A sidecar on the Pod's loopback address presents the Pod's own service account token. Gatehouse checks the live Pod, the controller it declares and its exact image. That declaration is only as trustworthy as the admission policy a deployment must add (see [Running it](#running-it)) | The pool, or the person when the runtime signs a session token that names them |
 | Shared sandbox clusters | A relay outside the sandboxes matches each connection to a live sandbox Pod. The sandbox holds no identity token at all | The person who started the sandbox, or the pool |
-| Cursor self-hosted workers | The sidecar adds Cursor's short-lived token for the task, accepted only from the worker running that task | The person who started the task |
+| Cursor self-hosted workers | The sidecar adds Cursor's short-lived token for the task, accepted only from the worker running that task | The person who started the task, on a person pool; otherwise the pool |
 
 Each runtime is declared in the catalog as a harness. A new runtime is a new
 catalog entry, and needs code only if it brings a new kind of identity proof.
@@ -181,7 +185,7 @@ check:
 |---|---|
 | Send the placeholder to its own server | Catalog match: no entry for that host |
 | Ask an approved API to echo the key back | Reply screening, in plain text or common encodings |
-| Follow a redirect to a new host | Gatehouse does not follow redirects, and the new host needs its own entry |
+| Follow a redirect to a new host | Gatehouse never follows a redirect with the credential, and the new host needs its own entry |
 | Use its own credential or a chosen database password | Refused. The database accepts connections only from Gatehouse |
 
 **What it does not protect.** Whatever an approved destination sends back,
@@ -211,6 +215,10 @@ production deployment needs:
   A single replica can use SQLite.
 - **Kubernetes** service account tokens for workload identity.
 - **A locked-down agent network** that can reach only Gatehouse and approved DNS.
+- **An admission policy** that lets only the pool controller create Pods in
+  agent namespaces, and stops anyone changing their owner references or
+  requester annotation afterwards. Gatehouse reads those fields but does not
+  ship the policy, and namespace permissions alone do not enforce it.
 
 Start with the [developer guide](docs/gatehouse/developer-guide.md), then the
 [deployment requirements](examples/credential-proxy/README.md#deployment-requirements).
@@ -262,8 +270,11 @@ make build            # the web UI and the agent-vault binary
 go test -race ./...   # the full test suite
 ```
 
-The test suite includes a check that keeps internal hostnames and cloud
-project names out of this repository. Use `example.com` style placeholders.
+The test suite includes a check that refuses a list of known internal
+hostnames, project names and similar identifiers. It catches only what it
+lists, and one cloud project ID is still built into the sandbox image rule in
+`internal/imagerule` until that rule becomes configurable. Use `example.com`
+style placeholders.
 
 ## Contributing
 

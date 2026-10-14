@@ -6,7 +6,7 @@ and complete its deployed network acceptance checks.
 
 The agent presents a short-lived proof of the running pod instead of a standing Agent Vault token. The broker verifies that proof and the current pod, then checks the agent's existing access to the selected vault before either proxy admits work.
 
-These files prepare identity configuration only. They do not deploy a complete protected service. Kubernetes is a supported adapter protocol; GKE remains a proposed deployment until Infra confirms the runtime. A sandbox inside a shared runner is not a Kubernetes pod identity. Do not distribute a runner's service-account token to its sandboxes.
+These files prepare identity configuration only. They do not deploy a complete protected service. Kubernetes is a supported adapter protocol. A sandbox inside a shared runner is not a Kubernetes pod identity. Do not distribute a runner's service-account token to its sandboxes.
 
 ## Local implementation check
 
@@ -66,7 +66,7 @@ One namespace/service-account binding maps to one agent and one vault. `serviceA
 - Existing CONNECT tunnels and PostgreSQL connections retain their admission proof. Reopen the connection with freshly read proof before it expires; projected-file rotation does not renew an existing connection. PostgreSQL reauthorization checks enforce expiry at the configured polling interval.
 - When this configuration is enabled, both entry points use the workload resolver exclusively. A standing Agent Vault session or agent token cannot substitute for runtime proof. Management endpoints retain their separate administrator authentication.
 
-The current PostgreSQL listener is restricted to loopback, and the proxy ingress protocols do not themselves encrypt the caller-to-broker hop. Infra must choose and verify an encrypted authenticated tunnel or equivalent protected ingress before separate pods can use these listeners. Do not publish either plaintext listener or send bearer proof over an unprotected network. The runtime design must also deny direct agent access to destinations, Vault, broker storage and runtime sockets; these identity examples do not supply that enforcement.
+The current PostgreSQL listener is restricted to loopback, and the proxy ingress protocols do not themselves encrypt the caller-to-broker hop. The deployment must choose and verify an encrypted authenticated tunnel or equivalent protected ingress before separate pods can use these listeners. Do not publish either plaintext listener or send bearer proof over an unprotected network. The runtime design must also deny direct agent access to destinations, Vault, broker storage and runtime sockets; these identity examples do not supply that enforcement.
 
 ## Other clusters (trust domains)
 
