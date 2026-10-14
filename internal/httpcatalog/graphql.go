@@ -394,7 +394,8 @@ func value(v *ast.Value, vars map[string]any, defaults func(string) *ast.Value) 
 // defense in depth should the token's scope ever widen. gh reads none of them.
 var (
 	graphqlContentFields = map[string]bool{"object": true, "file": true, "entries": true, "tree": true, "readme": true,
-		"contributingGuidelines": true, "codeOfConduct": true, "pullRequestTemplates": true, "issueTemplates": true}
+		"contributingGuidelines": true, "codeOfConduct": true, "pullRequestTemplates": true, "issueTemplates": true,
+		"diffHunk": true} // a review comment's code context, which REST serves only with a clone grant
 	graphqlContentTypes = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
 )
 

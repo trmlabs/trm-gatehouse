@@ -281,6 +281,7 @@ func TestGraphQLRefusesRepositoryContents(t *testing.T) {
 		`pullRequest(number: 1) { repository { codeOfConduct { body } } }`,
 		`pullRequest(number: 1) { repository { pullRequestTemplates { body } } }`,
 		`pullRequest(number: 1) { repository { issueTemplates { body } } }`,
+		`pullRequest(number: 1) { reviewThreads(first: 10) { nodes { comments(first: 10) { nodes { diffHunk } } } } }`,
 	} {
 		query := `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ` + inner + ` } }`
 		if strings.Contains(inner, "...b") {
