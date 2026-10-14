@@ -131,9 +131,9 @@ there is no SDK.
   started the task, so the pool has no person behind it and a ceiling of T0.
   A catalog that grants such a pool an entry above T0 is refused when
   Gatehouse loads it.
-- **No group control on a worker pool:** anyone who can use the self-hosted
-  machines can pick any pool, so grant a worker pool only data every such
-  person may read.
+- **No group control on a worker pool:** anyone on the self-hosted machines
+  can pick any pool unless the deployment restricts it, so grant a worker pool
+  only data every such person may read.
 - **Person pools (`cursor-session`):** Gatehouse names the person who started
   each run from Cursor's signed identity token (see
   [who a Cursor run names](broker-catalog.md#who-a-cursor-run-names)), so the

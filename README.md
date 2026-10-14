@@ -46,7 +46,7 @@ Gatehouse release, and no version is supported for security fixes yet
 
 | Part | State |
 |---|---|
-| HTTP API keys, PostgreSQL logins and GitHub | Used in the maintainers' pre-production environment. HTTP and PostgreSQL are also tested against a real secrets manager and database in the [local demo](#try-it-in-5-minutes) |
+| HTTP API keys, PostgreSQL logins and GitHub | Running at TRM for two agent platforms. HTTP and PostgreSQL are also tested against a real secrets manager and database in the [local demo](#try-it-in-5-minutes) |
 | Google Cloud and browser sign-in | Built and tested on `main` |
 | Limiting an entry to people in named groups | Built. Off until a deployment turns on the directory lookup, which supports Microsoft Entra ID only |
 | Upstream Agent Vault features (vaults, web UI, proposals, TypeScript SDK) | Inherited unchanged. Gatehouse's strict profile does not use them |
