@@ -277,6 +277,10 @@ func TestGraphQLRefusesRepositoryContents(t *testing.T) {
 		`pullRequest(number: 1) { baseRepository { readme: object(expression: "HEAD:README.md") { id } } }`,
 		`pullRequest(number: 1) { headRef { target { ...b } } }`,
 		`pullRequest(number: 1) { headRef { target { ... on Tree { id } } } }`,
+		`pullRequest(number: 1) { repository { contributingGuidelines { body } } }`,
+		`pullRequest(number: 1) { repository { codeOfConduct { body } } }`,
+		`pullRequest(number: 1) { repository { pullRequestTemplates { body } } }`,
+		`pullRequest(number: 1) { repository { issueTemplates { body } } }`,
 	} {
 		query := `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ` + inner + ` } }`
 		if strings.Contains(inner, "...b") {

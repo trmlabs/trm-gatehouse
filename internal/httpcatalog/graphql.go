@@ -372,13 +372,14 @@ func value(v *ast.Value, vars map[string]any, defaults func(string) *ast.Value) 
 	return nil, ErrGraphQLShape // floats: no allowed argument takes one
 }
 
-// graphqlContentFields and graphqlContentTypes reach a repository's files,
-// which only a git entry grants. The broker's GraphQL token has no contents
-// permission, so GitHub refuses them anyway; they are refused here too, at
-// any depth, so that stays true if the token's scope ever widens. gh reads
-// none of them.
+// graphqlContentFields and graphqlContentTypes are the main ways to a
+// repository's files, which only a git entry grants. The control is the
+// token: the broker's GraphQL token has no contents permission, so GitHub
+// refuses file reads anyway. These are refused here too, at any depth, as
+// defense in depth should the token's scope ever widen. gh reads none of them.
 var (
-	graphqlContentFields = map[string]bool{"object": true, "file": true, "entries": true, "tree": true, "readme": true}
+	graphqlContentFields = map[string]bool{"object": true, "file": true, "entries": true, "tree": true, "readme": true,
+		"contributingGuidelines": true, "codeOfConduct": true, "pullRequestTemplates": true, "issueTemplates": true}
 	graphqlContentTypes  = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
 )
 
