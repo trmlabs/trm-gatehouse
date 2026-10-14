@@ -38,7 +38,7 @@ var registry atomic.Value // string
 // valid, and agent images are admitted by exact digest only.
 func SetRegistry(r string) error {
 	if r != "" && !registryShape.MatchString(r) {
-		return fmt.Errorf("%s must be a registry host and path ending in /, such as us-docker.pkg.dev/example-project/", RegistryEnv)
+		return fmt.Errorf("image registry (--image-registry or %s) must be a registry host with no port and a path ending in /, such as us-docker.pkg.dev/example-project/", RegistryEnv)
 	}
 	registry.Store(r)
 	return nil

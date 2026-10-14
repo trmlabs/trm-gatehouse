@@ -22,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/Infisical/agent-vault/internal/imagerule"
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
@@ -572,12 +573,26 @@ func TestSharedImagePrefixes(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	// With no image registry set, no prefix is valid, so the relay refuses
+	// a namespace that names one.
+	registry := imagerule.Registry()
+	t.Cleanup(func() { _ = imagerule.SetRegistry(registry) })
+	_ = imagerule.SetRegistry("")
+	c := f.c
+	c.Sandbox = SandboxConfig{}
+	s := *sharedConfig()
+	s.ImagePrefixes = map[string]string{"agent-sandboxes": teamA}
+	c.Shared = &s
+	c.Connect = &ConnectConfig{Listen: "0.0.0.0:8443", Upstream: f.upstream(t, "broker.internal:16443"), AllowedTargets: []string{"api.example.com:443"}}
+	if err := c.Validate(time.Now()); err == nil {
+		t.Error("a prefix was accepted with no image registry set")
+	}
 }
 
-// The staging proxy's configuration (#2926), exactly: no deadline, no
+// A standing shared proxy's configuration: no deadline, no
 // certificate, audit to stdout, image prefixes covering every namespace and
 // no digests. With no listeners it is refused; with one it loads.
-func TestStagingSharedConfig(t *testing.T) {
+func TestStandingSharedConfig(t *testing.T) {
 	dir := t.TempDir()
 	write := func(withListener bool) string {
 		config := map[string]any{
@@ -606,7 +621,7 @@ func TestStagingSharedConfig(t *testing.T) {
 		t.Error("a shared proxy with no listener loaded")
 	}
 	if _, err := LoadConfig(write(true)); err != nil {
-		t.Errorf("the staging shared config with one listener refused: %v", err)
+		t.Errorf("the standing shared config with one listener refused: %v", err)
 	}
 }
 

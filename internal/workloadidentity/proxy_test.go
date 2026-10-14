@@ -12,7 +12,7 @@ import (
 )
 
 // The private link's source range, and an address inside it.
-var linkIP = netip.MustParseAddr("10.200.0.7")
+var linkIP = netip.MustParseAddr("192.0.2.7")
 
 type proxyFixture struct {
 	pool *poolFixture
@@ -33,7 +33,7 @@ func setupProxy(t *testing.T) *proxyFixture {
 		Proxy: &ProxyBinding{Profiles: []ProxyProfile{
 			{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes"},
 			{Namespace: "team-a-sandboxes", Profile: "agent-sandbox-team-a", Pool: "team-a"}},
-			OwnerKind: "Sandbox", ImageDigests: []string{workerDigest}, SourceCIDRs: []string{"10.200.0.0/24"}, MaxSessionSeconds: 1800},
+			OwnerKind: "Sandbox", ImageDigests: []string{workerDigest}, SourceCIDRs: []string{"192.0.2.0/24"}, MaxSessionSeconds: 1800},
 	})
 	r, err := New(c, &fakeStore{status: "active", role: "proxy"})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestProxyAttestedRefusals(t *testing.T) {
 			return input{brokercore.WithAttestation(context.Background(), "not-base64!"), p.rc.token(p.rc.claims()), linkIP}
 		},
 		"source outside the private link": func(t *testing.T, p *proxyFixture) input {
-			return input{p.ctx(t, p.a), p.rc.token(p.rc.claims()), netip.MustParseAddr("10.201.0.7")}
+			return input{p.ctx(t, p.a), p.rc.token(p.rc.claims()), netip.MustParseAddr("198.51.100.7")}
 		},
 		"wrong-issuer proxy token": func(t *testing.T, p *proxyFixture) input {
 			c := p.rc.claims()
@@ -322,7 +322,7 @@ func TestProxyBindingValidation(t *testing.T) {
 		"no image digests":         func(b *Binding) { b.Proxy.ImageDigests = nil },
 		"no source range":          func(b *Binding) { b.Proxy.SourceCIDRs = nil },
 		"any source":               func(b *Binding) { b.Proxy.SourceCIDRs = []string{"0.0.0.0/0"} },
-		"unmasked source":          func(b *Binding) { b.Proxy.SourceCIDRs = []string{"10.200.0.7/24"} },
+		"unmasked source":          func(b *Binding) { b.Proxy.SourceCIDRs = []string{"192.0.2.7/24"} },
 		"session under a minute":   func(b *Binding) { b.Proxy.MaxSessionSeconds = 59 },
 		"with owner UIDs":          func(b *Binding) { b.OwnerUIDs = []string{"x"} },
 		"with a Pod UID":           func(b *Binding) { b.PodUID = "x" },
@@ -493,7 +493,7 @@ func TestRefusalsNameTheirCheck(t *testing.T) {
 	wrongProfile.Profile = "agent-sandbox-team-a"
 	for want, call := range map[string]func() error{
 		"proxy_source": func() error {
-			_, err := p.r.Attest(p.ctx(t, p.a), token, netip.MustParseAddr("10.201.0.7"))
+			_, err := p.r.Attest(p.ctx(t, p.a), token, netip.MustParseAddr("198.51.100.7"))
 			return err
 		},
 		"attestation_namespace": func() error { _, err := p.r.Attest(p.ctx(t, unknown), token, linkIP); return err },

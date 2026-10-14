@@ -27,7 +27,7 @@ func (a kindAttestor) Attest(context.Context, string, netip.Addr) (*brokercore.P
 // Each listener admits only the identity kinds it was opened for.
 func TestListenerAdmitsOnlyItsIdentityKinds(t *testing.T) {
 	cross := []string{brokercore.KindProxyAttested}
-	peer := netip.MustParseAddr("10.200.0.7")
+	peer := netip.MustParseAddr("192.0.2.7")
 	for name, c := range map[string]struct {
 		kind  string
 		kinds []string
