@@ -571,6 +571,7 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 		"a shared prefix starts a pool's own":              strings.Replace(refs(`{"pool-a":["refs/heads/cursor/pool-a/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/cursor/"],`, 1),
 		"a pool's own starts a shared prefix":              strings.Replace(refs(`{"pool-a":["refs/heads/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1),
 		"a shared pull request prefix starts a pool's own": strings.Replace(heads(`{"pool-a":["review/a/"]}`), `"access":"write",`, `"access":"write","pullRequestPrefixes":["review/"],`, 1),
+		"a pool's own starts a shared pull request prefix": strings.Replace(heads(`{"pool-a":["review/"]}`), `"access":"write",`, `"access":"write","pullRequestPrefixes":["review/shared/"],`, 1),
 	} {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil {
 			t.Errorf("%s accepted", name)
@@ -608,5 +609,15 @@ func TestPoolPrefixesFailingEntryIsDroppedAlone(t *testing.T) {
 	}
 	if _, ok, _ := c.GitMatch("github.com", 443, "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", "pool-a"); ok {
 		t.Fatal("the dropped entry still routes")
+	}
+}
+
+// An overlap names both prefixes as the catalog spells them, so an author can
+// find them.
+func TestPoolPrefixOverlapKeepsTheAuthorsSpelling(t *testing.T) {
+	doc := strings.Replace(poolsGitEntry, `"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]`, `"pool-b":["refs/heads/Cursor/Pool-A/x/"]`, 1)
+	_, err := Parse([]byte(`{"entries":[` + doc + `]}`))
+	if err == nil || !strings.Contains(err.Error(), `"refs/heads/Cursor/Pool-A/x/" (pool "pool-b") overlaps "refs/heads/cursor/pool-a/" (pool "pool-a")`) {
+		t.Fatalf("overlap error: %v", err)
 	}
 }

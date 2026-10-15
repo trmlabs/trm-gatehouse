@@ -744,10 +744,10 @@ func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]s
 	if len(byPool) == 0 {
 		return fmt.Errorf("repository %s: list a pool with its %ses, or leave the per-pool field out", repo, what)
 	}
-	type owned struct{ pool, prefix string }
+	type owned struct{ pool, prefix, spelled string } // prefix lowercased; spelled as written
 	var all []owned
 	for _, prefix := range shared {
-		all = append(all, owned{"", strings.ToLower(prefix)}) // "" is no pool: every pool of the entry
+		all = append(all, owned{"", strings.ToLower(prefix), prefix}) // "" is no pool: every pool of the entry
 	}
 	for pool, prefixes := range byPool {
 		if !contains(pools, pool) {
@@ -762,14 +762,14 @@ func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]s
 				return fmt.Errorf("repository %s: invalid or duplicate %s %q for pool %q", repo, what, prefix, pool)
 			}
 			seen[strings.ToLower(prefix)] = true
-			all = append(all, owned{pool, strings.ToLower(prefix)})
+			all = append(all, owned{pool, strings.ToLower(prefix), prefix})
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
 	for i := range all {
 		for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
 			if all[j].pool != all[i].pool {
-				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].prefix, holder(all[j].pool), all[i].prefix, holder(all[i].pool))
+				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].spelled, holder(all[j].pool), all[i].spelled, holder(all[i].pool))
 			}
 		}
 	}
