@@ -165,9 +165,10 @@ type KeyRef struct {
 }
 
 type Catalog struct {
-	entries   []Entry
-	pools     []Pool
-	harnesses []Harness
+	entries     []Entry
+	pools       []Pool
+	harnesses   []Harness
+	automations map[string]Automation // by id
 }
 
 // Pool names a set of workers by their Kubernetes identity. When a catalog
@@ -180,8 +181,10 @@ type Pool struct {
 	// "claude-session" (a runner session token naming the person),
 	// "cursor-session" (a Cursor run's identity token naming the person),
 	// "attested-person" (a shared proxy's attestation naming the person who
-	// created the agent, from its Pod's requester annotation) or "workload"
-	// (CI and automation: Entitlements, never a person).
+	// created the agent, from its Pod's requester annotation),
+	// "cursor-automation" (a Cursor run's identity token naming the
+	// Automation that started it, decided per listed Automation) or
+	// "workload" (CI: Entitlements, never a person).
 	Identity string `json:"identity,omitempty"`
 	// Ceiling is the highest tier the pool may reach (default T0). "external"
 	// is below T0: the pool's workers may reach nothing, and no entry may
@@ -194,7 +197,8 @@ type Pool struct {
 	// Entitlements are a workload pool's fixed groups.
 	Entitlements []string `json:"entitlements,omitempty"`
 
-	harness *Harness // the declared profile naming this pool, if any
+	harness     *Harness              // the declared profile naming this pool, if any
+	automations map[string]Automation // the catalog's Automations, on a cursor-automation pool
 }
 
 // Pool returns the defined pool with this name.
@@ -302,6 +306,10 @@ var reservedHeaders = map[string]bool{
 	"Authorization": true, "X-Api-Key": true, "Accept-Encoding": true,
 }
 
+// maxCatalogFile bounds a catalog file only against a runaway read: a
+// 100,000-Automation catalog is about 12 MiB.
+const maxCatalogFile = 256 << 20
+
 // Load reads a catalog file, rejecting unknown fields and trailing data.
 func Load(path string) (Catalog, error) {
 	f, err := os.Open(path)
@@ -309,8 +317,8 @@ func Load(path string) (Catalog, error) {
 		return Catalog{}, errors.New("cannot open HTTP catalog")
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
-	if err != nil || len(data) > 1<<20 {
+	data, err := io.ReadAll(io.LimitReader(f, maxCatalogFile+1))
+	if err != nil || len(data) > maxCatalogFile {
 		return Catalog{}, errors.New("HTTP catalog exceeds size limit or cannot be read")
 	}
 	return Parse(data)
@@ -318,9 +326,10 @@ func Load(path string) (Catalog, error) {
 
 func Parse(data []byte) (Catalog, error) {
 	var file struct {
-		Harnesses []Harness `json:"harnesses,omitempty"`
-		Pools     []Pool    `json:"pools,omitempty"`
-		Entries   []Entry   `json:"entries"`
+		Harnesses   []Harness    `json:"harnesses,omitempty"`
+		Pools       []Pool       `json:"pools,omitempty"`
+		Entries     []Entry      `json:"entries"`
+		Automations []Automation `json:"automations,omitempty"`
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -414,7 +423,16 @@ func Parse(data []byte) (Catalog, error) {
 			routes[route] = e.Name
 		}
 	}
-	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses}, nil
+	automations, err := indexAutomations(file.Automations, names)
+	if err != nil {
+		return Catalog{}, err
+	}
+	for i := range file.Pools {
+		if file.Pools[i].Identity == IdentityCursorAutomation {
+			file.Pools[i].automations = automations
+		}
+	}
+	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses, automations: automations}, nil
 }
 
 func (e *Entry) normalize() error {
@@ -1364,6 +1382,12 @@ func (p Pool) validate() error {
 		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
 			return fmt.Errorf("an attested-person pool takes no ccpool_ ID, base group or fixed entitlements")
 		}
+	case IdentityCursorAutomation:
+		// Each run is decided for its Automation, so the pool carries no
+		// entitlements of its own.
+		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
+			return fmt.Errorf("a cursor-automation pool takes no ccpool_ ID, base group or fixed entitlements")
+		}
 	case "workload":
 		if p.CCPoolID != "" || p.BaseGroup != "" || tierRank[p.Ceiling] > 1 {
 			return fmt.Errorf("a workload pool takes fixed entitlements only and never reaches T2")
@@ -1411,7 +1435,7 @@ func grantable(e Entry, p Pool, defined bool) error {
 		return fmt.Errorf("%s exceeds the pool's ceiling", e.Tier)
 	}
 	switch p.Identity {
-	case "claude-session", "cursor-session", "attested-person":
+	case "claude-session", "cursor-session", "attested-person", IdentityCursorAutomation:
 		return nil
 	case "workload":
 		if rank >= 2 {

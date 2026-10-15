@@ -109,6 +109,9 @@ type Requester struct {
 	Tier, Decision, Groups               string
 	Department                           string // directory department, audit only
 	CacheAgeSec                          int64
+	// A Cursor run's source and Automation, and the catalog's name and
+	// owner for a listed Automation; audit only.
+	Source, Automation, AutomationName, AutomationOwner string
 }
 
 type requesterKey struct{}

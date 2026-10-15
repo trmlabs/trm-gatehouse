@@ -88,9 +88,14 @@ type Event struct {
 	Operation           string
 	Database            string
 	RequesterDepartment string
-	Method              string
-	Status              int
-	Duration            int64 // milliseconds
+	// Source, Automation, AutomationName and AutomationOwner: see Row.
+	Source          string
+	Automation      string
+	AutomationName  string
+	AutomationOwner string
+	Method          string
+	Status          int
+	Duration        int64 // milliseconds
 }
 
 var (
@@ -189,7 +194,8 @@ func (e Event) Validate() error {
 	if e.CacheAgeSec < 0 {
 		return ErrInvalidEvent
 	}
-	for _, v := range []string{e.Pool, e.Agent, e.PodUID, e.Binding, e.Session, e.Outcome, e.Requester, e.RequesterKind, e.RequesterOID, e.TokenSHA256, e.Tier, e.Decision, e.Kid, e.KidSHA256, e.Peer} {
+	for _, v := range []string{e.Pool, e.Agent, e.PodUID, e.Binding, e.Session, e.Outcome, e.Requester, e.RequesterKind, e.RequesterOID, e.TokenSHA256, e.Tier, e.Decision, e.Kid, e.KidSHA256, e.Peer,
+		e.Source, e.Automation, e.AutomationName, e.AutomationOwner} {
 		if !identifier(v, true) {
 			return ErrInvalidEvent
 		}
@@ -345,6 +351,7 @@ func (c *Chain) Record(e Event) error {
 		RequesterKind: e.RequesterKind, RequesterOID: e.RequesterOID, TokenSHA256: e.TokenSHA256, Tier: e.Tier, Decision: e.Decision, Groups: e.Groups, CacheAgeSec: e.CacheAgeSec,
 		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
 		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment,
+		Source: e.Source, Automation: e.Automation, AutomationName: e.AutomationName, AutomationOwner: e.AutomationOwner,
 		Method: e.Method, Status: e.Status, Duration: e.Duration})
 	return err
 }

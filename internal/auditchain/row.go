@@ -83,13 +83,21 @@ type Row struct {
 	// lookup that decided an entry returned it (see DepartmentField). Present
 	// only when an entry needed that lookup.
 	RequesterDepartment string `json:"requesterDepartment,omitempty"`
-	Method              string `json:"method,omitempty"`     // HTTP rows only
-	Status              int    `json:"status,omitempty"`     // HTTP response rows: upstream or broker status
-	Duration            int64  `json:"durationMs,omitempty"` // transaction rows: milliseconds from first message to completion; HTTP response rows: from admission to the end of the response, or the length of a refresh-token revocation; session_open rows: from authentication to admission (queues, credential mint and upstream connect)
-	SignedSeq           uint64 `json:"signedSeq,omitempty"`  // checkpoint: the chain head it signs
-	SignedMAC           string `json:"signedMAC,omitempty"`
-	Signature           string `json:"signature,omitempty"` // checkpoint: Transit "vault:vN:..." signature
-	PrevKey             int    `json:"prevKeyVersion,omitempty"`
+	// Source and Automation are what a verified Cursor run token said: how
+	// the run started (AUTOMATIONS for an Automation) and the Automation's
+	// id. AutomationName and AutomationOwner are the catalog's for that
+	// Automation, on a pool that decides per Automation.
+	Source          string `json:"source,omitempty"`
+	Automation      string `json:"automation,omitempty"`
+	AutomationName  string `json:"automationName,omitempty"`
+	AutomationOwner string `json:"automationOwner,omitempty"`
+	Method          string `json:"method,omitempty"`     // HTTP rows only
+	Status          int    `json:"status,omitempty"`     // HTTP response rows: upstream or broker status
+	Duration        int64  `json:"durationMs,omitempty"` // transaction rows: milliseconds from first message to completion; HTTP response rows: from admission to the end of the response, or the length of a refresh-token revocation; session_open rows: from authentication to admission (queues, credential mint and upstream connect)
+	SignedSeq       uint64 `json:"signedSeq,omitempty"`  // checkpoint: the chain head it signs
+	SignedMAC       string `json:"signedMAC,omitempty"`
+	Signature       string `json:"signature,omitempty"` // checkpoint: Transit "vault:vN:..." signature
+	PrevKey         int    `json:"prevKeyVersion,omitempty"`
 	// chain_start: the previous boot and its last persisted checkpoint row,
 	// so a deleted boot or a truncated tail is detectable.
 	PrevBoot          uint64 `json:"prevBoot,omitempty"`
@@ -100,23 +108,25 @@ type Row struct {
 	// MACVersion selects the MAC input: absent (0) is v1, written before the
 	// authorization fields existed; 2 adds them; 3 adds the signing-key
 	// refusal fields; 4 adds the proxy certificate fields; 5 adds the refused
-	// target; MACVersionCurrent (6) adds the operation, the refused database
-	// and the requester's department, and covers every field.
+	// target; 6 adds the operation, the refused database and the requester's
+	// department; MACVersionCurrent (7) adds the run's source and Automation,
+	// and covers every field.
 	MACVersion int    `json:"macVersion,omitempty"`
 	MAC        string `json:"mac"`
 }
 
 // MACVersionCurrent is the MAC input every new row uses.
-const MACVersionCurrent = 6
+const MACVersionCurrent = 7
 
 // macInput encodes every field except MAC with explicit lengths, so no two
 // distinct rows share an input regardless of field contents. Version 2 adds
 // the authorization fields and the version itself, and version 3 the
 // signing-key refusal fields, and version 4 the proxy certificate fields, and
 // version 5 the refused target, and version 6 the operation, the refused
-// database and the requester's department. Older versions are kept only to
-// verify rows written before them, and a row carrying a field its version's
-// MAC does not cover fails verification (see v2Only through v6Only).
+// database and the requester's department, and version 7 the run's source
+// and Automation. Older versions are kept only to verify rows written before
+// them, and a row carrying a field its version's MAC does not cover fails
+// verification (see v2Only through v7Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,
@@ -146,7 +156,11 @@ func (r Row) macInput() []byte {
 		return lengthPrefixed("gatehouse-audit-v5", fields...)
 	}
 	fields = append(fields, r.Operation, r.Database, r.RequesterDepartment)
-	return lengthPrefixed("gatehouse-audit-v6", fields...)
+	if r.MACVersion < 7 {
+		return lengthPrefixed("gatehouse-audit-v6", fields...)
+	}
+	fields = append(fields, r.Source, r.Automation, r.AutomationName, r.AutomationOwner)
+	return lengthPrefixed("gatehouse-audit-v7", fields...)
 }
 
 // v2Only reports whether a row sets a field that only the v2 MAC covers.
@@ -167,6 +181,11 @@ func (r Row) v5Only() bool { return r.Target != "" }
 // v6Only reports whether a row sets a field that only the v6 MAC covers.
 func (r Row) v6Only() bool {
 	return r.Operation != "" || r.Database != "" || r.RequesterDepartment != ""
+}
+
+// v7Only reports whether a row sets a field that only the v7 MAC covers.
+func (r Row) v7Only() bool {
+	return r.Source != "" || r.Automation != "" || r.AutomationName != "" || r.AutomationOwner != ""
 }
 
 func (r Row) computeMAC(key []byte) string {

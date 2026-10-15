@@ -37,6 +37,11 @@ const prefixReadConcurrency = 64
 //     JSON array or a string holding one. When it is there, only those
 //     entries are read and digested, so a stray document under entries/ (one
 //     left by a cancelled apply) is ignored instead of failing every reload.
+//   - automations/<id>, optionally: field "automation" is that Automation's
+//     JSON. They are read only when the head has "automations_sha256", the
+//     same digest over automation ids, and optionally "automations_names";
+//     the head's document then carries no "automations". Without them, the
+//     head's document may carry its own (bounded by Vault's size limit).
 //
 // Terraform writes the entries, then the head. The head's KV version is the
 // catalog version, so a poll costs one read until the head changes. A reload
@@ -66,50 +71,31 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		if document == "" || len(want) != 64 {
 			return nil, 0, errors.New("catalog head incomplete")
 		}
-		names, named, err := headNames(head["entries_names"])
+		names, entries, err := readFolder(ctx, vault, mount, prefix, "entries", "entry", head["entries_names"])
 		if err != nil {
 			return nil, version, err
 		}
-		if !named {
-			listing, err := vault.ListWithContext(ctx, mount+"/metadata/"+prefix+"/entries")
-			if err != nil {
-				return nil, version, errors.New("catalog entry listing failed")
-			}
-			// Vault answers LIST on an empty folder with 404, which the client
-			// returns as no secret: no entries. The head's digest still decides,
-			// so this loads only a head that itself says there are none.
-			var keys []interface{}
-			if listing != nil && listing.Data != nil {
-				keys, _ = listing.Data["keys"].([]interface{})
-			}
-			for _, k := range keys {
-				name, _ := k.(string)
-				if !idPattern.MatchString(name) {
-					return nil, version, fmt.Errorf("catalog entry key %q is not an entry name", name)
-				}
-				names = append(names, name)
-			}
-		}
-		sort.Strings(names)
-		stored, err := readEntries(ctx, vault, mount+"/data/"+prefix+"/entries/", names)
-		if err != nil {
-			return nil, version, err
-		}
-		listed := names
-		names, entries := names[:0:0], make([]string, 0, len(stored))
-		for i, entry := range stored {
-			if entry != "" {
-				names, entries = append(names, listed[i]), append(entries, entry)
-			}
-		}
-		digest := sha256.New()
-		for i, name := range names {
-			digest.Write([]byte(name + "\n" + entries[i] + "\n"))
-		}
-		if hex.EncodeToString(digest.Sum(nil)) != want {
+		if folderDigest(names, entries) != want {
 			return nil, version, fmt.Errorf("catalog entries do not match the head; retrying at the next poll (%s)", entryChanges(lastEntries, names, entries))
 		}
-		out, err := assemble(document, names, entries)
+		var ids, automations []string
+		if stored, ok := head["automations_sha256"]; ok {
+			// Automations one secret each, so their count is not bounded by
+			// Vault's size limit for the head.
+			wantAutomations, _ := stored.(string)
+			if len(wantAutomations) != 64 {
+				return nil, version, errors.New("catalog head automations_sha256 is not a SHA-256")
+			}
+			if ids, automations, err = readFolder(ctx, vault, mount, prefix, "automations", "automation", head["automations_names"]); err != nil {
+				return nil, version, err
+			}
+			if folderDigest(ids, automations) != wantAutomations {
+				return nil, version, fmt.Errorf("catalog automations do not match the head; retrying at the next poll (listed %d)", len(ids))
+			}
+		} else if head["automations_names"] != nil {
+			return nil, version, errors.New("catalog head lists automations without their digest")
+		}
+		out, err := assemble(document, names, entries, ids, automations)
 		if err != nil {
 			return nil, version, err
 		}
@@ -120,6 +106,60 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		}
 		return out, version, nil
 	}
+}
+
+// readFolder reads every secret under prefix/folder, in name order, and
+// returns the names and each one's field. When the head lists the names
+// (listed), only those are read; otherwise the folder is listed. A deleted
+// secret is left out: it is no longer in the catalog.
+func readFolder(ctx context.Context, vault ListLogical, mount, prefix, folder, field string, listed interface{}) ([]string, []string, error) {
+	names, named, err := headNames(listed)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !named {
+		listing, err := vault.ListWithContext(ctx, mount+"/metadata/"+prefix+"/"+folder)
+		if err != nil {
+			return nil, nil, fmt.Errorf("catalog %s listing failed", folder)
+		}
+		// Vault answers LIST on an empty folder with 404, which the client
+		// returns as no secret: none stored. The head's digest still decides,
+		// so this loads only a head that itself says there are none.
+		var keys []interface{}
+		if listing != nil && listing.Data != nil {
+			keys, _ = listing.Data["keys"].([]interface{})
+		}
+		for _, k := range keys {
+			name, _ := k.(string)
+			if !idPattern.MatchString(name) {
+				return nil, nil, fmt.Errorf("catalog %s key %q is not a catalog name", folder, name)
+			}
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	stored, err := readEntries(ctx, vault, mount+"/data/"+prefix+"/"+folder+"/", field, names)
+	if err != nil {
+		return nil, nil, err
+	}
+	kept, docs := names[:0:0], make([]string, 0, len(stored))
+	for i, doc := range stored {
+		if doc != "" {
+			kept, docs = append(kept, names[i]), append(docs, doc)
+		}
+	}
+	return kept, docs, nil
+}
+
+// folderDigest is the head's digest of a folder: the SHA-256, in lowercase
+// hex, of each name in byte order followed by a newline, its stored JSON and
+// a newline.
+func folderDigest(names, docs []string) string {
+	digest := sha256.New()
+	for i, name := range names {
+		digest.Write([]byte(name + "\n" + docs[i] + "\n"))
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // headNames reads the head's optional entry name list. listed is false when
@@ -213,7 +253,7 @@ func readKV(ctx context.Context, vault Logical, path string) (map[string]interfa
 
 // readEntries reads every entry's stored JSON, concurrently, in names order.
 // A deleted entry reads as "": it is no longer in the catalog.
-func readEntries(ctx context.Context, vault Logical, base string, names []string) ([]string, error) {
+func readEntries(ctx context.Context, vault Logical, base, field string, names []string) ([]string, error) {
 	out := make([]string, len(names))
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -230,12 +270,12 @@ func readEntries(ctx context.Context, vault Logical, base string, names []string
 				if errors.Is(err, errDeleted) {
 					continue
 				}
-				entry, _ := data["entry"].(string)
+				entry, _ := data[field].(string)
 				if err == nil && entry == "" {
-					err = errors.New("catalog entry incomplete")
+					err = fmt.Errorf("catalog %s incomplete", field)
 				}
 				if err != nil {
-					once.Do(func() { failure = fmt.Errorf("catalog entry %q: %w", names[i], err); cancel() })
+					once.Do(func() { failure = fmt.Errorf("catalog %s %q: %w", field, names[i], err); cancel() })
 					continue
 				}
 				out[i] = entry
@@ -256,9 +296,9 @@ func readEntries(ctx context.Context, vault Logical, base string, names []string
 	return out, nil
 }
 
-// assemble rebuilds the one-document form Parse validates. Each entry's name
-// must be the key it is stored under.
-func assemble(document string, names, entries []string) ([]byte, error) {
+// assemble rebuilds the one-document form Parse validates. Each entry's name,
+// and each stored Automation's id, must be the key it is stored under.
+func assemble(document string, names, entries, ids, automations []string) ([]byte, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(document), &top); err != nil {
 		return nil, errors.New("catalog head is not a JSON object")
@@ -266,14 +306,32 @@ func assemble(document string, names, entries []string) ([]byte, error) {
 	if _, ok := top["entries"]; ok {
 		return nil, errors.New("catalog head must not carry entries")
 	}
+	list, err := keyedList("entry", "name", names, entries)
+	if err != nil {
+		return nil, err
+	}
+	top["entries"] = list
+	if automations != nil {
+		if _, ok := top["automations"]; ok {
+			return nil, errors.New("catalog head must not carry automations it stores one secret each")
+		}
+		if top["automations"], err = keyedList("automation", "id", ids, automations); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(top)
+}
+
+// keyedList joins stored JSON objects into an array, checking that each
+// one's key field is the name it is stored under.
+func keyedList(kind, key string, names, docs []string) (json.RawMessage, error) {
 	var list bytes.Buffer
 	list.WriteByte('[')
-	for i, raw := range entries {
-		var named struct {
-			Name string `json:"name"`
-		}
-		if json.Unmarshal([]byte(raw), &named) != nil || named.Name != names[i] {
-			return nil, fmt.Errorf("catalog entry %q is stored under another name", names[i])
+	for i, raw := range docs {
+		var keyed map[string]json.RawMessage
+		var stored string
+		if json.Unmarshal([]byte(raw), &keyed) != nil || json.Unmarshal(keyed[key], &stored) != nil || stored != names[i] {
+			return nil, fmt.Errorf("catalog %s %q is stored under another name", kind, names[i])
 		}
 		if i > 0 {
 			list.WriteByte(',')
@@ -281,6 +339,5 @@ func assemble(document string, names, entries []string) ([]byte, error) {
 		list.WriteString(raw)
 	}
 	list.WriteByte(']')
-	top["entries"] = list.Bytes()
-	return json.Marshal(top)
+	return list.Bytes(), nil
 }

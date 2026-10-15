@@ -19,7 +19,9 @@ import (
 // socket. Cursor fills the claims from the run, so a process on the worker
 // cannot mint one for another run or another owner. sub is user:<id> for a
 // person or service_account:<id> for a service account; owner_email is the
-// person's lower-cased email when Cursor knows it.
+// person's lower-cased email when Cursor knows it. source says how the run
+// started (WEBSITE, API, SLACK or AUTOMATIONS), and automation_id names the
+// Automation when it started the run.
 const (
 	CursorIssuer  = "https://api.cursor.com"
 	CursorJWKSURL = "https://api.cursor.com/keys"
@@ -57,7 +59,12 @@ type cursorClaims struct {
 	TeamID   string          `json:"team_id"`
 	Email    string          `json:"owner_email"`
 	RunID    string          `json:"cloud_agent_id"`
+	Source   string          `json:"source"`
+	AutoID   string          `json:"automation_id"`
 }
+
+// SourceAutomations is the source of a run an Automation started.
+const SourceAutomations = "AUTOMATIONS"
 
 func (v *CursorVerifier) now() time.Time {
 	if v.Now != nil {
@@ -113,7 +120,10 @@ func (v *CursorVerifier) Verify(ctx context.Context, token string) (Session, err
 		return Session{}, ErrInvalid
 	}
 	sum := sha256.Sum256([]byte(token))
-	session := Session{Kind: KindNone, Owner: c.Subject, Run: c.RunID, Expires: expires, TokenSHA256: hex.EncodeToString(sum[:])}
+	// Cursor's documentation spells the source in both cases; one spelling
+	// keeps every comparison exact.
+	session := Session{Kind: KindNone, Owner: c.Subject, Run: c.RunID, Source: strings.ToUpper(c.Source), Automation: c.AutoID,
+		Expires: expires, TokenSHA256: hex.EncodeToString(sum[:])}
 	switch {
 	case strings.HasPrefix(c.Subject, "service_account:") && len(c.Subject) > len("service_account:"):
 		// A service account's run has no person behind it.
@@ -127,7 +137,8 @@ func (v *CursorVerifier) Verify(ctx context.Context, token string) (Session, err
 		// names no owner this broker can pin.
 		session.Owner = ""
 	}
-	if !plainSubject(session.Subject) || !plainSubject(session.Owner) || !plainSubject(session.Run) {
+	if !plainSubject(session.Subject) || !plainSubject(session.Owner) || !plainSubject(session.Run) ||
+		!plainSubject(session.Source) || !plainSubject(session.Automation) {
 		return Session{}, ErrInvalid
 	}
 	return session, nil

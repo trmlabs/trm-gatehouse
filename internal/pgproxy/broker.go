@@ -869,6 +869,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	event.RequesterKind, event.TokenSHA256, event.RequesterOID = who.Kind, who.TokenSHA256, who.ObjectID
 	event.Tier, event.Decision, event.Groups, event.CacheAgeSec = who.Tier, who.Decision, who.Groups, who.CacheAgeSec
 	event.RequesterDepartment = auditchain.DepartmentField(who.Department)
+	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
 	if who.Kind == "person" || who.Kind == "agent" {
 		event.Requester = who.Subject
 	}

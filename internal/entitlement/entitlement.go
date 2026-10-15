@@ -240,8 +240,8 @@ type Entry struct {
 
 // Requester is the verified identity behind the request.
 type Requester struct {
-	Kind    string // "person", "agent", "workload" or "none"
-	Subject string
+	Kind    string // "person", "agent", "workload", "automation" or "none"
+	Subject string // the person's email; for an automation, its owner's
 }
 
 // Decision records why a request was allowed or refused, for the audit row.
@@ -303,12 +303,20 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Allowed, d.Outcome = true, "workload_entitled"
 		return d
 	case "claude-session", "cursor-session", "attested-person":
+		if who.Kind != "person" || who.Subject == "" {
+			d.Outcome = "no_person"
+			return d
+		}
+	case "cursor-automation":
+		// An Automation is decided on its owner's account, so it never
+		// reaches what its owner could not, and stops when that account
+		// does. Which entries it may use at all is the caller's check.
+		if who.Kind != "automation" || who.Subject == "" {
+			d.Outcome = "no_automation"
+			return d
+		}
 	default:
 		d.Outcome = "no_identity"
-		return d
-	}
-	if who.Kind != "person" || who.Subject == "" {
-		d.Outcome = "no_person"
 		return d
 	}
 	if len(entry.Requires) == 0 {
