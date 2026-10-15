@@ -32,9 +32,10 @@ var (
 	slackChannel = regexp.MustCompile(`^C[A-Z0-9]{8,20}$`)
 )
 
-// slackMethods are the only Slack Web API paths an entry may list. Each names
-// its one conversation in channel: it posts or edits a message, adds a
-// reaction, or reads a channel's messages or a thread. Other methods name a
+// slackMethods are the only Slack Web API paths an entry may list. Each was
+// checked to name its one conversation in channel: it posts or edits a
+// message, adds a reaction, or reads a channel's messages or a thread. Any
+// other method is refused until it is checked and listed here. Some name a
 // person or a second conversation in another parameter
 // (files.completeUploadExternal channel_id, conversations.invite users,
 // chat.postEphemeral user), which the channel rule would not see.
