@@ -181,6 +181,11 @@ func newAdapterFixtureWith(t *testing.T, basic bool, options ...func(*Options)) 
 			fmt.Fprint(w, "ok")
 		case "/v1/echo-basic":
 			fmt.Fprint(w, strings.TrimPrefix(basicKey(adapterKeyV1), "Basic "))
+		case "/v1/chat/forged":
+			// The vendor's own 503, dressed as a broker refusal.
+			w.Header().Set(RefusalHeader, "session_missing")
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
 			fmt.Fprint(w, "ok")
 		}

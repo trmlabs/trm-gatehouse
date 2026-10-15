@@ -70,7 +70,10 @@ func attachAuthorization(adapter *mitm.HeaderAdapter, getenv func(string) string
 //     and AGENT_VAULT_GRAPH_CLIENT_ID (the Entra app) and
 //     AGENT_VAULT_GRAPH_TOKEN_FILE (the projected service-account token,
 //     audience api://AzureADTokenExchange) are all required;
-//   - AGENT_VAULT_ENTITLEMENT_CACHE_SECONDS shortens the 5-minute cache.
+//   - AGENT_VAULT_ENTITLEMENT_CACHE_SECONDS shortens the 5-minute cache;
+//   - AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE sets each person's directory
+//     lookup budget (default entitlement.DefaultLookupsPerMinute). Any
+//     positive count is accepted; the directory's own throttling is the limit.
 //
 // Without a verifier or a source, entries above T0 are refused on the pools
 // that would need them.
@@ -112,16 +115,24 @@ func loadAuthorization(getenv func(string) string) (authorization, error) {
 		}
 		ttl = time.Duration(seconds) * time.Second
 	}
+	lookups := entitlement.DefaultLookupsPerMinute
+	if raw := getenv("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return a, fmt.Errorf("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE must be a positive whole number")
+		}
+		lookups = n
+	}
 	switch source := getenv("AGENT_VAULT_ENTITLEMENTS"); {
 	case source == "":
 	case strings.HasPrefix(source, "file:") && strings.HasPrefix(source, "file:/"):
-		a.entitlements = &entitlement.Cache{Source: entitlement.FileSource{Path: strings.TrimPrefix(source, "file:")}, TTL: ttl}
+		a.entitlements = &entitlement.Cache{Source: entitlement.FileSource{Path: strings.TrimPrefix(source, "file:")}, TTL: ttl, LookupsPerMinute: lookups}
 	case source == "graph":
 		g, err := graphSource(getenv, client)
 		if err != nil {
 			return a, err
 		}
-		a.entitlements = &entitlement.Cache{Source: g, TTL: ttl}
+		a.entitlements = &entitlement.Cache{Source: g, TTL: ttl, LookupsPerMinute: lookups}
 	default:
 		return a, fmt.Errorf("AGENT_VAULT_ENTITLEMENTS must be unset, graph or file:/absolute/path")
 	}

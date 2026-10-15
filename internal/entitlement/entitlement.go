@@ -44,10 +44,12 @@ type cached struct {
 var ErrLookupLimited = errors.New("entitlement lookups over budget")
 
 const (
-	// DefaultLookupsPerMinute is each person's directory budget. A worker
-	// looping on a T2 entry asks once per request; past the budget it is
-	// refused before the directory is asked, so it cannot get the tenant
-	// throttled and fail every decision in the fleet.
+	// DefaultLookupsPerMinute is each person's directory budget unless the
+	// operator sets Cache.LookupsPerMinute (the broker's
+	// AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE). A worker looping on a T2
+	// entry asks once per request; past the budget it is refused before the
+	// directory is asked, so it cannot get the tenant throttled and fail every
+	// decision in the fleet.
 	DefaultLookupsPerMinute = 60
 	// DefaultRecentAnswer is how old an answer a fresh lookup over budget
 	// still accepts instead of refusing.
@@ -311,7 +313,9 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Outcome = "no_person"
 		return d
 	}
-	if len(entry.Requires) == 0 {
+	// No directory configured is an operator's to fix, never a passing
+	// outage: waiting does not make one appear.
+	if len(entry.Requires) == 0 || cache == nil || cache.Source == nil {
 		d.Outcome = "entitlement_config"
 		return d
 	}

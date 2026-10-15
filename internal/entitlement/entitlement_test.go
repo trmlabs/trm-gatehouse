@@ -61,6 +61,7 @@ func TestDecide(t *testing.T) {
 		{"non-member", &fakeSource{person: Person{ObjectID: "oid", Enabled: true}}, claude, t1, alice, false, "not_entitled"},
 		{"disabled", &fakeSource{person: Person{ObjectID: "oid", MemberOf: []string{g1}}}, claude, t1, alice, false, "account_disabled"},
 		{"lookup error", &fakeSource{err: errors.New("down")}, claude, t1, alice, false, "entitlement_unavailable"},
+		{"no directory configured", nil, claude, t1, alice, false, "entitlement_config"},
 		{"workload entitled", nil, Pool{Identity: "workload", Ceiling: "T1", Entitlements: []string{g1}}, t1, Requester{Kind: "workload"}, true, "workload_entitled"},
 		{"workload missing group", nil, Pool{Identity: "workload", Ceiling: "T1"}, t1, Requester{Kind: "workload"}, false, "workload_not_entitled"},
 		{"workload T2", nil, Pool{Identity: "workload", Ceiling: "T2", Entitlements: []string{g1}}, Entry{Tier: "T2", Requires: []string{g1}}, Requester{Kind: "workload"}, false, "workload_not_entitled"},
@@ -71,6 +72,11 @@ func TestDecide(t *testing.T) {
 		if d.Allowed != c.allowed || d.Outcome != c.outcome {
 			t.Errorf("%s: got %v %q", c.name, d.Allowed, d.Outcome)
 		}
+	}
+	// A broker started without a directory refuses as a configuration fault,
+	// which waiting never clears, not as a directory outage.
+	if d := Decide(context.Background(), nil, claude, t1, alice); d.Allowed || d.Outcome != "entitlement_config" {
+		t.Errorf("no cache: got %v %q", d.Allowed, d.Outcome)
 	}
 }
 

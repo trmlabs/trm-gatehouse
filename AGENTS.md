@@ -8,9 +8,12 @@ When the managed runner selects this profile, use its approved destinations, pub
 
 HTTP supports approved HTTPS GET/HEAD requests without a caller query or body, with configured placeholders only in `Authorization` or `X-Api-Key`. HTTP Basic supports a configured placeholder as the username with an empty password; never supply a real username or password. An operator may configure a fixed non-secret query for an exact GET destination; send its URL without parameters and let the proxy add them. HEAD is denied for that mapping. Send no `Proxy-Authorization` or other identity header. PostgreSQL uses only the operator-provided public placeholder password and fixed database/user. The relay also preserves supported application-name, positive statement-timeout and UTF8 encoding settings; see the task relay guide for bounds. Reconnect when a connection expires; never retrieve a proof or bypass the relay. Browser access, when configured, uses only the assigned create/check/close routes with an empty JSON object; no login credentials or session handles belong in the sandbox.
 
-- `403`: denied identity, mapping, destination or request format. Stop and report it.
-- `429`: rate limited. Pause before retrying the approved request.
-- `503`: required audit recording unavailable; the outcome may be unknown. Report it without bypassing or blindly repeating the request.
+Every refusal from the catalog broker carries an `X-Gatehouse-Refusal` header with a fixed reason code, and a one-line body naming the code and the next step. The one exception is a refused CONNECT through the task relay, covered last below. Decide by that header, not by the status alone: the broker strips it from every destination response, while a destination's own status and `Retry-After` pass through unchanged.
+
+- `X-Gatehouse-Refusal` with `Retry-After` (a `503` or `429`): a passing refusal, such as `session_missing`, `entitlement_unavailable`, `key_unavailable` or `audit_unavailable`. The request was not sent upstream. Wait that many seconds, then send it again. After `session_missing` the broker closes the connection, so the retry opens a new one.
+- `X-Gatehouse-Refusal` without `Retry-After`: a lasting refusal of identity, mapping, destination or request format (`403`, `400`, `405`, `413`), or a `503` only an operator can clear, such as `key_deleted` or `key_not_header_safe`. Stop and report it with the reason code, or change the request as the next step says; resending it unchanged is refused again. A `429` without `Retry-After`: pause, then retry the approved request.
+- No `X-Gatehouse-Refusal`: the destination's own answer, or a `502` when the broker could not get or pass on that answer. The request may have been applied. Follow that service's retry rules and never assume it was not sent.
+- A refused CONNECT, which your client reports as a proxy or tunnel error rather than a response: nothing was sent. Through the task relay it is a bare `403` (denied; report it) or `503` (unavailable; retry after a pause) with no reason code.
 
 ## Legacy token workflow
 

@@ -1,6 +1,11 @@
 package cmd
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+
+	"github.com/Infisical/agent-vault/internal/entitlement"
+)
 
 func TestRunnerPersonDomains(t *testing.T) {
 	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
@@ -114,5 +119,28 @@ func TestGraphSettings(t *testing.T) {
 	}
 	if _, err := loadAuthorization(env(map[string]string{"AGENT_VAULT_ENTITLEMENTS": "graph"})); err == nil {
 		t.Error("graph without its settings accepted")
+	}
+}
+
+// Each person's directory budget is a setting: today's 60 by default, and any
+// positive count an operator sets, with no small fixed cap.
+func TestEntitlementLookupsPerMinute(t *testing.T) {
+	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
+	base := map[string]string{"AGENT_VAULT_ENTITLEMENTS": "file:/nonexistent/entitlements.json"}
+	a, err := loadAuthorization(env(base))
+	if err != nil || a.entitlements == nil || a.entitlements.LookupsPerMinute != entitlement.DefaultLookupsPerMinute || entitlement.DefaultLookupsPerMinute != 60 {
+		t.Fatalf("default: %+v %v", a.entitlements, err)
+	}
+	for _, set := range []int{1, 600, 250000} {
+		with := map[string]string{"AGENT_VAULT_ENTITLEMENTS": base["AGENT_VAULT_ENTITLEMENTS"], "AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE": strconv.Itoa(set)}
+		if a, err := loadAuthorization(env(with)); err != nil || a.entitlements.LookupsPerMinute != set {
+			t.Errorf("%d: %+v %v", set, a.entitlements, err)
+		}
+	}
+	for _, bad := range []string{"0", "-5", "ten", "1.5"} {
+		with := map[string]string{"AGENT_VAULT_ENTITLEMENTS": base["AGENT_VAULT_ENTITLEMENTS"], "AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE": bad}
+		if _, err := loadAuthorization(env(with)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }
