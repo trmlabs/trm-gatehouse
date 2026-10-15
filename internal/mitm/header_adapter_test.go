@@ -531,3 +531,36 @@ func TestUnsafePathRefusesTraversalForms(t *testing.T) {
 		}
 	}
 }
+
+// An entry with requestFields forwards a request only when each limited
+// parameter appears once with a listed value, and audits every refusal.
+func TestAdapterHoldsRequestFieldsToListedValues(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{
+			"name":"llm","host":"example.com","port":%d,"pathPrefixes":["/v1/chat"],"methods":["POST"],
+			"header":"Authorization","scheme":"Bearer","placeholder":"__vault_LLM_KEY__",
+			"key":{"mount":"gatehouse","path":"vendors/llm","field":"key"},"pools":["pool-agent"],
+			"requestFields":[{"name":"channel","values":["C0123456789"]}]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	if code, _, err := f.do(t, "POST", "/v1/chat/completions", `{"channel":"C0123456789","text":"x"}`, nil); err != nil || code != 200 {
+		t.Fatalf("listed channel: %d %v", code, err)
+	}
+	for name, tc := range map[string]struct{ path, body string }{
+		"unlisted":          {"/v1/chat/completions", `{"channel":"D0123456789","text":"x"}`},
+		"missing":           {"/v1/chat/completions", `{"text":"x"}`},
+		"duplicate key":     {"/v1/chat/completions", `{"channel":"C0123456789","channel":"D0123456789"}`},
+		"query and body":    {"/v1/chat/completions?channel=C0123456789", `{"channel":"C0123456789"}`},
+		"unlisted in query": {"/v1/chat/completions?channel=D0123456789", ``},
+	} {
+		calls := f.calls.Load()
+		code, _, err := f.do(t, "POST", tc.path, tc.body, nil)
+		if err != nil || code != http.StatusForbidden || f.calls.Load() != calls || f.audit.last().Outcome != "request_field" {
+			t.Errorf("%s: %d %v outcome=%q, vendor calls %d->%d", name, code, err, f.audit.last().Outcome, calls, f.calls.Load())
+		}
+	}
+}

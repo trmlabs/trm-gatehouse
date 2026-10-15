@@ -689,16 +689,28 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	// Audit identity comes only from the verified scope. The binding is added
 	// once the database resolves.
 	event := auditchain.Event{Pool: scope.Pool, Agent: scope.ActorID, PodUID: scope.WorkloadID, Session: newSessionID()}
+	// session_open records how long admission took from here: queues, the
+	// credential mint and the upstream connect.
+	authenticated := time.Now()
 	connCtx := WithSession(baseCtx, session)
+	// A refusal before the catalog resolves the database names the database
+	// the client asked for, so an unknown database can be counted.
+	denied := func() auditchain.Event {
+		e := event
+		if e.Binding == "" {
+			e.Database = auditchain.DatabaseField(requestedDB)
+		}
+		return e
+	}
 	refuse := func(outcome, code, message string) {
-		b.auditDenied(event, outcome)
+		b.auditDenied(denied(), outcome)
 		writeClientError(backend, code, outcome, message)
 	}
 	// refuseBusy is busy for a session past authentication: it is audited like
 	// every other refusal from here on.
 	refuseBusy := func(stage string) {
 		if b.ctx.Err() == nil {
-			b.auditDenied(event, "admission_timeout")
+			b.auditDenied(denied(), "admission_timeout")
 		}
 		busy(stage)
 	}
@@ -856,6 +868,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	releaseStore()
 	event.RequesterKind, event.TokenSHA256, event.RequesterOID = who.Kind, who.TokenSHA256, who.ObjectID
 	event.Tier, event.Decision, event.Groups, event.CacheAgeSec = who.Tier, who.Decision, who.Groups, who.CacheAgeSec
+	event.RequesterDepartment = auditchain.DepartmentField(who.Department)
 	if who.Kind == "person" || who.Kind == "agent" {
 		event.Requester = who.Subject
 	}
@@ -890,7 +903,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	if b.pools != nil {
 		// Multiplexed: the pool owns the database budget, credentials and
 		// server connections, so this session takes none of its own.
-		b.servePooled(hsCtx, conn, backend, *scope, svc, token, startup.Parameters["agent_vault_vault"], requestedDB, peer, startup.Parameters, event)
+		b.servePooled(hsCtx, conn, backend, *scope, svc, token, startup.Parameters["agent_vault_vault"], requestedDB, peer, startup.Parameters, event, authenticated)
 		return
 	}
 
@@ -966,6 +979,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	// No query may reach the database before its session row exists.
 	opened := event
 	opened.Event, opened.Outcome = auditchain.EventSessionOpen, "admitted"
+	opened.Duration = time.Since(authenticated).Milliseconds()
 	if err := b.auditRecord(opened); err != nil {
 		b.logger.Error("pgproxy: audit trail unavailable; refusing session", slog.String("error", err.Error()))
 		writeClientError(backend, "08004", "audit_unavailable", "Agent Vault: audit unavailable")

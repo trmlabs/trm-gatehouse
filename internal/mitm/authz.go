@@ -45,6 +45,7 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 	}
 	d := authorize.Decide(ctx, a.Entitlements, pool, *entry, who)
 	event.Tier, event.Decision, event.RequesterOID = d.Tier, d.Outcome, d.ObjectID
+	event.RequesterDepartment = auditchain.DepartmentField(d.Department)
 	event.Groups = strings.Join(d.Groups, ",")
 	event.CacheAgeSec = int64(d.CacheAge.Seconds())
 	if !d.Allowed {

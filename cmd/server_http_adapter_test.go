@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 	"github.com/Infisical/agent-vault/internal/server"
 )
@@ -138,5 +139,23 @@ func TestShutdownSecondsMustFitTheGrace(t *testing.T) {
 	t.Setenv("AGENT_VAULT_SHUTDOWN_SECONDS", "75")
 	if err := serverCmd.RunE(serverCmd, nil); err == nil || !strings.Contains(err.Error(), "AGENT_VAULT_SHUTDOWN_SECONDS") {
 		t.Fatalf("server started with a 75 s drain: %v", err)
+	}
+}
+
+// gitScope names a token's permissions the way the catalog grants them, so a
+// catalog change that drops a grant prunes the tokens minted for it.
+func TestGitScopeNamesEveryTokenScope(t *testing.T) {
+	for p, want := range map[githubapp.Permissions]string{
+		githubapp.ContentsRead:      "contents-read",
+		githubapp.ContentsWrite:     "contents-write",
+		githubapp.PullRequestsWrite: "pull-requests",
+		githubapp.ActionsRead:       "actions",
+		githubapp.DeploymentsRead:   "deployments",
+		githubapp.ChecksRead:        "checks",
+		githubapp.StatusesRead:      "statuses",
+	} {
+		if got := gitScope(p); got != want {
+			t.Errorf("gitScope(%+v) = %q, want %q", p, got, want)
+		}
 	}
 }

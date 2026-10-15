@@ -154,7 +154,7 @@ has database entries):
 | HTTP APIs | A placeholder in the key header | The real key, for the entry's host, paths and methods only |
 | PostgreSQL | A placeholder password | A short-lived database login: by default a fresh one per connection, removed when it closes; with [pooling](docs/gatehouse/postgres-pooling.md) on, one shared login per pool and database that rotates in the background |
 | GitHub repositories (clone, push) | Nothing | A short-lived GitHub App token for one repository. Pushes can be limited to branch prefixes |
-| GitHub pull requests, Actions and deployments | A placeholder token, or none | The same App token, limited to the operations the entry lists |
+| GitHub pull requests, Actions runs, checks and deployments | A placeholder token, or none | The same App token, limited to the operations the entry lists: the pull request API and, where the catalog grants them, Actions, check run, commit status and deployment reads |
 | Google Cloud Storage and BigQuery | A placeholder token | A short-lived token narrowed to one bucket prefix, or to one service account |
 | Web apps that sign in with Auth0 | Nothing | A sign-in as a test or service account. The browser holds only placeholders, and cookies never pass |
 
