@@ -584,8 +584,9 @@ func TestSharedImagePrefixes(t *testing.T) {
 	s.ImagePrefixes = map[string]string{"agent-sandboxes": teamA}
 	c.Shared = &s
 	c.Connect = &ConnectConfig{Listen: "0.0.0.0:8443", Upstream: f.upstream(t, "broker.internal:16443"), AllowedTargets: []string{"api.example.com:443"}}
-	if err := c.Validate(time.Now()); err == nil {
-		t.Error("a prefix was accepted with no image registry set")
+	// The refusal names the setting, so a deployment that missed it can tell.
+	if err := c.Validate(time.Now()); !errors.Is(err, errConfig) || !strings.Contains(fmt.Sprint(err), imagerule.RegistryEnv) {
+		t.Errorf("a prefix with no image registry set: %v", err)
 	}
 }
 

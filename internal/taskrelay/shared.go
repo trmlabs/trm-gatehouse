@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -110,8 +111,13 @@ func (s *SharedConfig) validate() error {
 		}
 	}
 	for ns, prefix := range s.ImagePrefixes {
-		if s.Profiles[ns] == "" || !imagerule.ValidPrefix(prefix) {
+		if s.Profiles[ns] == "" {
 			return errConfig
+		}
+		// The registry setting is the one a deployment most often misses,
+		// so this refusal names it.
+		if !imagerule.ValidPrefix(prefix) {
+			return fmt.Errorf("%w: imagePrefixes[%q] must be a repository or tenant path under %s", errConfig, ns, imagerule.RegistryEnv)
 		}
 		for other, otherPrefix := range s.ImagePrefixes {
 			if other != ns && imagerule.Overlap(prefix, otherPrefix) {
@@ -137,8 +143,11 @@ func (s *SharedConfig) connections() int {
 // validateShared allows TLS listeners on any address, Kubernetes access for
 // the Pod cache, no pairing, no browser and no session files.
 func (c FixedConfig) validateShared(now time.Time) error {
-	if c.Self || c.Browser != nil || c.Sandbox != (SandboxConfig{}) || c.Shared.validate() != nil {
+	if c.Self || c.Browser != nil || c.Sandbox != (SandboxConfig{}) {
 		return errConfig
+	}
+	if e := c.Shared.validate(); e != nil {
+		return e
 	}
 	// Plaintext listeners are allowed (no certificate and no key) on the Pod
 	// network; the HTTP listener takes CONNECT only, so HTTPS stays end to

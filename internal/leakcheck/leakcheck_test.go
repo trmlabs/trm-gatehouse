@@ -77,6 +77,11 @@ var deniedTokens = map[string]string{
 	"485bfd7adf5cfa3d4d0918705e2d22b12d9eef37af588427fc5e54f4b25c27f5": "broker audience",
 	"e1567e104c4d2565f930e29e4998a998c0992d48858a03c6400ffb27e7acf052": "signing key ID",
 	"3cc03119d3cb2d4df14ce0b22b4616260c728bbef9e943285df760b31711ed6b": "network range",
+	"29db9333fd6708d092065c6ea34f2d3c5554d59612ebaad82ba49f75c202f603": "Vault path",
+	"f37e9b581a0be76ef4940750d8482e5633aaab09424631131787609969389811": "Vault path",
+	"676fd47aaecf9b13801c1eb8297b7b2205df99c8397c48d1e8db382b97029e74": "database role",
+	"8ae4083d184acb1c77da2012450c0c023a8a8ca5c802b2232ee557f356f3bea2": "network range",
+	"047f8aa724cd188af08e4e5153247c4f8291f8e1b4af319cfef935317d8349db": "network range",
 }
 
 var (
@@ -86,6 +91,10 @@ var (
 	internalHost = regexp.MustCompile(`(?i)[a-z0-9-]+(\.[a-z0-9-]+)*\.trmlabs(-[a-z]+)?\.[a-z]{2,}`)
 	otherDomain  = regexp.MustCompile(`(?i)trmlabs-[a-z]+\.[a-z]{2,}`)
 	email        = regexp.MustCompile(`(?i)[a-z0-9._%+-]*@-?trmlabs\.[a-z]{2,}`)
+	// A token claim namespaced under the operator's domain, such as
+	// https://<domain>/email, names one tenant's login action. A link to the
+	// domain itself, with no path, stays allowed.
+	namespacedClaim = regexp.MustCompile(`(?i)://trmlabs(-[a-z]+)?\.[a-z]{2,}/[a-z0-9]`)
 	// An identity organization ID has the shape org_ and 16 characters; tests
 	// use short synthetic ones.
 	orgID = regexp.MustCompile(`\borg_[A-Za-z0-9]{16}\b`)
@@ -126,6 +135,9 @@ func problems(name, line string) []string {
 	}
 	if otherDomain.MatchString(line) {
 		found = append(found, "internal domain")
+	}
+	if namespacedClaim.MatchString(line) {
+		found = append(found, "namespaced claim")
 	}
 	for _, m := range email.FindAllString(line, -1) {
 		if name != "SECURITY.md" || !strings.EqualFold(m, securityContact) {
@@ -187,7 +199,9 @@ func TestProblems(t *testing.T) {
 		`"host": "api.corp.trmlabs.com"`:                     true,
 		`"https://api.corp.trmlabs.com/v1/x"`:                true,
 		`annotation gatehouse.trmlabs.com/requester`:         false,
-		`"https://trmlabs.com/email"`:                        false,
+		`"https://trmlabs.com/email"`:                        true,
+		`[TRM Labs](https://trmlabs.com).`:                   false,
+		`"https://example.com/email"`:                        false,
 		`alice@example.com`:                                  false,
 		`alice@trmlabs.com`:                                  true,
 		`"orgID": "org_synthetic"`:                           false,

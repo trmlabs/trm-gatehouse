@@ -27,6 +27,10 @@ var automatedSecrets = map[string]string{"email": "qa-user@example.test", "passw
 
 const syntheticRefresh = "synthetic-refresh-token-5d8"
 
+// namespacedEmail is the fake access token's namespaced email claim. It
+// differs from the plain email claim, so a test sees which one was read.
+const namespacedEmail = "qa-user+namespaced@example.test"
+
 type automatedVault struct{ down bool }
 
 func (v automatedVault) ReadWithDataWithContext(context.Context, string, map[string][]string) (*vaultapi.Secret, error) {
@@ -302,7 +306,7 @@ func fakeAutomatedAuth(t *testing.T) (*automatedFake, *http.Client) {
 		access := fmt.Sprintf("synthetic-access-token-%d", n)
 		if f.jwt.Load() {
 			payload, _ := json.Marshal(map[string]any{"sub": "auth0|qa-user", "org_id": f.org.Load(), "aud": json.RawMessage(f.aud.Load().(string)), "exp": exp.Unix(),
-				"https://example.com/email": automatedSecrets["email"], "permissions": []string{"read:cases"}})
+				"email": automatedSecrets["email"], "https://example.com/email": namespacedEmail, "permissions": []string{"read:cases"}})
 			access = "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + "." + access
 		}
 		out := map[string]any{"accessToken": access, "refreshToken": syntheticRefresh, "target": "https://app.example.com/",
@@ -478,10 +482,13 @@ func TestAutomatedAuthSignInCachesAndRevokes(t *testing.T) {
 func TestAutomatedAuthClaimsFromAccessToken(t *testing.T) {
 	t.Cleanup(func() { EmailClaim.Store("") })
 	for claim, want := range map[string]map[string]any{
-		// The fake names the email in a namespaced claim, so the default
-		// "email" finds none.
-		"":                          {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
-		"https://example.com/email": {"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": automatedSecrets["email"]},
+		// The fake sets a different email in the plain and the namespaced
+		// claim, so each case shows which claim was read.
+		"":                          {"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": automatedSecrets["email"]},
+		"https://example.com/email": {"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": namespacedEmail},
+		// A claim that is absent or is not a string is left out.
+		"permissions": {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
+		"missing":     {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
 	} {
 		EmailClaim.Store(claim)
 		fake, client := fakeAutomatedAuth(t)

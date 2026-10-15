@@ -238,7 +238,7 @@ func auth0Client(catalog interface{ Current() httpcatalog.Catalog }, dial func(c
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-// automatedAuthClient is how browser-session test users sign in through TRM's
+// automatedAuthClient is how browser-session test users sign in through an
 // automated-auth service: over the guarded dialer, to a service address the
 // current catalog names and nowhere else, never following a redirect. The
 // service drives a real login page, so a sign-in takes tens of seconds.
