@@ -963,19 +963,9 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 // may come only from one of them; none means none may be opened.
 func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 	var out []string
-	for _, e := range c.entries {
-		if e.Kind != "git" || e.Git == nil || !contains(e.Pools, pool) {
-			continue
-		}
-		for _, r := range e.Git.Repos {
-			if r.Repo != repo || r.Access != "write" {
-				continue
-			}
-			for _, prefix := range r.RefPrefixes {
-				if branch, ok := strings.CutPrefix(prefix, "refs/heads/"); ok && branch != "" {
-					out = append(out, branch)
-				}
-			}
+	for i := range c.entries {
+		if e := &c.entries[i]; e.Kind == "git" && contains(e.Pools, pool) {
+			out = append(out, pushPrefixes(e, repo)...)
 		}
 	}
 	return out

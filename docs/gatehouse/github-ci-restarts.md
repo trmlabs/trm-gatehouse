@@ -26,7 +26,7 @@ Add the operations to a repository in a `github-api` entry. The pool also needs 
 
 Without the opt-in, or without a `git` entry that lets the pool push to at least one branch prefix (`refs/heads/...`), the routes do not exist and are refused as `unlisted`. A `git` entry with no prefixes, only tag prefixes, or `refs/heads/` alone (every branch) gives no branch prefixes, so it enables nothing.
 
-`gh run rerun <id>` and `gh run rerun <id> --failed` use these routes; they also read the run first, which needs `actions.read`. `gh api -X PUT repos/<owner>/<repo>/pulls/<n>/update-branch` updates a branch. `gh pr update-branch` uses GraphQL and is not served by this route.
+`gh run rerun <id>` and `gh run rerun <id> --failed` use these routes; they also read the run and its workflow first, which needs `actions.read`. `gh api -X PUT repos/<owner>/<repo>/pulls/<n>/update-branch` updates a branch. `gh pr update-branch` uses GraphQL and is not served by this route.
 
 ## What the broker checks
 
