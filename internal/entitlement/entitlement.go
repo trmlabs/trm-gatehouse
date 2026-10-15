@@ -272,20 +272,20 @@ func WithRecheck(ctx context.Context) context.Context {
 func isRecheck(ctx context.Context) bool { v, _ := ctx.Value(recheckKey{}).(bool); return v }
 
 // LookupFor answers a membership question with the freshness Decide uses for
-// an entry at tier: a T2 admission asks the directory now, within the
-// person's budget; T1, T0 and rechecks may use the cache. A refusing answer
-// that was fresh, or on a recheck, should be followed by Forget.
-func LookupFor(ctx context.Context, cache *Cache, subject string, groups []string, tier string) (Person, error) {
+// an entry at tier, and how old the answer is: a T2 admission asks the
+// directory now, within the person's budget; T1, T0 and rechecks may use the
+// cache. A refusing answer that was fresh, or on a recheck, should be
+// followed by Forget.
+func LookupFor(ctx context.Context, cache *Cache, subject string, groups []string, tier string) (Person, time.Duration, error) {
 	want, err := Tier(tier)
 	if err != nil {
-		return Person{}, err
+		return Person{}, 0, err
 	}
 	lookup := cache.Lookup
 	if want >= 2 && !isRecheck(ctx) {
 		lookup = cache.Fresh
 	}
-	p, _, err := lookup(ctx, subject, groups)
-	return p, err
+	return lookup(ctx, subject, groups)
 }
 
 // Forget purges subject after a refusing answer that was fresh (tier T2) or

@@ -248,8 +248,9 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 //
 // The decision's ObjectID and Department are the run person's, so an audit
 // row's requester fields all name one person; Tier, Outcome, Groups and
-// CacheAge are the decision on the owner's account, or on a runner refusal
-// the runner group's check.
+// CacheAge are the decision on the owner's account, or on a refusal at the
+// runner check the runner group's check: automation_runner, or a runner
+// lookup that was rate limited or unavailable, with Groups the runner group.
 func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool, entry httpcatalog.Entry, who Requester) entitlement.Decision {
 	requester := entitlement.Requester{Kind: who.Kind, Subject: who.Subject}
 	if pool.Identity != httpcatalog.IdentityCursorAutomation {
@@ -266,12 +267,12 @@ func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool
 		refused.Outcome = "automation_not_granted"
 		return refused
 	}
-	runner, checked, outcome := runnerAllowed(ctx, cache, a, who.RunPerson, entry.Tier)
+	runner, age, checked, outcome := runnerAllowed(ctx, cache, a, who.RunPerson, entry.Tier)
 	if outcome != "" {
 		refused.Outcome, refused.ObjectID, refused.Department = outcome, runner.ObjectID, runner.Department
 		refused.Groups = nil
 		if checked {
-			refused.Groups = []string{a.RunnerGroup}
+			refused.Groups, refused.CacheAge = []string{a.RunnerGroup}, age
 		}
 		return refused
 	}
@@ -288,29 +289,29 @@ func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool
 // Automation: its owner, or an enabled member of its runner group, looked up
 // as fresh as a person pool looks a person up for the same tier, within the
 // runner's own budget. It returns what the directory said about a runner
-// other than the owner, whether the runner group was looked up, and a refusal
-// code, or "".
-func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.Automation, person, tier string) (entitlement.Person, bool, string) {
+// other than the owner and how old that answer is, whether the runner group
+// was looked up, and a refusal code, or "".
+func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.Automation, person, tier string) (entitlement.Person, time.Duration, bool, string) {
 	switch {
 	case person == "":
-		return entitlement.Person{}, false, "automation_runner"
+		return entitlement.Person{}, 0, false, "automation_runner"
 	case person == a.Owner:
-		return entitlement.Person{}, false, ""
+		return entitlement.Person{}, 0, false, ""
 	case a.RunnerGroup == "":
-		return entitlement.Person{}, false, "automation_runner"
+		return entitlement.Person{}, 0, false, "automation_runner"
 	}
 	if tier == "" {
 		tier = "T0"
 	}
-	p, err := entitlement.LookupFor(ctx, cache, person, []string{a.RunnerGroup}, tier)
+	p, age, err := entitlement.LookupFor(ctx, cache, person, []string{a.RunnerGroup}, tier)
 	switch {
 	case errors.Is(err, entitlement.ErrLookupLimited):
-		return entitlement.Person{}, true, "entitlement_rate_limited"
+		return entitlement.Person{}, 0, true, "entitlement_rate_limited"
 	case err != nil:
-		return entitlement.Person{}, true, "entitlement_unavailable"
+		return entitlement.Person{}, 0, true, "entitlement_unavailable"
 	case !p.Enabled || len(p.MemberOf) != 1 || p.MemberOf[0] != a.RunnerGroup:
 		entitlement.Forget(ctx, cache, person, tier)
-		return p, true, "automation_runner"
+		return p, age, true, "automation_runner"
 	}
-	return p, true, ""
+	return p, age, true, ""
 }

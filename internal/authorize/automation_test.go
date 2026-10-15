@@ -315,3 +315,48 @@ func TestAutomationOwnerChecksUseTheAutomationsBudget(t *testing.T) {
 		t.Fatalf("alice's own lookup after her Automation's: %v", err)
 	}
 }
+
+// A refusal at the runner check describes the runner group's lookup: the age
+// of a cached answer, and the runner group on a lookup that was rate limited.
+func TestRunnerCheckRefusalsDescribeTheRunnerLookup(t *testing.T) {
+	catalog := automationCatalog(t)
+	pool, _ := catalog.Pool("automations")
+	now := time.Unix(1_700_000_000, 0)
+	cache := &entitlement.Cache{
+		Source:           directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}, "carol@example.com": {}},
+		LookupsPerMinute: 1,
+		Now:              func() time.Time { return now },
+	}
+	ctx := context.Background()
+	decide := func(token, name string) entitlement.Decision {
+		t.Helper()
+		run := automationRuns[token]
+		who, refusal := Resolve(ctx, pool, token, Claims{Pod: "pod-" + token, ClaimedRun: run.Run}, automationRuns, &authorizetest.MemBinder{})
+		if refusal != "" {
+			t.Fatalf("%s: %q", token, refusal)
+		}
+		e, err := catalog.Match("api."+name+".example", 443, "GET", "/v1/x", "automations")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Decide(ctx, cache, pool, *e, who)
+	}
+	// carol is not in the runner group. Her T0 refusal is cached, so the
+	// next one two minutes later rides that answer and says how old it is.
+	if d := decide("carol-explorer", "tracker"); d.Outcome != "automation_runner" || d.CacheAge != 0 {
+		t.Fatalf("first refusal: %+v", d)
+	}
+	now = now.Add(2 * time.Minute)
+	if d := decide("carol-explorer", "tracker"); d.Outcome != "automation_runner" || d.CacheAge != 2*time.Minute ||
+		len(d.Groups) != 1 || d.Groups[0] != teamGroup || d.ObjectID != "oid-carol@example.com" {
+		t.Fatalf("cached refusal: %+v", d)
+	}
+	// bob's second T2 run within the minute is over his own lookup budget.
+	if d := decide("bob-explorer", "vault"); !d.Allowed {
+		t.Fatalf("bob's first T2 run: %+v", d)
+	}
+	now = now.Add(10 * time.Second) // past the recent answer an over-budget lookup may reuse
+	if d := decide("bob-explorer", "vault"); d.Outcome != "entitlement_rate_limited" || len(d.Groups) != 1 || d.Groups[0] != teamGroup {
+		t.Fatalf("over the runner's budget: %+v", d)
+	}
+}
