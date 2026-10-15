@@ -297,8 +297,9 @@ func Forget(ctx context.Context, cache *Cache, subject, tier string) {
 }
 
 // Decide applies the lesser of the pool ceiling and the requester's entitlements.
-// A T2 admission always asks the directory now, within the person's lookup
-// budget; T1 admissions and rechecks may use the cache. A refusal on a recheck
+// A T2 admission always asks the directory now, within the requester's lookup
+// budget (Budget, or the person's own); T1 admissions and rechecks may use the
+// cache. A refusal on a recheck
 // or a fresh answer forgets everything cached about the person, so none of
 // their other sessions or entries rides a stale answer.
 func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Requester) Decision {
