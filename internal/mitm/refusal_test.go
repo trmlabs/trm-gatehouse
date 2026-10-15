@@ -191,9 +191,9 @@ func TestRefusalTableIsComplete(t *testing.T) {
 	quoted := regexp.MustCompile(`"([a-z_]+)"`)
 	returned := regexp.MustCompile(`return "([a-z_]+)"`)
 	assigned := regexp.MustCompile(`\boutcome :?= "([a-z_]+)"`)
-	outcomeFunc := regexp.MustCompile(`(?s)\nfunc \w*Outcome\([^)]*\) string \{\n(.*?)\n\}\n`)
+	outcomeFunc := regexp.MustCompile(`(?s)\nfunc (?:\([^)]*\) )?\w*Outcome\([^)]*\) string \{\n(.*?)\n\}\n`)
 	files, _ := filepath.Glob("*.go")
-	seen := 0
+	seen, assignedSeen, helperSeen := 0, 0, 0
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") {
 			continue
@@ -210,7 +210,7 @@ func TestRefusalTableIsComplete(t *testing.T) {
 		}
 		for _, m := range assigned.FindAllStringSubmatch(string(src), -1) {
 			check(file, m[1])
-			seen++
+			assignedSeen++
 		}
 		bodies := []string{}
 		if file == "refusal.go" {
@@ -218,6 +218,7 @@ func TestRefusalTableIsComplete(t *testing.T) {
 		} else {
 			for _, m := range outcomeFunc.FindAllStringSubmatch(string(src), -1) {
 				bodies = append(bodies, m[1])
+				helperSeen++
 			}
 		}
 		for _, body := range bodies {
@@ -248,8 +249,10 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			}
 		}
 	}
-	if seen < 50 {
-		t.Fatalf("only %d refusal codes found in this package; the patterns no longer match the source", seen)
+	// Each pattern finds what it finds today, so none can stop matching unnoticed.
+	if seen < 50 || assignedSeen < 2 || helperSeen < 1 {
+		t.Fatalf("only %d refusal codes, %d assigned outcomes and %d ...Outcome helpers found in this package; the patterns no longer match the source",
+			seen, assignedSeen, helperSeen)
 	}
 }
 
