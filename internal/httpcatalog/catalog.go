@@ -703,10 +703,10 @@ func (e *Entry) normalizeGit() error {
 				return fmt.Errorf("invalid ref prefix %q", prefix)
 			}
 		}
-		if err := checkPoolPrefixes(r.Repo, "ref prefix", r.PoolRefPrefixes, e.Pools, validRefPrefix); err != nil {
+		if err := checkPoolPrefixes(r.Repo, "ref prefix", r.RefPrefixes, r.PoolRefPrefixes, e.Pools, validRefPrefix); err != nil {
 			return err
 		}
-		if err := checkPoolPrefixes(r.Repo, "pull request prefix", r.PoolPullRequestPrefixes, e.Pools, validPullRequestPrefix); err != nil {
+		if err := checkPoolPrefixes(r.Repo, "pull request prefix", r.PullRequestPrefixes, r.PoolPullRequestPrefixes, e.Pools, validPullRequestPrefix); err != nil {
 			return err
 		}
 	}
@@ -730,14 +730,25 @@ func validPullRequestPrefix(prefix string) bool {
 	return branchPrefixPattern.MatchString(prefix) && !strings.Contains(prefix, "..") && !strings.HasPrefix(prefix, "refs/")
 }
 
-// checkPoolPrefixes checks a repository's per-pool prefixes: each pool is one
-// the entry grants and lists distinct, valid prefixes, and no pool's prefix
-// starts another pool's (ignoring case), so each pool's branches are its own.
-// Sorting puts every prefix right before the ones it starts, so the check
-// grows with the number of prefixes, not their pairs.
-func checkPoolPrefixes(repo, what string, byPool map[string][]string, pools []string, valid func(string) bool) error {
+// checkPoolPrefixes checks a repository's per-pool prefixes: a map that is
+// present names at least one pool (an empty one would read as no limit), each
+// pool is one the entry grants and lists distinct, valid prefixes, and no
+// pool's prefix starts another pool's or a shared one, nor is started by one
+// (ignoring case), so each pool's branches are its own. Sorting puts every
+// prefix right before the ones it starts, so each is compared only with
+// those, never with every other prefix.
+func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]string, pools []string, valid func(string) bool) error {
+	if byPool == nil {
+		return nil
+	}
+	if len(byPool) == 0 {
+		return fmt.Errorf("repository %s: list a pool with its %ses, or leave the per-pool field out", repo, what)
+	}
 	type owned struct{ pool, prefix string }
 	var all []owned
+	for _, prefix := range shared {
+		all = append(all, owned{"", strings.ToLower(prefix)}) // "" is no pool: every pool of the entry
+	}
 	for pool, prefixes := range byPool {
 		if !contains(pools, pool) {
 			return fmt.Errorf("repository %s: %s for pool %q, which the entry does not grant", repo, what, pool)
@@ -758,11 +769,19 @@ func checkPoolPrefixes(repo, what string, byPool map[string][]string, pools []st
 	for i := range all {
 		for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
 			if all[j].pool != all[i].pool {
-				return fmt.Errorf("repository %s: %s %q of pool %q overlaps pool %q's %q", repo, what, all[j].prefix, all[j].pool, all[i].pool, all[i].prefix)
+				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].prefix, holder(all[j].pool), all[i].prefix, holder(all[i].pool))
 			}
 		}
 	}
 	return nil
+}
+
+// holder names who holds a checked prefix: a pool, or "" for the shared list.
+func holder(pool string) string {
+	if pool == "" {
+		return "shared by every pool"
+	}
+	return "pool " + strconv.Quote(pool)
 }
 
 // normalizeGitHubAPI checks a github-api repository's operations and their
@@ -787,7 +806,7 @@ func (r *GitRepo) normalizeGitHubAPI() error {
 	case r.Allows("dispatch") != (len(r.DispatchEvents) > 0):
 		return fmt.Errorf("repository %s: dispatch needs dispatchEvents, and dispatchEvents need dispatch", r.Repo)
 	case (len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0) && !r.Allows("pr.comment") && !r.Allows("pr.edit") && !r.Allows("pr.label") && !r.Allows("pr.ready"):
-		return fmt.Errorf("repository %s: pullRequestPrefixes need pr.comment, pr.edit, pr.label or pr.ready", r.Repo)
+		return fmt.Errorf("repository %s: pullRequestPrefixes and poolPullRequestPrefixes need pr.comment, pr.edit, pr.label or pr.ready", r.Repo)
 	}
 	check := func(what string, values []string, pattern *regexp.Regexp) error {
 		seen := map[string]bool{}

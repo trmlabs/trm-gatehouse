@@ -458,7 +458,7 @@ const poolsGitEntry = `{"name":"github","host":"github.com","kind":"git","pools"
 
 const poolsAPIEntry = `{"name":"github-api","host":"api.github.com","kind":"github-api","pools":["pool-a","pool-b","pool-c"],
 	"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/trm-b2b","access":"write",
-		"operations":["pr.open","pr.read","pr.comment","pr.edit"],
+		"operations":["pr.open","pr.read","pr.comment","pr.edit","pr.label","pr.ready"],"labels":["preview"],
 		"poolPullRequestPrefixes":{"pool-a":["review/"]}}]}}`
 
 func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
@@ -501,6 +501,8 @@ func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
 			{"POST", "/repos/trmlabs/trm-b2b/issues/7/comments"},
 			{"PATCH", "/repos/trmlabs/trm-b2b/pulls/7"},
 			{"PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5"},
+			{"POST", "/repos/trmlabs/trm-b2b/issues/7/labels"},
+			{"POST", "/repos/trmlabs/trm-b2b/pulls/7/ready"},
 		} {
 			m, _, err := c.GitHubAPIMatch("api.github.com", 443, route.method, route.path, "", tc.pool)
 			if err != nil || fmt.Sprint(m.HeadPrefixes) != tc.target {
@@ -561,7 +563,14 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 		"pull request prefix without a slash":    heads(`{"pool-a":["review"]}`),
 		"same pull request prefix for two pools": heads(`{"pool-a":["review/"],"pool-b":["review/"]}`),
 		"nested pull request prefixes":           heads(`{"pool-a":["review/"],"pool-b":["review/b/"]}`),
-		"pull request prefixes with reads only":  strings.Replace(heads(`{"pool-a":["review/"]}`), `"operations":["pr.open","pr.read","pr.comment","pr.edit"]`, `"operations":["pr.open","pr.read"]`, 1),
+		"pull request prefixes with reads only":  strings.Replace(heads(`{"pool-a":["review/"]}`), `"operations":["pr.open","pr.read","pr.comment","pr.edit","pr.label","pr.ready"],"labels":["preview"]`, `"operations":["pr.open","pr.read"]`, 1),
+		// A present but empty map would read as no limit at all.
+		"empty per-pool ref prefixes":          refs(`{}`),
+		"empty per-pool pull request prefixes": heads(`{}`),
+		// The shared lists apply to every pool, so they may not reach a pool's own.
+		"a shared prefix starts a pool's own":              strings.Replace(refs(`{"pool-a":["refs/heads/cursor/pool-a/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/cursor/"],`, 1),
+		"a pool's own starts a shared prefix":              strings.Replace(refs(`{"pool-a":["refs/heads/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1),
+		"a shared pull request prefix starts a pool's own": strings.Replace(heads(`{"pool-a":["review/a/"]}`), `"access":"write",`, `"access":"write","pullRequestPrefixes":["review/"],`, 1),
 	} {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil {
 			t.Errorf("%s accepted", name)
@@ -577,5 +586,27 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
 			t.Errorf("%s refused: %v", name, err)
 		}
+	}
+}
+
+// The tolerant load drops only the entry whose per-pool prefixes fail, and
+// keeps the rest of the catalog in force.
+func TestPoolPrefixesFailingEntryIsDroppedAlone(t *testing.T) {
+	bad := strings.Replace(poolsGitEntry, `"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]`, `"pool-b":["refs/heads/cursor/pool-a/x/"]`, 1)
+	if bad == poolsGitEntry {
+		t.Fatal("fixture replacement did not apply")
+	}
+	c, dropped, err := ParseTolerant([]byte(`{"entries":[` + validEntry + `,` + bad + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dropped) != 1 || dropped[0].Kind != "entry" || dropped[0].Name != "github" || !strings.Contains(dropped[0].Reason, "overlaps") {
+		t.Fatalf("dropped %+v", dropped)
+	}
+	if len(c.Entries()) != 1 || c.Entries()[0].Name != "serpapi" {
+		t.Fatalf("kept %+v", c.Entries())
+	}
+	if _, ok, _ := c.GitMatch("github.com", 443, "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", "pool-a"); ok {
+		t.Fatal("the dropped entry still routes")
 	}
 }
