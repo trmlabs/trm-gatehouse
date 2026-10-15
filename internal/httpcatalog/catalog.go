@@ -117,10 +117,10 @@ var DefaultGitHubOperations = []string{"pr.open", "pr.read", "pr.comment"}
 var githubOperations = map[string]string{
 	// graphql opts a repository into POST /graphql (graphql.go), where each
 	// field still needs its own operation and pr.read also covers a pull
-	// request's comments, reviews and review threads, and the pull requests
-	// a label, commit or branch leads to. Opt-in, so no existing entry widens
-	// when the broker starts serving GraphQL. A broker without it drops any
-	// entry listing it, REST routes included: deploy the broker first.
+	// request's comments, reviews and review threads. Opt-in, so no existing
+	// entry widens when the broker starts serving GraphQL. A broker without
+	// it drops any entry listing it, REST routes included: deploy the broker
+	// first.
 	"graphql":          "pull-requests",
 	"pr.open":          "pull-requests",  // POST /pulls, head under the pool's push prefixes
 	"pr.read":          "pull-requests",  // GET /pulls/{n}

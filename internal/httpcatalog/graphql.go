@@ -42,7 +42,8 @@ import (
 // Repository) is checked as the root one is: pullRequests, defaultBranchRef
 // and labels need the same operations there, and any other field with
 // arguments or a selection is refused. Lists of repositories are refused at
-// any depth (graphqlRepositoryList). The token GitHub sees is minted for the
+// any depth (graphqlRepositoryList), and every list of pull requests needs
+// pr.list wherever it is read (graphqlPullRequestList). The token GitHub sees is minted for the
 // one repository with pull requests and no contents, so a nested field reaches
 // neither another private repository nor files and history (a git entry's
 // grant). Node IDs (a mutation's target, node's id) do not name their
@@ -172,6 +173,18 @@ func graphqlRepositoryField(name string) bool {
 	return name == "repository" || strings.HasSuffix(name, "Repository")
 }
 
+// graphqlPullRequestList reports a field that lists pull requests, which
+// needs pr.list at any depth as a repository's pullRequests does: a label's,
+// milestone's or user's pullRequests, a commit's or branch's
+// associatedPullRequests, a check suite's matchingPullRequests, an issue's
+// closedByPullRequestsReferences, and a user's pull request (review)
+// contributions. These are every field GitHub's schema has that returns
+// pull requests as a list; gh reads none of them below the root.
+func graphqlPullRequestList(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "pullrequests") || strings.Contains(n, "pullrequestcontribution") || strings.Contains(n, "pullrequestreviewcontribution")
+}
+
 // graphqlRepositoryList reports a field that lists repositories (an owner's
 // repositories, a user's starred or watched ones, a repository's forks).
 // Each item would be a repository the mapping never sees, so these are
@@ -298,9 +311,9 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 	repos := map[string]bool{}
 	switch op.Operation {
 	case ast.Query:
-		// Below a mapped field any selection is allowed, and from any of them
-		// a pull request can be read (a label's pullRequests, a commit's
-		// associatedPullRequests), so every query also needs pr.read.
+		// Below a mapped field any selection is allowed, and from many of
+		// them a pull request can be read (a comment's subject, an event's
+		// source), so every query also needs pr.read.
 		ops["pr.read"] = true
 		if err := queryRoot(op.SelectionSet, vars, defaults, ops, repos, &out.Targets); err != nil {
 			return GitHubGraphQL{}, err
@@ -463,7 +476,7 @@ type graphqlCheck struct {
 	vars     map[string]any
 	defaults func(string) *ast.Value
 	aliases  int
-	ops      map[string]bool // operations the fields of repositories reached below the root need
+	ops      map[string]bool // operations fields below the root need (repository, graphqlPullRequestList)
 	code     bool            // a field of graphqlPathFields appears
 	checks   bool            // a field of graphqlCheckFields appears
 	actions  bool            // a field of graphqlActionsFields appears
@@ -500,6 +513,9 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			}
 			if graphqlRepositoryList(s.Name) {
 				c.fail(ErrGraphQLUnmapped)
+			}
+			if graphqlPullRequestList(s.Name) {
+				c.ops["pr.list"] = true
 			}
 			if graphqlRepositoryField(s.Name) {
 				c.repository(s.SelectionSet)

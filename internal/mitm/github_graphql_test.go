@@ -966,7 +966,7 @@ func TestGitHubGraphQLCheckStatusScopes(t *testing.T) {
 // A repository reached below the root needs the operations it needs at the
 // root: with pr.read alone, a pull request's repository cannot list pull
 // requests, read the default branch or look up labels, however the request
-// reaches it.
+// reaches it; nor can a label list its pull requests.
 func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
 	f := newGraphQLFixture(t)
 	nested := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { repository { ` +
@@ -975,6 +975,9 @@ func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
 		"variables": map[string]any{"id": ownPR}})
 	payload, _ := json.Marshal(map[string]any{"query": `mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { repository { defaultBranchRef { name } } } } } }`,
 		"variables": map[string]any{"input": map[string]any{"subjectId": ownPR, "body": "x"}}})
+	// Any list of pull requests needs pr.list, not only a repository's.
+	labelsPRs := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { ` +
+		`labels(first: 10) { nodes { pullRequests(first: 100) { nodes { number body } } } } } } }"}`
 	// Without pr.list on example-repo, a read naming its pull request by node
 	// ID finds only read-repo granting every operation it needs, which does
 	// not hold that pull request; no repository grants the comment's.
@@ -986,6 +989,7 @@ func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
 		{"nested under the root repository", nested, "unlisted", []string{"pr.read"}, []string{"pr.read", "pr.list", "pr.label"}},
 		{"nested under a node", string(byNode), "pull_request_target", []string{"pr.read"}, []string{"pr.read", "pr.list"}},
 		{"nested in a mutation's payload", string(payload), "unlisted", []string{"pr.read", "pr.comment"}, []string{"pr.read", "pr.list", "pr.comment"}},
+		{"a label's pull requests", labelsPRs, "unlisted", []string{"pr.read"}, []string{"pr.read", "pr.list"}},
 	} {
 		f.use(t, tc.without...)
 		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != 403 || f.audit.last().Outcome != tc.refused {

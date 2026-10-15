@@ -170,6 +170,7 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"search with a quoted term", graphqlBody(`query { search(query: "repo:o/r \"org:x\"", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"node of another type", graphqlBody(`query { node(id: "R_kgDNA-g") { ... on Repository { collaborators(first: 1) { totalCount } } } }`, nil), ErrGraphQLUnmapped},
 		{"nodes", graphqlBody(`query { nodes(ids: ["PR_kwDNA-jNB9A"]) { id } }`, nil), ErrGraphQLUnmapped},
+		{"empty node ID", graphqlBody(`query { node(id: "") { id } }`, nil), ErrGraphQLUnmapped},
 		{"search without a repository", graphqlBody(`query { search(query: "is:pr author:@me", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search across an organization", graphqlBody(`query { search(query: "repo:o/r org:o", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search with a grouped qualifier", graphqlBody(`query { search(query: "repo:o/r (org:p)", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
@@ -264,7 +265,7 @@ func TestGraphQLRebuildsTheRequest(t *testing.T) {
 }
 
 // Below a mapped field any selection is allowed, so every query needs
-// pr.read: pull requests can be read from a label or a commit.
+// pr.read, whatever else it needs.
 func TestGraphQLQueriesNeedPullRequestRead(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for _, inner := range []string{
@@ -494,6 +495,31 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 		got, err := ParseGitHubGraphQL(tc.body)
 		if err != nil || strings.Join(got.Operations, " ") != tc.want {
 			t.Errorf("%s: %v %v, want %s", tc.name, got.Operations, err, tc.want)
+		}
+	}
+}
+
+// Every list of pull requests needs pr.list wherever it is read, as a
+// repository's pullRequests does: these are all the fields GitHub's schema
+// has that list pull requests.
+func TestGraphQLPullRequestListsNeedList(t *testing.T) {
+	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
+	for _, inner := range []string{
+		`labels(first: 1) { nodes { pullRequests(first: 1) { totalCount } } }`,
+		`milestone { pullRequests(first: 1) { totalCount } }`,
+		`author { ... on User { pullRequests(first: 1) { nodes { body } } } }`,
+		`headRef { associatedPullRequests(first: 1) { nodes { body } } }`,
+		`commits(last: 1) { nodes { commit { associatedPullRequests(first: 1) { totalCount } } } }`,
+		`commits(last: 1) { nodes { commit { checkSuites(first: 1) { nodes { matchingPullRequests(first: 1) { totalCount } } } } } }`,
+		`closingIssuesReferences(first: 1) { nodes { closedByPullRequestsReferences(first: 1) { totalCount } } }`,
+		`author { ... on User { contributionsCollection { pullRequestContributions(first: 1) { totalCount } } } }`,
+		`author { ... on User { contributionsCollection { pullRequestReviewContributions(first: 1) { totalCount } } } }`,
+		`author { ... on User { contributionsCollection { popularPullRequestContribution { pullRequest { body } } } } }`,
+	} {
+		query := `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: 1) { ` + inner + ` } } }`
+		got, err := ParseGitHubGraphQL(graphqlBody(query, vars))
+		if err != nil || strings.Join(got.Operations, " ") != "pr.list pr.read" {
+			t.Errorf("%s: %v %v, want pr.list pr.read", inner, got.Operations, err)
 		}
 	}
 }
