@@ -167,8 +167,25 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 
 	repo := req.Repo
 	if repo == "" {
+		// A file list needs the clone grant (below); for a request naming its
+		// repository only by node ID, repositories without it are dropped
+		// before any token is minted or GitHub asked.
+		candidates := authorized
+		if req.Code {
+			candidates = nil
+			for _, g := range authorized {
+				probe := event
+				if clone := catalog.GitHubCloneEntry(host, g.Repo.Repo, scope.Pool); clone != nil && p.authorize(r.Context(), scope, clone, &probe) == "" {
+					candidates = append(candidates, g)
+				}
+			}
+			if len(candidates) == 0 {
+				deny(http.StatusForbidden, "unlisted")
+				return
+			}
+		}
 		var outcome string
-		if repo, outcome = p.nodesRepository(r, target, expected, authorized, req, limit); outcome != "" {
+		if repo, outcome = p.nodesRepository(r, target, expected, candidates, req, limit); outcome != "" {
 			deny(lookupStatus(outcome), outcome)
 			return
 		}
@@ -217,12 +234,16 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	app := githubapp.App{AppID: entry.Git.AppID, InstallationID: entry.Git.InstallationID}
-	// Check status needs checks and statuses read, which a repository grants
-	// with actions.read (as for REST's check run and status routes); a
-	// request that reads none gets the pull request scope alone.
+	// Check status needs checks and statuses read, and a check suite's
+	// workflow run actions read, which a repository grants with actions.read
+	// (as for REST's check run, status and workflow run routes); a request
+	// that reads none gets the pull request scope alone.
 	permissions := graphqlPermissions
 	if req.Checks && api.Repo.GrantsScope("checks") && api.Repo.GrantsScope("statuses") {
 		permissions.Checks, permissions.Statuses = "read", "read"
+	}
+	if req.Actions && api.Repo.GrantsScope("actions") {
+		permissions.Actions = "read"
 	}
 	token, err := a.GitTokens.Token(r.Context(), app, api.Repo.Repo, permissions)
 	if err != nil {

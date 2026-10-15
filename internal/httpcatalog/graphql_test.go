@@ -148,6 +148,10 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"duplicate input field", graphqlBody(`query { repository(owner: "o", name: "r") { pullRequests(orderBy: {field: CREATED_AT, field: UPDATED_AT}, first: 1) { totalCount } } }`, nil), ErrGraphQLShape},
 		{"fragment cycle", graphqlBody(repoQuery(`pullRequest(number: 1) { ...a }`)+` fragment a on PullRequest { author { ...a } }`, repoVars), ErrGraphQLShape},
 		{"unknown fragment", graphqlBody(repoQuery(`pullRequest(number: 1) { ...missing }`), repoVars), ErrGraphQLShape},
+		{"duplicate fragment", graphqlBody(repoQuery(`pullRequest(number: 1) { ...f }`)+` fragment f on PullRequest { id } fragment f on PullRequest { title }`, repoVars), ErrGraphQLShape},
+		// The printer drops a variable definition's directives, so GitHub would
+		// read something other than what was checked.
+		{"directive on a variable", graphqlBody(`query($owner: String! @deprecated, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: 1) { id } } }`, repoVars), ErrGraphQLShape},
 		{"too many tokens", graphqlBody(repoQuery(`pullRequest(number: 1) { `+strings.Repeat("id ", maxGraphQLTokens)+`}`), repoVars), ErrGraphQLLimit},
 		{"oversized document", graphqlBody(repoQuery(`pullRequest(number: 1) { id }`)+strings.Repeat(" ", maxGraphQLDocument), repoVars), ErrGraphQLLimit},
 
@@ -159,6 +163,11 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"fragment at the root", graphqlBody(`query { ...q } fragment q on Query { viewer { login } }`, nil), ErrGraphQLUnmapped},
 		{"fragment under repository", graphqlBody(repoQuery(`...r`)+` fragment r on Repository { collaborators(first: 1) { totalCount } }`, repoVars), ErrGraphQLUnmapped},
 		{"directive", graphqlBody(repoQuery(`pullRequest(number: 1) @include(if: true) { id }`), repoVars), ErrGraphQLUnmapped},
+		{"directive on the operation", graphqlBody(`query($owner: String!, $repo: String!) @include(if: true) { repository(owner: $owner, name: $repo) { pullRequest(number: 1) { id } } }`, repoVars), ErrGraphQLUnmapped},
+		{"directive on a fragment", graphqlBody(repoQuery(`pullRequest(number: 1) { ...f }`)+` fragment f on PullRequest @include(if: true) { id }`, repoVars), ErrGraphQLUnmapped},
+		{"repository name with ..", graphqlBody(`query { repository(owner: "o", name: "r..s") { pullRequest(number: 1) { id } } }`, nil), ErrGraphQLUnmapped},
+		{"search with ..", graphqlBody(`query { search(query: "repo:o/r..s", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search with a quoted term", graphqlBody(`query { search(query: "repo:o/r \"org:x\"", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"node of another type", graphqlBody(`query { node(id: "R_kgDNA-g") { ... on Repository { collaborators(first: 1) { totalCount } } } }`, nil), ErrGraphQLUnmapped},
 		{"nodes", graphqlBody(`query { nodes(ids: ["PR_kwDNA-jNB9A"]) { id } }`, nil), ErrGraphQLUnmapped},
 		{"search without a repository", graphqlBody(`query { search(query: "is:pr author:@me", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
@@ -174,6 +183,9 @@ func TestGraphQLRefusals(t *testing.T) {
 			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A", "event": "APPROVE"}}), ErrGraphQLUnmapped},
 		{"two mutations", graphqlBody(`mutation($input: AddCommentInput!) { a: addComment(input: $input) { clientMutationId } b: addComment(input: $input) { clientMutationId } }`,
 			map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}), ErrGraphQLUnmapped},
+		{"aliased mutation", graphqlBody(`mutation($input: AddCommentInput!) { c: addComment(input: $input) { clientMutationId } }`,
+			map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}), ErrGraphQLUnmapped},
+		{"comment with an empty target", comment(map[string]any{"subjectId": "", "body": "x"}), ErrGraphQLUnmapped},
 		{"literal input", graphqlBody(`mutation { addComment(input: {subjectId: "PR_kwDNA-jNB9A", body: "x"}) { clientMutationId } }`, nil), ErrGraphQLUnmapped},
 		{"edit the title", graphqlBody(`mutation($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { clientMutationId } }`,
 			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A", "title": "x"}}), ErrGraphQLUnmapped},
@@ -303,7 +315,9 @@ func TestGraphQLMutationPayloadNeedsPullRequestRead(t *testing.T) {
 		`clientMutationId`:             "pr.comment",
 		`__typename clientMutationId`:  "pr.comment",
 		`commentEdge { node { url } }`: "pr.comment pr.read",
-		`subject { ... on PullRequest { repository { pullRequests(first: 1) { nodes { body comments(first: 1) { nodes { body } } } } } } }`: "pr.comment pr.read",
+		`subject { ... on PullRequest { number comments(first: 1) { nodes { body } } } }`: "pr.comment pr.read",
+		// A repository reached from the payload is mapped as at the root.
+		`subject { ... on PullRequest { repository { pullRequests(first: 1) { nodes { body comments(first: 1) { nodes { body } } } } } } }`: "pr.comment pr.list pr.read",
 	} {
 		got, err := ParseGitHubGraphQL(graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { `+payload+` } }`, input))
 		if err != nil || strings.Join(got.Operations, " ") != want {
@@ -386,27 +400,100 @@ func TestGraphQLMarksFileListsAsCode(t *testing.T) {
 }
 
 // A request reading check status is marked Checks, for the checks and
-// statuses scopes; gh's default view, status and checks read it, list and
-// the mutations do not.
+// statuses scopes, and one reading a check suite's workflow run is marked
+// Actions, for the actions scope; gh's default view and checks read both,
+// status reads check status only, list and the mutations read neither.
 func TestGraphQLMarksCheckStatusReads(t *testing.T) {
-	for fixture, want := range map[string][]bool{
-		"pr-view-number": {true, false},
-		"pr-status":      {true},
-		"pr-checks":      {false, false, false, true},
-		"pr-list":        {false},
-		"pr-comment":     {false, false},
+	for fixture, want := range map[string][]string{ // per request: Checks/Actions
+		"pr-view-number": {"true/true", "false/false"},
+		"pr-view-branch": {"true/true", "false/false"},
+		"pr-status":      {"true/false"},
+		"pr-checks":      {"false/false", "false/false", "false/false", "true/true"},
+		"pr-checks-json": {"false/false", "true/true"},
+		"pr-list":        {"false/false"},
+		"pr-comment":     {"false/false", "false/false"},
 	} {
-		var got []bool
+		var got []string
 		for _, r := range readGhFixture(t, fixture).Requests {
 			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
 			req, err := ParseGitHubGraphQL([]byte(body))
 			if err != nil {
 				t.Fatalf("%s: %v", fixture, err)
 			}
-			got = append(got, req.Checks)
+			got = append(got, fmt.Sprintf("%v/%v", req.Checks, req.Actions))
 		}
 		if fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("%s: %v, want %v", fixture, got, want)
+		}
+	}
+}
+
+// A repository reached below the root is checked as the root one is: its
+// pull request list and default branch need pr.list and its labels pr.label
+// however it is reached, any other field with arguments or a selection is
+// refused, and lists of repositories are refused outright. gh's own nested
+// reads (a pull request's headRepository name) need nothing more.
+func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
+	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
+	const pr = `repository(owner: $owner, name: $repo) { pullRequest(number: 12) { `
+	const prEnd = ` } }`
+	listed := "pr.list pr.read"
+	for _, tc := range []struct {
+		name, query, want string // want: the operations, or the refusal
+		fragments         string
+	}{
+		{"a pull request's repository", pr + `repository { pullRequests(first: 100) { nodes { number body } } defaultBranchRef { name } labels(first: 100) { nodes { id name } } }` + prEnd,
+			"pr.label pr.list pr.read", ""},
+		{"baseRepository", pr + `baseRepository { defaultBranchRef { name } }` + prEnd, listed, ""},
+		{"headRepository", pr + `headRepository { labels(first: 1) { nodes { id } } }` + prEnd, "pr.label pr.read", ""},
+		{"a label's repository", pr + `labels(first: 1) { nodes { repository { pullRequests(first: 1) { totalCount } } } }` + prEnd, listed, ""},
+		{"an owner's repository by name", pr + `headRepositoryOwner { repository(name: "example-repo") { pullRequests(first: 1) { totalCount } } }` + prEnd, listed, ""},
+		{"an event's fromRepository", pr + `timelineItems(first: 1) { nodes { ... on TransferredEvent { fromRepository { pullRequests(first: 1) { totalCount } } } } }` + prEnd, listed, ""},
+		{"... on Repository in a union", pr + `author { ... on User { pinnedItems(first: 1) { nodes { ... on Repository { pullRequests(first: 1) { totalCount } } } } } }` + prEnd, listed, ""},
+		{"a fragment on Repository", pr + `author { ... on User { pinnedItems(first: 1) { nodes { ...r } } } }` + prEnd, listed,
+			`fragment r on Repository { pullRequests(first: 1) { totalCount } }`},
+		{"an inline fragment inside a repository", pr + `repository { ... on Repository { pullRequests(first: 1) { totalCount } } }` + prEnd, listed, ""},
+		{"two levels down", pr + `repository { pullRequest(number: 2) { repository { defaultBranchRef { name } } } }` + prEnd, listed, ""},
+		{"gh's own headRepository read", pr + `headRepository { __typename id name nameWithOwner } isCrossRepository` + prEnd, "pr.read", ""},
+
+		{"another field of a nested repository", pr + `repository { issues(first: 1) { totalCount } }` + prEnd, "graphql_unmapped", ""},
+		{"a nested repository's owner", pr + `baseRepository { owner { login } }` + prEnd, "graphql_unmapped", ""},
+		{"an interface fragment inside a repository", pr + `repository { ... on RepositoryInfo { owner { login } } }` + prEnd, "graphql_unmapped", ""},
+		{"a fragment spread inside a repository", pr + `repository { ...r }` + prEnd, "graphql_unmapped", `fragment r on Repository { name }`},
+		{"a user's repositories", pr + `author { ... on User { repositories(first: 1) { nodes { name } } } }` + prEnd, "graphql_unmapped", ""},
+		{"a user's watched repositories", pr + `author { ... on User { watching(first: 1) { nodes { name } } } }` + prEnd, "graphql_unmapped", ""},
+		{"a user's starred repositories", pr + `author { ... on User { starredRepositories(first: 1) { nodes { name } } } }` + prEnd, "graphql_unmapped", ""},
+	} {
+		query := `query($owner: String!, $repo: String!) { ` + tc.query + ` } ` + tc.fragments
+		got, err := ParseGitHubGraphQL(graphqlBody(query, vars))
+		var refusal *GraphQLError
+		switch {
+		case errors.As(err, &refusal):
+			if refusal.Outcome != tc.want {
+				t.Errorf("%s: refused %s, want %s", tc.name, refusal.Outcome, tc.want)
+			}
+		case err != nil:
+			t.Errorf("%s: %v", tc.name, err)
+		case strings.Join(got.Operations, " ") != tc.want:
+			t.Errorf("%s: %v, want %s", tc.name, got.Operations, tc.want)
+		}
+	}
+	// The same holds where the root is a node ID, a search or a mutation.
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"node", graphqlBody(`query($id: ID!) { node(id: $id) { ... on PullRequest { repository { pullRequests(first: 1) { totalCount } } } } }`,
+			map[string]any{"id": fixturePR}), listed},
+		{"search", graphqlBody(`query { search(query: "repo:example-org/example-repo is:pr", type: ISSUE, first: 1) { nodes { ... on PullRequest { repository { labels(first: 1) { totalCount } } } } } }`, nil),
+			"pr.label pr.list pr.read"},
+		{"mutation payload", graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { baseRepository { defaultBranchRef { name } } } } } }`,
+			map[string]any{"input": map[string]any{"subjectId": fixturePR, "body": "x"}}), "pr.comment pr.list pr.read"},
+	} {
+		got, err := ParseGitHubGraphQL(tc.body)
+		if err != nil || strings.Join(got.Operations, " ") != tc.want {
+			t.Errorf("%s: %v %v, want %s", tc.name, got.Operations, err, tc.want)
 		}
 	}
 }

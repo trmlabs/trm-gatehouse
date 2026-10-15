@@ -37,11 +37,16 @@ import (
 // Every query also needs pr.read, as does a mutation whose payload selects
 // more than __typename or clientMutationId, since below those fields any
 // selection is allowed within the limits here and pull requests are reachable
-// from most of them. The token GitHub sees is minted for the one repository with pull
-// requests and no contents, so a nested field reaches neither another private
-// repository nor files and history (a git entry's grant). Node IDs (a
-// mutation's target, node's id) do not name their repository; the broker
-// resolves each one before sending (GraphQLTarget).
+// from most of them. A repository reached below the root (a pull request's
+// repository, baseRepository or headRepository, a label's repository, ... on
+// Repository) is checked as the root one is: pullRequests, defaultBranchRef
+// and labels need the same operations there, and any other field with
+// arguments or a selection is refused. Lists of repositories are refused at
+// any depth (graphqlRepositoryList). The token GitHub sees is minted for the
+// one repository with pull requests and no contents, so a nested field reaches
+// neither another private repository nor files and history (a git entry's
+// grant). Node IDs (a mutation's target, node's id) do not name their
+// repository; the broker resolves each one before sending (GraphQLTarget).
 
 // Limits on one GraphQL request. gh's largest document (pr view) is about 3
 // KiB, 13 levels deep, with about 150 fields once fragments are expanded.
@@ -99,6 +104,11 @@ type GitHubGraphQL struct {
 	// its token also carries checks and statuses read where the repository
 	// grants them (actions.read), as REST's check run and status routes.
 	Checks bool
+	// Actions marks a request that reads workflow runs (graphqlActionsFields:
+	// default gh pr view and gh pr checks read a check run's workflowRun): its
+	// token also carries actions read where the repository grants it
+	// (actions.read), as REST's workflow run routes.
+	Actions bool
 	// Code marks a request that reads which files a pull request changes
 	// (graphqlPathFields): as for REST's pull request files, it is served only
 	// to a pool whose git entry may clone the repository, for a requester that
@@ -143,12 +153,31 @@ var githubSchemaFeatures = map[string][]string{
 }
 
 // graphqlRepositoryFields are the fields allowed directly under
-// repository(owner, name), and the operation each needs.
+// repository(owner, name), and the operation each needs. The same fields need
+// the same operations under a repository reached anywhere below the root
+// (graphqlCheck.repository).
 var graphqlRepositoryFields = map[string]string{
 	"pullRequest":      "pr.read",
 	"pullRequests":     "pr.list",
 	"defaultBranchRef": "pr.list",
 	"labels":           "pr.label",
+}
+
+// graphqlRepositoryField reports a field whose value is a repository: a
+// pull request's, label's or commit's repository, a pull request's
+// baseRepository and headRepository, an event's fromRepository. Named by
+// convention, since the parser has no schema; isCrossRepository matches too,
+// a plain value with nothing below it to check.
+func graphqlRepositoryField(name string) bool {
+	return name == "repository" || strings.HasSuffix(name, "Repository")
+}
+
+// graphqlRepositoryList reports a field that lists repositories (an owner's
+// repositories, a user's starred or watched ones, a repository's forks).
+// Each item would be a repository the mapping never sees, so these are
+// refused at any depth; gh reads none of them.
+func graphqlRepositoryList(name string) bool {
+	return strings.Contains(strings.ToLower(name), "repositories") || name == "watching" || name == "forks"
 }
 
 // graphqlMutation is one allowed mutation: its operation, the fields its input
@@ -222,11 +251,14 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 		}
 		return nil
 	}
-	c := &graphqlCheck{vars: vars, defaults: defaults}
+	c := &graphqlCheck{vars: vars, defaults: defaults, ops: map[string]bool{}}
 	c.selections(op.SelectionSet)
 	for _, f := range doc.Fragments {
 		if len(f.Directives) > 0 || graphqlContentTypes[f.TypeCondition] {
 			c.fail(ErrGraphQLUnmapped)
+		}
+		if f.TypeCondition == "Repository" {
+			c.repository(f.SelectionSet)
 		}
 		c.selections(f.SelectionSet)
 	}
@@ -261,8 +293,8 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 		return GitHubGraphQL{}, ErrGraphQLLimit
 	}
 
-	out := GitHubGraphQL{Code: c.code, Checks: c.checks}
-	ops := map[string]bool{}
+	out := GitHubGraphQL{Code: c.code, Checks: c.checks, Actions: c.actions}
+	ops := c.ops // what repositories reached at any depth need
 	repos := map[string]bool{}
 	switch op.Operation {
 	case ast.Query:
@@ -419,15 +451,22 @@ var graphqlPathFields = map[string]bool{"files": true, "path": true}
 // token with checks and statuses read (GitHubGraphQL.Checks).
 var graphqlCheckFields = map[string]bool{"statusCheckRollup": true, "checkSuites": true, "checkRuns": true}
 
+// graphqlActionsFields read a check suite's workflow run, which GitHub serves
+// only to a token with actions read (GitHubGraphQL.Actions).
+var graphqlActionsFields = map[string]bool{"workflowRun": true}
+
 // graphqlCheck walks every selection as written: no directives, no
 // introspection beyond __typename, no argument named twice, aliases counted,
-// and every first or last at most maxGraphQLPage.
+// every first or last at most maxGraphQLPage, and every repository reached
+// checked as the root one is.
 type graphqlCheck struct {
 	vars     map[string]any
 	defaults func(string) *ast.Value
 	aliases  int
-	code     bool // a field of graphqlPathFields appears
-	checks   bool // a field of graphqlCheckFields appears
+	ops      map[string]bool // operations the fields of repositories reached below the root need
+	code     bool            // a field of graphqlPathFields appears
+	checks   bool            // a field of graphqlCheckFields appears
+	actions  bool            // a field of graphqlActionsFields appears
 	err      error
 }
 
@@ -456,6 +495,15 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			if graphqlCheckFields[s.Name] {
 				c.checks = true
 			}
+			if graphqlActionsFields[s.Name] {
+				c.actions = true
+			}
+			if graphqlRepositoryList(s.Name) {
+				c.fail(ErrGraphQLUnmapped)
+			}
+			if graphqlRepositoryField(s.Name) {
+				c.repository(s.SelectionSet)
+			}
 			if s.Alias != "" && s.Alias != s.Name {
 				c.aliases++
 			}
@@ -480,11 +528,37 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			if len(s.Directives) > 0 || graphqlContentTypes[s.TypeCondition] {
 				c.fail(ErrGraphQLUnmapped)
 			}
+			if s.TypeCondition == "Repository" {
+				c.repository(s.SelectionSet)
+			}
 			c.selections(s.SelectionSet)
 		case *ast.FragmentSpread:
 			if len(s.Directives) > 0 {
 				c.fail(ErrGraphQLUnmapped)
 			}
+		}
+	}
+}
+
+// repository checks a selection on a repository reached anywhere, as
+// queryRoot checks the root one's: a field of graphqlRepositoryFields needs
+// its operation, a plain value (no arguments, no selection, such as name) is
+// allowed, and anything else is refused, as is a fragment spread, so nothing
+// below a repository goes unmapped. selections still walks it all for the
+// other checks.
+func (c *graphqlCheck) repository(set ast.SelectionSet) {
+	for _, s := range set {
+		switch s := s.(type) {
+		case *ast.Field:
+			if op, ok := graphqlRepositoryFields[s.Name]; ok {
+				c.ops[op] = true
+			} else if len(s.Arguments) > 0 || len(s.SelectionSet) > 0 {
+				c.fail(ErrGraphQLUnmapped)
+			}
+		case *ast.InlineFragment:
+			c.repository(s.SelectionSet)
+		case *ast.FragmentSpread:
+			c.fail(ErrGraphQLUnmapped)
 		}
 	}
 }

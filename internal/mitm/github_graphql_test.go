@@ -26,6 +26,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
@@ -77,11 +78,13 @@ type graphqlFixture struct {
 	received     []string                     // relayed GraphQL bodies (not the broker's lookups)
 	nextIDs      []string                     // X-Github-Next-Global-ID on relayed requests
 	lookups      int
+	repoReads    int      // the broker's GET /repos/{owner}/{repo} lookups
 	failNode     bool     // the node lookup answers 502
 	failRepo     string   // this repository's read answers 502 ("*": every one)
 	withContents []string // GraphQL requests made with a token holding contents
 	person       bool     // pool-agent is a claude-session pool; requests come as alice
 	mintedFor    []string // the repository of every token minted
+	proxy        *Proxy
 }
 
 type swapCatalog struct {
@@ -233,6 +236,9 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 			case failRepo == "*" || failRepo == name:
 				w.WriteHeader(http.StatusBadGateway)
 			case name == repo:
+				f.mu.Lock()
+				f.repoReads++
+				f.mu.Unlock()
 				_ = json.NewEncoder(w).Encode(map[string]any{"id": repoIDs[repo], "full_name": "example-org/" + repo})
 			case strings.HasPrefix(name, repo+"/pulls/"): // gh pr diff
 				fmt.Fprint(w, `{"number":12}`)
@@ -311,6 +317,7 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 	p.upstream.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
+	f.proxy = p
 	f.client = newTrustingClient(proxyURL, url.User("workload-token"), roots)
 	if person {
 		f.client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{SessionHeader: {"alice"}}
@@ -845,13 +852,35 @@ func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("relayed without the clone grant: %v", got)
 	}
+	// A request naming its pull request only by node ID is refused before
+	// any token is minted or GitHub asked: in a query, and in a mutation's
+	// payload.
+	byNode, _ := json.Marshal(map[string]any{"query": `query($id: ID!) { node(id: $id) { ... on PullRequest { files(first: 5) { nodes { path } } } } }`,
+		"variables": map[string]any{"id": ownPR}})
+	payload, _ := json.Marshal(map[string]any{"query": `mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { files(first: 5) { nodes { path } } } } } }`,
+		"variables": map[string]any{"input": map[string]any{"subjectId": ownPR, "body": "x"}}})
+	for name, body := range map[string][]byte{"node": byNode, "mutation payload": payload} {
+		f.mu.Lock()
+		minted, reads := len(f.mintedFor), f.repoReads
+		f.mu.Unlock()
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, string(body)); code != 403 || f.audit.last().Outcome != "unlisted" {
+			t.Fatalf("%s without the clone grant: %d %q", name, code, f.audit.last().Outcome)
+		}
+		f.mu.Lock()
+		if len(f.mintedFor) != minted || f.repoReads != reads || f.lookups != 0 {
+			t.Errorf("%s without the clone grant: minted %v, %d repository reads, %d node lookups", name, f.mintedFor[minted:], f.repoReads-reads, f.lookups)
+		}
+		f.mu.Unlock()
+	}
 	cloneable := `{%s"entries":[{"name":"github-api","host":"example.com","port":%%[1]d,"kind":"github-api","pools":["pool-agent"],
 		"git":{"appID":7,"installationID":42,"repos":[` + exampleRepo(allPullRequestOps...) + `]}},
 		{"name":"github","host":"example.com","kind":"git","pools":["pool-agent"]%s,"git":{"appID":7,"installationID":42,
 		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`
 	f.useRaw(t, fmt.Sprintf(cloneable, "", ""))
-	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, files); code != 200 {
-		t.Fatalf("with the clone grant: %d %q", code, f.audit.last().Outcome)
+	for _, body := range []string{files, string(byNode)} {
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 200 {
+			t.Fatalf("with the clone grant: %d %q", code, f.audit.last().Outcome)
+		}
 	}
 	// A git entry the requester cannot use (T1, and no entitlement source)
 	// refuses the file list though the API entry allows the query.
@@ -902,10 +931,11 @@ func TestGitHubGraphQLAuditNamesOneOperation(t *testing.T) {
 	}
 }
 
-// Reading check status takes checks and statuses read on the token, exactly
-// when the repository grants actions.read, as REST's check run and status
-// routes do; never contents. A request reading no check status gets the pull
-// request scope alone.
+// Reading check status takes checks and statuses read on the token, and
+// reading a check suite's workflow run (default gh pr view and gh pr checks
+// do) actions read, exactly when the repository grants actions.read, as
+// REST's check run, status and workflow run routes do; never contents. A
+// request reading neither gets the pull request scope alone.
 func TestGitHubGraphQLCheckStatusScopes(t *testing.T) {
 	for _, grantsActions := range []bool{true, false} {
 		f := newGraphQLFixture(t)
@@ -914,7 +944,7 @@ func TestGitHubGraphQLCheckStatusScopes(t *testing.T) {
 			ops = append(ops, "actions.read")
 		}
 		f.use(t, ops...)
-		for _, fixture := range []string{"pr-view-number", "pr-checks", "pr-status", "pr-list"} {
+		for _, fixture := range []string{"pr-view-number", "pr-checks", "pr-checks-json", "pr-status", "pr-list"} {
 			if outcome := f.replay(t, fixture); outcome != "" {
 				t.Fatalf("%s (actions.read %v): refused %q", fixture, grantsActions, outcome)
 			}
@@ -923,10 +953,89 @@ func TestGitHubGraphQLCheckStatusScopes(t *testing.T) {
 		for i, body := range f.received {
 			perms := f.relayedPerms[i]
 			wantChecks := grantsActions && strings.Contains(body, "statusCheckRollup")
-			if (perms["checks"] == "read") != wantChecks || (perms["statuses"] == "read") != wantChecks || perms["contents"] != "" || perms["pull_requests"] != "write" {
+			wantActions := grantsActions && strings.Contains(body, "workflowRun")
+			if (perms["checks"] == "read") != wantChecks || (perms["statuses"] == "read") != wantChecks || (perms["actions"] == "read") != wantActions ||
+				perms["contents"] != "" || perms["pull_requests"] != "write" {
 				t.Errorf("actions.read %v: %v for %.120s", grantsActions, perms, body)
 			}
 		}
 		f.mu.Unlock()
+	}
+}
+
+// A repository reached below the root needs the operations it needs at the
+// root: with pr.read alone, a pull request's repository cannot list pull
+// requests, read the default branch or look up labels, however the request
+// reaches it.
+func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
+	f := newGraphQLFixture(t)
+	nested := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { repository { ` +
+		`pullRequests(first: 100) { nodes { number body } } defaultBranchRef { name } labels(first: 100) { nodes { id name } } } } } }"}`
+	byNode, _ := json.Marshal(map[string]any{"query": `query($id: ID!) { node(id: $id) { ... on PullRequest { baseRepository { pullRequests(first: 100) { nodes { number } } } } } }`,
+		"variables": map[string]any{"id": ownPR}})
+	payload, _ := json.Marshal(map[string]any{"query": `mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { repository { defaultBranchRef { name } } } } } }`,
+		"variables": map[string]any{"input": map[string]any{"subjectId": ownPR, "body": "x"}}})
+	// Without pr.list on example-repo, a read naming its pull request by node
+	// ID finds only read-repo granting every operation it needs, which does
+	// not hold that pull request; no repository grants the comment's.
+	for _, tc := range []struct {
+		name, body, refused string
+		without             []string // granted: every operation the request needs but one
+		with                []string
+	}{
+		{"nested under the root repository", nested, "unlisted", []string{"pr.read"}, []string{"pr.read", "pr.list", "pr.label"}},
+		{"nested under a node", string(byNode), "pull_request_target", []string{"pr.read"}, []string{"pr.read", "pr.list"}},
+		{"nested in a mutation's payload", string(payload), "unlisted", []string{"pr.read", "pr.comment"}, []string{"pr.read", "pr.list", "pr.comment"}},
+	} {
+		f.use(t, tc.without...)
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != 403 || f.audit.last().Outcome != tc.refused {
+			t.Errorf("%s with %v: %d %q, want 403 %q", tc.name, tc.without, code, f.audit.last().Outcome, tc.refused)
+		}
+		if got := f.relayed(); len(got) != 0 {
+			t.Fatalf("%s: relayed %v", tc.name, got)
+		}
+		f.use(t, tc.with...)
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != 200 {
+			t.Errorf("%s with %v: %d %q", tc.name, tc.with, code, f.audit.last().Outcome)
+		}
+		f.mu.Lock()
+		f.received = nil
+		f.mu.Unlock()
+	}
+}
+
+// The per-Pod proxy rate limit applies to GraphQL per entry, as to REST: on
+// the entry chosen, and before the broker asks GitHub which repository a node
+// ID is in, so a request over the limit costs no token and no lookup.
+func TestGitHubGraphQLRateLimited(t *testing.T) {
+	f := newGraphQLFixture(t)
+	cfg := ratelimit.DefaultsFor(ratelimit.ProfileDefault)
+	proxyTier := cfg.Tiers[ratelimit.TierProxy]
+	proxyTier.Rate, proxyTier.Burst = 0.001, 1
+	cfg.Tiers[ratelimit.TierProxy] = proxyTier
+	f.proxy.rateLimit = ratelimit.New(cfg)
+	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { title } } }"}`
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, read); code != 200 {
+		t.Fatalf("first read: %d %q", code, f.audit.last().Outcome)
+	}
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, read); code != http.StatusTooManyRequests || f.audit.last().Outcome != "rate_limited" {
+		t.Fatalf("second read: %d %q", code, f.audit.last().Outcome)
+	}
+	if got := f.relayed(); len(got) != 1 {
+		t.Fatalf("relayed over the limit: %v", got)
+	}
+	// A comment by node ID, whose repository the broker has not looked up
+	// yet: refused before the lookup.
+	f.mu.Lock()
+	minted, reads := len(f.mintedFor), f.repoReads
+	f.mu.Unlock()
+	comment := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"})
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, comment); code != http.StatusTooManyRequests || f.audit.last().Outcome != "rate_limited" {
+		t.Fatalf("comment over the limit: %d %q", code, f.audit.last().Outcome)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.mintedFor) != minted || f.repoReads != reads || f.lookups != 0 || len(f.received) != 1 {
+		t.Fatalf("over the limit: minted %v, %d repository reads, %d node lookups, relayed %d", f.mintedFor[minted:], f.repoReads-reads, f.lookups, len(f.received))
 	}
 }
