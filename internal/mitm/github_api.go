@@ -35,12 +35,14 @@ const readyMutation = `mutation($id: ID!) { markPullRequestReadyForReview(input:
 // forwardGitHubAPI serves the GitHub REST routes a github-api entry lists
 // (httpcatalog GitHubAPIMatch) for one listed repository, with a token minted
 // for that repository and only the scope the route needs. It can never
-// approve, review, merge or push: those are unlisted. A write to an existing
+// approve, review or merge a pull request, and it pushes only through a CI
+// restart's branch update: the rest are unlisted. A write to an existing
 // pull request (comment, label, body edit, ready) goes ahead only when its
 // head is under the pool's push prefixes or the repository's pull request
 // prefixes, and a comment edit only on the App's own comment there. A CI
-// restart (a pull request's branch update, a workflow run run again) goes
-// ahead only on a branch under the pool's own push prefixes (restartInScope).
+// restart (a pull request's branch update, which merges the base into the
+// head, or a workflow run run again) goes ahead only on a branch under the
+// pool's own push prefixes (restartInScope).
 func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, api httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if api.Entry != nil {

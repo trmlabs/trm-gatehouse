@@ -15,7 +15,9 @@ import (
 // the base (PUT .../pulls/{n}/update-branch) and run a workflow run again
 // (POST .../actions/runs/{id}/rerun and /rerun-failed-jobs), instead of pushing
 // an empty commit to start CI again. Each acts only on a branch the pool could
-// push to itself, so it grants nothing a push does not.
+// push to itself. A rerun keeps the original run's actor, so a run a person
+// started on such a branch runs again as that person; the run's actor is not
+// checked here.
 
 // restartEvents are the workflow run events a rerun may repeat: a run GitHub
 // started for a push to the branch, or for a pull request from it. A

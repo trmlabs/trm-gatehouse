@@ -46,8 +46,9 @@ func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFix
 	// Pull requests: 12 the pool's own, 13 from a person's branch, 14 from a
 	// fork, 15 unreadable. Runs: 21 a push and 22 a pull request from the
 	// pool's branch; 23 a push to the default branch (a deploy); 24 a dispatch,
-	// 25 a pull request from a fork and 27 a pull_request_target, each naming
-	// the pool's branch; 26 unreadable.
+	// 25 a pull request from a fork, 27 a pull_request_target, 28 a
+	// workflow_run and 29 a schedule, each naming the pool's branch; 26
+	// unreadable.
 	same, fork := `{"full_name":"example-org/example-repo"}`, `{"full_name":"someone/example-repo"}`
 	run := func(event, branch, head string) string {
 		return fmt.Sprintf(`{"event":%q,"head_branch":%q,"repository":%s,"head_repository":%s}`, event, branch, same, head)
@@ -62,6 +63,8 @@ func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFix
 		"/actions/runs/24": run("workflow_dispatch", "cursor/pool-agent/x", same),
 		"/actions/runs/25": run("pull_request", "cursor/pool-agent/x", fork),
 		"/actions/runs/27": run("pull_request_target", "cursor/pool-agent/x", same),
+		"/actions/runs/28": run("workflow_run", "cursor/pool-agent/x", same),
+		"/actions/runs/29": run("schedule", "cursor/pool-agent/x", same),
 	}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +204,31 @@ func TestCIRestartOnThePoolsBranch(t *testing.T) {
 	}
 }
 
+// A body need not be labelled JSON (curl -d sends a form Content-Type, a bare
+// client none): the broker checks it as JSON, and GitHub receives it rebuilt
+// and labelled application/json.
+func TestCIRestartSendsTheRebuiltBodyAsJSON(t *testing.T) {
+	f := newRestartFixture(t, allRestarts, `"refs/heads/cursor/pool-agent/"`)
+	want := "PUT " + restartRepo + `/pulls/12/update-branch application/json {"expected_head_sha":"` + restartCommit + `"}`
+	for _, contentType := range []string{"application/x-www-form-urlencoded", ""} {
+		r, _ := http.NewRequest("PUT", "https://"+f.host+":"+strconv.Itoa(f.port)+restartRepo+"/pulls/12/update-branch",
+			strings.NewReader(`{"expected_head_sha":"`+restartCommit+`"}`))
+		if contentType != "" {
+			r.Header.Set("Content-Type", contentType)
+		}
+		before := len(f.writes())
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if writes := f.writes(); resp.StatusCode != http.StatusAccepted || len(writes) != before+1 || writes[len(writes)-1] != want {
+			t.Errorf("Content-Type %q: %d, GitHub received %v, want %s", contentType, resp.StatusCode, writes[before:], want)
+		}
+	}
+}
+
 // Anything outside the pool's own branches is refused before GitHub sees a
 // write: a person's branch, a fork, a run of the default branch (a deploy), a
 // run not started by a push or pull request, and any lookup that fails.
@@ -218,6 +246,8 @@ func TestCIRestartRefusesOtherTargets(t *testing.T) {
 		{"fork run", "POST", "/actions/runs/25/rerun", "", "run_target", "cursor/pool-agent/x"},
 		{"run lookup fails", "POST", "/actions/runs/26/rerun", "", "run_target", ""},
 		{"pull_request_target run", "POST", "/actions/runs/27/rerun-failed-jobs", "", "run_target", "cursor/pool-agent/x"},
+		{"workflow_run run", "POST", "/actions/runs/28/rerun", "", "run_target", "cursor/pool-agent/x"},
+		{"scheduled run", "POST", "/actions/runs/29/rerun-failed-jobs", "", "run_target", "cursor/pool-agent/x"},
 		{"debug logging", "POST", "/actions/runs/21/rerun", `{"enable_debug_logging":true}`, "request_shape", ""},
 		{"short head", "PUT", "/pulls/12/update-branch", `{"expected_head_sha":"0123abc"}`, "request_shape", ""},
 		{"other field", "PUT", "/pulls/12/update-branch", `{"update_method":"rebase"}`, "request_shape", ""},

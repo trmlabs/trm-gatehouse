@@ -489,6 +489,21 @@ func TestGitHubCIRestartsNeedPushPrefixes(t *testing.T) {
 	if s := c.GitScope(42); !s.PullRequests || !s.ActionsWrite || s.Actions {
 		t.Errorf("GitScope = %+v", s)
 	}
+	// Each restart operation alone sets the installation scope its token needs.
+	for op, want := range map[string][2]bool{ // pull requests write, actions write
+		"pr.update_branch":     {true, false},
+		"actions.rerun":        {false, true},
+		"actions.rerun_failed": {false, true},
+	} {
+		c, err := Parse([]byte(`{"entries":[{"name":"github-api","host":"api.github.com","kind":"github-api","pools":["pool-a"],
+			"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write","operations":["` + op + `"]}]}}]}`))
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		if s := c.GitScope(42); s.PullRequests != want[0] || s.ActionsWrite != want[1] || s.Actions || s.Deployments || s.Checks || s.Statuses {
+			t.Errorf("%s alone: GitScope = %+v", op, s)
+		}
+	}
 	for name, doc := range map[string]string{
 		"no git entry":         api,
 		"read-only git entry":  api + `,` + git("github.com", "read", ``),

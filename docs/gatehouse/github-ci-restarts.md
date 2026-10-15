@@ -1,6 +1,6 @@
 # Restarting CI on an agent's own branch
 
-An agent whose pull request fell behind its base branch, or whose CI run failed for a reason outside its change, used to push an empty commit to start CI again. That leaves noise in the history and runs every workflow, not just the one that failed. A `github-api` catalog entry can now let agents do the two things a person would do instead: update the pull request's branch from its base, and run a workflow run again. Both are off unless a repository opts in, and both act only on a branch the agent could already push to, so they grant nothing a push does not.
+An agent whose pull request fell behind its base branch, or whose CI run failed for a reason outside its change, used to push an empty commit to start CI again. That leaves noise in the history and runs every workflow, not just the one that failed. A `github-api` catalog entry can now let agents do the two things a person would do instead: update the pull request's branch from its base, and run a workflow run again. Both are off unless a repository opts in, and both act only on a branch the agent could already push to. A rerun keeps the original run's actor, so it can repeat a run a person started on that branch (see Limits).
 
 ## Turning it on
 
@@ -51,7 +51,8 @@ The App and each installation that serves these repositories must hold `actions:
 
 ## Limits
 
-- **Scale.** Each request costs one extra GitHub read (the pull request or run) before the write, against the installation's hourly API budget, which every pool on that installation shares. Nothing is cached, so the cost grows with restart requests, not with the number of agents. The broker's per-agent rate limit for the entry applies as on every other route.
+- **Scale.** Each request costs one extra GitHub read (the pull request or run) before the write, against the installation's hourly API budget, which every pool on that installation shares. Nothing is cached, so the cost grows with restart requests, not with the number of agents. As for every `github-api` route, nothing limits requests per installation: the broker's proxy rate limit is one setting for all proxied traffic, counted per agent and entry, and one agent's allowance is far above an installation's budget. If restarts crowd the budget, the fix is a per-installation limit on `github-api` writes, or spreading pools across App installations, not a cache.
+- **Run actor.** GitHub runs a rerun with the privileges of the actor who started the original run, not of whoever asked for the rerun. A run a person started on an agent branch (by pushing a fix-up to it, for example) runs again as that person, so a workflow step gated on `github.actor` or on the actor's repository permission sees the person, which no push by the pool can produce. It is the same commit and workflow file, and environment approvals still apply. The broker does not check the run's actor.
 - **Workflow files.** GitHub may refuse an update that brings in changes under `.github/workflows` unless the token also holds the `workflows` permission, which the broker never requests; the agent then sees GitHub's answer.
 - **Tags.** GitHub's run object names a tag push's tag in `head_branch` and does not say whether it was a tag. A tag whose name falls under a branch push prefix would pass the branch check. Keep agent branch prefixes out of tag names.
 - **Not served.** Rerunning one job (`POST /actions/jobs/{id}/rerun`), cancelling a run, and dispatching a workflow by file are unlisted.

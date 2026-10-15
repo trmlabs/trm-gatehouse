@@ -864,8 +864,9 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 // restarts exist only where the repository grants them; a CI restart also
 // needs the git entry a push would use to grant the pool branch prefixes,
 // which then hold its target's head (HeadPrefixes), and authorizes the
-// requester against that entry too (CloneEntry). Reviews, merges, pushes
-// through the API and everything else are unlisted.
+// requester against that entry too (CloneEntry). Reviews, merging a pull
+// request, pushes through the API other than a CI restart's branch update
+// (which merges the base into the head) and everything else are unlisted.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry

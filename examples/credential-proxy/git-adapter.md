@@ -49,7 +49,7 @@ The App acts as itself on GitHub, so branch protection and rulesets govern its p
 
 ## Opening pull requests (GitHub REST)
 
-A `github-api` entry lets agents work with pull requests in listed repositories, doing only the operations each repository lists, and never review, approve, merge or push through the API:
+A `github-api` entry lets agents work with pull requests in listed repositories, doing only the operations each repository lists. It never reviews, approves or merges a pull request, and never pushes through the API except for the opt-in `pr.update_branch`, which merges the base branch into a head under the pool's own push prefixes (see `docs/gatehouse/github-ci-restarts.md`):
 
 ```json
 {"name": "github-api", "host": "api.github.com", "kind": "github-api", "pools": ["<pool agent ID>"],
