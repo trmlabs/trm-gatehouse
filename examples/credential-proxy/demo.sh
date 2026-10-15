@@ -10,8 +10,8 @@ cat <<'SUMMARY'
 
 PASS: local HTTP and PostgreSQL fixtures.
 
-What this proved (real Vault and PostgreSQL where they are involved; the reply and audit checks use test doubles):
-  - A placeholder is swapped for the real key only for the configured host, path and method; anything else is refused.
+What this proved (real Vault and PostgreSQL where they are involved; the reply, audit and method checks use test doubles):
+  - A placeholder is swapped for the real key only for the configured host and path, and only on GET or HEAD; anything else is refused.
   - A key rotated in Vault is used on the next request, and a deleted key is never sent (this run's strict profile; catalog entries take up to a minute).
   - A reply that echoes the key, in plain text or a common encoding, is cut off.
   - Every attempt is recorded before the request leaves; a dropped connection is recorded as unknown, never replayed.

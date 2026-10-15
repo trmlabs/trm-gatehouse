@@ -71,11 +71,12 @@ proved, and a reminder that a real deployment needs more checks.
 A nonzero exit is a failure. Some tests print a skip line asking for extra
 settings; those cover setups the container does not include.
 
-What the run proves. The HTTP checks run the strict profile, whose rules name
-each key; catalog entries differ where noted. The reply and audit checks use
-test doubles; the rest run against the real secrets manager and database:
+What the run proves. The HTTP checks use rules that name each key, as the
+strict profile does, not catalog entries, which differ where noted. The reply,
+audit and method checks use test doubles; the rest run against the real
+secrets manager and database:
 
-- A placeholder is swapped for the real key only for the configured host, path and method. Everything else is refused.
+- A placeholder is swapped for the real key only for the configured host and path, and only on GET or HEAD. Everything else is refused.
 - A key rotated or deleted in the secrets manager takes effect on the next request. Catalog entries read each key at most once a minute, so there it takes effect within a minute ([keys and rotation](docs/gatehouse/http-header-adapter.md#keys-and-rotation)).
 - A reply that echoes the key back, in plain text or a common encoding, is cut off.
 - Every attempt is recorded before the request leaves, and a dropped connection is recorded as an unknown outcome, never replayed.
