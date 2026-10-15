@@ -173,22 +173,27 @@ func graphqlRepositoryField(name string) bool {
 	return name == "repository" || strings.HasSuffix(name, "Repository")
 }
 
-// graphqlPullRequestList reports a field that lists pull requests, which
-// needs pr.list at any depth as a repository's pullRequests does: a label's,
-// milestone's or user's pullRequests, a commit's or branch's
-// associatedPullRequests, a check suite's matchingPullRequests, an issue's
-// closedByPullRequestsReferences, and a user's pull request (review)
-// contributions. These are every field GitHub's schema has that returns
-// pull requests as a list; gh reads none of them below the root.
+// graphqlPullRequestList reports a field whose value is a list of pull
+// requests, which needs pr.list at any depth as a repository's pullRequests
+// does: a label's, milestone's, user's or project field's pullRequests, a
+// commit's or branch's associatedPullRequests, a check suite's
+// matchingPullRequests, an issue's closedByPullRequestsReferences, and a
+// user's pull request (review) contributions. These are every field
+// GitHub's schema has whose type is a list of pull requests; gh reads none
+// of them below the root. A pull request reached through a list of
+// something else (a user's comments, timeline events) is read under
+// pr.read, which reads any pull request by number anyway.
 func graphqlPullRequestList(name string) bool {
 	n := strings.ToLower(name)
 	return strings.Contains(n, "pullrequests") || strings.Contains(n, "pullrequestcontribution") || strings.Contains(n, "pullrequestreviewcontribution")
 }
 
-// graphqlRepositoryList reports a field that lists repositories (an owner's
-// repositories, a user's starred or watched ones, a repository's forks).
-// Each item would be a repository the mapping never sees, so these are
-// refused at any depth; gh reads none of them.
+// graphqlRepositoryList reports a field whose value is a list of
+// repositories (an owner's repositories, a user's starred or watched ones,
+// a repository's forks). Each item would be a repository the mapping never
+// sees, so these are refused at any depth; gh reads none of them. Lists of
+// mixed items (pinned items) reach a repository only through ... on
+// Repository, which graphqlCheck.repository checks.
 func graphqlRepositoryList(name string) bool {
 	return strings.Contains(strings.ToLower(name), "repositories") || name == "watching" || name == "forks"
 }
