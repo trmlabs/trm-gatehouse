@@ -1,7 +1,9 @@
 package netguard
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -790,6 +792,37 @@ func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 	now = now.Add(fileRangesInterval) // a file that disappears keeps the last good set
 	if err := dial(); err != nil {
 		t.Fatalf("a missing file dropped the last good set: %v", err)
+	}
+}
+
+// A file that is not there before its first good read is logged once, with
+// its path, so a mistyped path or a mount that never arrives shows; each
+// refused dial names the file too.
+func TestEgressRangesFileLogsAMissingFile(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := acceptAndClose(t)
+	path := filepath.Join(t.TempDir(), "egress")
+	now := time.Now()
+	fileRangesByPath.Store(path, &fileRanges{path: path, now: func() time.Time { return now }})
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	for range 3 {
+		if conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String()); err == nil {
+			_ = conn.Close()
+			t.Fatal("dialed with no file")
+		}
+		now = now.Add(fileRangesInterval) // the next dial reads the file again
+	}
+	if n := strings.Count(logs.String(), "egress ranges file not there yet"); n != 1 || !strings.Contains(logs.String(), "path="+path) {
+		t.Fatalf("missing-file warnings %d, want 1 naming the path:\n%s", n, logs.String())
+	}
+	if n := strings.Count(logs.String(), "egress_file="+path); n != 3 {
+		t.Fatalf("refusals naming the file %d, want 3:\n%s", n, logs.String())
 	}
 }
 

@@ -250,8 +250,11 @@ func withEgressRanges(d *net.Dialer, setting, file string) *net.Dialer {
 			err = nil
 		}
 		if err != nil {
-			slog.Warn("netguard: dial attempt outside egress ranges refused", //nolint:gosec // G706: structured slog attrs, handlers quote control chars
-				slog.String("address", address), slog.String("error", err.Error()))
+			attrs := []any{slog.String("address", address), slog.String("error", err.Error())}
+			if extra != nil {
+				attrs = append(attrs, slog.String("egress_file", extra.path))
+			}
+			slog.Warn("netguard: dial attempt outside egress ranges refused", attrs...) //nolint:gosec // G706: structured slog attrs, handlers quote control chars
 		}
 		return err
 	}
@@ -272,8 +275,8 @@ const fileRangesInterval = 5 * time.Second
 // the file revokes nothing, so revoke by writing a shorter list. The broker
 // cannot tell a file cut off mid-write from a whole one, so the writer must
 // replace it atomically (write a temporary file and rename it; a Kubernetes
-// ConfigMap mount does). The private and metadata blocks apply to these
-// addresses as to every other.
+// ConfigMap mounted as a directory does, but a subPath mount never updates).
+// The private and metadata blocks apply to these addresses as to every other.
 type fileRanges struct {
 	path    string
 	mu      sync.Mutex
@@ -281,6 +284,7 @@ type fileRanges struct {
 	content string
 	nets    []net.IPNet
 	now     func() time.Time
+	absent  bool // logged that the file is not there before its first good read
 }
 
 var fileRangesByPath sync.Map // path -> *fileRanges
@@ -300,8 +304,14 @@ func (f *fileRanges) current() []net.IPNet {
 	data, err := os.ReadFile(f.path) //nolint:gosec // G703: the path is the operator's AGENT_VAULT_EGRESS_RANGES_FILE setting, not request input
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if f.content != "" {
+		switch {
+		case f.content != "":
 			slog.Warn("netguard: egress ranges file is gone; keeping the last addresses read", slog.String("path", f.path)) //nolint:gosec // G706: structured slog attrs
+		case !f.absent:
+			// Once, so a mistyped path or a mount that never arrives is told
+			// apart from a writer that has not run yet.
+			f.absent = true
+			slog.Warn("netguard: egress ranges file not there yet; adding no addresses until it is written", slog.String("path", f.path)) //nolint:gosec // G706: structured slog attrs
 		}
 		return f.nets
 	case err != nil:
