@@ -331,8 +331,10 @@ func TestPrefixLoaderRefusesBadBuckets(t *testing.T) {
 				v.head["automations_buckets"].(map[string]interface{})[b] = "x"
 			}
 		},
-		"a head that is not an object": func(v *prefixVault) { v.head["automations_buckets"] = []interface{}{"b00"} },
+		"a head that is not an object":         func(v *prefixVault) { v.head["automations_buckets"] = []interface{}{"b00"} },
 		"a head that also carries automations": func(v *prefixVault) { v.head["catalog"] = `{"automations":[]}` },
+		"a stale writer's per-id digest":       func(v *prefixVault) { v.head["automations_sha256"] = strings.Repeat("0", 64) },
+		"a stale writer's per-id names":        func(v *prefixVault) { v.head["automations_names"] = []interface{}{"auto-1"} },
 	} {
 		v := fresh()
 		mutate(v)

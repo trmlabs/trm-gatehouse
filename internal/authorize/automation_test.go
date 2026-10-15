@@ -26,10 +26,11 @@ func automationCatalog(t *testing.T) httpcatalog.Catalog {
 			`"placeholder":"__vault_KEY__","key":{"mount":"gatehouse","path":"vendors/x","field":"key"},"pools":["automations"]` + extra + `}`
 	}
 	c, err := httpcatalog.Parse([]byte(`{
-		"pools":[{"name":"automations","namespace":"cursor","serviceAccount":"worker","identity":"cursor-automation","ceiling":"T1"}],
-		"entries":[` + entry("tracker", "") + `,` + entry("ledger", `,"tier":"T1","requires":["`+automationGroup+`"]`) + `],
+		"pools":[{"name":"automations","namespace":"cursor","serviceAccount":"worker","identity":"cursor-automation","ceiling":"T2"}],
+		"entries":[` + entry("tracker", "") + `,` + entry("ledger", `,"tier":"T1","requires":["`+automationGroup+`"]`) + `,` +
+		entry("vault", `,"tier":"T2","requires":["`+automationGroup+`"]`) + `],
 		"automations":[
-			{"id":"auto-1","name":"explorer","owner":"alice@example.com","runnerGroup":"` + teamGroup + `","entries":["tracker","ledger"]},
+			{"id":"auto-1","name":"explorer","owner":"alice@example.com","runnerGroup":"` + teamGroup + `","entries":["tracker","ledger","vault"]},
 			{"id":"auto-2","name":"auditor","owner":"gone@example.com","entries":["tracker","ledger"]},
 			{"id":"auto-3","name":"reader","owner":"alice@example.com","entries":["tracker"]}]}`))
 	if err != nil {
@@ -49,6 +50,7 @@ var automationRuns = cursorRuns{
 	"bob-explorer":   automationRun("bob@example.com", "bc-10", "auto-1"),
 	"carol-explorer": automationRun("carol@example.com", "bc-11", "auto-1"),
 	"dave-explorer":  automationRun("dave@example.com", "bc-12", "auto-1"),
+	"erin-explorer":  automationRun("erin@example.com", "bc-15", "auto-1"),
 	"bob-reader":     automationRun("bob@example.com", "bc-13", "auto-3"),
 	"svc":            {Kind: runnerid.KindAgent, Subject: "service_account:9", Owner: "service_account:9", Run: "bc-14", Source: "AUTOMATIONS", Automation: "auto-1"},
 	"unlisted":       automationRun("alice@example.com", "bc-4", "auto-9"),
@@ -58,14 +60,18 @@ var automationRuns = cursorRuns{
 	"no-src":         {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-8", Automation: "auto-1"},
 }
 
-// directoryOf answers group lookups from a fixed table; a person not in it is
-// a disabled account.
+// directoryOf answers group lookups from a fixed table; a person not in it,
+// or listed with "disabled", is a disabled account.
 type directoryOf map[string][]string
 
 func (d directoryOf) Lookup(_ context.Context, subject string, groups []string) (entitlement.Person, error) {
 	member, ok := d[subject]
 	if !ok {
 		return entitlement.Person{ObjectID: "oid-" + subject}, nil
+	}
+	enabled := true
+	for _, m := range member {
+		enabled = enabled && m != "disabled"
 	}
 	var in []string
 	for _, g := range groups {
@@ -75,7 +81,7 @@ func (d directoryOf) Lookup(_ context.Context, subject string, groups []string) 
 			}
 		}
 	}
-	return entitlement.Person{ObjectID: "oid-" + subject, Enabled: true, MemberOf: in}, nil
+	return entitlement.Person{ObjectID: "oid-" + subject, Enabled: enabled, MemberOf: in}, nil
 }
 
 func TestAutomationRunNamesItsAutomation(t *testing.T) {
@@ -125,6 +131,7 @@ func TestAutomationDecisions(t *testing.T) {
 		"alice@example.com": {automationGroup, teamGroup},
 		"bob@example.com":   {teamGroup},
 		"carol@example.com": {},
+		"erin@example.com":  {teamGroup, "disabled"},
 	}}
 	ctx := context.Background()
 	decide := func(token, entry string) entitlement.Decision {
@@ -152,6 +159,10 @@ func TestAutomationDecisions(t *testing.T) {
 		// Not the owner and not in the runner group, or disabled: refused, T0 too.
 		{"carol-explorer", "tracker", "automation_runner", false},
 		{"dave-explorer", "tracker", "automation_runner", false},
+		// In the runner group, but the account is disabled.
+		{"erin-explorer", "tracker", "automation_runner", false},
+		{"explorer", "vault", "entitled", true},
+		{"bob-explorer", "vault", "entitled", true},
 		// No runner group: only the owner's runs.
 		{"bob-reader", "tracker", "automation_runner", false},
 		// Not listed for this Automation, though granted to the pool.
@@ -191,5 +202,40 @@ func TestPersonPoolIsUnchangedForAutomationRuns(t *testing.T) {
 	who, refusal = Resolve(context.Background(), cursorPool, "alice-1", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, &authorizetest.MemBinder{})
 	if refusal != "" || who.Kind != "person" || who.Source != "" || who.Automation != "" || who.Audited() != "alice@example.com" {
 		t.Fatalf("person run: %q %+v", refusal, who)
+	}
+}
+
+// Leaving the runner group takes effect for T2 at once, as a person's group
+// change does on a person pool; T0 and T1 may ride the cached answer.
+func TestRunnerGroupIsLookedUpFreshAtT2(t *testing.T) {
+	catalog := automationCatalog(t)
+	pool, _ := catalog.Pool("automations")
+	directory := directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}}
+	cache := &entitlement.Cache{Source: directory}
+	ctx := context.Background()
+	who, refusal := Resolve(ctx, pool, "bob-explorer", Claims{Pod: "pod-bob", ClaimedRun: "bc-10"}, automationRuns, &authorizetest.MemBinder{})
+	if refusal != "" {
+		t.Fatal(refusal)
+	}
+	entry := func(name string) httpcatalog.Entry {
+		e, err := catalog.Match("api."+name+".example", 443, "GET", "/v1/x", "automations")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *e
+	}
+	if d := Decide(ctx, cache, pool, entry("tracker"), who); !d.Allowed {
+		t.Fatalf("bob as a member: %+v", d)
+	}
+	directory["bob@example.com"] = nil // removed from the group
+	if d := Decide(ctx, cache, pool, entry("ledger"), who); !d.Allowed {
+		t.Fatalf("T1 should ride the cached answer: %+v", d)
+	}
+	if d := Decide(ctx, cache, pool, entry("vault"), who); d.Allowed || d.Outcome != "automation_runner" {
+		t.Fatalf("T2 after leaving the group: %+v", d)
+	}
+	// The fresh refusal forgot bob, so T0 is refused now too.
+	if d := Decide(ctx, cache, pool, entry("tracker"), who); d.Allowed || d.Outcome != "automation_runner" {
+		t.Fatalf("T0 after the fresh refusal: %+v", d)
 	}
 }

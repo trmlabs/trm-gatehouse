@@ -258,7 +258,7 @@ func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool
 			refused.Outcome = "automation_not_granted"
 			return refused
 		}
-		if outcome := runnerAllowed(ctx, cache, a, who.RunPerson); outcome != "" {
+		if outcome := runnerAllowed(ctx, cache, a, who.RunPerson, entry.Tier); outcome != "" {
 			refused.Outcome = outcome
 			return refused
 		}
@@ -269,9 +269,10 @@ func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool
 }
 
 // runnerAllowed checks that the person whose run it is may run the
-// Automation: its owner, or an enabled member of its runner group. It returns
-// a refusal code, or "".
-func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.Automation, person string) string {
+// Automation: its owner, or an enabled member of its runner group, looked up
+// as fresh as a person pool looks a person up for the same tier. It returns a
+// refusal code, or "".
+func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.Automation, person, tier string) string {
 	switch {
 	case person == "":
 		return "automation_runner"
@@ -280,13 +281,17 @@ func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.
 	case a.RunnerGroup == "":
 		return "automation_runner"
 	}
-	p, _, err := cache.Lookup(ctx, person, []string{a.RunnerGroup})
+	if tier == "" {
+		tier = "T0"
+	}
+	p, err := entitlement.LookupFor(ctx, cache, person, []string{a.RunnerGroup}, tier)
 	switch {
 	case errors.Is(err, entitlement.ErrLookupLimited):
 		return "entitlement_rate_limited"
 	case err != nil:
 		return "entitlement_unavailable"
 	case !p.Enabled || len(p.MemberOf) != 1 || p.MemberOf[0] != a.RunnerGroup:
+		entitlement.Forget(ctx, cache, person, tier)
 		return "automation_runner"
 	}
 	return ""

@@ -87,6 +87,9 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		if folderDigest(names, entries) != want {
 			return nil, version, fmt.Errorf("catalog entries do not match the head; retrying at the next poll (%s)", entryChanges(lastEntries, names, entries))
 		}
+		if head["automations_sha256"] != nil || head["automations_names"] != nil {
+			return nil, version, errors.New("catalog head carries automations_sha256 or automations_names, which this broker does not read; store Automations in automations_buckets")
+		}
 		var buckets map[string]automationBucket
 		if listed, ok := head["automations_buckets"]; ok {
 			// Bucketed, so neither the head nor any one secret bounds how
