@@ -205,13 +205,27 @@ func TestPersonPoolIsUnchangedForAutomationRuns(t *testing.T) {
 	}
 }
 
+// countingDirectory counts the directory calls a cache makes.
+type countingDirectory struct {
+	directoryOf
+	calls int
+}
+
+func (d *countingDirectory) Lookup(ctx context.Context, subject string, groups []string) (entitlement.Person, error) {
+	d.calls++
+	return d.directoryOf.Lookup(ctx, subject, groups)
+}
+
 // Leaving the runner group takes effect for T2 at once, as a person's group
-// change does on a person pool; T0 and T1 may ride the cached answer.
+// change does on a person pool; T0 and T1 may ride the cached answer. The
+// fresh refusal forgets every cached answer about the person, not only the
+// runner group's.
 func TestRunnerGroupIsLookedUpFreshAtT2(t *testing.T) {
 	catalog := automationCatalog(t)
 	pool, _ := catalog.Pool("automations")
 	directory := directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}}
-	cache := &entitlement.Cache{Source: directory}
+	source := &countingDirectory{directoryOf: directory}
+	cache := &entitlement.Cache{Source: source}
 	ctx := context.Background()
 	who, refusal := Resolve(ctx, pool, "bob-explorer", Claims{Pod: "pod-bob", ClaimedRun: "bc-10"}, automationRuns, &authorizetest.MemBinder{})
 	if refusal != "" {
@@ -227,6 +241,10 @@ func TestRunnerGroupIsLookedUpFreshAtT2(t *testing.T) {
 	if d := Decide(ctx, cache, pool, entry("tracker"), who); !d.Allowed {
 		t.Fatalf("bob as a member: %+v", d)
 	}
+	// Another cached answer about bob, for another group.
+	if _, _, err := cache.Lookup(ctx, "bob@example.com", []string{automationGroup}); err != nil {
+		t.Fatal(err)
+	}
 	directory["bob@example.com"] = nil // removed from the group
 	if d := Decide(ctx, cache, pool, entry("ledger"), who); !d.Allowed {
 		t.Fatalf("T1 should ride the cached answer: %+v", d)
@@ -237,5 +255,14 @@ func TestRunnerGroupIsLookedUpFreshAtT2(t *testing.T) {
 	// The fresh refusal forgot bob, so T0 is refused now too.
 	if d := Decide(ctx, cache, pool, entry("tracker"), who); d.Allowed || d.Outcome != "automation_runner" {
 		t.Fatalf("T0 after the fresh refusal: %+v", d)
+	}
+	// And his answer for the other group is gone: asking again reaches the
+	// directory instead of the cache.
+	before := source.calls
+	if _, _, err := cache.Lookup(ctx, "bob@example.com", []string{automationGroup}); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != before+1 {
+		t.Fatal("bob's other cached answer survived the fresh refusal")
 	}
 }
