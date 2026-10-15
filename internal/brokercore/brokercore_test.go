@@ -25,6 +25,23 @@ func TestIsHopByHop(t *testing.T) {
 	}
 }
 
+// The refusal header is the broker's own: no relay passes a destination's
+// copy on, however it is spelled.
+func TestShouldStripResponseHeader(t *testing.T) {
+	for name, want := range map[string]bool{
+		"X-Gatehouse-Refusal": true,
+		"x-gatehouse-refusal": true,
+		"Set-Cookie":          true,
+		"Connection":          true,
+		"Retry-After":         false,
+		"Content-Type":        false,
+	} {
+		if got := ShouldStripResponseHeader(name); got != want {
+			t.Errorf("ShouldStripResponseHeader(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestIsBrokerScopedRequestHeader(t *testing.T) {
 	cases := map[string]bool{
 		"X-Vault":             true,

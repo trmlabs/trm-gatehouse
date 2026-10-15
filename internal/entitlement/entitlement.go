@@ -43,6 +43,11 @@ type cached struct {
 // ErrLookupLimited refuses a directory lookup over the per-person budget.
 var ErrLookupLimited = errors.New("entitlement lookups over budget")
 
+// ErrNotInDirectory is a lookup the directory answered: it has no account for
+// the subject. Waiting does not make one appear, so it refuses as lasting,
+// apart from a directory that did not answer.
+var ErrNotInDirectory = errors.New("subject not in directory")
+
 const (
 	// DefaultLookupsPerMinute is each person's directory budget unless the
 	// operator sets Cache.LookupsPerMinute (the broker's
@@ -330,6 +335,8 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 	case errors.Is(err, ErrLookupLimited):
 		d.Outcome = "entitlement_rate_limited"
 		return d
+	case errors.Is(err, ErrNotInDirectory):
+		d.Outcome = "not_in_directory"
 	case err != nil:
 		d.Outcome = "entitlement_unavailable"
 	case !person.Enabled:
@@ -342,7 +349,7 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 	}
 	// A recheck that refuses, or a fresh answer that refuses, forgets the
 	// person: none of their other sessions or entries rides an older answer.
-	if isRecheck(ctx) || (fresh && err == nil) {
+	if isRecheck(ctx) || (fresh && (err == nil || errors.Is(err, ErrNotInDirectory))) {
 		cache.Purge(who.Subject)
 	}
 	return d

@@ -72,7 +72,8 @@ func attachAuthorization(adapter *mitm.HeaderAdapter, getenv func(string) string
 //     audience api://AzureADTokenExchange) are all required;
 //   - AGENT_VAULT_ENTITLEMENT_CACHE_SECONDS shortens the 5-minute cache;
 //   - AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE sets each person's directory
-//     lookup budget (default entitlement.DefaultLookupsPerMinute). Any
+//     lookup budget, per cache: the HTTP adapter and the PostgreSQL broker
+//     each load their own (default entitlement.DefaultLookupsPerMinute). Any
 //     positive count is accepted; the directory's own throttling is the limit.
 //
 // Without a verifier or a source, entries above T0 are refused on the pools

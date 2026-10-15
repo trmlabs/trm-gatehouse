@@ -61,6 +61,7 @@ func TestDecide(t *testing.T) {
 		{"non-member", &fakeSource{person: Person{ObjectID: "oid", Enabled: true}}, claude, t1, alice, false, "not_entitled"},
 		{"disabled", &fakeSource{person: Person{ObjectID: "oid", MemberOf: []string{g1}}}, claude, t1, alice, false, "account_disabled"},
 		{"lookup error", &fakeSource{err: errors.New("down")}, claude, t1, alice, false, "entitlement_unavailable"},
+		{"not in the directory", &fakeSource{err: ErrNotInDirectory}, claude, t1, alice, false, "not_in_directory"},
 		{"no directory configured", nil, claude, t1, alice, false, "entitlement_config"},
 		{"workload entitled", nil, Pool{Identity: "workload", Ceiling: "T1", Entitlements: []string{g1}}, t1, Requester{Kind: "workload"}, true, "workload_entitled"},
 		{"workload missing group", nil, Pool{Identity: "workload", Ceiling: "T1"}, t1, Requester{Kind: "workload"}, false, "workload_not_entitled"},
@@ -124,8 +125,8 @@ func TestFileSource(t *testing.T) {
 	if err != nil || !p.Enabled || len(p.MemberOf) != 1 || p.Department != "Security" {
 		t.Fatalf("%+v %v", p, err)
 	}
-	if _, err := (FileSource{Path: path}).Lookup(context.Background(), "sso|bob", nil); err == nil {
-		t.Fatal("unknown subject resolved")
+	if _, err := (FileSource{Path: path}).Lookup(context.Background(), "sso|bob", nil); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("unknown subject: %v, want ErrNotInDirectory", err)
 	}
 }
 
@@ -147,6 +148,8 @@ func TestGraphSource(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/users/"+user:
 			// Graph resolves an object ID too; its UPN is not the subject.
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": user, "userPrincipalName": "alice@example.test", "accountEnabled": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/users/down@example.test":
+			w.WriteHeader(503)
 		case r.Method == http.MethodPost && r.URL.Path == "/users/"+user+"/checkMemberGroups":
 			var in struct {
 				GroupIDs []string `json:"groupIds"`
@@ -168,11 +171,21 @@ func TestGraphSource(t *testing.T) {
 	if err != nil || p.ObjectID != user || len(p.MemberOf) != 1 || p.Department != "Security" {
 		t.Fatalf("%+v %v", p, err)
 	}
-	if _, err := g.Lookup(context.Background(), "bob@example.test", []string{g1}); err == nil {
-		t.Fatal("missing user resolved")
+	// The directory's own answer that it has no such account lasts; a
+	// directory that did not answer does not.
+	if _, err := g.Lookup(context.Background(), "bob@example.test", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("missing user: %v, want ErrNotInDirectory", err)
 	}
-	if _, err := g.Lookup(context.Background(), user, []string{g1}); err == nil {
-		t.Fatal("a subject that is not the user's UPN resolved")
+	if _, err := g.Lookup(context.Background(), user, []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("a subject that is not the user's UPN: %v, want ErrNotInDirectory", err)
+	}
+	if _, err := g.Lookup(context.Background(), "down@example.test", []string{g1}); err == nil || errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("directory 503: %v, want a passing error", err)
+	}
+	byID := g
+	byID.SubjectIsObjectID = true
+	if _, err := byID.Lookup(context.Background(), "alice@example.test", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("a subject that is not an object ID: %v, want ErrNotInDirectory", err)
 	}
 	if _, err := g.Lookup(context.Background(), "alice@example.test", []string{"not-an-id"}); err == nil {
 		t.Fatal("non-ID group accepted")

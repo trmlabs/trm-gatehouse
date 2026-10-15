@@ -51,6 +51,7 @@ func TestRefusalNamesItsReason(t *testing.T) {
 		{"seed deadline lasts", "seed_deadline", "", 503, 0, "seed_deadline", 503, "", false},
 		{"a misconfigured broker lasts", "broker_misconfigured", "", 503, 0, "broker_misconfigured", 503, "", false},
 		{"not entitled lasts", "not_entitled", "", 403, 0, "not_entitled", 403, "", false},
+		{"no directory account lasts", "not_in_directory", "", 403, 0, "not_in_directory", 403, "", false},
 		{"no person lasts", "no_person", "", 403, 0, "no_person", 403, "", false},
 		{"another pool's host reads as unlisted", "pool", "", 403, 0, "unlisted", 403, "", false},
 		{"unlisted", "unlisted", "", 403, 0, "unlisted", 403, "", false},
@@ -164,10 +165,11 @@ func TestSignInLimitSendsTheLimitersWait(t *testing.T) {
 
 // Every next step is one plain line, every passing refusal answers 503 or
 // 429, and every fixed outcome the adapters refuse with has its own entry:
-// the literals this package refuses with, and every refusal outcome the
-// authorize and entitlement packages return, which the adapters pass on as
-// variables. A new outcome there without an entry here fails this test
-// instead of falling back to "report it and do not retry".
+// the literals this package refuses with, assigns to an outcome or returns
+// from an ...Outcome helper, and every refusal outcome the authorize and
+// entitlement packages return, which the adapters pass on as variables. A new
+// outcome written in any of those shapes without an entry here fails this
+// test instead of falling back to "report it and do not retry".
 func TestRefusalTableIsComplete(t *testing.T) {
 	for code, kind := range refusals {
 		if kind.next == "" || strings.ContainsAny(kind.next, "\r\n") || strings.ContainsFunc(kind.next, func(r rune) bool { return r > 0x7e }) {
@@ -182,11 +184,14 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			t.Errorf("%s refuses with %q, which has no next step", file, outcome)
 		}
 	}
-	// In this package: every quoted code on a line that refuses, and every
-	// code refusal.go's helpers return.
+	// In this package: every quoted code on a line that refuses, every code
+	// assigned to an outcome, and every code refusal.go's helpers or any
+	// ...Outcome helper returns.
 	refusing := regexp.MustCompile(`(?m)^.*\b(?:deny|refuse|refuseWith|adapterDeny|adapterDenyAs)\(.*$`)
 	quoted := regexp.MustCompile(`"([a-z_]+)"`)
 	returned := regexp.MustCompile(`return "([a-z_]+)"`)
+	assigned := regexp.MustCompile(`\boutcome :?= "([a-z_]+)"`)
+	outcomeFunc := regexp.MustCompile(`(?s)\nfunc \w*Outcome\([^)]*\) string \{\n(.*?)\n\}\n`)
 	files, _ := filepath.Glob("*.go")
 	seen := 0
 	for _, file := range files {
@@ -203,8 +208,20 @@ func TestRefusalTableIsComplete(t *testing.T) {
 				seen++
 			}
 		}
+		for _, m := range assigned.FindAllStringSubmatch(string(src), -1) {
+			check(file, m[1])
+			seen++
+		}
+		bodies := []string{}
 		if file == "refusal.go" {
-			for _, m := range returned.FindAllStringSubmatch(string(src), -1) {
+			bodies = append(bodies, string(src))
+		} else {
+			for _, m := range outcomeFunc.FindAllStringSubmatch(string(src), -1) {
+				bodies = append(bodies, m[1])
+			}
+		}
+		for _, body := range bodies {
+			for _, m := range returned.FindAllStringSubmatch(body, -1) {
 				check(file, m[1])
 				seen++
 			}

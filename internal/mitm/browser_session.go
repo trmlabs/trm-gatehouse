@@ -96,7 +96,8 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 	defer enf.Release()
 	token, err := a.BrowserTokens.Token(r.Context(), entry)
 	if err != nil {
-		deny(http.StatusServiceUnavailable, "token_unavailable")
+		// No sign-in is tried again sooner, so an earlier retry is refused too.
+		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "token_unavailable", httpcatalog.ReloginInterval)
 		return
 	}
 	admittedAt := time.Now()

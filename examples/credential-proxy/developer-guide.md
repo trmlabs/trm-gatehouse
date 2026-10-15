@@ -169,14 +169,14 @@ anything unclear, give Security the pool and the time to find the audit row.
 
 | You see | Usually means | Fix |
 |---|---|---|
-| 403 | The host or path is not in the catalog, your pool has no grant, or the tier check refused: no person behind the session, not in the group, or a session from another pool | Add the entry or the grant, or request the group |
+| 403 | The host or path is not in the catalog, your pool has no grant, or the tier check refused: no person behind the session, no directory account for that person (`not_in_directory`), not in the group, or a session from another pool | Add the entry or the grant, or request the group |
 | 405 | The method is not listed for that path | Add the method to the entry |
 | 400 | Something other than the exact placeholder in the key header, a placeholder anywhere else, plain HTTP, or an unsupported request (an upgrade, a compressed body) | Send only the placeholder, in the entry's header, over HTTPS |
 | 413 | The request is larger than the entry allows | Raise `maxRequestBytes` |
 | 429 | This worker's rate limit for that entry (`rate_limited`), or too many group checks for one person in a minute (`entitlement_rate_limited`) | Slow down; wait the `Retry-After` seconds |
 | 502 | The service could not be reached, or its response was refused, for example because it echoed the credential | Check the service |
-| 503 with `Retry-After` | Gatehouse could not get the credential or a token, the group lookup is unavailable (`entitlement_unavailable`), no run token reached it on this connection yet (`session_missing`), or its audit trail is down | Retry after the stated seconds; tell Security if it persists |
-| 503 without `Retry-After` | The key was deleted or emptied in Vault (`key_deleted`), the stored key cannot be sent in a header (`key_not_header_safe`), or Gatehouse is not set up for this kind of entry (`broker_misconfigured`) | Fix the key in Vault, or tell Security; retrying does not help |
+| 503 with `Retry-After` | Gatehouse could not get the credential or a token, the group lookup is unavailable (`entitlement_unavailable`), no run token reached it on this connection yet (`session_missing`), or its audit trail is down | Retry after the stated seconds; after three refused retries, tell Security |
+| 503 without `Retry-After` | The key was deleted or emptied in Vault (`key_deleted`), the stored key cannot be sent in a header (`key_not_header_safe`), Gatehouse is not set up for this kind of entry (`broker_misconfigured`), or the worker ends too soon for a browser session (`seed_deadline`) | Fix the key in Vault, start a new run, or tell Security; retrying does not help |
 | Postgres 53300 "this worker reached its session cap" | This worker has as many sessions open as it may | Close idle sessions, or retry |
 | Postgres 53300 "the database's Gatehouse connection budget is full; retry shortly" | The database's connection budget is in use, at connect time or on a query | Retry shortly |
 | Postgres 53300 "Gatehouse is at capacity; retry shortly" | Gatehouse's overall connection cap is reached | Retry shortly |

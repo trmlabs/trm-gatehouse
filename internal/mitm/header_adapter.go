@@ -399,11 +399,8 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 		return
 	}
 	for name, values := range resp.Header {
-		// RefusalHeader is the broker's own: a destination's copy would dress
-		// its answer, which may already have been applied, as a refusal the
-		// request never left the broker for.
-		if brokercore.ShouldStripResponseHeader(name) || name == "X-Request-Id" || name == "Trailer" || name == "Content-Length" ||
-			http.CanonicalHeaderKey(name) == RefusalHeader {
+		// ShouldStripResponseHeader also drops RefusalHeader, the broker's own.
+		if brokercore.ShouldStripResponseHeader(name) || name == "X-Request-Id" || name == "Trailer" || name == "Content-Length" {
 			continue
 		}
 		w.Header()[name] = append([]string(nil), values...)

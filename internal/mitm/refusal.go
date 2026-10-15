@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
@@ -21,7 +22,7 @@ import (
 // for a check made before the request reached the catalog). The broker sets
 // this header only on its own refusals and strips it from every upstream
 // response, so its presence means the request was refused here.
-const RefusalHeader = "X-Gatehouse-Refusal"
+const RefusalHeader = brokercore.RefusalHeader
 
 // refusalKind is how one refusal code answers. A passing refusal (one the
 // same request may clear by waiting) sets retryAfter and answers 503, or 429
@@ -35,7 +36,7 @@ type refusalKind struct {
 }
 
 const (
-	nextRetry      = "this is temporary; wait for Retry-After, then send the same request again."
+	nextRetry      = "this is temporary; wait for Retry-After, then send the same request again; if the third retry is refused the same way, stop and report it."
 	nextNotAllowed = "the catalog does not allow this request; do not retry it, report it or ask for a catalog change."
 	nextFixRequest = "the broker does not forward a request of this form; change the request, do not resend it as is."
 	nextSession    = "the runner session was refused; start a new session and do not reuse this one."
@@ -55,7 +56,7 @@ var refusals = map[string]refusalKind{
 	"entitlement_unavailable":  {status: http.StatusServiceUnavailable, retryAfter: 5, next: "the directory could not confirm your access; " + nextRetry},
 	"entitlement_rate_limited": {status: http.StatusTooManyRequests, retryAfter: 60, next: "too many access checks for this person in the last minute; " + nextRetry},
 	"busy":                     {status: http.StatusTooManyRequests, retryAfter: 5, next: "the broker is at its connection limit, or this address has too many failed sign-ins; " + nextRetry},
-	"rate_limited":             {status: http.StatusTooManyRequests, next: "this workload is over its request rate for the destination; wait for Retry-After when present, otherwise pause, then retry."},
+	"rate_limited":             {status: http.StatusTooManyRequests, next: "this workload is over its request rate for the destination; wait for Retry-After when present, otherwise pause, then retry; if the third retry is refused the same way, stop and report it."},
 
 	// Lasting: the same request will be refused again.
 	"broker_misconfigured":   {status: http.StatusServiceUnavailable, next: "the broker is not set up to serve this destination; " + nextReport},
@@ -78,13 +79,14 @@ var refusals = map[string]refusalKind{
 	"denied_path":            {next: nextNotAllowed},
 	"ref_outside_binding":    {next: "this push names a branch outside the ones this pool may write; " + nextNotAllowed},
 	"head":                   {next: "this pull request's branch is outside the ones this pool may write; " + nextNotAllowed},
-	"comment_target":         {next: "this comment's target is outside the repositories this pool may write; " + nextNotAllowed},
-	"pull_request_target":    {next: "this pull request is outside the ones this pool may change; " + nextNotAllowed},
+	"comment_target":         {next: "GitHub did not confirm this comment is one this pool's app wrote on a pull request it may change; " + nextNotAllowed},
+	"pull_request_target":    {next: "GitHub did not confirm this pull request is one this pool may change; " + nextNotAllowed},
 	"pool_ceiling":           {next: "this destination's tier is above what this pool may reach; " + nextNotAllowed},
 	"pool_external":          {next: "this pool may reach no catalog entry; " + nextNotAllowed},
 	"no_identity":            {next: "this destination needs a pool that names who runs it; " + nextNotAllowed},
 	"no_person":              {next: "this destination needs a person behind the run, and this run names none; run it as yourself."},
 	"not_entitled":           {next: "your account lacks a group this destination requires; ask for access, do not retry."},
+	"not_in_directory":       {next: "the directory has no account for this person; " + nextReport},
 	"account_disabled":       {next: "the requester's account is disabled; " + nextReport},
 	"workload_not_entitled":  {next: "this pool's workload is not entitled to this destination; " + nextNotAllowed},
 	"entitlement_config":     {next: "this destination's access check is not configured; " + nextReport},
