@@ -388,3 +388,38 @@ func TestOperationIsAFixedVocabularyShape(t *testing.T) {
 		}
 	}
 }
+
+// A row written under an older MAC version that later gains a field only a
+// newer version covers still verifies its MAC, since the old input leaves the
+// field out; only the version's field check catches it. Each trail here is a
+// genuine one at that version, with nothing newer after it.
+func TestOlderRowsCannotGainNewerFields(t *testing.T) {
+	t.Cleanup(func() { writeMACVersion = MACVersionCurrent })
+	for version, field := range map[int]string{
+		0: `"decision":"entitled"`,
+		2: `"kid":"k1"`,
+		3: `"serial":"1a"`,
+		4: `"target":"example.com:443"`,
+		5: `"operation":"pr.open"`,
+		6: `"source":"AUTOMATIONS"`,
+	} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			writeMACVersion = version
+			f := newFixture(t)
+			f.session(t, 1)
+			f.checkpoint(t)
+			out := f.out.String()
+			if report := verify(t, f.verifier(), out); len(report.Findings) != 0 {
+				t.Fatalf("untouched v%d trail: %v", version, kinds(report))
+			}
+			const open = `"event":"session_open"`
+			if !strings.Contains(out, open) {
+				t.Fatal("trail has no session_open row")
+			}
+			edited := strings.Replace(out, open, open+","+field, 1)
+			if report := verify(t, f.verifier(), edited); !hasKind(report, FindingEdit) {
+				t.Fatalf("v%d row gained %s unnoticed: %v", version, field, kinds(report))
+			}
+		})
+	}
+}

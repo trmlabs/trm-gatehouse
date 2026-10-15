@@ -43,17 +43,17 @@ func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 		"unlisted": {Kind: runnerid.KindPerson, Subject: "owner@example.com", Owner: "user:1", Run: "bc-2", Source: "AUTOMATIONS", Automation: "auto-9"},
 	}
 	p := &Proxy{adapter: &HeaderAdapter{Catalog: catalog, Runner: runner, Sessions: &authorizetest.MemBinder{},
-		Entitlements: &entitlement.Cache{Source: directory{}}}}
+		Entitlements: &entitlement.Cache{Source: directory{"owner@example.com": {}}}}}
 	open, _ := catalog.Match("api.vendor.example", 443, "GET", "/open/x", "automations")
-	for token, want := range map[string]struct{ refusal, name, owner string }{
-		"listed":   {"", "explorer", "owner@example.com"},
-		"unlisted": {"automation_unlisted", "", ""},
+	for token, want := range map[string]struct{ refusal, name, owner, requester string }{
+		"listed":   {"", "explorer", "owner@example.com", "owner@example.com"},
+		"unlisted": {"automation_unlisted", "", "", ""},
 	} {
 		event := auditchain.Event{Event: auditchain.EventHTTPRequest}
 		run := runner[token].Run
 		got := p.authorize(withSessionToken(context.Background(), token), &brokercore.ProxyScope{Pool: "automations", AgentID: "a", WorkloadID: "pod-" + token, ClaimedRun: run}, open, &event)
 		if got != want.refusal || event.Source != "AUTOMATIONS" || event.Automation != runner[token].Automation ||
-			event.AutomationName != want.name || event.AutomationOwner != want.owner || event.TokenSHA256 != "sha-"+token {
+			event.AutomationName != want.name || event.AutomationOwner != want.owner || event.Requester != want.requester || event.TokenSHA256 != "sha-"+token {
 			t.Errorf("%s: %q %+v", token, got, event)
 		}
 		if err := event.Validate(); err != nil {

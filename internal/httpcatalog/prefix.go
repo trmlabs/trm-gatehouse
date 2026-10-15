@@ -37,11 +37,19 @@ const prefixReadConcurrency = 64
 //     JSON array or a string holding one. When it is there, only those
 //     entries are read and digested, so a stray document under entries/ (one
 //     left by a cancelled apply) is ignored instead of failing every reload.
-//   - automations/<id>, optionally: field "automation" is that Automation's
-//     JSON. They are read only when the head has "automations_sha256", the
-//     same digest over automation ids, and optionally "automations_names";
-//     the head's document then carries no "automations". Without them, the
-//     head's document may carry its own (bounded by Vault's size limit).
+//   - head, optionally: field "automations_buckets" maps each bucket name to
+//     the SHA-256, in lowercase hex, of that bucket's stored field, as a JSON
+//     object or a string holding one. Automations are then stored in buckets
+//     and the head's document carries no "automations"; without the field,
+//     the document may carry its own (bounded by Vault's size limit).
+//   - automations/<bucket>: field "automations" is a JSON array of
+//     Automations. Which bucket holds an Automation is the writer's choice
+//     (by a hash of its id, so one change rewrites one bucket); an id in two
+//     buckets is refused at load like any repeated id.
+//
+// Buckets are read incrementally: a reload reads only the buckets whose
+// digest in the head differs from the last good catalog's, so changing one
+// Automation costs the head and one bucket, however many there are.
 //
 // Terraform writes the entries, then the head. The head's KV version is the
 // catalog version, so a poll costs one read until the head changes. A reload
@@ -53,6 +61,7 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 	var lastVersion int
 	var last []byte
 	var lastEntries map[string]string // name to the entry JSON in the last good catalog
+	var lastBuckets map[string]automationBucket
 	return func(ctx context.Context) ([]byte, int, error) {
 		if vault == nil || !kvPattern.MatchString(mount) || !kvPattern.MatchString(prefix) {
 			return nil, 0, errors.New("catalog location is not configured")
@@ -78,27 +87,19 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		if folderDigest(names, entries) != want {
 			return nil, version, fmt.Errorf("catalog entries do not match the head; retrying at the next poll (%s)", entryChanges(lastEntries, names, entries))
 		}
-		var ids, automations []string
-		if stored, ok := head["automations_sha256"]; ok {
-			// Automations one secret each, so their count is not bounded by
-			// Vault's size limit for the head.
-			wantAutomations, _ := stored.(string)
-			if len(wantAutomations) != 64 {
-				return nil, version, errors.New("catalog head automations_sha256 is not a SHA-256")
-			}
-			if ids, automations, err = readFolder(ctx, vault, mount, prefix, "automations", "automation", head["automations_names"]); err != nil {
+		var buckets map[string]automationBucket
+		if listed, ok := head["automations_buckets"]; ok {
+			// Bucketed, so neither the head nor any one secret bounds how
+			// many Automations there are.
+			if buckets, err = readBuckets(ctx, vault, mount+"/data/"+prefix+"/automations/", listed, lastBuckets); err != nil {
 				return nil, version, err
 			}
-			if folderDigest(ids, automations) != wantAutomations {
-				return nil, version, fmt.Errorf("catalog automations do not match the head; retrying at the next poll (listed %d)", len(ids))
-			}
-		} else if head["automations_names"] != nil {
-			return nil, version, errors.New("catalog head lists automations without their digest")
 		}
-		out, err := assemble(document, names, entries, ids, automations)
+		out, err := assemble(document, names, entries, buckets)
 		if err != nil {
 			return nil, version, err
 		}
+		lastBuckets = buckets
 		last, lastVersion = out, version
 		lastEntries = make(map[string]string, len(names))
 		for i, name := range names {
@@ -160,6 +161,70 @@ func folderDigest(names, docs []string) string {
 		digest.Write([]byte(name + "\n" + docs[i] + "\n"))
 	}
 	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// automationBucket is one stored bucket of Automations: its digest and its
+// items, kept so an unchanged bucket is never read again.
+type automationBucket struct {
+	digest string
+	items  []json.RawMessage
+}
+
+// readBuckets reads the buckets the head lists whose digest differs from the
+// last good catalog's, concurrently, and reuses the rest. A bucket whose
+// stored field does not hash to the head's digest (an apply under way) fails
+// the reload; the last good catalog stays in force.
+func readBuckets(ctx context.Context, vault Logical, base string, listed interface{}, last map[string]automationBucket) (map[string]automationBucket, error) {
+	digests, err := bucketDigests(listed)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]automationBucket, len(digests))
+	var changed []string
+	for name, digest := range digests {
+		if b, ok := last[name]; ok && b.digest == digest {
+			out[name] = b
+			continue
+		}
+		changed = append(changed, name)
+	}
+	sort.Strings(changed)
+	stored, err := readEntries(ctx, vault, base, "automations", changed)
+	if err != nil {
+		return nil, err
+	}
+	for i, name := range changed {
+		sum := sha256.Sum256([]byte(stored[i]))
+		if stored[i] == "" || hex.EncodeToString(sum[:]) != digests[name] {
+			return nil, fmt.Errorf("catalog automations bucket %q does not match the head; retrying at the next poll (%d of %d buckets changed)", name, len(changed), len(digests))
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal([]byte(stored[i]), &items); err != nil {
+			return nil, fmt.Errorf("catalog automations bucket %q is not a JSON array", name)
+		}
+		out[name] = automationBucket{digest: digests[name], items: items}
+	}
+	return out, nil
+}
+
+// bucketDigests reads the head's bucket map: bucket names to SHA-256 hex.
+func bucketDigests(field interface{}) (map[string]string, error) {
+	raw, ok := field.(map[string]interface{})
+	if text, isText := field.(string); isText {
+		ok = json.Unmarshal([]byte(text), &raw) == nil
+	}
+	if !ok {
+		return nil, errors.New("catalog head automations_buckets is not a JSON object")
+	}
+	out := make(map[string]string, len(raw))
+	for name, v := range raw {
+		digest, _ := v.(string)
+		if !idPattern.MatchString(name) || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+			return nil, fmt.Errorf("catalog head bucket %q has no lowercase SHA-256", name)
+		}
+		out[name] = digest
+	}
+	return out, nil
 }
 
 // headNames reads the head's optional entry name list. listed is false when
@@ -296,9 +361,10 @@ func readEntries(ctx context.Context, vault Logical, base, field string, names [
 	return out, nil
 }
 
-// assemble rebuilds the one-document form Parse validates. Each entry's name,
-// and each stored Automation's id, must be the key it is stored under.
-func assemble(document string, names, entries, ids, automations []string) ([]byte, error) {
+// assemble rebuilds the one-document form Parse validates. Each entry's name
+// must be the key it is stored under. Bucketed Automations join in bucket
+// name order.
+func assemble(document string, names, entries []string, buckets map[string]automationBucket) ([]byte, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(document), &top); err != nil {
 		return nil, errors.New("catalog head is not a JSON object")
@@ -311,11 +377,20 @@ func assemble(document string, names, entries, ids, automations []string) ([]byt
 		return nil, err
 	}
 	top["entries"] = list
-	if automations != nil {
+	if buckets != nil {
 		if _, ok := top["automations"]; ok {
-			return nil, errors.New("catalog head must not carry automations it stores one secret each")
+			return nil, errors.New("catalog head must not carry automations it stores in buckets")
 		}
-		if top["automations"], err = keyedList("automation", "id", ids, automations); err != nil {
+		order := make([]string, 0, len(buckets))
+		for name := range buckets {
+			order = append(order, name)
+		}
+		sort.Strings(order)
+		var all []json.RawMessage
+		for _, name := range order {
+			all = append(all, buckets[name].items...)
+		}
+		if top["automations"], err = json.Marshal(all); err != nil {
 			return nil, err
 		}
 	}

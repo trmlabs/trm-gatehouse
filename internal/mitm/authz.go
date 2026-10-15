@@ -41,9 +41,7 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 	if refusal != "" {
 		return refusal
 	}
-	if who.Kind == "person" || who.Kind == "agent" {
-		event.Requester = who.Subject
-	}
+	event.Requester = who.Audited()
 	d := authorize.Decide(ctx, a.Entitlements, pool, *entry, who)
 	event.Tier, event.Decision, event.RequesterOID = d.Tier, d.Outcome, d.ObjectID
 	event.RequesterDepartment = auditchain.DepartmentField(d.Department)

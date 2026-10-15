@@ -43,7 +43,7 @@ func (v *prefixVault) ReadWithDataWithContext(_ context.Context, path string, _ 
 		}
 	case strings.HasPrefix(path, base+"automations/"):
 		if automation, ok := v.automations[strings.TrimPrefix(path, base+"automations/")]; ok {
-			data = map[string]interface{}{"automation": automation}
+			data = map[string]interface{}{"automations": automation}
 		}
 	}
 	if data == nil {

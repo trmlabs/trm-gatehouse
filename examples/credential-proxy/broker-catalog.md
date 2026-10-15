@@ -84,12 +84,24 @@ automations:
   - id: <automation_id from the run token>
     name: explorer                 # a label for audit rows
     owner: owner@example.com       # the accountable person
+    runnerGroup: <Entra group ID>  # optional: others who may run it
     entries: [tracker, repo-read]  # entries it may use; each also granted to the pool
 ```
 
-The run token is verified exactly as on a `cursor-session` pool (run, Pod and owner pins included). Then every request on the pool, T0 included, must come from an Automation the catalog lists: `source` must be `AUTOMATIONS` with an `automation_id` (otherwise `not_automation`, so a person's run routed here gets nothing), and that id must be listed (`automation_unlisted`). An entry the Automation does not list is refused even when the pool is granted it (`automation_not_granted`). Above T0 the entry is decided on the owner's account, as a person's would be: the Automation never reaches what its owner could not, and stops when the owner's account is disabled (`account_disabled`). A `cursor-session` pool is unchanged.
+The run token is verified exactly as on a `cursor-session` pool (run, Pod and owner pins included). Then every request on the pool, T0 included, must come from an Automation the catalog lists, run by a person who may run it:
 
-Every audit row from a Cursor run records the token's `source` and `automation`, on any pool and on refusals; on an automation pool, a listed Automation's `automationName` and `automationOwner` too. Automations are indexed by id at load, so a lookup costs the same at 100,000 as at one. An `id`, `name` and entry names are plain identifiers; `owner` is a lower-case email. A tolerant load drops an Automation that is invalid, repeats another's id, or names an entry that was dropped, and keeps the rest.
+| Check | Refusal |
+|---|---|
+| `source` is `AUTOMATIONS` with an `automation_id`, so a person's run routed here gets nothing | `not_automation` |
+| The id is listed | `automation_unlisted` |
+| The run names a person (`sub` `user:` with an `owner_email` in a configured domain) | `automation_no_person` |
+| The entry is one the Automation lists, even when the pool is granted it | `automation_not_granted` |
+| The run's person is the `owner`, or an enabled member of `runnerGroup` | `automation_runner` |
+| The owner's account is enabled, at every tier, so an offboarded owner's Automation stops | `account_disabled` |
+
+Above T0 the entry is then decided on the owner's account, as a person's would be, so the Automation never reaches what its owner could not. Without `runnerGroup` only the owner's runs are served: someone else who can edit or trigger the Automation does not borrow the owner's access. A `cursor-session` pool is unchanged.
+
+Every audit row from a Cursor run records the token's `source` and `automation`, on any pool and on refusals; on an automation pool, a listed Automation's `automationName` and `automationOwner` too, and `requester` is the person whose run it is. Automations are indexed by id at load, so a lookup costs the same at 100,000 as at one. An `id`, `name` and entry names are plain identifiers; `owner` is a lower-case email. A tolerant load drops an Automation that is invalid, repeats another's id, or names an entry that was dropped, and keeps the rest.
 
 ### Who an agent-sandbox Pod names
 
@@ -115,11 +127,10 @@ Under `AGENT_VAULT_CATALOG_VAULT_PREFIX=<mount>/<prefix>`:
 | `<prefix>/head` | `entries_sha256` | SHA-256, lowercase hex, over every entry in byte order of name: the name, a newline, the stored entry JSON, a newline. |
 | `<prefix>/head` | `entries_names` | Optional. The entry names, as a JSON array (or a string holding one). When present, the broker reads and digests only these entries, so a stray document under `entries/` (one a cancelled apply left behind) is ignored instead of failing every reload. Without it, the broker lists `entries/` as before. |
 | `<prefix>/entries/<name>` | `entry` | One entry's JSON. Its `name` must equal `<name>`. |
-| `<prefix>/head` | `automations_sha256` | Optional. The same digest over `automations/`, by id. When present, Automations are read one secret each and the head's `catalog` must not carry `automations`; without it, the head's `catalog` may carry them, bounded by the size limit for one secret. |
-| `<prefix>/head` | `automations_names` | Optional, only with `automations_sha256`. The Automation ids to read, as for `entries_names`. |
-| `<prefix>/automations/<id>` | `automation` | One Automation's JSON. Its `id` must equal `<id>`. |
+| `<prefix>/head` | `automations_buckets` | Optional. Bucket name to the SHA-256, lowercase hex, of that bucket's stored `automations` field, as a JSON object (or a string holding one). When present, the head's `catalog` must not carry `automations`; without it, the head's `catalog` may carry them, bounded by the size limit for one secret. |
+| `<prefix>/automations/<bucket>` | `automations` | A JSON array of Automations. Put each in a bucket by a hash of its id (for example the first byte of its SHA-256, 256 buckets), so one change rewrites one bucket. |
 
-Write every changed entry first and the head last. The head's KV version is the catalog version: each poll reads only the head, and reads every entry only when that version changes. If the entries read do not hash to the head's digest, because an apply is part way through, the broker logs `broker catalog version rejected`, keeps the last good catalog and tries again at the next poll. A head that carries `entries` is refused. An entry whose current version is deleted or destroyed is out of the catalog, so removing an entry needs no metadata cleanup; leave it out of the digest.
+Write every changed entry first and the head last. The head's KV version is the catalog version: each poll reads only the head, and reads every entry only when that version changes. Buckets are read incrementally: a new head rereads only the buckets whose digest changed, so changing one Automation costs the head, the entries and one bucket. Write changed buckets before the head. If the entries read do not hash to the head's digest, because an apply is part way through, the broker logs `broker catalog version rejected`, keeps the last good catalog and tries again at the next poll. A head that carries `entries` is refused. An entry whose current version is deleted or destroyed is out of the catalog, so removing an entry needs no metadata cleanup; leave it out of the digest.
 
 ## When a catalog is bad or Vault is down
 

@@ -290,7 +290,9 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Outcome = "pool_ceiling"
 		return d
 	}
-	if want == 0 {
+	// An Automation is checked on its owner's account at every tier, so an
+	// offboarded owner's Automation stops entirely.
+	if want == 0 && pool.Identity != "cursor-automation" {
 		d.Allowed, d.Outcome = true, "t0"
 		return d
 	}
@@ -310,7 +312,8 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 	case "cursor-automation":
 		// An Automation is decided on its owner's account, so it never
 		// reaches what its owner could not, and stops when that account
-		// does. Which entries it may use at all is the caller's check.
+		// does. Which entries it may use, and who may run it, are the
+		// caller's checks.
 		if who.Kind != "automation" || who.Subject == "" {
 			d.Outcome = "no_automation"
 			return d
@@ -319,7 +322,7 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Outcome = "no_identity"
 		return d
 	}
-	if len(entry.Requires) == 0 {
+	if want > 0 && len(entry.Requires) == 0 {
 		d.Outcome = "entitlement_config"
 		return d
 	}
@@ -340,6 +343,9 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.ObjectID, d.Department, d.Outcome = person.ObjectID, person.Department, "account_disabled"
 	case !subset(entry.Requires, person.MemberOf):
 		d.ObjectID, d.Department, d.Outcome = person.ObjectID, person.Department, "not_entitled"
+	case want == 0:
+		d.ObjectID, d.Department, d.Allowed, d.Outcome = person.ObjectID, person.Department, true, "t0"
+		return d
 	default:
 		d.ObjectID, d.Department, d.Allowed, d.Outcome = person.ObjectID, person.Department, true, "entitled"
 		return d

@@ -870,7 +870,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	event.Tier, event.Decision, event.Groups, event.CacheAgeSec = who.Tier, who.Decision, who.Groups, who.CacheAgeSec
 	event.RequesterDepartment = auditchain.DepartmentField(who.Department)
 	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
-	if who.Kind == "person" || who.Kind == "agent" {
+	if who.Kind == "person" || who.Kind == "agent" || who.Kind == "automation" {
 		event.Requester = who.Subject
 	}
 	var refused *RefusedError

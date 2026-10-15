@@ -2,9 +2,12 @@ package httpcatalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +124,7 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 		"upper-case owner": {"id": "auto-9", "name": "x", "owner": "Owner@example.com", "entries": []any{"vendor"}},
 		"unsafe name":      {"id": "auto-9", "name": "an \"x\"", "owner": "owner@example.com", "entries": []any{"vendor"}},
 		"unknown field":    {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "pools": []any{"p"}},
+		"bad runner group": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "runnerGroup": "engineers", "entries": []any{"vendor"}},
 	} {
 		c := automationCatalog()
 		c["automations"] = append(c["automations"].([]any), a)
@@ -224,49 +228,123 @@ func TestOneHundredThousandAutomationsLoad(t *testing.T) {
 	runtime.KeepAlive(catalog)
 }
 
-// Automations stored one secret each load through the per-entry loader, so
-// the head stays small however many there are.
-func TestPrefixLoaderReadsAutomationsOneSecretEach(t *testing.T) {
-	v := newPrefixVault(2)
-	v.automations = map[string]string{}
-	for i := range 3 {
-		id := fmt.Sprintf("auto-%d", i)
-		v.automations[id] = fmt.Sprintf(`{"id":%q,"name":"a%d","owner":"owner@example.com","entries":["e00001"]}`, id, i)
+// bucketed stores Automations in 256 buckets by the first byte of the
+// SHA-256 of their id, and sets the head's bucket digests.
+func bucketed(v *prefixVault, automations map[string]string) {
+	lists := map[string][]string{}
+	for id, a := range automations {
+		sum := sha256.Sum256([]byte(id))
+		name := fmt.Sprintf("b%02x", sum[0])
+		lists[name] = append(lists[name], a)
 	}
-	v.head["automations_sha256"] = entriesDigest(v.automations)
-	raw, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background())
+	v.automations = map[string]string{}
+	digests := map[string]interface{}{}
+	for name, list := range lists {
+		sort.Strings(list)
+		stored := "[" + strings.Join(list, ",") + "]"
+		v.automations[name] = stored
+		sum := sha256.Sum256([]byte(stored))
+		digests[name] = hex.EncodeToString(sum[:])
+	}
+	v.head["automations_buckets"] = digests
+	v.headVersion++
+}
+
+func automationDoc(id, entry string) string {
+	return fmt.Sprintf(`{"id":%q,"name":"a","owner":"owner@example.com","entries":[%q]}`, id, entry)
+}
+
+// 100,000 Automations in 256 buckets: the first load reads every bucket, and
+// a change to one Automation rereads only its bucket.
+func TestPrefixLoaderRereadsOnlyChangedBuckets(t *testing.T) {
+	v := newPrefixVault(2)
+	automations := make(map[string]string, 100_000)
+	for i := range 100_000 {
+		id := fmt.Sprintf("automation-%06d", i)
+		automations[id] = automationDoc(id, "e00001")
+	}
+	bucketed(v, automations)
+	load := VaultPrefixLoader(v, "gatehouse", "catalog")
+	ctx := context.Background()
+	raw, _, err := load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, dropped, err := ParseTolerant(raw)
-	if err != nil || len(dropped) != 0 || c.Automations() != 3 {
-		t.Fatalf("automations %d, dropped %+v, %v", c.Automations(), dropped, err)
+	if c, dropped, err := ParseTolerant(raw); err != nil || len(dropped) != 0 || c.Automations() != 100_000 {
+		t.Fatalf("first load: %d automations, dropped %d, %v", c.Automations(), len(dropped), err)
 	}
+	if reads := v.reads.Load(); reads != 1+2+256 {
+		t.Fatalf("first load read %d secrets, want the head, 2 entries and 256 buckets", reads)
+	}
+	// An unchanged head costs one read.
+	v.reads.Store(0)
+	if _, _, err := load(ctx); err != nil || v.reads.Load() != 1 {
+		t.Fatalf("unchanged head: %d reads, %v", v.reads.Load(), err)
+	}
+	// One Automation changes: the head, the entries (reread on every change)
+	// and that one bucket.
+	automations["automation-000042"] = automationDoc("automation-000042", "e00000")
+	bucketed(v, automations)
+	v.reads.Store(0)
+	raw, _, err = load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads := v.reads.Load(); reads != 1+2+1 {
+		t.Fatalf("one change read %d secrets, want the head, 2 entries and 1 bucket", reads)
+	}
+	c, _, err := ParseTolerant(raw)
+	if err != nil || c.Automations() != 100_000 {
+		t.Fatalf("after one change: %d, %v", c.Automations(), err)
+	}
+	if a, _ := c.Automation("automation-000042"); !a.Uses("e00000") || a.Uses("e00001") {
+		t.Fatalf("changed automation: %+v", a)
+	}
+}
 
-	// A half-written apply: the head has not caught up.
-	v.automations["auto-3"] = `{"id":"auto-3","name":"a3","owner":"owner@example.com","entries":["e00001"]}`
-	v.headVersion++
-	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil || !strings.Contains(err.Error(), "automations do not match") {
-		t.Fatalf("mismatch accepted: %v", err)
+func TestPrefixLoaderRefusesBadBuckets(t *testing.T) {
+	ctx := context.Background()
+	fresh := func() *prefixVault {
+		v := newPrefixVault(2)
+		bucketed(v, map[string]string{"auto-1": automationDoc("auto-1", "e00001"), "auto-2": automationDoc("auto-2", "e00000")})
+		return v
 	}
-	// An Automation stored under another id.
-	v.automations["auto-3"] = strings.Replace(v.automations["auto-3"], `"id":"auto-3"`, `"id":"auto-1"`, 1)
-	v.head["automations_sha256"] = entriesDigest(v.automations)
-	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil || !strings.Contains(err.Error(), "another name") {
-		t.Fatalf("misnamed automation accepted: %v", err)
+	v := fresh()
+	raw, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A head that both stores them and carries its own.
-	delete(v.automations, "auto-3")
-	v.head["automations_sha256"] = entriesDigest(v.automations)
-	v.head["catalog"] = `{"automations":[]}`
-	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil || !strings.Contains(err.Error(), "must not carry automations") {
-		t.Fatalf("head with automations accepted: %v", err)
+	if c, _, err := ParseTolerant(raw); err != nil || c.Automations() != 2 {
+		t.Fatalf("automations %d, %v", c.Automations(), err)
 	}
-	// Names without a digest would load nothing the head vouches for.
-	v.head["catalog"] = `{}`
-	delete(v.head, "automations_sha256")
-	v.head["automations_names"] = []interface{}{"auto-1"}
-	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil || !strings.Contains(err.Error(), "without their digest") {
-		t.Fatalf("names without a digest accepted: %v", err)
+	for name, mutate := range map[string]func(v *prefixVault){
+		"a bucket written after the head": func(v *prefixVault) {
+			for b := range v.automations {
+				v.automations[b] = "[]"
+			}
+		},
+		"a bucket the head lists but Vault lacks": func(v *prefixVault) {
+			v.head["automations_buckets"].(map[string]interface{})["bff"] = strings.Repeat("0", 64)
+		},
+		"a digest that is not SHA-256 hex": func(v *prefixVault) {
+			for b := range v.head["automations_buckets"].(map[string]interface{}) {
+				v.head["automations_buckets"].(map[string]interface{})[b] = "x"
+			}
+		},
+		"a head that is not an object": func(v *prefixVault) { v.head["automations_buckets"] = []interface{}{"b00"} },
+		"a head that also carries automations": func(v *prefixVault) { v.head["catalog"] = `{"automations":[]}` },
+	} {
+		v := fresh()
+		mutate(v)
+		if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(ctx); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The bucket map may also arrive as a string holding the object.
+	v = fresh()
+	text, _ := json.Marshal(v.head["automations_buckets"])
+	v.head["automations_buckets"] = string(text)
+	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(ctx); err != nil {
+		t.Fatalf("string bucket map: %v", err)
 	}
 }

@@ -18,10 +18,16 @@ type Automation struct {
 	ID string `json:"id"`
 	// Name is a short label for audit rows and logs.
 	Name string `json:"name"`
-	// Owner is the email of the person accountable for the Automation. Above
-	// T0 it is decided on the owner's account: it never reaches what the
-	// owner could not, and it stops when the owner's account does.
+	// Owner is the email of the person accountable for the Automation. Its
+	// requests are decided on the owner's account: it never reaches what the
+	// owner could not, and it stops, at every tier, when the owner's account
+	// is disabled.
 	Owner string `json:"owner"`
+	// RunnerGroup, optional, is the Entra group whose members may also start
+	// the Automation's runs. Without it only the owner's runs are served, so
+	// someone else who can edit or trigger the Automation never borrows the
+	// owner's access.
+	RunnerGroup string `json:"runnerGroup,omitempty"`
 	// Entries are the catalog entries the Automation may use. Each must also
 	// be granted to the pool its runs land on.
 	Entries []string `json:"entries"`
@@ -41,6 +47,9 @@ func (a *Automation) validate() error {
 	}
 	if len(a.Owner) > 254 || !automationOwner.MatchString(a.Owner) {
 		return errors.New("owner must be a lower-case email address")
+	}
+	if a.RunnerGroup != "" && !groupID.MatchString(a.RunnerGroup) {
+		return errors.New("runnerGroup must be an Entra object ID")
 	}
 	if len(a.Entries) == 0 {
 		return errors.New("entries must name at least one catalog entry")
