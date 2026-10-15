@@ -253,7 +253,7 @@ The binary, Go module path and environment variables keep the upstream
 | Path | What it is |
 |---|---|
 | `cmd/`, `internal/` | The broker and CLI |
-| `examples/credential-proxy/` | The local demo, the strict profile, and the Kubernetes and task relay fixtures. The guides that used to live here point to `docs/gatehouse/` |
+| `examples/credential-proxy/` | The local demo, the strict profile, and the Kubernetes and task relay fixtures |
 | `docs/gatehouse/` | Gatehouse guides |
 | `docs/`, `web/`, `sdks/` | Inherited from Agent Vault |
 | `install.sh`, `fly.toml`, `.github/workflows/release*.yml` | Inherited from Agent Vault. `install.sh` installs upstream Agent Vault, not Gatehouse. The release workflows run only in the upstream repository |
