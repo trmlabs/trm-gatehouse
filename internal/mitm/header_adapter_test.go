@@ -245,7 +245,8 @@ func (f *adapterFixture) do(t *testing.T, method, path, body string, mutate func
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, readErr := io.ReadAll(resp.Body)
-	for _, key := range []string{adapterKeyV1, adapterKeyV2, basicKey(adapterKeyV1)[6:], basicKey(adapterKeyV2)[6:]} {
+	pair := base64.StdEncoding.EncodeToString([]byte(f.acceptsV)) // the encoded key, as a Basic pair sends it
+	for _, key := range []string{adapterKeyV1, adapterKeyV2, basicKey(adapterKeyV1)[6:], basicKey(adapterKeyV2)[6:], pair} {
 		if strings.Contains(string(data), key) || strings.Contains(fmt.Sprint(resp.Header), key) {
 			t.Fatal("key reached the worker")
 		}

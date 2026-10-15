@@ -99,15 +99,22 @@ func TestCredentialEncodesBasicPair(t *testing.T) {
 		t.Fatal("basicUser caller credential changed")
 	}
 	for name, doc := range map[string]string{
-		"other header":    entryWith(`,"basicPair":true`),
-		"with scheme":     authorization(entryWith(`,"basicPair":true,"scheme":"Bearer"`)),
-		"with basicUser":  authorization(entryWith(`,"basicPair":true,"basicUser":true`)),
-		"postgres entry":  `{"entries":[{"name":"db","kind":"postgres","host":"db.example.com","pools":["pool-a"],"basicPair":true,"postgres":{"database":"core","mount":"database","role":"readonly"}}]}`,
-		"browser session": `{"entries":[` + browserEntryJSON(`,"basicPair":true`) + `]}`,
-		"gcp entry":       `{` + gcpPools + `,"entries":[` + strings.Replace(gcsEntry, `"kind":"gcp",`, `"kind":"gcp","basicPair":true,`, 1) + `]}`,
+		"other header":     entryWith(`,"basicPair":true`),
+		"with scheme":      authorization(entryWith(`,"basicPair":true,"scheme":"Bearer"`)),
+		"with basicUser":   authorization(entryWith(`,"basicPair":true,"basicUser":true`)),
+		"postgres entry":   `{"entries":[{"name":"db","kind":"postgres","host":"db.example.com","pools":["pool-a"],"basicPair":true,"postgres":{"database":"core","mount":"database","role":"readonly"}}]}`,
+		"browser session":  `{"entries":[` + browserEntryJSON(`,"basicPair":true`) + `]}`,
+		"gcp entry":        `{` + gcpPools + `,"entries":[` + strings.Replace(gcsEntry, `"kind":"gcp",`, `"kind":"gcp","basicPair":true,`, 1) + `]}`,
+		"git entry":        `{"entries":[` + strings.Replace(gitEntry, `"kind":"git",`, `"kind":"git","basicPair":true,`, 1) + `]}`,
+		"github-api entry": `{"entries":[` + strings.Replace(apiEntry, `"kind":"github-api",`, `"kind":"github-api","basicPair":true,`, 1) + `]}`,
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: basicPair accepted", name)
+		}
+	}
+	for _, doc := range []string{`{"entries":[` + gitEntry + `]}`, `{"entries":[` + apiEntry + `]}`} {
+		if _, err := Parse([]byte(doc)); err != nil {
+			t.Fatalf("control git entry: %v", err)
 		}
 	}
 	for key, want := range map[string]bool{"pk:sk": true, "pk:sk:x": true, "pk": false, ":sk": false, "pk:": false, "": false} {

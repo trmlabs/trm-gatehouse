@@ -339,12 +339,13 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		_ = a.Audit.Record(done)
 	}
 	values := map[string]string{"key": secret.Value(), "credential": credential}
-	if entry.BasicUser || entry.BasicPair {
-		// The encoded credentials alone, as a vendor might echo them.
+	if entry.BasicUser {
+		// The encoded user name alone, as a vendor might echo it.
 		values["basic"] = strings.TrimPrefix(credential, "Basic ")
 	}
 	if entry.BasicPair {
-		// The password alone. The user half is usually a public key, so it is
+		// The password alone; the encoded pair is already one of the key's
+		// screened encodings. The user half is usually a public key, so it is
 		// not screened.
 		values["password"] = password
 	}
