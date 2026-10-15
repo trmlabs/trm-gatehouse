@@ -222,8 +222,9 @@ func checkDialAddress(address string, allowPrivate bool, allowed []net.IPNet) er
 // ranges, every destination public or private: the broker's own
 // least-privilege layer beneath the catalog's host allowlist. The ranges are
 // checked in the same ControlContext hook as the network policy, on each
-// address right before connect. An empty setting leaves d unchanged; a set
-// but unparseable one allows nothing rather than everything.
+// address right before connect. With neither setting nor file set, d is
+// unchanged; a set but unparseable setting allows nothing beyond the file's
+// addresses, rather than everything.
 //
 // file, when set (AGENT_VAULT_EGRESS_RANGES_FILE), names a file of single
 // addresses that also count as egress ranges, re-read while the process runs:
