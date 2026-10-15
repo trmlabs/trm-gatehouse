@@ -671,11 +671,11 @@ func TestSafeDialer_AllAnswersBlockedNeverConnect(t *testing.T) {
 }
 
 func TestParseHostAddresses(t *testing.T) {
-	nets, err := parseHostAddresses("# resolved for mcp.linear.app\n203.0.113.7, 203.0.113.8/32\n2001:db8::1 2001:db8::2/128\n\n")
+	nets, err := parseHostAddresses("# resolved for api.example.com\n203.0.113.7, 203.0.113.8/32\n2001:db8::1 2001:db8::2/128\n\n")
 	if err != nil || len(nets) != 4 {
 		t.Fatalf("valid file: %v %v", nets, err)
 	}
-	for _, bad := range []string{"203.0.113.0/24", "0.0.0.0/0", "linear.app", "203.0.113.7:443", "fe80::1%eth0", "2001:db8::/64"} {
+	for _, bad := range []string{"203.0.113.0/24", "0.0.0.0/0", "example.com", "203.0.113.7:443", "fe80::1%eth0", "2001:db8::/64"} {
 		if _, err := parseHostAddresses("203.0.113.9\n" + bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
