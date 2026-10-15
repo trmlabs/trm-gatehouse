@@ -31,9 +31,11 @@ type HeaderAdapter struct {
 	// next request; an httpcatalog.Catalog or a live *httpcatalog.Source.
 	Catalog interface{ Current() httpcatalog.Catalog }
 	// Runner verifies Claude runner session tokens for claude-session pools,
-	// and Cursor run tokens for cursor-session and cursor-automation pools when it is a
-	// runnerid.Verifiers; Entitlements answers live group membership. Without
-	// them, entries above T0 are refused on those pools.
+	// and Cursor run tokens for cursor-session and cursor-automation pools
+	// when it is a runnerid.Verifiers; Entitlements answers live group
+	// membership. Without them, entries above T0 are refused on those pools,
+	// and every entry on a cursor-automation pool, whose owner check needs
+	// the directory at T0 too.
 	Runner interface {
 		Verify(context.Context, string) (runnerid.Session, error)
 	}

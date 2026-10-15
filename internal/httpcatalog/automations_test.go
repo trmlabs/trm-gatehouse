@@ -333,8 +333,6 @@ func TestPrefixLoaderRefusesBadBuckets(t *testing.T) {
 		},
 		"a head that is not an object":         func(v *prefixVault) { v.head["automations_buckets"] = []interface{}{"b00"} },
 		"a head that also carries automations": func(v *prefixVault) { v.head["catalog"] = `{"automations":[]}` },
-		"a stale writer's per-id digest":       func(v *prefixVault) { v.head["automations_sha256"] = strings.Repeat("0", 64) },
-		"a stale writer's per-id names":        func(v *prefixVault) { v.head["automations_names"] = []interface{}{"auto-1"} },
 	} {
 		v := fresh()
 		mutate(v)
@@ -348,5 +346,30 @@ func TestPrefixLoaderRefusesBadBuckets(t *testing.T) {
 	v.head["automations_buckets"] = string(text)
 	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(ctx); err != nil {
 		t.Fatalf("string bucket map: %v", err)
+	}
+}
+
+// With no bucketed Automation, the assembled document carries no
+// "automations", so the stored copy stays readable by a broker that predates
+// them; with one, it carries them.
+func TestPrefixLoaderLeavesOutAnEmptyAutomationsList(t *testing.T) {
+	ctx := context.Background()
+	for name, automations := range map[string]map[string]string{
+		"no buckets":     {},
+		"one Automation": {"auto-1": automationDoc("auto-1", "e00001")},
+	} {
+		v := newPrefixVault(2)
+		bucketed(v, automations)
+		raw, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(ctx)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &top); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := top["automations"]; ok != (len(automations) > 0) {
+			t.Errorf("%s: document carries automations %v: %s", name, ok, top["automations"])
+		}
 	}
 }

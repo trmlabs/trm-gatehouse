@@ -63,15 +63,15 @@ type Requester struct {
 	Source     string
 	Automation string
 	// AutomationName and AutomationOwner are the catalog's, for a listed
-	// Automation on a cursor-automation pool, and RunPerson is the verified
-	// person whose run it is.
+	// Automation on a cursor-automation pool, and RunPerson is the person
+	// the verified run token names.
 	AutomationName  string
 	AutomationOwner string
 	RunPerson       string
 }
 
 // Audited is the verified identity an audit row names as the requester: the
-// person, the agent, or the person whose run started an Automation's request.
+// person, the agent, or the person an Automation's run token names.
 func (r Requester) Audited() string {
 	switch r.Kind {
 	case "person", "agent":
@@ -198,11 +198,9 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 				if !ok {
 					return who, "automation_unlisted"
 				}
-				// TODO(probe): this assumes an Automation's run token names
-				// the person who started it (sub user:, owner_email). If the
-				// claims probe shows a service account instead, decide who is
-				// accountable for such a run before serving it; until then it
-				// is refused.
+				// TODO(probe): an Automation set to run as a service account
+				// is refused (automation_no_person) until we decide who is
+				// accountable for its runs.
 				if s.Kind != runnerid.KindPerson || s.Subject == "" {
 					return who, "automation_no_person"
 				}
@@ -244,42 +242,62 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 // the catalog lists for the run's Automation (automation_not_granted); the
 // run's person must be the owner or in the Automation's runner group
 // (automation_runner); and the entry is then decided on the owner's account,
-// which must be enabled.
+// which must be enabled. The owner's check is charged to the Automation's own
+// lookup budget, not the owner's. A runner-group member acts with the owner's
+// access for the Automation's listed entries, whatever their own groups.
+//
+// The decision's ObjectID and Department are the run person's, so an audit
+// row's requester fields all name one person; Tier, Outcome, Groups and
+// CacheAge are the decision on the owner's account, or on a runner refusal
+// the runner group's check.
 func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool, entry httpcatalog.Entry, who Requester) entitlement.Decision {
 	requester := entitlement.Requester{Kind: who.Kind, Subject: who.Subject}
-	if pool.Identity == httpcatalog.IdentityCursorAutomation {
-		tier := entry.Tier
-		if tier == "" {
-			tier = "T0"
-		}
-		refused := entitlement.Decision{Tier: tier, Groups: append([]string(nil), entry.Requires...)}
-		a, ok := pool.Automation(who.Subject)
-		if who.Kind != "automation" || !ok || !a.Uses(entry.Name) {
-			refused.Outcome = "automation_not_granted"
-			return refused
-		}
-		if outcome := runnerAllowed(ctx, cache, a, who.RunPerson, entry.Tier); outcome != "" {
-			refused.Outcome = outcome
-			return refused
-		}
-		requester.Subject = a.Owner
+	if pool.Identity != httpcatalog.IdentityCursorAutomation {
+		return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
+			entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
 	}
-	return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
+	tier := entry.Tier
+	if tier == "" {
+		tier = "T0"
+	}
+	refused := entitlement.Decision{Tier: tier, Groups: append([]string(nil), entry.Requires...)}
+	a, ok := pool.Automation(who.Subject)
+	if who.Kind != "automation" || !ok || !a.Uses(entry.Name) {
+		refused.Outcome = "automation_not_granted"
+		return refused
+	}
+	runner, checked, outcome := runnerAllowed(ctx, cache, a, who.RunPerson, entry.Tier)
+	if outcome != "" {
+		refused.Outcome, refused.ObjectID, refused.Department = outcome, runner.ObjectID, runner.Department
+		refused.Groups = nil
+		if checked {
+			refused.Groups = []string{a.RunnerGroup}
+		}
+		return refused
+	}
+	requester.Subject, requester.Budget = a.Owner, "automation:"+a.ID
+	d := entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
 		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
+	if who.RunPerson != a.Owner {
+		d.ObjectID, d.Department = runner.ObjectID, runner.Department
+	}
+	return d
 }
 
-// runnerAllowed checks that the person whose run it is may run the
+// runnerAllowed checks that the person the run token names may run the
 // Automation: its owner, or an enabled member of its runner group, looked up
-// as fresh as a person pool looks a person up for the same tier. It returns a
-// refusal code, or "".
-func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.Automation, person, tier string) string {
+// as fresh as a person pool looks a person up for the same tier, within the
+// runner's own budget. It returns what the directory said about a runner
+// other than the owner, whether the runner group was looked up, and a refusal
+// code, or "".
+func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.Automation, person, tier string) (entitlement.Person, bool, string) {
 	switch {
 	case person == "":
-		return "automation_runner"
+		return entitlement.Person{}, false, "automation_runner"
 	case person == a.Owner:
-		return ""
+		return entitlement.Person{}, false, ""
 	case a.RunnerGroup == "":
-		return "automation_runner"
+		return entitlement.Person{}, false, "automation_runner"
 	}
 	if tier == "" {
 		tier = "T0"
@@ -287,12 +305,12 @@ func runnerAllowed(ctx context.Context, cache *entitlement.Cache, a httpcatalog.
 	p, err := entitlement.LookupFor(ctx, cache, person, []string{a.RunnerGroup}, tier)
 	switch {
 	case errors.Is(err, entitlement.ErrLookupLimited):
-		return "entitlement_rate_limited"
+		return entitlement.Person{}, true, "entitlement_rate_limited"
 	case err != nil:
-		return "entitlement_unavailable"
+		return entitlement.Person{}, true, "entitlement_unavailable"
 	case !p.Enabled || len(p.MemberOf) != 1 || p.MemberOf[0] != a.RunnerGroup:
 		entitlement.Forget(ctx, cache, person, tier)
-		return "automation_runner"
+		return p, true, "automation_runner"
 	}
-	return ""
+	return p, true, ""
 }

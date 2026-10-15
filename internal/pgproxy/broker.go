@@ -864,7 +864,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	}
 
 	var who Requester
-	svc, err := b.opts.Databases.ResolveDatabase(withRequesterRecord(hsCtx, &who), *scope, requestedDB)
+	svc, err := b.opts.Databases.ResolveDatabase(WithRequesterRecord(hsCtx, &who), *scope, requestedDB)
 	releaseStore()
 	event.RequesterKind, event.TokenSHA256, event.RequesterOID = who.Kind, who.TokenSHA256, who.ObjectID
 	event.Tier, event.Decision, event.Groups, event.CacheAgeSec = who.Tier, who.Decision, who.Groups, who.CacheAgeSec

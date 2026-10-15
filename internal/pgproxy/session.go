@@ -106,7 +106,7 @@ func Session(ctx context.Context) string {
 // credential: the token is identified only by its hash.
 type Requester struct {
 	// Subject is the verified identity the audit row names: the person, the
-	// agent, or for an Automation the person whose run it is.
+	// agent, or for an Automation the person its run token names.
 	Kind, Subject, ObjectID, TokenSHA256 string
 	Tier, Decision, Groups               string
 	Department                           string // directory department, audit only
@@ -118,7 +118,9 @@ type Requester struct {
 
 type requesterKey struct{}
 
-func withRequesterRecord(ctx context.Context, r *Requester) context.Context {
+// WithRequesterRecord returns a context in which RecordRequester fills r, as
+// an admission does; a resolver's own tests use it to read what it records.
+func WithRequesterRecord(ctx context.Context, r *Requester) context.Context {
 	return context.WithValue(ctx, requesterKey{}, r)
 }
 

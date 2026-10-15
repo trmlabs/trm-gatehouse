@@ -42,14 +42,16 @@ const prefixReadConcurrency = 64
 //     object or a string holding one. Automations are then stored in buckets
 //     and the head's document carries no "automations"; without the field,
 //     the document may carry its own (bounded by Vault's size limit).
-//   - automations/<bucket>: field "automations" is a JSON array of
-//     Automations. Which bucket holds an Automation is the writer's choice
-//     (by a hash of its id, so one change rewrites one bucket); an id in two
-//     buckets is refused at load like any repeated id.
+//   - automations/<bucket>: field "automations" is a string holding a JSON
+//     array of Automations (Terraform's jsonencode of the list); the head's
+//     digest is over that string. Which bucket holds an Automation is the
+//     writer's choice (by a hash of its id, so one change rewrites one
+//     bucket); an id in two buckets is refused at load like any repeated id.
 //
 // Buckets are read incrementally: a reload reads only the buckets whose
-// digest in the head differs from the last good catalog's, so changing one
-// Automation costs the head and one bucket, however many there are.
+// digest in the head differs from the last good catalog's. Every new head
+// still rereads every entry, so changing one Automation costs the head, the
+// entries and one bucket, however many buckets there are.
 //
 // Terraform writes the entries, then the head. The head's KV version is the
 // catalog version, so a poll costs one read until the head changes. A reload
@@ -86,9 +88,6 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		}
 		if folderDigest(names, entries) != want {
 			return nil, version, fmt.Errorf("catalog entries do not match the head; retrying at the next poll (%s)", entryChanges(lastEntries, names, entries))
-		}
-		if head["automations_sha256"] != nil || head["automations_names"] != nil {
-			return nil, version, errors.New("catalog head carries automations_sha256 or automations_names, which this broker does not read; store Automations in automations_buckets")
 		}
 		var buckets map[string]automationBucket
 		if listed, ok := head["automations_buckets"]; ok {
@@ -366,7 +365,8 @@ func readEntries(ctx context.Context, vault Logical, base, field string, names [
 
 // assemble rebuilds the one-document form Parse validates. Each entry's name
 // must be the key it is stored under. Bucketed Automations join in bucket
-// name order.
+// name order. With none, the document carries no "automations", so a broker
+// that predates them still reads the stored copy.
 func assemble(document string, names, entries []string, buckets map[string]automationBucket) ([]byte, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(document), &top); err != nil {
@@ -393,8 +393,10 @@ func assemble(document string, names, entries []string, buckets map[string]autom
 		for _, name := range order {
 			all = append(all, buckets[name].items...)
 		}
-		if top["automations"], err = json.Marshal(all); err != nil {
-			return nil, err
+		if len(all) > 0 {
+			if top["automations"], err = json.Marshal(all); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return json.Marshal(top)

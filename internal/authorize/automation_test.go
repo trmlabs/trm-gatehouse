@@ -3,6 +3,7 @@ package authorize
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Infisical/agent-vault/internal/authorize/authorizetest"
 	"github.com/Infisical/agent-vault/internal/entitlement"
@@ -175,9 +176,15 @@ func TestAutomationDecisions(t *testing.T) {
 		if d.Allowed != c.allowed || d.Outcome != c.outcome {
 			t.Errorf("%s on %s: %+v, want %s", c.token, c.entry, d, c.outcome)
 		}
-		if c.allowed && d.ObjectID != "oid-alice@example.com" {
-			t.Errorf("%s on %s decided on %q, not the owner's account", c.token, c.entry, d.ObjectID)
+		// The decision is the owner's (bob is not in the ledger's group),
+		// but the row's object ID is the run person's, as its requester is.
+		if person := automationRuns[c.token].Subject; c.allowed && d.ObjectID != "oid-"+person {
+			t.Errorf("%s on %s records object ID %q, not the run person's", c.token, c.entry, d.ObjectID)
 		}
+	}
+	// A runner refusal records the runner and the group checked.
+	if d := decide("carol-explorer", "ledger"); d.ObjectID != "oid-carol@example.com" || len(d.Groups) != 1 || d.Groups[0] != teamGroup {
+		t.Errorf("carol's refusal: %+v", d)
 	}
 	// A requester that is not an Automation is never served on the pool.
 	e, _ := catalog.Match("api.tracker.example", 443, "GET", "/v1/x", "automations")
@@ -264,5 +271,47 @@ func TestRunnerGroupIsLookedUpFreshAtT2(t *testing.T) {
 	}
 	if source.calls != before+1 {
 		t.Fatal("bob's other cached answer survived the fresh refusal")
+	}
+}
+
+// The owner's check for an Automation is charged to that Automation's own
+// lookup budget: its busy T2 runs neither use up the owner's own budget nor
+// another Automation's.
+func TestAutomationOwnerChecksUseTheAutomationsBudget(t *testing.T) {
+	catalog := automationCatalog(t)
+	pool, _ := catalog.Pool("automations")
+	now := time.Unix(1_700_000_000, 0)
+	cache := &entitlement.Cache{
+		Source:           directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}},
+		LookupsPerMinute: 2,
+		Now:              func() time.Time { return now },
+	}
+	ctx := context.Background()
+	vault, err := catalog.Match("api.vault.example", 443, "GET", "/v1/x", "automations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decide := func(token string) entitlement.Decision {
+		t.Helper()
+		run := automationRuns[token]
+		who, refusal := Resolve(ctx, pool, token, Claims{Pod: "pod-" + token, ClaimedRun: run.Run}, automationRuns, &authorizetest.MemBinder{})
+		if refusal != "" {
+			t.Fatalf("%s: %q", token, refusal)
+		}
+		now = now.Add(10 * time.Second) // past the recent answer an over-budget lookup may reuse
+		return Decide(ctx, cache, pool, *vault, who)
+	}
+	// alice's and bob's runs of auto-1 share auto-1's budget for the owner check.
+	for i, token := range []string{"explorer", "bob-explorer"} {
+		if d := decide(token); !d.Allowed {
+			t.Fatalf("request %d: %+v", i, d)
+		}
+	}
+	if d := decide("explorer"); d.Allowed || d.Outcome != "entitlement_rate_limited" {
+		t.Fatalf("third T2 request within the minute: %+v", d)
+	}
+	// alice's own budget is untouched, so her own T2 sessions are still served.
+	if _, _, err := cache.Fresh(ctx, "alice@example.com", []string{automationGroup}); err != nil {
+		t.Fatalf("alice's own lookup after her Automation's: %v", err)
 	}
 }

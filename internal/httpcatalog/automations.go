@@ -24,9 +24,13 @@ type Automation struct {
 	// is disabled.
 	Owner string `json:"owner"`
 	// RunnerGroup, optional, is the Entra group whose members may also start
-	// the Automation's runs. Without it only the owner's runs are served, so
-	// someone else who can edit or trigger the Automation never borrows the
-	// owner's access.
+	// the Automation's runs. A member acts with the owner's access for the
+	// listed entries, whatever their own groups. Without it, a run whose
+	// token names anyone other than the owner is refused. The broker sees
+	// only the person the run token names, never who edited the Automation
+	// or set off its trigger: a run Cursor attributes to the owner is served
+	// on the owner's account, so whoever can edit or trigger an Automation
+	// that runs as its owner acts with the owner's access.
 	RunnerGroup string `json:"runnerGroup,omitempty"`
 	// Entries are the catalog entries the Automation may use. Each must also
 	// be granted to the pool its runs land on.

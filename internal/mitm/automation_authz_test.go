@@ -30,30 +30,34 @@ func (c cursorRunner) VerifyCursor(_ context.Context, token string) (runnerid.Se
 }
 
 // Every audit row from an automation pool names the Automation, allowed or
-// refused, and the row passes the chain's own validation.
+// refused, and the row passes the chain's own validation. The requester's
+// object ID is the run person's, whoever owns the Automation.
 func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"pools":[{"name":"automations","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],
 	 "entries":[{"name":"open","host":"api.vendor.example","pathPrefixes":["/open/"],"methods":["GET"],"header":"Authorization","placeholder":"__vault_KEY__","key":{"mount":"gatehouse","path":"vendors/p","field":"f"},"pools":["automations"]}],
-	 "automations":[{"id":"auto-1","name":"explorer","owner":"owner@example.com","entries":["open"]}]}`))
+	 "automations":[{"id":"auto-1","name":"explorer","owner":"owner@example.com","runnerGroup":"11111111-2222-3333-4444-555555555555","entries":["open"]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	runner := cursorRunner{
 		"listed":   {Kind: runnerid.KindPerson, Subject: "owner@example.com", Owner: "user:1", Run: "bc-1", Source: "AUTOMATIONS", Automation: "auto-1"},
 		"unlisted": {Kind: runnerid.KindPerson, Subject: "owner@example.com", Owner: "user:1", Run: "bc-2", Source: "AUTOMATIONS", Automation: "auto-9"},
+		"runner":   {Kind: runnerid.KindPerson, Subject: "bob@example.com", Owner: "user:2", Run: "bc-3", Source: "AUTOMATIONS", Automation: "auto-1"},
 	}
 	p := &Proxy{adapter: &HeaderAdapter{Catalog: catalog, Runner: runner, Sessions: &authorizetest.MemBinder{},
-		Entitlements: &entitlement.Cache{Source: directory{"owner@example.com": {}}}}}
+		Entitlements: &entitlement.Cache{Source: directory{"owner@example.com": {}, "bob@example.com": {"11111111-2222-3333-4444-555555555555"}}}}}
 	open, _ := catalog.Match("api.vendor.example", 443, "GET", "/open/x", "automations")
-	for token, want := range map[string]struct{ refusal, name, owner, requester string }{
-		"listed":   {"", "explorer", "owner@example.com", "owner@example.com"},
-		"unlisted": {"automation_unlisted", "", "", ""},
+	for token, want := range map[string]struct{ refusal, name, owner, requester, oid string }{
+		"listed":   {"", "explorer", "owner@example.com", "owner@example.com", "oid-owner@example.com"},
+		"runner":   {"", "explorer", "owner@example.com", "bob@example.com", "oid-bob@example.com"},
+		"unlisted": {"automation_unlisted", "", "", "", ""},
 	} {
 		event := auditchain.Event{Event: auditchain.EventHTTPRequest}
 		run := runner[token].Run
 		got := p.authorize(withSessionToken(context.Background(), token), &brokercore.ProxyScope{Pool: "automations", AgentID: "a", WorkloadID: "pod-" + token, ClaimedRun: run}, open, &event)
 		if got != want.refusal || event.Source != "AUTOMATIONS" || event.Automation != runner[token].Automation ||
-			event.AutomationName != want.name || event.AutomationOwner != want.owner || event.Requester != want.requester || event.TokenSHA256 != "sha-"+token {
+			event.AutomationName != want.name || event.AutomationOwner != want.owner || event.Requester != want.requester || event.TokenSHA256 != "sha-"+token ||
+			event.RequesterOID != want.oid {
 			t.Errorf("%s: %q %+v", token, got, event)
 		}
 		if err := event.Validate(); err != nil {

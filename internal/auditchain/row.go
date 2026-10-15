@@ -47,9 +47,13 @@ type Row struct {
 	Session   string `json:"session,omitempty"`   // broker-generated session ID
 	Outcome   string `json:"outcome,omitempty"`   // fixed code
 	Requester string `json:"requester,omitempty"` // developer identity, only from a verified source
-	// Authorization decision fields (see mitm authorize).
-	RequesterKind string `json:"requesterKind,omitempty"` // person, agent, workload or none
-	RequesterOID  string `json:"requesterOID,omitempty"`  // Entra object ID of a person
+	// Authorization decision fields (see mitm authorize). On an automation
+	// row, requester, requesterOID and requesterDepartment are the person the
+	// run's token names; tier, decision, groups and cacheAgeSec are the
+	// decision on automationOwner's account, or on an automation_runner
+	// refusal the runner group's check.
+	RequesterKind string `json:"requesterKind,omitempty"` // person, agent, workload, automation or none
+	RequesterOID  string `json:"requesterOID,omitempty"`  // Entra object ID of the person named by requester
 	TokenSHA256   string `json:"tokenSHA256,omitempty"`   // runner session token hash; never the token
 	Tier          string `json:"tier,omitempty"`
 	Decision      string `json:"decision,omitempty"`
