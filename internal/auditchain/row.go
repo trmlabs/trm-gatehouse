@@ -75,6 +75,11 @@ type Row struct {
 	// "git.fetch" or "git.push", or "graphql" for a GitHub GraphQL request no
 	// route admits. Never a path or body.
 	Operation string `json:"operation,omitempty"`
+	// Branch is the head branch of what a CI restart (pr.update_branch,
+	// actions.rerun, actions.rerun_failed) acted on or was refused for, as
+	// GitHub named it, or "invalid" when it is not a plain name (see
+	// BranchField). Empty when the lookup failed before GitHub named one.
+	Branch string `json:"branch,omitempty"`
 	// Database is the database name a refused PostgreSQL session asked for,
 	// before any catalog entry matched it, or "invalid" when it is not a plain
 	// name (see DatabaseField).
@@ -100,23 +105,25 @@ type Row struct {
 	// MACVersion selects the MAC input: absent (0) is v1, written before the
 	// authorization fields existed; 2 adds them; 3 adds the signing-key
 	// refusal fields; 4 adds the proxy certificate fields; 5 adds the refused
-	// target; MACVersionCurrent (6) adds the operation, the refused database
-	// and the requester's department, and covers every field.
+	// target; 6 adds the operation, the refused database and the requester's
+	// department; MACVersionCurrent (7) adds a CI restart's branch, and covers
+	// every field.
 	MACVersion int    `json:"macVersion,omitempty"`
 	MAC        string `json:"mac"`
 }
 
 // MACVersionCurrent is the MAC input every new row uses.
-const MACVersionCurrent = 6
+const MACVersionCurrent = 7
 
 // macInput encodes every field except MAC with explicit lengths, so no two
 // distinct rows share an input regardless of field contents. Version 2 adds
 // the authorization fields and the version itself, and version 3 the
 // signing-key refusal fields, and version 4 the proxy certificate fields, and
 // version 5 the refused target, and version 6 the operation, the refused
-// database and the requester's department. Older versions are kept only to
-// verify rows written before them, and a row carrying a field its version's
-// MAC does not cover fails verification (see v2Only through v6Only).
+// database and the requester's department, and version 7 a CI restart's
+// branch. Older versions are kept only to verify rows written before them,
+// and a row carrying a field its version's MAC does not cover fails
+// verification (see v2Only through v7Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,
@@ -146,7 +153,11 @@ func (r Row) macInput() []byte {
 		return lengthPrefixed("gatehouse-audit-v5", fields...)
 	}
 	fields = append(fields, r.Operation, r.Database, r.RequesterDepartment)
-	return lengthPrefixed("gatehouse-audit-v6", fields...)
+	if r.MACVersion < 7 {
+		return lengthPrefixed("gatehouse-audit-v6", fields...)
+	}
+	fields = append(fields, r.Branch)
+	return lengthPrefixed("gatehouse-audit-v7", fields...)
 }
 
 // v2Only reports whether a row sets a field that only the v2 MAC covers.
@@ -168,6 +179,9 @@ func (r Row) v5Only() bool { return r.Target != "" }
 func (r Row) v6Only() bool {
 	return r.Operation != "" || r.Database != "" || r.RequesterDepartment != ""
 }
+
+// v7Only reports whether a row sets a field that only the v7 MAC covers.
+func (r Row) v7Only() bool { return r.Branch != "" }
 
 func (r Row) computeMAC(key []byte) string {
 	h := hmac.New(sha256.New, key)

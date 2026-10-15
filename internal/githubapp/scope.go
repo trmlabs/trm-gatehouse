@@ -17,7 +17,8 @@ import (
 
 // Scope is what the catalog lets one installation's tokens reach: its
 // repositories ("owner/name") and whether any entry opens pull requests,
-// reads Actions, reads deployments, reads check runs or reads commit statuses.
+// reads Actions, reads deployments, reads check runs, reads commit statuses or
+// runs a workflow run again (ActionsWrite).
 type Scope struct {
 	Repos        []string
 	PullRequests bool
@@ -25,6 +26,7 @@ type Scope struct {
 	Deployments  bool
 	Checks       bool
 	Statuses     bool
+	ActionsWrite bool
 }
 
 // ScopeMode is what the broker does about an installation's reach.
@@ -251,7 +253,8 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 			case name == "metadata" && level == "read",
 				name == "contents" && (level == "read" || level == "write"),
 				name == "pull_requests" && want.PullRequests && level == "write",
-				name == "actions" && want.Actions && level == "read",
+				name == "actions" && (want.Actions || want.ActionsWrite) && level == "read",
+				name == "actions" && want.ActionsWrite && level == "write",
 				name == "deployments" && want.Deployments && level == "read",
 				name == "checks" && want.Checks && level == "read",
 				name == "statuses" && want.Statuses && level == "read":

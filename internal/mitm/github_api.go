@@ -38,7 +38,9 @@ const readyMutation = `mutation($id: ID!) { markPullRequestReadyForReview(input:
 // approve, review, merge or push: those are unlisted. A write to an existing
 // pull request (comment, label, body edit, ready) goes ahead only when its
 // head is under the pool's push prefixes or the repository's pull request
-// prefixes, and a comment edit only on the App's own comment there.
+// prefixes, and a comment edit only on the App's own comment there. A CI
+// restart (a pull request's branch update, a workflow run run again) goes
+// ahead only on a branch under the pool's own push prefixes (restartInScope).
 func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, api httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if api.Entry != nil {
@@ -62,7 +64,7 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
-	jsonBody := api.Write && api.Route != "ready"
+	jsonBody := api.Write && api.Route != "ready" && api.RestartOf == 0
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
 		unsafePath(r.URL.Path) || r.Header.Get("Upgrade") != "" || r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 ||
 		(jsonBody && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json")) {
@@ -111,6 +113,8 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		body, ok = dispatchFrom(body, api.Repo.DispatchEvents)
 	case "ready":
 		ok = len(bytes.TrimSpace(body)) == 0 || string(bytes.TrimSpace(body)) == "{}"
+	case "update-branch", "rerun", "rerun-failed":
+		body, ok = restartBody(body, api.Route == "update-branch")
 	}
 	if !ok {
 		deny(http.StatusBadRequest, "request_shape")
@@ -128,6 +132,14 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	if err != nil {
 		deny(http.StatusServiceUnavailable, "token_unavailable")
 		return
+	}
+	if api.RestartOf > 0 {
+		branch, inScope := p.restartInScope(r, target, expected, api, token.Value())
+		event.Branch = auditchain.BranchField(branch)
+		if !inScope {
+			deny(http.StatusForbidden, restartOutcome(api.Route))
+			return
+		}
 	}
 	var nodeID string
 	if api.CommentID > 0 {
@@ -167,7 +179,7 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 			out.Header[name] = append([]string(nil), v...)
 		}
 	}
-	if api.Route == "ready" {
+	if api.Route == "ready" || (api.RestartOf > 0 && len(body) > 0) {
 		out.Header.Set("Content-Type", "application/json")
 	}
 	credential := "Bearer " + token.Value()
@@ -209,6 +221,10 @@ func routePermissions(scope string) githubapp.Permissions {
 		return githubapp.ChecksRead
 	case "statuses":
 		return githubapp.StatusesRead
+	case "update-branch":
+		return githubapp.UpdateBranch
+	case "actions-write":
+		return githubapp.ActionsWrite
 	}
 	return githubapp.PullRequestsWrite
 }
@@ -336,17 +352,25 @@ func (p *Proxy) pullRequestInScope(r *http.Request, target, host string, api htt
 		} `json:"head"`
 	}
 	path := "/repos/" + api.Repo.Repo + "/pulls/" + strconv.FormatInt(number, 10)
-	if !p.githubGet(r, target, host, path, token, &pr) ||
-		pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, api.Repo.Repo) ||
-		strings.Contains(pr.Head.Ref, ":") || unsafeBranch(pr.Head.Ref) {
+	if !p.githubGet(r, target, host, path, token, &pr) || pr.Head.Repo == nil ||
+		!headInReach(api.Repo.Repo, pr.Head.Repo.FullName, pr.Head.Ref, api.HeadPrefixes) {
 		return "", false
 	}
-	for _, prefix := range api.HeadPrefixes {
-		if strings.HasPrefix(pr.Head.Ref, prefix) && len(pr.Head.Ref) > len(prefix) {
-			return pr.NodeID, true
+	return pr.NodeID, true
+}
+
+// headInReach reports whether a pull request's head is a branch of repo itself
+// (not a fork) under one of prefixes.
+func headInReach(repo, headRepo, ref string, prefixes []string) bool {
+	if !strings.EqualFold(headRepo, repo) || strings.Contains(ref, ":") || unsafeBranch(ref) {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(ref, prefix) && len(ref) > len(prefix) {
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // onlyBody rebuilds a body edit: one JSON object with exactly one string
