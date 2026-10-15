@@ -335,7 +335,7 @@ func (f *fileRanges) current() []net.IPNet {
 // parseHostAddresses parses an egress ranges file: single addresses only.
 func parseHostAddresses(raw string) ([]net.IPNet, error) {
 	var out []net.IPNet
-	for _, line := range strings.Split(raw, "\n") {
+	for n, line := range strings.Split(raw, "\n") {
 		if i := strings.IndexByte(line, '#'); i >= 0 {
 			line = line[:i]
 		}
@@ -344,7 +344,9 @@ func parseHostAddresses(raw string) ([]net.IPNet, error) {
 			if err != nil {
 				addr, aerr := netip.ParseAddr(field)
 				if aerr != nil || addr.Zone() != "" {
-					return nil, fmt.Errorf("entry %q is not an address", field)
+					// The line, not the entry: a path set to the wrong file
+					// must not copy that file's contents into the log.
+					return nil, fmt.Errorf("line %d: an entry is not an address", n+1)
 				}
 				prefix = netip.PrefixFrom(addr, addr.BitLen())
 			}

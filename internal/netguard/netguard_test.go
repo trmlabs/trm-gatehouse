@@ -3,6 +3,7 @@ package netguard
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -698,6 +699,11 @@ func TestParseHostAddresses(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		}
 	}
+	// A refusal names the line, never the entry, so a path set to the wrong
+	// file (a token, say) never copies it into the log.
+	if _, err := parseHostAddresses("203.0.113.9\nnot-an-address-secret\n"); err == nil || strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("refusal: %v", err)
+	}
 	// A file that lists no address is refused, so a writer that resolved nothing cuts nothing.
 	for _, empty := range []string{"", "\n", "# resolved nothing\n"} {
 		if _, err := parseHostAddresses(empty); err == nil {
@@ -800,9 +806,11 @@ func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 // refused dial names the file too.
 func TestEgressRangesFileLogsAMissingFile(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
+	// slog.SetDefault also redirects the log package, which restoring the
+	// slog default alone does not undo.
+	previous, out, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(out); log.SetFlags(flags) })
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener := acceptAndClose(t)
 	path := filepath.Join(t.TempDir(), "egress")
