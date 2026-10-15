@@ -85,11 +85,16 @@ type GitBinding struct {
 }
 
 // GitRepo is one repository. RefPrefixes, when set, restrict which refs a
-// push may create, update or delete (for example refs/heads/cursor/).
+// push may create, update or delete (for example refs/heads/cursor/), for
+// every pool of the entry. PoolRefPrefixes give each pool its own besides
+// (see PushPrefixes): once a repository lists either, a pool may push only
+// under the shared prefixes and its own, and a pool with none pushes nothing,
+// so one entry serves many pools without any pushing to another's branches.
 type GitRepo struct {
-	Repo        string   `json:"repo"` // owner/name
-	Access      string   `json:"access"`
-	RefPrefixes []string `json:"refPrefixes,omitempty"`
+	Repo            string              `json:"repo"` // owner/name
+	Access          string              `json:"access"`
+	RefPrefixes     []string            `json:"refPrefixes,omitempty"`
+	PoolRefPrefixes map[string][]string `json:"poolRefPrefixes,omitempty"`
 	// The rest apply to github-api entries only.
 	// Operations are what the pool may do in this repository, from the
 	// vocabulary in githubOperations; unset means DefaultGitHubOperations.
@@ -99,6 +104,9 @@ type GitRepo struct {
 	// edit and mark ready, as its operations allow, besides its own (from its
 	// push prefixes). It never opens a pull request from them.
 	PullRequestPrefixes []string `json:"pullRequestPrefixes,omitempty"`
+	// PoolPullRequestPrefixes are pull request prefixes for one pool of the
+	// entry each, besides the shared PullRequestPrefixes.
+	PoolPullRequestPrefixes map[string][]string `json:"poolPullRequestPrefixes,omitempty"`
 	// Labels are the only labels pr.label may add.
 	Labels []string `json:"labels,omitempty"`
 	// DispatchEvents are the only repository_dispatch event types dispatch may
@@ -133,6 +141,21 @@ var githubOperations = map[string]string{
 // holding only that permission.
 var githubRouteScopes = map[string][]string{
 	"actions.read": {"checks", "statuses"},
+}
+
+// PushPrefixes returns the ref prefixes pool may push to in the repository:
+// the shared RefPrefixes, then the pool's own. limited is false when the
+// repository lists none for any pool, so only GitHub's branch protection
+// holds a push; when it is true, a pool with no prefixes may push nothing.
+func (r GitRepo) PushPrefixes(pool string) (prefixes []string, limited bool) {
+	prefixes = append(append([]string(nil), r.RefPrefixes...), r.PoolRefPrefixes[pool]...)
+	return prefixes, len(r.RefPrefixes) > 0 || len(r.PoolRefPrefixes) > 0
+}
+
+// pullRequestHeads returns the head prefixes of pull requests pool may act on
+// besides its push prefixes: the shared PullRequestPrefixes, then its own.
+func (r GitRepo) pullRequestHeads(pool string) []string {
+	return append(append([]string(nil), r.PullRequestPrefixes...), r.PoolPullRequestPrefixes[pool]...)
 }
 
 // operations returns the repository's operations, the default when unset.
@@ -451,7 +474,7 @@ func (e *Entry) normalize() error {
 			return err
 		}
 		for _, r := range e.Git.Repos {
-			if r.Access != "write" || len(r.RefPrefixes) > 0 {
+			if r.Access != "write" || len(r.RefPrefixes) > 0 || len(r.PoolRefPrefixes) > 0 {
 				return fmt.Errorf("github-api repository %s must have access write (open pull requests) and no ref prefixes", r.Repo)
 			}
 			if err := r.normalizeGitHubAPI(); err != nil {
@@ -662,7 +685,7 @@ func (e *Entry) normalizeGit() error {
 	for i := range g.Repos {
 		r := &g.Repos[i]
 		r.Repo = strings.ToLower(r.Repo)
-		if e.Kind == "git" && (r.Operations != nil || len(r.PullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
+		if e.Kind == "git" && (r.Operations != nil || len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
 			return fmt.Errorf("repository %s: operations, pull request prefixes, labels and dispatch events belong to a github-api entry", r.Repo)
 		}
 		if !repoPattern.MatchString(r.Repo) || strings.Contains(r.Repo, "..") || strings.HasSuffix(r.Repo, ".git") || seen[r.Repo] {
@@ -672,13 +695,19 @@ func (e *Entry) normalizeGit() error {
 		if r.Access != "read" && r.Access != "write" {
 			return fmt.Errorf("repository %s access must be read or write", r.Repo)
 		}
-		if r.Access == "read" && len(r.RefPrefixes) > 0 {
+		if r.Access == "read" && (len(r.RefPrefixes) > 0 || len(r.PoolRefPrefixes) > 0) {
 			return fmt.Errorf("repository %s is read-only; ref prefixes apply to pushes", r.Repo)
 		}
 		for _, prefix := range r.RefPrefixes {
-			if !refPattern.MatchString(prefix) || strings.Contains(prefix, "..") || strings.Contains(prefix, "//") {
+			if !validRefPrefix(prefix) {
 				return fmt.Errorf("invalid ref prefix %q", prefix)
 			}
+		}
+		if err := checkPoolPrefixes(r.Repo, "ref prefix", r.PoolRefPrefixes, e.Pools, validRefPrefix); err != nil {
+			return err
+		}
+		if err := checkPoolPrefixes(r.Repo, "pull request prefix", r.PoolPullRequestPrefixes, e.Pools, validPullRequestPrefix); err != nil {
+			return err
 		}
 	}
 	if e.MaxRequestBytes == 0 {
@@ -689,6 +718,49 @@ func (e *Entry) normalizeGit() error {
 	}
 	if e.MaxRequestBytes < 1 || e.MaxRequestBytes > 2<<30 || e.MaxResponseBytes < 1 || e.MaxResponseBytes > 8<<30 {
 		return errors.New("size limits out of range")
+	}
+	return nil
+}
+
+func validRefPrefix(prefix string) bool {
+	return refPattern.MatchString(prefix) && !strings.Contains(prefix, "..") && !strings.Contains(prefix, "//")
+}
+
+func validPullRequestPrefix(prefix string) bool {
+	return branchPrefixPattern.MatchString(prefix) && !strings.Contains(prefix, "..") && !strings.HasPrefix(prefix, "refs/")
+}
+
+// checkPoolPrefixes checks a repository's per-pool prefixes: each pool is one
+// the entry grants and lists distinct, valid prefixes, and no pool's prefix
+// starts another pool's (ignoring case), so each pool's branches are its own.
+// Sorting puts every prefix right before the ones it starts, so the check
+// grows with the number of prefixes, not their pairs.
+func checkPoolPrefixes(repo, what string, byPool map[string][]string, pools []string, valid func(string) bool) error {
+	type owned struct{ pool, prefix string }
+	var all []owned
+	for pool, prefixes := range byPool {
+		if !contains(pools, pool) {
+			return fmt.Errorf("repository %s: %s for pool %q, which the entry does not grant", repo, what, pool)
+		}
+		if len(prefixes) == 0 {
+			return fmt.Errorf("repository %s: list at least one %s for pool %q, or leave the pool out", repo, what, pool)
+		}
+		seen := map[string]bool{}
+		for _, prefix := range prefixes {
+			if !valid(prefix) || seen[strings.ToLower(prefix)] {
+				return fmt.Errorf("repository %s: invalid or duplicate %s %q for pool %q", repo, what, prefix, pool)
+			}
+			seen[strings.ToLower(prefix)] = true
+			all = append(all, owned{pool, strings.ToLower(prefix)})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
+	for i := range all {
+		for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
+			if all[j].pool != all[i].pool {
+				return fmt.Errorf("repository %s: %s %q of pool %q overlaps pool %q's %q", repo, what, all[j].prefix, all[j].pool, all[i].pool, all[i].prefix)
+			}
+		}
 	}
 	return nil
 }
@@ -714,7 +786,7 @@ func (r *GitRepo) normalizeGitHubAPI() error {
 		return fmt.Errorf("repository %s: pr.label needs labels, and labels need pr.label", r.Repo)
 	case r.Allows("dispatch") != (len(r.DispatchEvents) > 0):
 		return fmt.Errorf("repository %s: dispatch needs dispatchEvents, and dispatchEvents need dispatch", r.Repo)
-	case len(r.PullRequestPrefixes) > 0 && !r.Allows("pr.comment") && !r.Allows("pr.edit") && !r.Allows("pr.label") && !r.Allows("pr.ready"):
+	case (len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0) && !r.Allows("pr.comment") && !r.Allows("pr.edit") && !r.Allows("pr.label") && !r.Allows("pr.ready"):
 		return fmt.Errorf("repository %s: pullRequestPrefixes need pr.comment, pr.edit, pr.label or pr.ready", r.Repo)
 	}
 	check := func(what string, values []string, pattern *regexp.Regexp) error {
@@ -746,6 +818,10 @@ type GitRequest struct {
 	Entry *Entry
 	Repo  GitRepo
 	Write bool // receive-pack: the push service; for github-api, a POST
+	// RefPrefixes are, for a push, the refs it may create, update or delete:
+	// the repository's shared prefixes and the pool's own (PushPrefixes);
+	// none when the repository limits no ref.
+	RefPrefixes []string
 	// OpensPullRequest marks a github-api request that opens a pull request;
 	// its head must start with one of HeadPrefixes, the pool's own push
 	// prefixes (none: no pull request may be opened).
@@ -766,8 +842,9 @@ type GitRequest struct {
 	Method    string
 	// Target is the pull request a write acts on (comment, label, body edit,
 	// ready); the broker acts only when its head is under HeadPrefixes, which
-	// then also holds the repository's PullRequestPrefixes. CommentID is the
-	// comment an edit targets, which must be the App's own.
+	// then also holds the repository's pull request prefixes, shared and the
+	// pool's own. CommentID is the comment an edit targets, which must be the
+	// App's own.
 	Target    int64
 	CommentID int64
 	// Query is the request's query string, rebuilt from its allowed keys.
@@ -829,6 +906,14 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 			case write && r.Access != "write":
 				return matched, true, ErrReadOnly
 			}
+			if write {
+				var limited bool
+				if matched.RefPrefixes, limited = r.PushPrefixes(pool); limited && len(matched.RefPrefixes) == 0 {
+					// The repository holds every pool to its own prefixes, and
+					// this pool has none: it may clone and fetch only.
+					return matched, true, ErrReadOnly
+				}
+			}
 			return matched, true, nil
 		}
 	}
@@ -840,8 +925,8 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 // exist. Every repository gets the pull request routes: open a pull request
 // from a branch under the pool's own push prefixes (HeadPrefixes), list and
 // read pull requests, read and post comments, and, on a pull request whose
-// head is under the pool's push prefixes or the repository's
-// PullRequestPrefixes, comment, edit the body, edit the App's own comment and
+// head is under the pool's push prefixes or its pull request prefixes (see
+// pullRequestHeads), comment, edit the body, edit the App's own comment and
 // mark it ready. A pull request's files and a compare return code, so they
 // exist only for a pool whose git entry can clone the repository, which the
 // broker then authorizes too (CloneEntry). Labels, repository dispatch, Actions
@@ -915,12 +1000,12 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 				matched.OpensPullRequest, matched.HeadPrefixes = true, c.pushBranchPrefixes(repo, pool)
 			case route.target > 0:
 				matched.Target = route.target
-				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.PullRequestPrefixes...)
+				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 				if route.name == "comment" {
 					matched.CommentsOn = route.target
 				}
 			case route.comment > 0:
-				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.PullRequestPrefixes...)
+				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 			}
 			return matched, true, nil
 		}
@@ -929,8 +1014,9 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 }
 
 // pushBranchPrefixes are the branch names (refs/heads/ removed) a pool may
-// push to in a repository, from its git entries' refPrefixes. A pull request
-// may come only from one of them; none means none may be opened.
+// push to in a repository, from its git entries' shared and per-pool ref
+// prefixes (PushPrefixes). A pull request may come only from one of them; none
+// means none may be opened.
 func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 	var out []string
 	for _, e := range c.entries {
@@ -941,7 +1027,8 @@ func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 			if r.Repo != repo || r.Access != "write" {
 				continue
 			}
-			for _, prefix := range r.RefPrefixes {
+			prefixes, _ := r.PushPrefixes(pool)
+			for _, prefix := range prefixes {
 				if branch, ok := strings.CutPrefix(prefix, "refs/heads/"); ok && branch != "" {
 					out = append(out, branch)
 				}

@@ -21,7 +21,8 @@ import (
 // forwardGit serves git smart-HTTP for a catalog git entry. The worker sends
 // no credential; the broker adds a token minted for this one repository with
 // contents read, or write only for a push to a write binding. GitHub's own
-// branch protection still governs every push, and RefPrefixes narrow it.
+// branch protection still governs every push, and the pool's ref prefixes
+// (httpcatalog GitRepo.PushPrefixes) narrow it.
 func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, git httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if git.Entry != nil {
@@ -67,14 +68,14 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	}
 	body := &limitedBody{reader: r.Body, remaining: entry.MaxRequestBytes}
 	var outBody io.Reader = body
-	if git.Write && r.Method == http.MethodPost && len(git.Repo.RefPrefixes) > 0 {
+	if git.Write && r.Method == http.MethodPost && len(git.RefPrefixes) > 0 {
 		consumed, refs, err := readReceivePackCommands(body)
 		if err != nil {
 			deny(http.StatusBadRequest, "push_shape")
 			return
 		}
 		for _, ref := range refs {
-			if !hasAnyPrefix(ref, git.Repo.RefPrefixes) {
+			if !hasAnyPrefix(ref, git.RefPrefixes) {
 				deny(http.StatusForbidden, "ref_outside_binding")
 				return
 			}

@@ -444,3 +444,138 @@ func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
 		t.Errorf("only an alternate port lists the repository: %v", err)
 	}
 }
+
+// One git entry and one github-api entry serve several pools, each on its own
+// branches: per-pool prefixes apply to their pool only, beside the shared
+// ones, and a pool is refused on another pool's prefix for a push, opening a
+// pull request and acting on one.
+const poolsGitEntry = `{"name":"github","host":"github.com","kind":"git","pools":["pool-a","pool-b","pool-c"],
+	"git":{"appID":7,"installationID":42,"repos":[
+		{"repo":"trmlabs/trm-b2b","access":"write","poolRefPrefixes":{
+			"pool-a":["refs/heads/cursor/pool-a/"],
+			"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]}},
+		{"repo":"trmlabs/docs","access":"read"}]}}`
+
+const poolsAPIEntry = `{"name":"github-api","host":"api.github.com","kind":"github-api","pools":["pool-a","pool-b","pool-c"],
+	"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/trm-b2b","access":"write",
+		"operations":["pr.open","pr.read","pr.comment","pr.edit"],
+		"poolPullRequestPrefixes":{"pool-a":["review/"]}}]}}`
+
+func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
+	c, err := Parse([]byte(`{"entries":[` + poolsGitEntry + `,` + poolsAPIEntry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		pool, method, path, query, prefixes string
+		err                                 error
+	}{
+		{"pool-a", "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", "[refs/heads/cursor/pool-a/]", nil},
+		{"pool-b", "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", "[refs/heads/cursor/pool-b/ refs/heads/factory/]", nil},
+		{"pool-b", "GET", "/trmlabs/trm-b2b.git/info/refs", "service=git-receive-pack", "[refs/heads/cursor/pool-b/ refs/heads/factory/]", nil},
+		// pool-c is granted the repository but lists no prefix there: it
+		// clones and fetches, and never pushes.
+		{"pool-c", "POST", "/trmlabs/trm-b2b.git/git-upload-pack", "", "[]", nil},
+		{"pool-c", "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", "[]", ErrReadOnly},
+		{"pool-c", "GET", "/trmlabs/trm-b2b.git/info/refs", "service=git-receive-pack", "[]", ErrReadOnly},
+		{"pool-d", "POST", "/trmlabs/trm-b2b.git/git-upload-pack", "", "[]", ErrPool},
+	} {
+		m, ok, err := c.GitMatch("github.com", 443, tc.method, tc.path, tc.query, tc.pool)
+		if !ok || !errors.Is(err, tc.err) || (err == nil && fmt.Sprint(m.RefPrefixes) != tc.prefixes) {
+			t.Errorf("%s %s %s: ok=%v err=%v prefixes=%v", tc.pool, tc.method, tc.path, ok, err, m.RefPrefixes)
+		}
+	}
+	// A pull request opens only from the pool's own push prefixes, and a write
+	// acts only on pull requests under them or the pool's own pull request
+	// prefixes: pool-b never reaches review/, and nobody else reaches factory/.
+	for _, tc := range []struct{ pool, open, target string }{
+		{"pool-a", "[cursor/pool-a/]", "[cursor/pool-a/ review/]"},
+		{"pool-b", "[cursor/pool-b/ factory/]", "[cursor/pool-b/ factory/]"},
+		{"pool-c", "[]", "[]"},
+	} {
+		m, _, err := c.GitHubAPIMatch("api.github.com", 443, "POST", "/repos/trmlabs/trm-b2b/pulls", "", tc.pool)
+		if err != nil || !m.OpensPullRequest || fmt.Sprint(m.HeadPrefixes) != tc.open {
+			t.Errorf("%s opens from %v (%v), want %s", tc.pool, m.HeadPrefixes, err, tc.open)
+		}
+		for _, route := range []struct{ method, path string }{
+			{"POST", "/repos/trmlabs/trm-b2b/issues/7/comments"},
+			{"PATCH", "/repos/trmlabs/trm-b2b/pulls/7"},
+			{"PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5"},
+		} {
+			m, _, err := c.GitHubAPIMatch("api.github.com", 443, route.method, route.path, "", tc.pool)
+			if err != nil || fmt.Sprint(m.HeadPrefixes) != tc.target {
+				t.Errorf("%s %s %s reaches %v (%v), want %s", tc.pool, route.method, route.path, m.HeadPrefixes, err, tc.target)
+			}
+		}
+	}
+	// The shared lists still apply to every pool of the entry, before its own.
+	mixed := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
+	if c, err := Parse([]byte(`{"entries":[` + mixed + `]}`)); err != nil {
+		t.Fatal(err)
+	} else {
+		for pool, want := range map[string]string{"pool-a": "[refs/heads/shared/ refs/heads/cursor/pool-a/]", "pool-c": "[refs/heads/shared/]"} {
+			if m, _, err := c.GitMatch("github.com", 443, "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", pool); err != nil || fmt.Sprint(m.RefPrefixes) != want {
+				t.Errorf("%s with shared prefixes: %v %v", pool, m.RefPrefixes, err)
+			}
+		}
+	}
+	// A write repository that lists no prefix at all still leaves every pool
+	// to GitHub's branch protection, as before.
+	open := strings.Replace(gitEntry, `,"refPrefixes":["refs/heads/cursor/"]`, ``, 1)
+	if c, err := Parse([]byte(`{"entries":[` + open + `]}`)); err != nil {
+		t.Fatal(err)
+	} else if m, _, err := c.GitMatch("github.com", 443, "POST", "/trmlabs/trm-b2b.git/git-receive-pack", "", "pool-a"); err != nil || len(m.RefPrefixes) != 0 {
+		t.Errorf("unlimited repository: %v %v", m.RefPrefixes, err)
+	}
+}
+
+func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
+	refs := func(m string) string {
+		return strings.Replace(poolsGitEntry, `"poolRefPrefixes":{
+			"pool-a":["refs/heads/cursor/pool-a/"],
+			"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]}`, `"poolRefPrefixes":`+m, 1)
+	}
+	heads := func(m string) string {
+		return strings.Replace(poolsAPIEntry, `"poolPullRequestPrefixes":{"pool-a":["review/"]}`, `"poolPullRequestPrefixes":`+m, 1)
+	}
+	if refs(`{}`) == poolsGitEntry || heads(`{}`) == poolsAPIEntry {
+		t.Fatal("fixture replacement did not apply")
+	}
+	for name, doc := range map[string]string{
+		"pool the entry does not grant":     refs(`{"pool-x":["refs/heads/cursor/pool-x/"]}`),
+		"pool with no prefixes":             refs(`{"pool-a":[]}`),
+		"invalid ref prefix":                refs(`{"pool-a":["heads/cursor/pool-a/"]}`),
+		"escaping ref prefix":               refs(`{"pool-a":["refs/heads/../main"]}`),
+		"duplicate within a pool":           refs(`{"pool-a":["refs/heads/a/","refs/heads/A/"]}`),
+		"same prefix for two pools":         refs(`{"pool-a":["refs/heads/factory/"],"pool-b":["refs/heads/factory/"]}`),
+		"one pool's prefix starts another":  refs(`{"pool-a":["refs/heads/cursor/"],"pool-b":["refs/heads/cursor/pool-b/"]}`),
+		"overlap past a pool's own nesting": refs(`{"pool-a":["refs/heads/a","refs/heads/ab/"],"pool-b":["refs/heads/ac/"]}`),
+		"overlap ignoring case":             refs(`{"pool-a":["refs/heads/Factory/"],"pool-b":["refs/heads/factory/x/"]}`),
+		"per-pool prefixes on a read repository": strings.Replace(poolsGitEntry, `{"repo":"trmlabs/docs","access":"read"}`,
+			`{"repo":"trmlabs/docs","access":"read","poolRefPrefixes":{"pool-a":["refs/heads/x/"]}}`, 1),
+		"pull request prefixes on a git entry": strings.Replace(poolsGitEntry, `{"repo":"trmlabs/docs","access":"read"}`,
+			`{"repo":"trmlabs/docs","access":"read","poolPullRequestPrefixes":{"pool-a":["x/"]}}`, 1),
+		"ref prefixes on a github-api entry":     strings.Replace(poolsAPIEntry, `"access":"write",`, `"access":"write","poolRefPrefixes":{"pool-a":["refs/heads/x/"]},`, 1),
+		"pull request prefix for another pool":   heads(`{"pool-x":["review/"]}`),
+		"pull request prefix with refs/heads":    heads(`{"pool-a":["refs/heads/review/"]}`),
+		"pull request prefix without a slash":    heads(`{"pool-a":["review"]}`),
+		"same pull request prefix for two pools": heads(`{"pool-a":["review/"],"pool-b":["review/"]}`),
+		"nested pull request prefixes":           heads(`{"pool-a":["review/"],"pool-b":["review/b/"]}`),
+		"pull request prefixes with reads only":  strings.Replace(heads(`{"pool-a":["review/"]}`), `"operations":["pr.open","pr.read","pr.comment","pr.edit"]`, `"operations":["pr.open","pr.read"]`, 1),
+	} {
+		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	// Prefixes that only share text, not a starting run, are disjoint.
+	for name, doc := range map[string]string{
+		"sibling pools":         refs(`{"pool-a":["refs/heads/cursor/pool-a/"],"pool-ab":["refs/heads/cursor/pool-ab/"]}`),
+		"same pool nests":       refs(`{"pool-a":["refs/heads/a/","refs/heads/a/b/"]}`),
+		"pull request siblings": heads(`{"pool-a":["review/a/"],"pool-b":["review/b/"]}`),
+	} {
+		doc = strings.Replace(doc, `"pools":["pool-a","pool-b","pool-c"]`, `"pools":["pool-a","pool-ab","pool-b","pool-c"]`, 1)
+		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
+			t.Errorf("%s refused: %v", name, err)
+		}
+	}
+}
