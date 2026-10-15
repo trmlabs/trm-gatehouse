@@ -564,3 +564,49 @@ func TestAdapterHoldsRequestFieldsToListedValues(t *testing.T) {
 		}
 	}
 }
+
+// A Slack entry forwards a call that uses only its method's parameters and
+// refuses a key Slack could read as a second channel, or one the method does
+// not take, before anything reaches Slack.
+func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{
+			"name":"slack","host":"slack.com","port":%d,"pathPrefixes":["/api/conversations.history"],"methods":["GET"],
+			"header":"Authorization","scheme":"Bearer","placeholder":"__vault_LLM_KEY__",
+			"key":{"mount":"gatehouse","path":"vendors/slack","field":"key"},"pools":["pool-agent"],
+			"requestFields":[{"name":"channel","values":["C0123456789"]}]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	// The test vendor's certificate names example.com, not slack.com.
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	call := func(query string) int {
+		t.Helper()
+		r, err := http.NewRequest("GET", "https://slack.com:"+strconv.Itoa(f.port)+"/api/conversations.history?"+query, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := call("channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 {
+		t.Fatalf("listed channel: %d, vendor calls %d", code, f.calls.Load())
+	}
+	for name, query := range map[string]string{
+		"leading space":                 "channel=C0123456789&%20channel=D0123456789",
+		"NUL":                           "channel=C0123456789&channel%00=D0123456789",
+		"not a parameter of the method": "channel=C0123456789&name=eyes",
+	} {
+		if code := call(query); code != http.StatusForbidden || f.calls.Load() != 1 || f.audit.last().Outcome != "request_field" {
+			t.Errorf("%s: %d outcome=%q, vendor calls %d", name, code, f.audit.last().Outcome, f.calls.Load())
+		}
+	}
+}
