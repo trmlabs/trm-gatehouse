@@ -10,9 +10,9 @@ cat <<'SUMMARY'
 
 PASS: local HTTP and PostgreSQL fixtures.
 
-What this proved, against a real Vault and a real PostgreSQL:
-  - A placeholder is swapped for the real key only for the catalog's host, path and method; anything else is refused.
-  - A key rotated in Vault is used on the next request, and a deleted key is never sent.
+What this proved (real Vault and PostgreSQL where they are involved; the reply and audit checks use test doubles):
+  - A placeholder is swapped for the real key only for the configured host, path and method; anything else is refused.
+  - A key rotated in Vault is used on the next request, and a deleted key is never sent (this run's strict profile; catalog entries take up to a minute).
   - A reply that echoes the key, in plain text or a common encoding, is cut off.
   - Every attempt is recorded before the request leaves; a dropped connection is recorded as unknown, never replayed.
   - Without pooling, each database connection gets a fresh login, removed when it closes, even after the broker is killed.

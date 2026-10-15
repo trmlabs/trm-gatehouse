@@ -46,7 +46,7 @@ Gatehouse release, and no version is supported for security fixes yet
 
 | Part | State |
 |---|---|
-| HTTP API keys, PostgreSQL logins and GitHub | Running at TRM for two agent platforms. HTTP and PostgreSQL are also tested against a real secrets manager and database in the [local demo](#try-it-in-5-minutes) |
+| HTTP API keys, PostgreSQL logins and GitHub | Running at TRM for two agent platforms. The [local demo](#try-it-in-5-minutes) also tests PostgreSQL logins, and HTTP keys in the strict profile, against a real secrets manager and database |
 | Google Cloud and browser sign-in | Built and tested on `main` |
 | Limiting an entry to people in named groups | Built. Off until a deployment turns on the directory lookup, which supports Microsoft Entra ID only |
 | Upstream Agent Vault features (vaults, web UI, proposals, TypeScript SDK) | Inherited unchanged. Gatehouse's strict profile does not use them |
@@ -55,8 +55,8 @@ Gatehouse release, and no version is supported for security fixes yet
 ## Try it in 5 minutes
 
 One container brings a test secrets manager and a test PostgreSQL database,
-runs with no network access, and proves the core behavior against them. You
-need Docker and nothing else.
+runs with no network access, and checks the core behavior. You need Docker and
+nothing else.
 
 ```sh
 git clone https://github.com/trmlabs/trm-gatehouse && cd trm-gatehouse
@@ -71,10 +71,12 @@ proved, and a reminder that a real deployment needs more checks.
 A nonzero exit is a failure. Some tests print a skip line asking for extra
 settings; those cover setups the container does not include.
 
-What the run proves:
+What the run proves. The HTTP checks run the strict profile, whose rules name
+each key; catalog entries differ where noted. The reply and audit checks use
+test doubles; the rest run against the real secrets manager and database:
 
-- A placeholder is swapped for the real key only for the catalog's host, path and method. Everything else is refused.
-- A key rotated in the secrets manager is used on the next request, and a deleted key is never sent.
+- A placeholder is swapped for the real key only for the configured host, path and method. Everything else is refused.
+- A key rotated or deleted in the secrets manager takes effect on the next request. Catalog entries read each key at most once a minute, so there it takes effect within a minute ([keys and rotation](docs/gatehouse/http-header-adapter.md#keys-and-rotation)).
 - A reply that echoes the key back, in plain text or a common encoding, is cut off.
 - Every attempt is recorded before the request leaves, and a dropped connection is recorded as an unknown outcome, never replayed.
 - Without pooling (the default), every database connection gets a fresh login that is removed when it closes, even after the broker crashes.
