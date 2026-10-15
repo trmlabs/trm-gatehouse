@@ -680,6 +680,12 @@ func TestParseHostAddresses(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		}
 	}
+	// A file that lists no address is refused, so a writer that resolved nothing cuts nothing.
+	for _, empty := range []string{"", "\n", "# resolved nothing\n"} {
+		if _, err := parseHostAddresses(empty); err == nil {
+			t.Errorf("%q accepted", empty)
+		}
+	}
 }
 
 // The egress ranges file adds single addresses while the process runs: a
@@ -728,6 +734,14 @@ func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 	if err := dial(); err != nil {
 		t.Fatalf("a bad file dropped the last good set: %v", err)
 	}
+	write("") // empty: refused, the last good set stays
+	if err := dial(); err != nil {
+		t.Fatalf("an empty file dropped the last good set: %v", err)
+	}
+	write("# resolved nothing\n")
+	if err := dial(); err != nil {
+		t.Fatalf("a file with no address dropped the last good set: %v", err)
+	}
 	write("127.0.0.2\n") // a good file without the address
 	if err := dial(); err == nil {
 		t.Fatal("address dropped from the file still allowed")
@@ -747,7 +761,8 @@ func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 	}
 }
 
-// Setting only the file confines egress to it.
+// Setting only the file confines egress to it: nothing before the file is
+// written, and only what it lists after.
 func TestEgressRangesFileAloneConfines(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener := listenTCP(t, "tcp", "127.0.0.1:0")
@@ -766,6 +781,59 @@ func TestEgressRangesFileAloneConfines(t *testing.T) {
 	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
 	if conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String()); err == nil {
 		_ = conn.Close()
-		t.Fatal("dialed with only an empty file")
+		t.Fatal("dialed before the file was written")
+	}
+	if err := os.WriteFile(path, []byte("127.0.0.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileRangesByPath.Delete(path) // read the file now, not after the interval
+	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("address listed in the file refused: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// The private and metadata blocks run before the egress ranges, so listing a
+// blocked address in the file never opens it.
+func TestEgressRangesFileNeverOpensBlockedAddresses(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := listenTCP(t, "tcp", "127.0.0.1:0")
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	path := filepath.Join(t.TempDir(), "egress")
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	if err := os.WriteFile(path, []byte("127.0.0.1\n169.254.169.254\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	for _, tc := range []struct {
+		name         string
+		allowPrivate bool
+		address      string
+	}{
+		{"private address without allowPrivate", false, listener.Addr().String()},
+		{"metadata address even with allowPrivate", true, "169.254.169.254:80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			conn, err := SafeDialContext(tc.allowPrivate)(ctx, "tcp", tc.address)
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("a blocked address listed in the file was dialed")
+			}
+			if !strings.Contains(err.Error(), "blocked by network policy") {
+				t.Fatalf("refused for another reason: %v", err)
+			}
+		})
 	}
 }

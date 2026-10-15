@@ -263,10 +263,15 @@ const fileRangesInterval = 5 * time.Second
 // fileRanges holds the addresses read from an egress ranges file. The file
 // lists single addresses (an IPv4 or IPv6 address, or one with /32 or /128),
 // separated by commas, spaces or new lines, with # comments. A missing file
-// adds nothing, since the job that writes it may not have run yet. A file with
-// any other entry (a wider range, a name, garbage) is refused whole and the
-// last good set stays, so a bad write never widens egress and never cuts
-// working connections. The private and metadata blocks apply to these
+// adds nothing until a good read, since the job that writes it may not have
+// run yet. A file with no address, or with any other entry (a wider range, a
+// name, garbage), is refused whole and the last good set stays, so a failed
+// or bad write never widens egress and never cuts working connections. After a
+// good read, a missing, unreadable or empty file keeps that set: removing
+// the file revokes nothing, so revoke by writing a shorter list. The broker
+// cannot tell a file cut off mid-write from a whole one, so the writer must
+// replace it atomically (write a temporary file and rename it; a Kubernetes
+// ConfigMap mount does). The private and metadata blocks apply to these
 // addresses as to every other.
 type fileRanges struct {
 	path    string
@@ -338,6 +343,10 @@ func parseHostAddresses(raw string) ([]net.IPNet, error) {
 			addr := prefix.Addr().Unmap()
 			out = append(out, net.IPNet{IP: addr.AsSlice(), Mask: net.CIDRMask(addr.BitLen(), addr.BitLen())})
 		}
+	}
+	if len(out) == 0 {
+		// A writer that resolved nothing must not cut every address it gave before.
+		return nil, errors.New("no address listed")
 	}
 	return out, nil
 }
