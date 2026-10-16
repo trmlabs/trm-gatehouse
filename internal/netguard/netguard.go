@@ -340,18 +340,18 @@ func parseHostAddresses(raw string) ([]net.IPNet, error) {
 			line = line[:i]
 		}
 		for _, field := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
+			// Errors name the line, never the entry: a path set to the wrong
+			// file must not copy that file's contents into the log.
 			prefix, err := netip.ParsePrefix(field)
 			if err != nil {
 				addr, aerr := netip.ParseAddr(field)
 				if aerr != nil || addr.Zone() != "" {
-					// The line, not the entry: a path set to the wrong file
-					// must not copy that file's contents into the log.
 					return nil, fmt.Errorf("line %d: an entry is not an address", n+1)
 				}
 				prefix = netip.PrefixFrom(addr, addr.BitLen())
 			}
 			if prefix.Bits() != prefix.Addr().BitLen() {
-				return nil, fmt.Errorf("entry %q is a range; only single addresses are allowed", field)
+				return nil, fmt.Errorf("line %d: an entry is a range; only single addresses are allowed", n+1)
 			}
 			addr := prefix.Addr().Unmap()
 			out = append(out, net.IPNet{IP: addr.AsSlice(), Mask: net.CIDRMask(addr.BitLen(), addr.BitLen())})

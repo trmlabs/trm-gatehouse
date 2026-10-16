@@ -34,7 +34,9 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 		return
 	}
 	if a.GCPTokens == nil {
-		deny(http.StatusServiceUnavailable, "token_unavailable")
+		// Waiting does not help: only an operator (a restart, for a minter
+		// wired at startup) can give the broker one.
+		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
@@ -62,7 +64,7 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
-		deny(http.StatusTooManyRequests, "rate_limited")
+		p.adapterRateDeny(w, event, target, enf.Decision)
 		return
 	}
 	defer enf.Release()
@@ -91,7 +93,7 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	admittedAt := time.Now()

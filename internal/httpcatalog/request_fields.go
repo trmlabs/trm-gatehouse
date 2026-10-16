@@ -52,6 +52,34 @@ var slackMethods = map[string][]string{
 	"/api/conversations.replies": {"channel", "ts", "cursor", "include_all_metadata", "inclusive", "latest", "limit", "oldest"},
 }
 
+// Operation names a request to the entry for the audit row, from the
+// broker's fixed vocabulary: for a Slack entry, the Web API method a listed
+// path names, such as "slack.conversations_history" for
+// /api/conversations.history, so a channel read, a post and a reaction can be
+// told apart afterward; "" for any other entry or path. Never the path itself.
+func (e *Entry) Operation(path string) string {
+	if e == nil || !slackHost(e.Host) {
+		return ""
+	}
+	if _, ok := slackMethods[path]; !ok {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("slack.")
+	for _, r := range strings.TrimPrefix(path, "/api/") {
+		switch {
+		case r == '.':
+			b.WriteByte('_')
+		case unicode.IsUpper(r):
+			b.WriteByte('_')
+			b.WriteRune(unicode.ToLower(r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // ErrRequestField is a request whose limited parameters are missing,
 // repeated, placed twice or not listed, that uses a key it may not, or whose
 // body cannot be read safely.
