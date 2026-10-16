@@ -345,7 +345,7 @@ func TestNamespaceInTwoProxyBindingsIsRefused(t *testing.T) {
 	p := setupProxy(t)
 	c := p.r.config
 	second := c.Bindings[1]
-	second.ServiceAccount, second.ServiceAccountUID = "gatehouse-edge-2", "edge-2-uid"
+	second.ServiceAccount, second.ServiceAccountUID = "example-edge-2", "edge-2-uid"
 	proxy := *second.Proxy
 	proxy.Profiles = []ProxyProfile{{Namespace: "agent-sandboxes", Profile: "other", Pool: "other"}}
 	second.Proxy = &proxy

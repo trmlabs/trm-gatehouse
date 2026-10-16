@@ -275,9 +275,7 @@ go test -race ./...   # the full test suite
 
 The test suite includes a check that refuses a list of known internal
 hostnames, project names and similar identifiers. It catches only what it
-lists, and one cloud project ID is still built into the sandbox image rule in
-`internal/imagerule` until that rule becomes configurable. Use `example.com`
-style placeholders.
+lists. Use `example.com` style placeholders.
 
 ## Contributing
 

@@ -136,7 +136,7 @@ func edgeClaims(now time.Time) claims {
 	c.Expires = c.Issued + 600
 	c.Kubernetes.Namespace = "example-edge"
 	c.Kubernetes.ServiceAccount.Name, c.Kubernetes.ServiceAccount.UID = "example-edge", "edge-account-uid"
-	c.Kubernetes.Pod.Name, c.Kubernetes.Pod.UID = "gatehouse-edge-7d9", "edge-pod-uid"
+	c.Kubernetes.Pod.Name, c.Kubernetes.Pod.UID = "example-edge-7d9", "edge-pod-uid"
 	return c
 }
 

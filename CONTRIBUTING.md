@@ -35,7 +35,7 @@ Thanks for helping. Issues, fixes and pull requests are welcome.
 
 - The Go tests with the race detector, the end-to-end build, `go vet`, golangci-lint, actionlint and `go mod tidy`.
 - The local demonstration, against a real Vault and PostgreSQL.
-- A check that refuses a list of known internal hostnames, project names and similar identifiers. It catches only what it lists, and one cloud project ID is still built into the sandbox image rule in `internal/imagerule` until that rule becomes configurable. Use `example.com` and `example-*` placeholders in code, tests and docs.
+- A check that refuses a list of known internal hostnames, project names and similar identifiers. It catches only what it lists. Use `example.com` and `example-*` placeholders in code, tests and docs.
 
 A maintainer reviews every pull request, and the required checks must pass before it merges. Please reply to or fix every automated review comment.
 
