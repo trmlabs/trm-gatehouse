@@ -357,6 +357,45 @@ func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
 	}
 }
 
+// gh sends gh pr ready as GraphQL. Its refusal names the REST route the
+// broker serves for it, and fixed text only: nothing from the request.
+func TestGitHubAPIGraphQLRefusalNamesTheRESTRoute(t *testing.T) {
+	f := newAPIFixture(t)
+	ready := `{"query":"mutation PullRequestReadyForReview($input:MarkPullRequestReadyForReviewInput!){markPullRequestReadyForReview(input:$input){pullRequest{id}}}","variables":{"input":{"pullRequestId":"PR_secretnodeid"}}}`
+	code, body := f.post(t, "POST", "/graphql", "", ready)
+	if code != http.StatusForbidden || !strings.HasPrefix(body, "unlisted: ") ||
+		!strings.Contains(body, "send POST /repos/{owner}/{repo}/pulls/{n}/ready (operation pr.ready)") || strings.Contains(body, "PR_secretnodeid") {
+		t.Fatalf("ready mutation: %d %q", code, body)
+	}
+	if code, body = f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code != http.StatusForbidden ||
+		!strings.Contains(body, "GitHub GraphQL is not served here; use the REST routes under /repos/{owner}/{repo} with gh api.") {
+		t.Fatalf("query: %d %q", code, body)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.last != "" || len(f.minted) != 0 {
+		t.Fatalf("a refused GraphQL request reached GitHub: minted %v, body %q", f.minted, f.last)
+	}
+}
+
+// Each mutation gh sends for a pull request command maps to the route that
+// serves it, and the hint is one printable line.
+func TestGraphQLRESTHint(t *testing.T) {
+	for mutation, want := range map[string]string{
+		"markPullRequestReadyForReview": "POST /repos/{owner}/{repo}/pulls/{n}/ready",
+		"createPullRequest":             "POST /repos/{owner}/{repo}/pulls ",
+		"addComment":                    "POST /repos/{owner}/{repo}/issues/{n}/comments",
+		"updatePullRequestBranch":       "PUT /repos/{owner}/{repo}/pulls/{n}/update-branch",
+		"updatePullRequest":             "PATCH /repos/{owner}/{repo}/pulls/{n} ",
+		"addLabelsToLabelable":          "POST /repos/{owner}/{repo}/issues/{n}/labels",
+	} {
+		hint := graphqlRESTHint([]byte(`{"query":"mutation X($input: In!) { ` + mutation + `(input: $input) { clientMutationId } }"}`))
+		if !strings.Contains(hint, want) || strings.ContainsAny(hint, "\r\n") || strings.ContainsFunc(hint, func(r rune) bool { return r < 0x20 || r > 0x7e }) {
+			t.Errorf("%s: %q", mutation, hint)
+		}
+	}
+}
+
 // An unmatched GitHub GraphQL path is named "graphql"; a matched route keeps
 // its own operation, and any other unmatched path names none.
 func TestGitHubAPIOperationNamesGraphQL(t *testing.T) {

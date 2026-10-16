@@ -103,8 +103,18 @@ func (p *Proxy) adapterDeny(w http.ResponseWriter, event auditchain.Event, targe
 // the audit outcome, and, from a rate limiter, its own wait (0 for none) in
 // place of the code's fixed Retry-After.
 func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome, code string, wait time.Duration) {
+	p.adapterDenyHint(w, event, target, status, outcome, code, wait, "")
+}
+
+// adapterDenyHint is adapterDenyAs with a fixed hint, never request data,
+// added to the next step, such as the REST route that serves what a refused
+// request was for. A refusal that falls back to audit_unavailable drops it.
+func (p *Proxy) adapterDenyHint(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome, code string, wait time.Duration, hint string) {
 	code, status, kind := refusalFor(code, status)
 	kind = kind.after(wait)
+	if hint != "" {
+		kind.next += " " + hint
+	}
 	event.Event, event.Outcome, event.Status = auditchain.EventDenied, outcome, status
 	event.Target = auditchain.TargetField(target)
 	if p.adapter.Audit.Record(event) != nil {
