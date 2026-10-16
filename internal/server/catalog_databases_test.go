@@ -12,7 +12,7 @@ import (
 
 const databaseCatalog = `{"pools":[{"name":"cursor","namespace":"agents","serviceAccount":"cursor-worker"},{"name":"ci","namespace":"ci","serviceAccount":"runner"}],
 "entries":[
- {"name":"b2bcore","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor"],
+ {"name":"examplecore","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor"],
   "postgres":{"database":"core","mount":"database","role":"staging.us.crunchy.core-readonly","maxConns":20}},
  {"name":"auditlog","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor","ci"],
   "postgres":{"database":"auditlog","mount":"database","role":"staging.us.crunchy.auditlog-readonly","sslmode":"verify-full","maxConns":5,"serverName":"auditlog.example.com"}}]}`
@@ -26,17 +26,17 @@ func TestCatalogDatabaseResolverFollowsTheLiveCatalog(t *testing.T) {
 	}
 	source := httpcatalog.NewSource(first, 1)
 	r := NewCatalogDatabaseResolver(source, nil, nil, nil)
-	svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "b2bcore")
+	svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "examplecore")
 	if err != nil || svc.Addr != "p.abc.db.postgresbridge.com:5432" || svc.Database != "core" || svc.SSLMode != "verify-full" || svc.MaxConns != 5 || !svc.ReadOnly {
 		t.Fatalf("resolved %+v %v", svc, err)
 	}
 	if svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-2", Pool: "ci"}, "auditlog"); err != nil || svc.ServerName != "auditlog.example.com" {
 		t.Fatalf("server name: %+v %v", svc, err)
 	}
-	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-2", Pool: "ci"}, "b2bcore"); err == nil || !strings.Contains(err.Error(), "not granted") {
+	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-2", Pool: "ci"}, "examplecore"); err == nil || !strings.Contains(err.Error(), "not granted") {
 		t.Fatalf("ungranted pool: %v", err)
 	}
-	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1"}, "b2bcore"); err == nil {
+	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1"}, "examplecore"); err == nil {
 		t.Fatal("a scope without a catalog pool resolved a database")
 	}
 	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "detect"); err == nil {

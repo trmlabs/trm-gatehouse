@@ -6,7 +6,7 @@ and complete its deployed network acceptance checks.
 
 The agent presents a short-lived proof of the running pod instead of a standing Agent Vault token. The broker verifies that proof and the current pod, then checks the agent's existing access to the selected vault before either proxy admits work.
 
-These files prepare identity configuration only. They do not deploy a complete protected service. Kubernetes is a supported adapter protocol; GKE remains a proposed deployment until Infra confirms the runtime. A sandbox inside a shared runner is not a Kubernetes pod identity. Do not distribute a runner's service-account token to its sandboxes.
+These files prepare identity configuration only. They do not deploy a complete protected service. Kubernetes is a supported adapter protocol. A sandbox inside a shared runner is not a Kubernetes pod identity. Do not distribute a runner's service-account token to its sandboxes.
 
 ## Local implementation check
 
@@ -66,7 +66,7 @@ One namespace/service-account binding maps to one agent and one vault. `serviceA
 - Existing CONNECT tunnels and PostgreSQL connections retain their admission proof. Reopen the connection with freshly read proof before it expires; projected-file rotation does not renew an existing connection. PostgreSQL reauthorization checks enforce expiry at the configured polling interval.
 - When this configuration is enabled, both entry points use the workload resolver exclusively. A standing Agent Vault session or agent token cannot substitute for runtime proof. Management endpoints retain their separate administrator authentication.
 
-The current PostgreSQL listener is restricted to loopback, and the proxy ingress protocols do not themselves encrypt the caller-to-broker hop. Infra must choose and verify an encrypted authenticated tunnel or equivalent protected ingress before separate pods can use these listeners. Do not publish either plaintext listener or send bearer proof over an unprotected network. The runtime design must also deny direct agent access to destinations, Vault, broker storage and runtime sockets; these identity examples do not supply that enforcement.
+The current PostgreSQL listener is restricted to loopback, and the proxy ingress protocols do not themselves encrypt the caller-to-broker hop. The deployment must choose and verify an encrypted authenticated tunnel or equivalent protected ingress before separate pods can use these listeners. Do not publish either plaintext listener or send bearer proof over an unprotected network. The runtime design must also deny direct agent access to destinations, Vault, broker storage and runtime sockets; these identity examples do not supply that enforcement.
 
 ## Other clusters (trust domains)
 
@@ -74,7 +74,7 @@ The top-level `issuer`, `audience` and `apiServer` are the broker's own cluster.
 
 ```json
 "trustDomains": [{"name": "agent-sandbox", "issuer": "https://container.googleapis.com/v1/projects/P/locations/L/clusters/C",
-  "audience": "gatehouse-edge", "keys": "remote", "jwksURL": "https://container.googleapis.com/v1/projects/P/locations/L/clusters/C/jwks"}]
+  "audience": "example-edge", "keys": "remote", "jwksURL": "https://container.googleapis.com/v1/projects/P/locations/L/clusters/C/jwks"}]
 ```
 
 A token's exact issuer picks its domain, and only that domain's keys can verify it. A token never chooses where keys come from: an issuer outside the list refuses with `token_issuer` and fetches nothing, and `jku`, `x5u` and similar header members are ignored.
@@ -85,24 +85,24 @@ A remote domain may also carry a fallback set in `jwks`, held to the pinned rule
 
 ```json
 "trustDomains": [{"name": "agent-sandbox", "issuer": "https://container.googleapis.com/v1/projects/P/locations/L/clusters/C",
-  "audience": "gatehouse-edge", "keys": "remote", "jwksURL": "https://container.googleapis.com/v1/projects/P/locations/L/clusters/C/jwks",
+  "audience": "example-edge", "keys": "remote", "jwksURL": "https://container.googleapis.com/v1/projects/P/locations/L/clusters/C/jwks",
   "jwksDialAddress": "199.36.153.8:443", "jwks": {"keys": [{"kty": "RSA", "kid": "K", "alg": "RS256", "use": "sig", "n": "...", "e": "AQAB"}]}}]
 ```
 
 The broker logs `msg="workloadidentity: trust domain keys changed" domain=<name> added=[...] removed=[...]` when a fetched set differs (including the first fetch), and `msg="workloadidentity: trust domain keys refresh failed" domain=<name> error=... verifying_with=<last good keys|fallback keys|no live keys> last_good=<time>` when a fetch fails.
 
-With `"keys": "pinned"` the domain holds the issuer's public key set in `jwks` instead of `jwksURL` (RSA RS256 of at least 2048 bits, or EC P-256 ES256; 1 to 16 keys, each with a unique kid). The broker then never fetches keys, so it needs no egress to the issuer; a kid outside the set refuses with `token_keys_pinned_mismatch` until the set is updated. A remote domain refuses an unfetched or unknown kid with `token_keys_unavailable`, the broker's own cluster with `token_keys_in_cluster_unknown`, and a bad signature is `token_signature`. Each of these logs `msg="workload identity refused" reason=<code> count=<n> kid=<kid> peer=<address>` and writes the kid and peer into the audit row; see [signed audit](../signed-audit.md). Any private or unknown key member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `k`, ...) refuses the whole configuration, as does `jwksURL`, `jwksDialAddress` or `caFile` beside a pinned set. The broker cannot read another cluster's Pods, so a remote domain admits only a proxy binding (a shared proxy there checks the Pod), and its token lifetime (`maxTokenLifetimeSeconds`, 600 to 3600, default 3600) is the revocation window. A binding names its domain with `trustDomain`; empty is the broker's own cluster.
+With `"keys": "pinned"` the domain holds the issuer's public key set in `jwks` instead of `jwksURL` (RSA RS256 of at least 2048 bits, or EC P-256 ES256; 1 to 16 keys, each with a unique kid). The broker then never fetches keys, so it needs no egress to the issuer; a kid outside the set refuses with `token_keys_pinned_mismatch` until the set is updated. A remote domain refuses an unfetched or unknown kid with `token_keys_unavailable`, the broker's own cluster with `token_keys_in_cluster_unknown`, and a bad signature is `token_signature`. Each of these logs `msg="workload identity refused" reason=<code> count=<n> kid=<kid> peer=<address>` and writes the kid and peer into the audit row; see [signed audit](../../../docs/gatehouse/signed-audit.md). Any private or unknown key member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `k`, ...) refuses the whole configuration, as does `jwksURL`, `jwksDialAddress` or `caFile` beside a pinned set. The broker cannot read another cluster's Pods, so a remote domain admits only a proxy binding (a shared proxy there checks the Pod), and its token lifetime (`maxTokenLifetimeSeconds`, 600 to 3600, default 3600) is the revocation window. A binding names its domain with `trustDomain`; empty is the broker's own cluster.
 
 ## Proxy-attested agents
 
 A binding with `proxy` trusts exactly one shared proxy: its `namespace`, `serviceAccount` and `serviceAccountUID`, in its `trustDomain`, with that domain's issuer and audience. The proxy runs the Pod check in its own cluster and sends an attestation of the agent Pod with each connection: the `Gatehouse-Attestation` header on CONNECT, or a `GHATTS1 <attestation>` line before any `GHSESS1` line on PostgreSQL.
 
 ```json
-{"namespace": "gatehouse-edge", "serviceAccount": "gatehouse-edge", "serviceAccountUID": "UID", "agentID": "A", "vaultID": "V",
+{"namespace": "example-edge", "serviceAccount": "example-edge", "serviceAccountUID": "UID", "agentID": "A", "vaultID": "V",
  "trustDomain": "agent-sandbox",
- "proxy": {"profiles": [{"namespace": "agent-sandboxes-staging", "profile": "agent-sandbox-orion-staging", "pool": "orion"},
-                        {"namespace": "developers-sandboxes-staging", "profile": "agent-sandbox-developers-staging", "pool": "sandbox-developers"}],
-           "ownerKind": "Sandbox", "imageDigests": ["sha256:..."], "sourceCIDRs": ["10.200.0.0/28"]}}
+ "proxy": {"profiles": [{"namespace": "example-agents", "profile": "example-agents-profile", "pool": "example-agents"},
+                        {"namespace": "example-developers", "profile": "example-developers-profile", "pool": "example-developers"}],
+           "ownerKind": "Sandbox", "imageDigests": ["sha256:..."], "sourceCIDRs": ["192.0.2.0/28"]}}
 ```
 
 Each profile entry may add `imagePrefix`, an agent-sandbox repository or tenant path; the binding's `imageDigests` then lists only platform containers, and every pulled image (the attestation's `images`, repository and digest) must lie under the namespace's prefix or match a listed digest. The attested namespace picks the profile and pool: the proxy names the profile it maps the namespace to, and the broker refuses a namespace it does not list or a profile its own map does not give that namespace. Within one trust domain, a namespace belongs to one proxy binding. The broker admits the attested Pod only when the connection comes from `sourceCIDRs` (the private link's range), its controller is `ownerKind`, every image is listed, its deadline has not passed, and the catalog declares that profile, from the trust domain that verified the proxy's token; with no catalog profile a proxy admits nothing. The session ends at that deadline or `maxSessionSeconds` after the proxy token was issued, whichever is first (optional; it defaults to, and may not pass, the policy's top-level `maxSessionSeconds`, a day unless set, at most 30 days, which also caps every pool binding's `maxPodSeconds`), and a recheck accepts an expired proxy token for at most one token lifetime past its expiry. The scope's workload is the attested Pod UID. Any other binding presenting an attestation is refused, and the token-only path never admits a proxy binding. When the catalog declares a harness for the pool, every admission, pool or proxy, must also match it: issuer, audience, key source, identity kind, namespace, controller kind and images.
@@ -123,19 +123,10 @@ TokenReview runs for each authorization decision, followed by a live Pod read th
 
 These projected tokens are bearer credentials. Another process holding the same token can replay it while the pod is live and the proof remains valid. Account/pod binding and short lifetimes do not prove which process presented a copied token. Protect the projected file and caller-to-broker transport, then record the accepted replay limit in the deployment review.
 
-### Runtime evidence to return
+### Checks before a deployment relies on this
 
-- [ ] Infra and Security select the disposable runtime, protected ingress and bypass controls, with contributor assignments accepted by those teams.
-  - Complete when: configuration identifies the cluster, namespace, image revision, token issuer/audience/lifetime, destination and database bindings, and network/storage boundaries.
-  - Result: Pending. Contributor and environment: __. Configuration/evidence link: __.
-  - Review and next action: __.
-- [ ] Run a fresh workload with no standing agent token through both entry points using real runtime-issued proof.
-  - Complete when: both positive controls succeed, and wrong account/audience, expired proof, removed grant, revoked agent, deleted pod, same-name replacement with old proof, verifier outage and copied-token behavior have recorded expected/observed results. Every pre-forward denial must leave destination and credential-issuance counts unchanged.
-  - Result: Not run. Contributor, revision, commands and environment: __. Evidence link: __.
-  - Review and next action: __.
-- [ ] Verify placement and isolation before release.
-  - Complete when: direct destination/Vault access, broker secret/storage access and runtime-socket access are denied from the actual agent while both broker workflows still succeed. Reviewers accept the remaining bearer replay limit.
-  - Result: Not run. Contributor, revision, commands and environment: __. Evidence link: __.
-  - Review and next action: __.
+- Record the runtime: the cluster, namespace, image revision, token issuer, audience and lifetime, destination and database bindings, and network and storage boundaries.
+- Run a fresh workload with no standing agent token through both entry points using real runtime-issued proof. Both positive controls must succeed, and wrong account or audience, expired proof, removed grant, revoked agent, deleted pod, same-name replacement with old proof, verifier outage and copied-token behavior must each give the expected result. Every pre-forward denial must leave destination and credential-issuance counts unchanged.
+- Verify placement and isolation: direct destination and Vault access, broker secret and storage access and runtime-socket access are denied from the actual agent while both broker workflows still succeed. Accept the remaining bearer replay limit explicitly.
 
 If these checks pass, the selected runtime can use both entry points without a standing agent token. Support for other runtime identities and process-bound replay prevention remains outside this adapter.

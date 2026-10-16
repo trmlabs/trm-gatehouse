@@ -48,19 +48,19 @@ func newRemoteCluster(t *testing.T) *remoteCluster {
 	t.Cleanup(srv.Close)
 	ca := filepath.Join(t.TempDir(), "remote-ca.pem")
 	os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0600)
-	rc.td = TrustDomain{Name: "agent-sandbox", Issuer: remoteIssuer, Audience: "gatehouse-edge", Keys: "remote", JWKSURL: srv.URL + "/jwks", CAFile: ca}
+	rc.td = TrustDomain{Name: "agent-sandbox", Issuer: remoteIssuer, Audience: "example-edge", Keys: "remote", JWKSURL: srv.URL + "/jwks", CAFile: ca}
 	return rc
 }
 
 // remoteClaims is a token the remote cluster issued to its proxy.
 func (rc *remoteCluster) claims() claims {
 	var c claims
-	c.Issuer, c.Subject, c.Audience = remoteIssuer, "system:serviceaccount:gatehouse-edge:gatehouse-edge", []string{"gatehouse-edge"}
+	c.Issuer, c.Subject, c.Audience = remoteIssuer, "system:serviceaccount:example-edge:example-edge", []string{"example-edge"}
 	c.Issued = time.Now().Unix() - 1
 	c.Expires = c.Issued + 600
-	c.Kubernetes.Namespace = "gatehouse-edge"
-	c.Kubernetes.ServiceAccount.Name, c.Kubernetes.ServiceAccount.UID = "gatehouse-edge", "edge-account-uid"
-	c.Kubernetes.Pod.Name, c.Kubernetes.Pod.UID = "gatehouse-edge-7d9", "edge-pod-uid"
+	c.Kubernetes.Namespace = "example-edge"
+	c.Kubernetes.ServiceAccount.Name, c.Kubernetes.ServiceAccount.UID = "example-edge", "edge-account-uid"
+	c.Kubernetes.Pod.Name, c.Kubernetes.Pod.UID = "example-edge-7d9", "edge-pod-uid"
 	return c
 }
 

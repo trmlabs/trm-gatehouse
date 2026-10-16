@@ -527,18 +527,18 @@ func TestSharedUpstreamsStayTLS(t *testing.T) {
 // Image prefixes: each namespace runs what its tenant path pulled; the proxy
 // image in the same repository never counts; platform digests run anywhere.
 func TestSharedImagePrefixes(t *testing.T) {
-	const orion = "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/orion/"
+	const research = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/research/"
 	ip := netip.MustParseAddr("10.8.0.4")
 	config := sharedConfig()
-	config.ImagePrefixes = map[string]string{"agent-sandboxes": orion}
+	config.ImagePrefixes = map[string]string{"agent-sandboxes": research}
 	for name, c := range map[string]struct {
 		images []string
 		ok     bool
 	}{
-		"tenant image":              {[]string{orion + "agent@" + otherDigest}, true},
-		"tenant image and platform": {[]string{orion + "agent@" + otherDigest, "registry.example/gcsfuse@" + sandboxDigest}, true},
-		"proxy image":               {[]string{"us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/gatehouse/proxy@" + otherDigest}, false},
-		"another tenant":            {[]string{"us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-developers-staging/x@" + otherDigest}, false},
+		"tenant image":              {[]string{research + "agent@" + otherDigest}, true},
+		"tenant image and platform": {[]string{research + "agent@" + otherDigest, "registry.example/gcsfuse@" + sandboxDigest}, true},
+		"proxy image":               {[]string{"us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/gatehouse/proxy@" + otherDigest}, false},
+		"another tenant":            {[]string{"us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/x@" + otherDigest}, false},
 	} {
 		pod := sandboxPod("sandbox-a", "pod-a", ip.String())
 		var statuses []any
@@ -556,15 +556,15 @@ func TestSharedImagePrefixes(t *testing.T) {
 	}
 	f := newRelayFixture(t)
 	for name, prefixes := range map[string]map[string]string{
-		"another project":    {"agent-sandboxes": "us-central1-docker.pkg.dev/other/agent-sandbox-images-staging/orion/"},
-		"no trailing slash":  {"agent-sandboxes": strings.TrimSuffix(orion, "/")},
-		"unmapped namespace": {"other-sandboxes": orion},
-		"overlap":            {"agent-sandboxes": orion, "orion-sandboxes": "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/"},
+		"another project":    {"agent-sandboxes": "us-central1-docker.pkg.dev/other/example-images/research/"},
+		"no trailing slash":  {"agent-sandboxes": strings.TrimSuffix(research, "/")},
+		"unmapped namespace": {"other-sandboxes": research},
+		"overlap":            {"agent-sandboxes": research, "research-sandboxes": "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/"},
 	} {
 		c := f.c
 		c.Sandbox = SandboxConfig{}
 		s := *sharedConfig()
-		s.Profiles = map[string]string{"agent-sandboxes": "a", "orion-sandboxes": "b"}
+		s.Profiles = map[string]string{"agent-sandboxes": "a", "research-sandboxes": "b"}
 		s.ImagePrefixes = prefixes
 		c.Shared = &s
 		c.Connect = &ConnectConfig{Listen: "0.0.0.0:8443", Upstream: f.upstream(t, "broker.internal:16443"), AllowedTargets: []string{"api.example.com:443"}}
@@ -585,11 +585,11 @@ func TestStagingSharedConfig(t *testing.T) {
 			"kubernetes": map[string]any{"apiURL": "https://kubernetes.default.svc", "caFile": "/etc/task-relay/kube/ca.crt",
 				"reviewerTokenFile": "/var/run/task-relay/proofs/api"},
 			"shared": map[string]any{
-				"profiles": map[string]any{"agent-sandboxes-staging": "agent-sandbox-orion-staging",
-					"developers-sandboxes-staging": "agent-sandbox-developers-staging"},
+				"profiles": map[string]any{"example-agents": "example-agents-profile",
+					"example-developers": "example-developers-profile"},
 				"imagePrefixes": map[string]any{
-					"agent-sandboxes-staging":      "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/orion/",
-					"developers-sandboxes-staging": "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-developers-staging/"},
+					"example-agents":     "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/research/",
+					"example-developers": "us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/"},
 				"imageDigests": []any{}, "ownerKind": "Sandbox", "ownerAPIVersion": "agents.x-k8s.io/v1beta1", "maxPodSeconds": 28800},
 		}
 		if withListener {

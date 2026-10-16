@@ -119,7 +119,7 @@ Supply env vars for one auth method. Detection picks the first complete group in
 | `VAULT_TOKEN` | Conditional (Token Auth) | A pre-issued Vault token. |
 | `VAULT_ROLE_ID` | Conditional (AppRole Auth) | AppRole RoleID. Selected over Token when set alongside `VAULT_SECRET_ID`. |
 | `VAULT_SECRET_ID` | Conditional (AppRole Auth) | AppRole SecretID. |
-| `VAULT_APPROLE_MOUNT` | Optional (AppRole Auth) | AppRole auth mount path. Defaults to `approle`; override for non-default Enterprise/HCP mounts (e.g. `prod-approle`). |
+| `VAULT_APPROLE_MOUNT` | Optional (AppRole Auth) | AppRole auth mount path. Defaults to `approle`; override for non-default Enterprise/HCP mounts (e.g. `example-approle`). |
 | `VAULT_JWT_ROLE` | Conditional (JWT Auth) | JWT auth role. Set together with `VAULT_JWT_TOKEN_FILE`. |
 | `VAULT_JWT_TOKEN_FILE` | Conditional (JWT Auth) | Path to a projected service-account token, read fresh at every login. |
 | `VAULT_JWT_MOUNT` | Optional (JWT Auth) | JWT auth mount path. Defaults to `jwt`. |

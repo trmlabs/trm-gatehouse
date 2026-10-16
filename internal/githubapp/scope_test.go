@@ -43,7 +43,7 @@ func newScopeGitHub(t *testing.T) (*scopeGitHub, *Minter) {
 		t.Fatal(err)
 	}
 	g := &scopeGitHub{appID: 7, selection: "selected", permissions: map[string]string{"contents": "write", "metadata": "read"},
-		repos: []string{"trmlabs/trm-b2b"}}
+		repos: []string{"example-org/example-app"}}
 	jwtCheck := &fakeGitHub{t: t, key: key}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
@@ -95,9 +95,9 @@ func newScopeGitHub(t *testing.T) (*scopeGitHub, *Minter) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": token, "expires_at": expires,
 				"permissions": body.Permissions, "repositories": func() []map[string]string {
-					out := []map[string]string{{"full_name": "trmlabs/" + body.Repositories[0]}}
+					out := []map[string]string{{"full_name": "example-org/" + body.Repositories[0]}}
 					if g.wideMint {
-						out = append(out, map[string]string{"full_name": "trmlabs/secret"})
+						out = append(out, map[string]string{"full_name": "example-org/secret"})
 					}
 					return out
 				}()})
@@ -119,7 +119,7 @@ func newScopeGitHub(t *testing.T) (*scopeGitHub, *Minter) {
 			if installation != 42 {
 				t.Errorf("scope asked for installation %d", installation)
 			}
-			return Scope{Repos: []string{"trmlabs/trm-b2b", "trmlabs/docs"}}
+			return Scope{Repos: []string{"example-org/example-app", "example-org/docs"}}
 		}}
 	return g, m
 }
@@ -127,7 +127,7 @@ func newScopeGitHub(t *testing.T) (*scopeGitHub, *Minter) {
 func TestScopeAcceptsStatelessTokens(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	g.stateless = true
-	token, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead)
+	token, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead)
 	if err != nil || len(token.Value()) != 520 {
 		t.Fatalf("token of %d characters: %v", len(token.Value()), err)
 	}
@@ -151,7 +151,7 @@ func (g *scopeGitHub) counts() (settings, listMints, repoMints, revoked int) {
 func TestScopeInsideCatalogMintsAndRevokesListingToken(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	for range 3 {
-		if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsWrite); err != nil {
+		if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsWrite); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -172,14 +172,14 @@ func TestScopeInsideCatalogMintsAndRevokesListingToken(t *testing.T) {
 func TestScopeReachBeyondTheCatalogKeepsListedRepositories(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"all repositories":    func(g *scopeGitHub) { g.selection = "all" },
-		"unlisted repository": func(g *scopeGitHub) { g.repos = append(g.repos, "trmlabs/secret") },
+		"unlisted repository": func(g *scopeGitHub) { g.repos = append(g.repos, "example-org/secret") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			g, m := newScopeGitHub(t)
 			var logs bytes.Buffer
 			m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 			widen(g)
-			if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+			if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
 				t.Fatalf("a listed repository lost its token: %v", err)
 			}
 			if !strings.Contains(logs.String(), `"outcome":"serve"`) || !strings.Contains(logs.String(), `"reach":"installed on`) || strings.Contains(logs.String(), "ghs_") {
@@ -194,19 +194,19 @@ func TestScopeReachBeyondTheCatalogKeepsListedRepositories(t *testing.T) {
 func TestScopeRefusesOnlyTheUnlistedRepository(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	g.mu.Lock()
-	g.repos = append(g.repos, "trmlabs/secret")
+	g.repos = append(g.repos, "example-org/secret")
 	g.mu.Unlock()
-	if _, err := m.Token(context.Background(), app, "trmlabs/secret", ContentsRead); err != ErrUnavailable {
+	if _, err := m.Token(context.Background(), app, "example-org/secret", ContentsRead); err != ErrUnavailable {
 		t.Fatalf("minted for an unlisted repository: %v", err)
 	}
 	if settings, _, repoMints, _ := g.counts(); settings != 0 || repoMints != 0 {
 		t.Fatalf("GitHub asked about an unlisted repository: settings %d, mints %d", settings, repoMints)
 	}
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
 		t.Fatalf("the listed repository lost its token: %v", err)
 	}
 	m.ScopeMode = ScopeWarn
-	if _, err := m.Token(context.Background(), app, "trmlabs/secret", ContentsRead); err != nil {
+	if _, err := m.Token(context.Background(), app, "example-org/secret", ContentsRead); err != nil {
 		t.Fatalf("warn mode refused: %v", err)
 	}
 }
@@ -220,7 +220,7 @@ func TestScopeUnreadableListingRefuses(t *testing.T) {
 	g.mu.Lock()
 	g.listErr = http.StatusForbidden
 	g.mu.Unlock()
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != ErrUnavailable {
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != ErrUnavailable {
 		t.Fatalf("token minted while the installation was unreadable: %v", err)
 	}
 	if _, _, repoMints, _ := g.counts(); repoMints != 0 {
@@ -253,7 +253,7 @@ func TestScopeWarnsOnWiderSettings(t *testing.T) {
 			m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 			widen(g)
 			for range 2 {
-				if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+				if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
 					t.Fatalf("a settings warning refused the token: %v", err)
 				}
 				now = now.Add(scopeTTL + time.Second)
@@ -271,8 +271,8 @@ func TestScopeWarnsOnWiderSettings(t *testing.T) {
 func TestScopeAllowsPullRequestsOnlyWithAGitHubAPIEntry(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	g.permissions["pull_requests"] = "write"
-	m.Scope = func(int64) Scope { return Scope{Repos: []string{"trmlabs/trm-b2b"}, PullRequests: true} }
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", PullRequestsWrite); err != nil {
+	m.Scope = func(int64) Scope { return Scope{Repos: []string{"example-org/example-app"}, PullRequests: true} }
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", PullRequestsWrite); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -285,10 +285,10 @@ func TestScopeAllowsChecksAndStatusesWithActions(t *testing.T) {
 	m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	g.permissions["actions"], g.permissions["checks"], g.permissions["statuses"] = "read", "read", "read"
 	m.Scope = func(int64) Scope {
-		return Scope{Repos: []string{"trmlabs/trm-b2b"}, Actions: true, Checks: true, Statuses: true}
+		return Scope{Repos: []string{"example-org/example-app"}, Actions: true, Checks: true, Statuses: true}
 	}
 	for _, p := range []Permissions{ActionsRead, ChecksRead, StatusesRead} {
-		if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", p); err != nil {
+		if _, err := m.Token(context.Background(), app, "example-org/example-app", p); err != nil {
 			t.Fatalf("%+v: %v", p, err)
 		}
 	}
@@ -304,9 +304,9 @@ func TestScopeAllowsActionsWriteOnlyWithARestartGrant(t *testing.T) {
 		g, m := newScopeGitHub(t)
 		var logs bytes.Buffer
 		m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
-		g.permissions["actions"], g.repos = "write", []string{"trmlabs/example-repo"}
-		m.Scope = func(int64) Scope { return Scope{Repos: []string{"trmlabs/example-repo"}, Actions: true, ActionsWrite: granted} }
-		if _, err := m.Token(context.Background(), app, "trmlabs/example-repo", ActionsWrite); err != nil {
+		g.permissions["actions"], g.repos = "write", []string{"example-org/example-repo"}
+		m.Scope = func(int64) Scope { return Scope{Repos: []string{"example-org/example-repo"}, Actions: true, ActionsWrite: granted} }
+		if _, err := m.Token(context.Background(), app, "example-org/example-repo", ActionsWrite); err != nil {
 			t.Fatalf("granted=%v: %v", granted, err)
 		}
 		if reported := strings.Contains(logs.String(), "holds actions write"); reported == granted {
@@ -320,7 +320,7 @@ func TestScopeRechecksAfterTTLRetryAndCatalogChange(t *testing.T) {
 	now := time.Now()
 	m.Now = func() time.Time { return now }
 	token := func() error {
-		_, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead)
+		_, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead)
 		return err
 	}
 	if err := token(); err != nil {
@@ -357,11 +357,11 @@ func TestScopeReadsEveryPageWithNoCap(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	var want []string
 	for i := range 1050 {
-		want = append(want, fmt.Sprintf("trmlabs/repo-%04d", i))
+		want = append(want, fmt.Sprintf("example-org/repo-%04d", i))
 	}
 	g.repos = want
-	m.Scope = func(int64) Scope { return Scope{Repos: append(want, "trmlabs/trm-b2b")} }
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+	m.Scope = func(int64) Scope { return Scope{Repos: append(want, "example-org/example-app")} }
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
 		t.Fatalf("a large installation inside the catalog was refused: %v", err)
 	}
 	g.mu.Lock()
@@ -376,12 +376,12 @@ func TestScopeReadsEveryPageWithNoCap(t *testing.T) {
 	g2, m2 := newScopeGitHub(t)
 	var logs bytes.Buffer
 	m2.Log = slog.New(slog.NewJSONHandler(&logs, nil))
-	g2.repos = append(append([]string(nil), want...), "trmlabs/x1", "trmlabs/x2", "trmlabs/x3", "trmlabs/x4", "trmlabs/x5", "trmlabs/x6", "trmlabs/x7")
-	m2.Scope = func(int64) Scope { return Scope{Repos: append(want, "trmlabs/trm-b2b")} }
-	if _, err := m2.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+	g2.repos = append(append([]string(nil), want...), "example-org/x1", "example-org/x2", "example-org/x3", "example-org/x4", "example-org/x5", "example-org/x6", "example-org/x7")
+	m2.Scope = func(int64) Scope { return Scope{Repos: append(want, "example-org/example-app")} }
+	if _, err := m2.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
 		t.Fatalf("unlisted repositories took the listed one's token: %v", err)
 	}
-	if !strings.Contains(logs.String(), "installed on trmlabs/x1, trmlabs/x2, trmlabs/x3, trmlabs/x4, trmlabs/x5 and 2 more") {
+	if !strings.Contains(logs.String(), "installed on example-org/x1, example-org/x2, example-org/x3, example-org/x4, example-org/x5 and 2 more") {
 		t.Fatalf("log: %s", logs.String())
 	}
 }
@@ -391,7 +391,7 @@ func TestScopeReadsEveryPageWithNoCap(t *testing.T) {
 func TestWarnModeServesAndKeepsThePerTokenLimits(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"all repositories":    func(g *scopeGitHub) { g.selection = "all" },
-		"unlisted repository": func(g *scopeGitHub) { g.repos = append(g.repos, "trmlabs/secret") },
+		"unlisted repository": func(g *scopeGitHub) { g.repos = append(g.repos, "example-org/secret") },
 		"listing unavailable": func(g *scopeGitHub) { g.listErr = http.StatusForbidden },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -400,7 +400,7 @@ func TestWarnModeServesAndKeepsThePerTokenLimits(t *testing.T) {
 			var logs bytes.Buffer
 			m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 			widen(g)
-			if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err != nil {
+			if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
 				t.Fatalf("warn mode refused: %v", err)
 			}
 			if !strings.Contains(logs.String(), `"mode":"warn","outcome":"serve"`) || strings.Contains(logs.String(), "ghs_") {
@@ -411,7 +411,7 @@ func TestWarnModeServesAndKeepsThePerTokenLimits(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	m.ScopeMode = ScopeWarn
 	g.wideMint = true
-	if _, err := m.Token(context.Background(), app, "trmlabs/trm-b2b", ContentsRead); err == nil {
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err == nil {
 		t.Fatal("warn mode accepted a token for two repositories")
 	}
 	g.mu.Lock()
@@ -539,7 +539,7 @@ func TestScopeCheckPanicReleasesWaiters(t *testing.T) {
 		if calls == 1 {
 			panic("scope source")
 		}
-		return Scope{Repos: []string{"trmlabs/trm-b2b"}}
+		return Scope{Repos: []string{"example-org/example-app"}}
 	}
 	app := App{AppID: 7, InstallationID: 42}
 	func() {

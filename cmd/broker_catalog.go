@@ -77,7 +77,7 @@ func validateBrokerCatalog(data []byte, suffixes []string, requirePools bool, w 
 }
 
 func init() {
-	brokerCatalogValidateCmd.Flags().StringSlice("allowed-host-suffix", nil, "domain every host must be in (repeatable), such as .postgresbridge.com")
+	brokerCatalogValidateCmd.Flags().StringSlice("allowed-host-suffix", nil, "domain every host must be in (repeatable), such as .example.com")
 	brokerCatalogValidateCmd.Flags().Bool("require-pools", false, "require a pools section that every grant refers to")
 	brokerCatalogValidateCmd.Flags().String("environment", "", "environment every database role must be named for, such as staging")
 	brokerCatalogCmd.AddCommand(brokerCatalogValidateCmd)

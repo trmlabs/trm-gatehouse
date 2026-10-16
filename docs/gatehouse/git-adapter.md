@@ -9,8 +9,8 @@ A git entry in `AGENT_VAULT_HTTP_CATALOG_FILE` lists repositories, not paths:
 ```json
 {"name": "github", "host": "github.com", "kind": "git", "pools": ["<pool agent ID>"],
  "git": {"appID": 0, "installationID": 0, "repos": [
-   {"repo": "trmlabs/trm-b2b", "access": "write", "refPrefixes": ["refs/heads/cursor/"]},
-   {"repo": "trmlabs/docs", "access": "read"}]}}
+   {"repo": "example-org/example-app", "access": "write", "refPrefixes": ["refs/heads/cursor/"]},
+   {"repo": "example-org/docs", "access": "read"}]}}
 ```
 
 | Field | Rule |
@@ -46,7 +46,6 @@ The App acts as itself on GitHub, so branch protection and rulesets govern its p
 - Turn off `--mint-github-token` and the dashboard's GitHub token minting, so the worker gets no token.
 - Route `github.com` through the worker's sidecar (`HTTPS_PROXY`) and trust the broker CA (`GIT_SSL_CAINFO` or `http.sslCAInfo`).
 - Use `https://github.com/<owner>/<repo>.git` remotes, and remove any credential helper, `http.extraHeader` or `url.<token URL>.insteadOf` rewrite.
-- Open risk: the Cursor README says runs fail to clone without the minting toggle. How Cursor's worker applies its token is not visible in our repositories, so confirm a run clones with the toggle off before relying on this.
 
 ## Opening pull requests (GitHub REST)
 

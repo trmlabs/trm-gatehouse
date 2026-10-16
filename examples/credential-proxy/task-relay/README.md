@@ -116,14 +116,14 @@ all listeners and browser policy are ready.
 For a runtime whose agent Pods hold no token of their own (agent-sandbox), one relay Deployment serves every agent in the listed namespaces. Set `shared` instead of `sandbox` and `self`; `deadline` may be omitted:
 
 ```json
-"shared": {"profiles": {"agent-sandboxes-staging": "agent-sandbox-orion-staging"},
-           "imagePrefixes": {"agent-sandboxes-staging": "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/orion/"},
+"shared": {"profiles": {"example-agents": "example-agents-profile"},
+           "imagePrefixes": {"example-agents": "us-central1-docker.pkg.dev/<project>/example-images/agents/"},
            "imageDigests": ["sha256:..."], "ownerKind": "Sandbox", "ownerAPIVersion": "agents.x-k8s.io/v1beta1",
            "maxPodSeconds": 3600, "maxConnections": 4096},
 "auditFile": "/dev/stdout"
 ```
 
-`profiles` maps each agent namespace to its harness profile, which every attestation names. A standing Deployment omits `deadline`. Without `tlsCertFile` and `tlsKeyFile` the listeners serve plaintext on the Pod network: the HTTP listener takes only CONNECT, so HTTPS stays end to end, a PostgreSQL client asking for TLS is told no (sslmode=prefer goes on, require stops), and every upstream to the broker is TLS regardless. `auditFile` may be `/dev/stdout` in shared mode only; admission rows name the agent Pod, its namespace, its Sandbox and the images it pulled. Images are judged on what the node pulled (`status.containerStatuses[].imageID`, init containers included): each must lie under its namespace's `imagePrefixes` path (`us-central1-docker.pkg.dev/trm-agent-sandbox/<repository>/` or `.../<repository>/<tenant>/`, never overlapping) or match an exact `imageDigests` entry, which is for containers the platform injects. The relay lists and watches Pods in those namespaces (its Role needs `get`, `list` and `watch` on `pods` there), so admitting a connection costs no API call. It matches each connection's source address to exactly one Pod that is Running, not deleting, not on the host network, with no ephemeral container, controlled by `ownerKind` at `ownerAPIVersion` with `blockOwnerDeletion`, running only listed images, and inside `maxPodSeconds` (or its `activeDeadlineSeconds`). It then presents its own projected token with an attestation of that Pod: the `Gatehouse-Attestation` CONNECT header, or a `GHATTS1` line ahead of the PostgreSQL startup. Every second it rechecks each open connection's Pod and closes the connection when the Pod or its controller's UID changes or the Pod stops qualifying. A namespace whose watch has been down for more than 10 seconds admits nothing; a silent stream counts as down after 75 seconds. Node addresses never match: only Pod addresses are indexed, and host-network Pods are refused. A client that sends its own attestation, session or PROXY line is refused. Listeners serve TLS on any address; session files and the browser are refused. The broker side is a proxy binding (see the identity reference). Scale with replicas; `maxConnections` bounds one replica.
+`profiles` maps each agent namespace to its harness profile, which every attestation names. A standing Deployment omits `deadline`. Without `tlsCertFile` and `tlsKeyFile` the listeners serve plaintext on the Pod network: the HTTP listener takes only CONNECT, so HTTPS stays end to end, a PostgreSQL client asking for TLS is told no (sslmode=prefer goes on, require stops), and every upstream to the broker is TLS regardless. `auditFile` may be `/dev/stdout` in shared mode only; admission rows name the agent Pod, its namespace, its Sandbox and the images it pulled. Images are judged on what the node pulled (`status.containerStatuses[].imageID`, init containers included): each must lie under its namespace's `imagePrefixes` path (`us-central1-docker.pkg.dev/<project>/<repository>/` or `.../<repository>/<tenant>/`, never overlapping) or match an exact `imageDigests` entry, which is for containers the platform injects. Today `<project>` must be the one Artifact Registry project built into the broker; any other registry or project is refused when the configuration loads. A later change makes the project configurable. The relay lists and watches Pods in those namespaces (its Role needs `get`, `list` and `watch` on `pods` there), so admitting a connection costs no API call. It matches each connection's source address to exactly one Pod that is Running, not deleting, not on the host network, with no ephemeral container, controlled by `ownerKind` at `ownerAPIVersion` with `blockOwnerDeletion`, running only listed images, and inside `maxPodSeconds` (or its `activeDeadlineSeconds`). It then presents its own projected token with an attestation of that Pod: the `Gatehouse-Attestation` CONNECT header, or a `GHATTS1` line ahead of the PostgreSQL startup. Every second it rechecks each open connection's Pod and closes the connection when the Pod or its controller's UID changes or the Pod stops qualifying. A namespace whose watch has been down for more than 10 seconds admits nothing; a silent stream counts as down after 75 seconds. Node addresses never match: only Pod addresses are indexed, and host-network Pods are refused. A client that sends its own attestation, session or PROXY line is refused. Listeners serve TLS on any address; session files and the browser are refused. The broker side is a proxy binding (see the identity reference). Scale with replicas; `maxConnections` bounds one replica.
 
 `requesterNamespaces` lists the namespaces whose attestations name the person behind the agent: the Pod's `gatehouse.trmlabs.com/requester` annotation, which admission policy there fixes to the Sandbox creator's login. It must be a lower-case `name@domain`; a Pod in such a namespace without one is not admitted, an open connection ends if it changes, and admission rows carry it. Elsewhere the attestation never names a requester.
 
@@ -221,28 +221,23 @@ withdrawal during handshake, deadline closure, audit refusal, request bounds,
 PostgreSQL cancellation isolation and browser cleanup. They do not establish a
 real identity issuer, actual TypeORM connectivity or deployed network enforcement.
 
-Before enabling a task, the deployment operator must complete these checks and
-record results in the deployment change request:
+Before enabling a task, the deployment operator must complete these checks:
 
-- [ ] Restrict sandbox egress to its relay and required DNS; restrict relay ingress
+- Restrict sandbox egress to its relay and required DNS; restrict relay ingress
   to its sandbox. Deny direct broker/API/destination access and access to another
   task's relay. Prevent the sandbox from editing its Pod, labels, policies or the
   operator configuration. Disallow host networking and shared credential volumes.
-  Result/evidence: pending. Reviewer/feedback: pending.
-- [ ] Confirm the real CNI preserves the expected source IP and prevents spoofing.
+- Confirm the real CNI preserves the expected source IP and prevents spoofing.
   Exercise the approved request and a sibling-Pod impersonation attempt. Network
   address translation that changes the peer IP must fail closed.
-  Result/evidence: pending. Reviewer/feedback: pending.
-- [ ] Exercise real HTTP/database clients, identity rotation, Pod replacement,
+- Exercise real HTTP/database clients, identity rotation, Pod replacement,
   API denial, task expiry, full audit storage and restart. Confirm forbidden
   requests create no destination call or credential issuance.
-  Result/evidence: pending. Reviewer/feedback: pending.
-- [ ] Review browser broker policy, actual login custody and physical closure
+- Review browser broker policy, actual login custody and physical closure
   separately before adding its listener. No full application journey is claimed.
-  Result/evidence: pending. Reviewer/feedback: pending.
 
-Record the tested revision, environment, command, expected/observed result and
-sanitized evidence link beside each result. When these checks are accepted, the
+Record the tested revision, environment, command, expected and observed result
+and evidence beside each check. When these checks are accepted, the
 paired Kubernetes task can use its approved services without holding an identity
 credential. Other hosted-agent runtimes require their own trustworthy sandbox
 identity and isolation integration.

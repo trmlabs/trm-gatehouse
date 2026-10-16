@@ -57,7 +57,7 @@ Set `AGENT_VAULT_HTTP_CATALOG_FILE` to a JSON file. One entry per binding:
 
 The broker reads each key from Vault at most once a minute and shares that read across concurrent requests. A new KV version takes effect within a minute, or at once when the vendor answers 401 or 403, which drops the cached key. Deleting the key in Vault revokes it within a minute: deleting or destroying the current version, deleting the secret, or removing or emptying the field makes the next read refuse the destination as `key_deleted` and drop the cached key. Only when Vault does not answer (unreachable, sealed, a server error or permission denied) does a cached key keep working, for five minutes past its minute, then calls are refused as `key_unavailable`. A stored key with a byte outside printable ASCII (0x21 to 0x7e), such as a trailing newline or a space, or longer than 8192 bytes, is refused the same way as a deleted one but recorded as `key_not_header_safe`, so the fix is to rewrite the value. Every refusal names its reason to the agent in the `X-Gatehouse-Refusal` header. `key_unavailable` is passing (503 with `Retry-After`); `key_deleted` and `key_not_header_safe` answer 503 without it, since only an operator can clear them (see the agent protocol page).
 
-Grant the broker read on each key path, for example `gatehouse/data/vendors/*`. In TRM's Vault this is a trm-infra change.
+Grant the broker read on each key path, for example `gatehouse/data/vendors/*`.
 
 ## Requirements
 

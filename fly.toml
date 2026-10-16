@@ -1,3 +1,6 @@
+# Inherited from Infisical's Agent Vault: a Fly.io deployment of upstream's
+# default profile. Gatehouse does not use it; see README.md for how Gatehouse
+# runs.
 app = "agent-vault"
 primary_region = "sjc"
 
