@@ -257,11 +257,11 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			}
 		}
 	}
-	// The outcomes authorize.Resolve and entitlement.Decide return, other
-	// than the ones that allow the request.
+	// The outcomes authorize.Resolve, authorize.Decide and entitlement.Decide
+	// return, other than the ones that allow the request.
 	allows := map[string]bool{"t0": true, "entitled": true, "workload_entitled": true}
 	for file, pattern := range map[string]*regexp.Regexp{
-		"../authorize/authorize.go":     regexp.MustCompile(`return who, "([a-z_]+)"`),
+		"../authorize/authorize.go":     regexp.MustCompile(`(?:return who, |\.Outcome(?:, [\w.]+)* = )"([a-z_]+)"`),
 		"../entitlement/entitlement.go": regexp.MustCompile(`(?m)Outcome = .*"([a-z_]+)"$`),
 	} {
 		src, err := os.ReadFile(file)

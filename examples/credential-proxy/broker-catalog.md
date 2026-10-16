@@ -96,7 +96,7 @@ The run token is verified exactly as on a `cursor-session` pool (run, Pod and ow
 | The run names a person (`sub` `user:` with an `owner_email` in a configured domain) | `automation_no_person` |
 | The entry is one the Automation lists, even when the pool is granted it | `automation_not_granted` |
 | The run's person is the `owner` | `automation_not_owner` |
-| The owner's account is enabled, at every tier, so an offboarded owner's Automation stops. T0 on this pool therefore needs the directory | `account_disabled`, or `entitlement_unavailable` once the account is deleted and the directory no longer answers for it |
+| The owner's account is enabled, at every tier, so an offboarded owner's Automation stops. T0 on this pool therefore needs the directory | `account_disabled`, or `not_in_directory` once the account is deleted and the directory has no account for it |
 
 Above T0 the entry is then decided on the owner's account, as a person's would be, so the Automation never reaches what its owner could not. A run whose token names anyone other than the owner is refused. The broker sees only the person the run token names, never who edited the Automation or set off its trigger: a run Cursor attributes to the owner is served on the owner's account, so whoever can edit or trigger an Automation that runs as its owner acts with the owner's access. Treat anyone who can edit or trigger an Automation as able to use its entries.
 
