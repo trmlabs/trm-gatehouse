@@ -157,6 +157,13 @@ var DefaultGitHubOperations = []string{"pr.open", "pr.read", "pr.comment"}
 // operations come from, and the token scope each needs (see GitGranted). The
 // routes each one opens are in githubAPIRoutes.
 var githubOperations = map[string]string{
+	// graphql opts a repository into POST /graphql (graphql.go), where each
+	// field still needs its own operation and pr.read also covers a pull
+	// request's comments, reviews and review threads. Opt-in, so no existing
+	// entry widens when the broker starts serving GraphQL. A broker without
+	// it drops any entry listing it, REST routes included: deploy the broker
+	// first.
+	"graphql":          "pull-requests",
 	"pr.open":          "pull-requests",  // POST /pulls, head under the pool's push prefixes
 	"pr.read":          "pull-requests",  // GET /pulls/{n}
 	"pr.list":          "pull-requests",  // GET /pulls, GET /issues/{n}/comments
@@ -209,6 +216,9 @@ func (r GitRepo) operations() []string {
 
 // Allows reports whether a github-api repository grants an operation.
 func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
+
+// GrantsScope is grantsScope for callers outside the catalog (GraphQL tokens).
+func (r GitRepo) GrantsScope(scope string) bool { return r.grantsScope(scope) }
 
 // grantsScope reports whether any of the repository's operations needs a
 // token scope.
@@ -1233,6 +1243,61 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 	return GitRequest{}, true, ErrUnlisted
 }
 
+// GitHubAPIRepos returns, for a GraphQL request to a github-api host, every
+// repository its entries list that the pool is granted, each with its head
+// prefixes as for a REST write (its push prefixes, then pullRequestHeads). ok
+// is false when the host has no github-api entry.
+func (c Catalog) GitHubAPIRepos(host string, port int, pool string) ([]GitRequest, bool) {
+	host = strings.ToLower(host)
+	var out []GitRequest
+	found := false
+	for i := range c.entries {
+		e := &c.entries[i]
+		if e.Kind != "github-api" || e.Host != host || e.Port != port {
+			continue
+		}
+		found = true
+		if !contains(e.Pools, pool) {
+			continue
+		}
+		for _, r := range e.Git.Repos {
+			out = append(out, GitRequest{Entry: e, Repo: r, Write: true, Route: "graphql", Method: http.MethodPost,
+				Permissions: "pull-requests", HeadPrefixes: append(c.pushBranchPrefixes(r.Repo, pool), r.pullRequestHeads(pool)...)})
+		}
+	}
+	return out, found
+}
+
+// GitHubAPIRepository is the GraphQL counterpart of GitHubAPIMatch: the
+// github-api entry listing repo on the host, with the pool's head prefixes
+// there. A repository no entry lists is ErrUnlisted; one listed only for
+// other pools is ErrPool.
+func (c Catalog) GitHubAPIRepository(host string, port int, repo, pool string) (GitRequest, error) {
+	repo = strings.ToLower(repo)
+	var listed *Entry
+	for i := range c.entries {
+		e := &c.entries[i]
+		if e.Kind != "github-api" || e.Host != strings.ToLower(host) || e.Port != port {
+			continue
+		}
+		for _, r := range e.Git.Repos {
+			if r.Repo == repo && listed == nil {
+				listed = e
+			}
+		}
+	}
+	granted, _ := c.GitHubAPIRepos(host, port, pool)
+	for _, g := range granted {
+		if g.Repo.Repo == repo {
+			return g, nil
+		}
+	}
+	if listed != nil {
+		return GitRequest{Entry: listed}, ErrPool
+	}
+	return GitRequest{}, ErrUnlisted
+}
+
 // pushBranchPrefixes are the branch names (refs/heads/ removed) a pool may
 // push to in a repository, from its git entries' shared and per-pool ref
 // prefixes (PushPrefixes). A pull request may come only from one of them; none
@@ -1564,6 +1629,13 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 // the same repository on another port is a different endpoint and never
 // stands in for it.
 const cloneGitPort = 443
+
+// GitHubCloneEntry is cloneEntry for a GraphQL request that reads a pull
+// request's files: the git entry the requester must also pass, or nil when
+// the pool may not clone the repository.
+func (c Catalog) GitHubCloneEntry(apiHost, repo, pool string) *Entry {
+	return c.cloneEntry(strings.ToLower(apiHost), strings.ToLower(repo), pool)
+}
 
 // cloneEntry returns the git entry a clone of repo would use (pairedGit), or
 // nil when there is none or it does not grant the pool (where a clone would

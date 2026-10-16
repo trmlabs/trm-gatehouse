@@ -1,0 +1,28 @@
+{
+ "gh": "2.89.0",
+ "recorded": "local mock server, no GitHub token",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/graphql",
+   "headers": {
+    "Accept": "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+    "Content-Type": "application/json; charset=utf-8",
+    "Graphql-Features": "merge_queue",
+    "X-Github-Api-Version": "2022-11-28"
+   },
+   "body": "{\"query\":\"\\n\\tquery PullRequestByNumber($owner: String!, $repo: String!, $pr_number: Int!) {\\n\\t\\trepository(owner: $owner, name: $repo) {\\n\\t\\t\\tpullRequest(number: $pr_number) {number,headRefName,id}\\n\\t\\t}\\n\\t}\",\"variables\":{\"owner\":\"example-org\",\"pr_number\":12,\"repo\":\"example-repo\"}}"
+  },
+  {
+   "method": "POST",
+   "path": "/graphql",
+   "headers": {
+    "Accept": "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+    "Content-Type": "application/json; charset=utf-8",
+    "Graphql-Features": "merge_queue",
+    "X-Github-Api-Version": "2022-11-28"
+   },
+   "body": "{\"query\":\"\\n\\tquery PullRequestStatusChecks($id: ID!, $endCursor: String) {\\n\\t\\tnode(id: $id) {\\n\\t\\t\\t...on PullRequest {\\n\\t\\t\\t\\tstatusCheckRollup: commits(last: 1) {nodes {commit {statusCheckRollup {contexts(first:100,after:$endCursor) {nodes {__typename...on StatusContext {context,state,targetUrl,createdAt,description,isRequired(pullRequestId: $id)},...on CheckRun {name,checkSuite{workflowRun{event,workflow{name}}},status,conclusion,startedAt,completedAt,detailsUrl,isRequired(pullRequestId: $id)}},pageInfo{hasNextPage,endCursor}}}}}}\\n\\t\\t\\t}\\n\\t\\t}\\n\\t}\",\"variables\":{\"id\":\"{{PR}}\"}}"
+  }
+ ]
+}

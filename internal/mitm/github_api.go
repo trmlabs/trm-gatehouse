@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,37 +36,6 @@ var githubDownloadHosts = []string{"actions.githubusercontent.com", "blob.core.w
 // sees the token.
 const readyMutation = `mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { number isDraft } } }`
 
-// graphqlHintBytes is how much of a refused GraphQL request is read to name
-// the REST route for it; gh's pull request mutations fit well within it.
-const graphqlHintBytes = 64 << 10
-
-// graphqlMutation finds the first GraphQL mutation field a REST route here
-// serves. Matching is by field name only: the request is refused either way,
-// so a wrong guess costs only a less useful hint.
-var graphqlMutation = regexp.MustCompile(`\b(markPullRequestReadyForReview|createPullRequest|addComment|updatePullRequestBranch|updatePullRequest|addLabelsToLabelable)\b`)
-
-// graphqlRoutes is the REST route, and the operation a repository must list
-// for it, that serves each mutation gh sends. Fixed text: a hint never
-// carries request data.
-var graphqlRoutes = map[string]string{
-	"markPullRequestReadyForReview": "to mark a draft ready, send POST /repos/{owner}/{repo}/pulls/{n}/ready (operation pr.ready), for example gh api -X POST repos/{owner}/{repo}/pulls/{n}/ready.",
-	"createPullRequest":             "to open a pull request, send POST /repos/{owner}/{repo}/pulls (operation pr.open).",
-	"addComment":                    "to comment on a pull request, send POST /repos/{owner}/{repo}/issues/{n}/comments (operation pr.comment).",
-	"updatePullRequestBranch":       "to update a pull request's branch, send PUT /repos/{owner}/{repo}/pulls/{n}/update-branch (operation pr.update_branch).",
-	"updatePullRequest":             "to edit a pull request's body, send PATCH /repos/{owner}/{repo}/pulls/{n} with only a body (operation pr.edit).",
-	"addLabelsToLabelable":          "to label a pull request, send POST /repos/{owner}/{repo}/issues/{n}/labels (operation pr.label).",
-}
-
-// graphqlRESTHint is the hint for a refused GraphQL request: the REST route
-// for its mutation, or where the REST routes are.
-func graphqlRESTHint(body []byte) string {
-	const served = "GitHub GraphQL is not served here; "
-	if m := graphqlMutation.FindSubmatch(body); m != nil {
-		return served + graphqlRoutes[string(m[1])]
-	}
-	return served + "use the REST routes under /repos/{owner}/{repo} with gh api."
-}
-
 // forwardGitHubAPI serves the GitHub REST routes a github-api entry lists
 // (httpcatalog GitHubAPIMatch) for one listed repository, with a token minted
 // for that repository and only the scope the route needs. It can never
@@ -86,13 +54,6 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	}
 	deny := func(status int, outcome string) { p.adapterDeny(w, event, target, status, outcome) }
 	switch {
-	case errors.Is(matchErr, httpcatalog.ErrUnlisted) && event.Operation == "graphql" && r.Method == http.MethodPost:
-		// gh sends most pull request commands as GraphQL. Name the REST route
-		// that serves the same intent, so an agent whose gh pr ready was
-		// refused can send the route the broker does serve.
-		body, _ := io.ReadAll(io.LimitReader(r.Body, graphqlHintBytes))
-		p.adapterDenyHint(w, event, target, http.StatusForbidden, "unlisted", "unlisted", 0, graphqlRESTHint(body))
-		return
 	case errors.Is(matchErr, httpcatalog.ErrUnlisted):
 		deny(http.StatusForbidden, "unlisted")
 		return

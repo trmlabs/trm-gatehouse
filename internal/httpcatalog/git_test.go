@@ -319,6 +319,7 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"PUT pulls/1/update-branch", "POST actions/runs/1/rerun", "POST actions/runs/1/rerun-failed-jobs",
 	}
 	want := map[string][]string{
+		"graphql":    nil, // POST /graphql only (graphql_test.go); no REST route
 		"pr.open":    {"POST pulls"},
 		"pr.read":    {"GET pulls/1"}, // files and compare also need a git entry (TestGitHubAPICodeReadsNeedClone)
 		"pr.list":    {"GET pulls", "GET issues/1/comments"},

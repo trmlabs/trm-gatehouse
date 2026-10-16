@@ -1,0 +1,28 @@
+{
+ "gh": "2.89.0",
+ "recorded": "local mock server, no GitHub token",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/graphql",
+   "headers": {
+    "Accept": "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+    "Content-Type": "application/json; charset=utf-8",
+    "Graphql-Features": "merge_queue",
+    "X-Github-Api-Version": "2022-11-28"
+   },
+   "body": "{\"query\":\"\\n\\tquery PullRequestByNumber($owner: String!, $repo: String!, $pr_number: Int!) {\\n\\t\\trepository(owner: $owner, name: $repo) {\\n\\t\\t\\tpullRequest(number: $pr_number) {id,number,state,isDraft}\\n\\t\\t}\\n\\t}\",\"variables\":{\"owner\":\"example-org\",\"pr_number\":12,\"repo\":\"example-repo\"}}"
+  },
+  {
+   "method": "POST",
+   "path": "/graphql",
+   "headers": {
+    "Accept": "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+    "Content-Type": "application/json",
+    "Graphql-Features": "merge_queue",
+    "X-Github-Api-Version": "2022-11-28"
+   },
+   "body": "{\"query\":\"mutation ConvertPullRequestToDraft($input:ConvertPullRequestToDraftInput!){convertPullRequestToDraft(input: $input){pullRequest{id}}}\",\"variables\":{\"input\":{\"pullRequestId\":\"{{PR}}\"}}}\n"
+  }
+ ]
+}
