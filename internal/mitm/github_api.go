@@ -86,6 +86,9 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	if err == nil && p.refuseDecoyBody(w, event, target, body) {
+		return
+	}
 	switch {
 	case err != nil:
 		deny(http.StatusBadRequest, "request_shape")
@@ -126,6 +129,11 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	}
 	if !ok {
 		deny(http.StatusBadRequest, "request_shape")
+		return
+	}
+	// The rebuilt body is what GitHub reads, with any escape in the worker's
+	// JSON decoded, so it is checked again.
+	if p.refuseDecoyBody(w, event, target, body) {
 		return
 	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)

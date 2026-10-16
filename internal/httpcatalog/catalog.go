@@ -60,6 +60,11 @@ type Entry struct {
 	// RequestFields limit request parameters to listed values (see
 	// RequestField). Header entries only; a Slack entry must limit channel.
 	RequestFields []RequestField `json:"requestFields,omitempty"`
+	// Transcript marks a model API: its request bodies carry an agent's
+	// conversation, which quotes whatever the agent read, so a decoy
+	// credential found only in one is not treated as presented. Headers and
+	// the URL are still checked. Header entries only.
+	Transcript bool `json:"transcript,omitempty"`
 	// Kind "git" makes the entry a git smart-HTTP binding, and "github-api" a
 	// GitHub REST binding limited to pull request work and the reads and
 	// writes its repositories grant (GitHubAPIMatch). Paths, methods and the
@@ -526,6 +531,9 @@ func (e *Entry) normalize() error {
 	}
 	if e.Kind != "" && len(e.RequestFields) > 0 {
 		return errors.New("requestFields apply to header entries only")
+	}
+	if e.Kind != "" && e.Transcript {
+		return errors.New("transcript applies to header entries only")
 	}
 	if e.Kind != "browser-session" && (len(e.DeniedPaths) > 0 || len(e.ReadOnlyPaths) > 0) {
 		return errors.New("deniedPaths and readOnlyPaths apply to browser-session entries only")

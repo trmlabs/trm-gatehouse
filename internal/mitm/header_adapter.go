@@ -15,6 +15,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/decoy"
 	"github.com/Infisical/agent-vault/internal/entitlement"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
@@ -70,10 +71,21 @@ type HeaderAdapter struct {
 		Token(context.Context, *httpcatalog.Entry) (httpcatalog.GCPToken, error)
 		Invalidate(*httpcatalog.Entry)
 	}
+	// Decoys are the decoy credentials planted in worker sessions (see
+	// package decoy), read per request. Without them, none is recognized.
+	Decoys interface{ Current() *decoy.Set }
 }
 
 func (a *HeaderAdapter) valid() bool {
 	return a != nil && a.Catalog != nil && a.Keys != nil && a.Audit != nil
+}
+
+// decoys is the decoy set in force, or nil.
+func (a *HeaderAdapter) decoys() *decoy.Set {
+	if a == nil || a.Decoys == nil {
+		return nil
+	}
+	return a.Decoys.Current()
 }
 
 const placeholderMarker = "__vault_"
@@ -105,6 +117,49 @@ func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, tar
 // with the limiter's own wait as Retry-After.
 func (p *Proxy) adapterRateDeny(w http.ResponseWriter, event auditchain.Event, target string, d ratelimit.Decision) {
 	p.adapterDenyAs(w, event, target, http.StatusTooManyRequests, "rate_limited", "rate_limited", d.RetryAfter)
+}
+
+// outcomeDecoy refuses a request that presented a decoy credential: proof the
+// session went looking for secrets, so the row pages.
+const outcomeDecoy = "decoy_credential"
+
+// refuseDecoy refuses a request that presented a decoy credential and records
+// which decoy and where: binding "decoy/<owner pool>/<name>" and the surface
+// as the decision. It never forwards, and the row never holds the value. The
+// caller sees the same 403 as any refusal.
+func (p *Proxy) refuseDecoy(w http.ResponseWriter, event auditchain.Event, target string, m decoy.Match) {
+	event.Binding, event.Decision = "decoy/"+m.Label, m.Surface
+	p.adapterDeny(w, event, target, http.StatusForbidden, outcomeDecoy)
+}
+
+// refuseDecoyBody refuses a request whose body, already read, holds a decoy
+// credential, and reports whether it did.
+func (p *Proxy) refuseDecoyBody(w http.ResponseWriter, event auditchain.Event, target string, body []byte) bool {
+	m, ok := p.adapter.decoys().Body(body)
+	if ok {
+		p.refuseDecoy(w, event, target, m)
+	}
+	return ok
+}
+
+// refuseDecoyAtProxy refuses a CONNECT or absolute-form request whose own URL
+// or headers carry a decoy credential, such as one sent as the proxy
+// password, and reports whether it did. scope is nil when identity was not
+// established, and the row then names no pool.
+func (p *Proxy) refuseDecoyAtProxy(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope) bool {
+	if !p.strictCredentialProxy || !p.adapter.valid() {
+		return false
+	}
+	m, ok := p.adapter.decoys().Request(r)
+	if !ok {
+		return false
+	}
+	event := auditchain.Event{Method: auditMethod(r.Method)}
+	if scope != nil {
+		event.Pool, event.Agent, event.PodUID = scope.Pool, scope.AgentID, scope.WorkloadID
+	}
+	p.refuseDecoy(w, event, target, m)
+	return true
 }
 
 // adapterUnauthenticatedDeny replaces the SQL audit for refusals that happen
@@ -195,6 +250,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusForbidden, "authentication")
 		return
 	}
+	// A decoy anywhere in the URL or headers is refused before routing, so
+	// every entry kind, and a host or path no entry lists, is covered.
+	if m, ok := a.decoys().Request(r); ok {
+		p.refuseDecoy(w, event, target, m)
+		return
+	}
 	if err := a.Audit.Admit(); err != nil {
 		deny(http.StatusServiceUnavailable, "audit_unavailable")
 		return
@@ -275,6 +336,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	// A model API's body quotes whatever the agent read, so only its headers
+	// and URL count as presenting a decoy.
+	if err == nil && !entry.Transcript && p.refuseDecoyBody(w, event, target, body) {
+		return
+	}
 	switch {
 	case err != nil:
 		deny(http.StatusBadRequest, "request_shape")

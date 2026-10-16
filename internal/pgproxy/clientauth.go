@@ -3,8 +3,10 @@ package pgproxy
 import (
 	"context"
 	"fmt"
-	"github.com/Infisical/agent-vault/internal/brokercore"
 	"net"
+
+	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/decoy"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -45,7 +47,7 @@ func readStartup(backend *pgproto3.Backend, conn net.Conn) (*pgproto3.StartupMes
 // internal detail leaks).
 // admit, when set, runs after the token has arrived and before the store is
 // asked about it, so a client slow to send its token holds no admission slot.
-func authenticateAgent(ctx context.Context, backend *pgproto3.Backend, auth AgentAuthenticator, startup *pgproto3.StartupMessage,
+func authenticateAgent(ctx context.Context, backend *pgproto3.Backend, auth AgentAuthenticator, decoys *decoy.Set, startup *pgproto3.StartupMessage,
 	admit func() (context.Context, context.CancelFunc, error)) (*AgentScope, string, error) {
 	backend.Send(&pgproto3.AuthenticationCleartextPassword{})
 	if err := backend.Flush(); err != nil {
@@ -65,6 +67,10 @@ func authenticateAgent(ctx context.Context, backend *pgproto3.Backend, auth Agen
 	}
 	if pw.Password == "" {
 		return nil, "", errMissingToken
+	}
+	// A decoy never reaches the authenticator or an admission slot.
+	if m, ok := decoys.Password(pw.Password); ok {
+		return nil, "", &decoyError{match: m}
 	}
 
 	if admit != nil {

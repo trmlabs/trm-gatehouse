@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/decoy"
 	"github.com/Infisical/agent-vault/internal/runtimestatus"
 )
 
@@ -69,6 +70,10 @@ type Options struct {
 	Sessions SessionLedger
 	Pool     *PoolOptions // transaction-mode multiplexing; nil keeps one upstream connection per session
 	Audit    AuditTrail   // signed audit trail; nil disables it
+	// Decoys are the decoy credentials planted in worker sessions (see
+	// package decoy). A password that is one refuses the session before it
+	// reaches Auth. Nil recognizes none.
+	Decoys interface{ Current() *decoy.Set }
 }
 
 // Broker is the PostgreSQL credential-brokering TCP listener. It mirrors the
@@ -109,6 +114,9 @@ type Broker struct {
 	pooled               map[net.Conn]*pooledSession
 	closers              map[net.Conn]func(closeNotice) // unpooled sessions that can end with a notice
 	denied               deniedLimiter
+	// decoyDenied caps decoy refusal rows on their own budget, so a flood of
+	// failed logins cannot crowd out the row that pages.
+	decoyDenied deniedLimiter
 }
 
 // New builds a Broker bound to addr (host:port). It does not listen until Serve
@@ -642,7 +650,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 		ctx, cancel := context.WithTimeout(baseCtx, b.opts.StartupTimeout) // #nosec G118 -- authenticateAgent defers the returned cancel.
 		return ctx, cancel, nil
 	}
-	scope, token, err := authenticateAgent(startupCtx, backend, b.authenticator(peer), startup, admit)
+	scope, token, err := authenticateAgent(startupCtx, backend, b.authenticator(peer), b.decoys(), startup, admit)
 	startupCancel()
 	releaseAdmission()
 	// busy refuses a session whose wait for an admission slot ran out. The
@@ -664,6 +672,17 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	if err == nil && scope != nil && !brokercore.KindAdmitted(brokercore.ConnKinds(conn), scope.IdentityKind) {
 		// Each listener admits only the identity kinds it was opened for.
 		err, scope = fmt.Errorf("identity kind not admitted on this listener"), nil
+	}
+	var presented *decoyError
+	if errors.As(err, &presented) {
+		// The client sees the same refusal as any failed authentication.
+		b.logger.Warn("pgproxy: decoy credential presented; refusing session")
+		if b.decoyDenied.allow(time.Now(), b.logger) {
+			b.auditDenied(auditchain.Event{Binding: "decoy/" + presented.match.Label, Decision: presented.match.Surface,
+				Database: auditchain.DatabaseField(requestedDB)}, outcomeDecoy)
+		}
+		writeClientError(backend, "28000", "authentication", "Agent Vault: authentication failed")
+		return
 	}
 	if err != nil || scope == nil || scope.VaultID == "" || scope.ActorID == "" {
 		if err == nil {
