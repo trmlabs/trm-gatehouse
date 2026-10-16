@@ -46,12 +46,12 @@ func (v automatedVault) ReadWithDataWithContext(context.Context, string, map[str
 
 func automatedEntryJSON(automated string) string {
 	return `{"name":"staging-app","kind":"browser-session","host":"api.example.com","placeholder":"__vault_STAGING_APP__",
-		"pools":["database-developers"],"pathPrefixes":["/v1/deconflict"],"browserSession":{"appHost":"app.example.com",
+		"pools":["database-developers"],"pathPrefixes":["/v1/lookups"],"browserSession":{"appHost":"app.example.com",
 		"auth0":{"domain":"auth.example.com","clientID":"spaClient1","audience":"https://api.example.com","login":"automated-auth"},
 		"automatedAuth":{` + automated + `},"user":{"mount":"gatehouse","path":"browser/qa-user"}}}`
 }
 
-const automatedSettings = `"url":"https://automated-auth.example.com","profile":"app-staging","orgID":"org_synthetic",
+const automatedSettings = `"url":"https://automated-auth.example.com","profile":"example-profile","orgID":"org_synthetic",
 	"key":{"mount":"gatehouse","path":"browser/automated-auth"}`
 
 func parseOne(entry string) error {
@@ -72,9 +72,9 @@ func TestAutomatedAuthEntry(t *testing.T) {
 	for name, settings := range map[string]string{
 		"no org":        strings.Replace(automatedSettings, `"orgID":"org_synthetic",`, "", 1),
 		"empty org":     strings.Replace(automatedSettings, `"org_synthetic"`, `""`, 1),
-		"no profile":    strings.Replace(automatedSettings, `"profile":"app-staging",`, "", 1),
+		"no profile":    strings.Replace(automatedSettings, `"profile":"example-profile",`, "", 1),
 		"no key":        strings.Replace(automatedSettings, ",\n\t\"key\":{\"mount\":\"gatehouse\",\"path\":\"browser/automated-auth\"}", "", 1),
-		"plain http":    strings.Replace(automatedSettings, "https://automated-auth.example.com", "http://automated-auth.automated-auth.svc.cluster.local:4319", 1),
+		"plain http":    strings.Replace(automatedSettings, "https://automated-auth.example.com", "http://auth-service.example-ns.svc.cluster.local:4319", 1),
 		"path":          strings.Replace(automatedSettings, "example.com", "example.com/v1/auth/login", 1),
 		"query":         strings.Replace(automatedSettings, "example.com", "example.com/?next=x", 1),
 		"credentials":   strings.Replace(automatedSettings, "https://", "https://user:pass@", 1),
@@ -126,7 +126,7 @@ func TestBrowserEntryPoolsAndUsers(t *testing.T) {
 
 func TestBrowserPathRules(t *testing.T) {
 	entry := func(fields string) string {
-		return strings.Replace(automatedEntryJSON(automatedSettings), `"pathPrefixes":["/v1/deconflict"]`, fields, 1)
+		return strings.Replace(automatedEntryJSON(automatedSettings), `"pathPrefixes":["/v1/lookups"]`, fields, 1)
 	}
 	for name, fields := range map[string]string{
 		"no prefixes":           `"pathPrefixes":[]`,
@@ -136,21 +136,21 @@ func TestBrowserPathRules(t *testing.T) {
 		"denied segment":        `"pathPrefixes":["/organizations/1/apiKey"]`,
 		"denied, other case":    `"pathPrefixes":["/v1/Change_Password"]`,
 		"denied, added segment": `"pathPrefixes":["/v1/client-secret"]`,
-		"equal to denied":       `"pathPrefixes":["/v1/intel-vault"],"deniedPaths":["/v1/intel-vault"]`,
-		"under denied":          `"pathPrefixes":["/v1/parent-organizations/7/users/3"],"deniedPaths":["/v1/parent-organizations/*/users"]`,
-		"bad template":          `"pathPrefixes":["/v1/deconflict"],"deniedPaths":["/v1/**"]`,
-		"dot template":          `"pathPrefixes":["/v1/deconflict"],"readOnlyPaths":["/v1/../x"]`,
-		"relative template":     `"pathPrefixes":["/v1/deconflict"],"deniedPaths":["v1/x"]`,
+		"equal to denied":       `"pathPrefixes":["/v1/archive"],"deniedPaths":["/v1/archive"]`,
+		"under denied":          `"pathPrefixes":["/v1/accounts/7/users/3"],"deniedPaths":["/v1/accounts/*/users"]`,
+		"bad template":          `"pathPrefixes":["/v1/lookups"],"deniedPaths":["/v1/**"]`,
+		"dot template":          `"pathPrefixes":["/v1/lookups"],"readOnlyPaths":["/v1/../x"]`,
+		"relative template":     `"pathPrefixes":["/v1/lookups"],"deniedPaths":["v1/x"]`,
 	} {
 		if parseOne(entry(fields)) == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 	for name, fields := range map[string]string{
-		"shared-with-me":   `"pathPrefixes":["/users/shared-with-me"]`,
-		"enterprise shape": `"pathPrefixes":["/v1/deconflict","/v1/parent-organizations/7/environments","/users-organizations"],"readOnlyPaths":["/users-organizations"],"deniedPaths":["/v1/parent-organizations/*/users","/v1/parent-organizations/*/invitations","/v1/parent-organizations/*/environments/*/groups/*/members","/v1/users/*/email","/v1/intel-vault"]`,
-		"members readable": `"pathPrefixes":["/v1/deconflict/members"]`,
-		"above a denied":   `"pathPrefixes":["/v1/parent-organizations"],"deniedPaths":["/v1/parent-organizations/*/users"]`,
+		"shared":           `"pathPrefixes":["/users/shared"]`,
+		"enterprise shape": `"pathPrefixes":["/v1/lookups","/v1/accounts/7/workspaces","/users-organizations"],"readOnlyPaths":["/users-organizations"],"deniedPaths":["/v1/accounts/*/users","/v1/accounts/*/invitations","/v1/accounts/*/workspaces/*/groups/*/members","/v1/users/*/email","/v1/archive"]`,
+		"members readable": `"pathPrefixes":["/v1/lookups/members"]`,
+		"above a denied":   `"pathPrefixes":["/v1/accounts"],"deniedPaths":["/v1/accounts/*/users"]`,
 	} {
 		if err := parseOne(entry(fields)); err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -166,7 +166,7 @@ func TestBrowserPathRules(t *testing.T) {
 // The runtime guard: built-in segments anywhere and in any spelling, and
 // templates covering their path and everything below it.
 func TestBrowserPathGuard(t *testing.T) {
-	e := &Entry{DeniedPaths: []string{"/v1/parent-organizations/*/users", "/v1/users/*/email", "/v1/intel-vault"},
+	e := &Entry{DeniedPaths: []string{"/v1/accounts/*/users", "/v1/users/*/email", "/v1/archive"},
 		ReadOnlyPaths: []string{"/v1/reports"}}
 	for _, segment := range []string{"apikey", "apikeys", "api-key", "api-keys", "password", "change-password", "reset-password", "mfa", "otp", "totp",
 		"invitations", "invites", "oauth", "tokens", "token", "sso", "saml", "scim", "connections", "roles", "ip-allowlist", "authentication", "admin",
@@ -179,24 +179,24 @@ func TestBrowserPathGuard(t *testing.T) {
 		}
 	}
 	for path, want := range map[string]error{
-		"/organizations/123/apiKey":                 ErrDeniedPath,
-		"/organizations/123/APIKEY":                 ErrDeniedPath,
-		"/users/mfa":                                ErrDeniedPath,
-		"/users/change-password":                    ErrDeniedPath,
-		"/oauth/clients/x/rotate-secret":            ErrDeniedPath,
-		"/parent-organizations/1/users/2/roles":     ErrDeniedPath,
-		"/v1/organizations/1/apiKey":                ErrDeniedPath,
-		"/v1/parent-organizations/7/users":          ErrDeniedPath,
-		"/v1/parent-organizations/7/users/3/roles":  ErrDeniedPath,
-		"/v1/parent-organizations/7/users/3/teams":  ErrDeniedPath,
-		"/V1/Parent-Organizations/7/Users":          ErrDeniedPath,
-		"/v1/users/9/email":                         ErrDeniedPath,
-		"/v1/intel-vault/files/2":                   ErrDeniedPath,
-		"/parent-organizations/7/users":             nil, // a /v1 template matches /v1 paths only
-		"/v1/parent-organizations/7/environments/2": nil,
-		"/v1/deconflict/members":                    nil,
-		"/users/shared-with-me":                     nil,
-		"/v1/users/9/profile":                       nil,
+		"/organizations/123/apiKey":      ErrDeniedPath,
+		"/organizations/123/APIKEY":      ErrDeniedPath,
+		"/users/mfa":                     ErrDeniedPath,
+		"/users/change-password":         ErrDeniedPath,
+		"/oauth/clients/x/rotate-secret": ErrDeniedPath,
+		"/accounts/1/users/2/roles":      ErrDeniedPath,
+		"/v1/organizations/1/apiKey":     ErrDeniedPath,
+		"/v1/accounts/7/users":           ErrDeniedPath,
+		"/v1/accounts/7/users/3/roles":   ErrDeniedPath,
+		"/v1/accounts/7/users/3/teams":   ErrDeniedPath,
+		"/V1/Accounts/7/Users":           ErrDeniedPath,
+		"/v1/users/9/email":              ErrDeniedPath,
+		"/v1/archive/files/2":            ErrDeniedPath,
+		"/accounts/7/users":              nil, // a /v1 template matches /v1 paths only
+		"/v1/accounts/7/workspaces/2":    nil,
+		"/v1/lookups/members":            nil,
+		"/users/shared":                  nil,
+		"/v1/users/9/profile":            nil,
 	} {
 		if err := e.guardBrowserPath("POST", path); !errors.Is(err, want) || (want == nil && err != nil) {
 			t.Errorf("POST %s: %v, want %v", path, err, want)
@@ -227,7 +227,7 @@ func TestBrowserPathGuard(t *testing.T) {
 		t.Errorf("built-in read-only: %v", err)
 	}
 	// Through the catalog: the seed path is not guarded; API paths are.
-	c, err := Parse([]byte(`{"entries":[` + strings.Replace(automatedEntryJSON(automatedSettings), `"pathPrefixes":["/v1/deconflict"]`,
+	c, err := Parse([]byte(`{"entries":[` + strings.Replace(automatedEntryJSON(automatedSettings), `"pathPrefixes":["/v1/lookups"]`,
 		`"pathPrefixes":["/v1","/users-organizations"]`, 1) + `]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +289,7 @@ func fakeAutomatedAuth(t *testing.T) (*automatedFake, *http.Client) {
 		}
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		want := map[string]string{"privateKey": automatedSecrets["private_key"], "profile": "app-staging", "orgId": "org_synthetic",
+		want := map[string]string{"privateKey": automatedSecrets["private_key"], "profile": "example-profile", "orgId": "org_synthetic",
 			"email": automatedSecrets["email"], "password": automatedSecrets["password"]}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/auth/login" || r.Header.Get("Content-Type") != "application/json" || !reflect.DeepEqual(body, want) {
 			w.WriteHeader(http.StatusBadRequest)

@@ -100,7 +100,7 @@ func TestAutomatedAuthClientDialsOnlyCatalogServices(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"entries":[{"name":"staging-app","kind":"browser-session","host":"api.example.com",
 		"placeholder":"__vault_STAGING_APP__","pools":["pool-a"],"pathPrefixes":["/v1"],"browserSession":{"appHost":"app.example.com",
 		"auth0":{"domain":"auth.example.com","clientID":"spaClient1","audience":"https://api.example.com","login":"automated-auth"},
-		"automatedAuth":{"url":"https://automated-auth.automated-auth.svc.cluster.local:8443","profile":"app-staging","orgID":"org_synthetic",
+		"automatedAuth":{"url":"https://auth-service.example-ns.svc.cluster.local:8443","profile":"example-profile","orgID":"org_synthetic",
 		"key":{"mount":"gatehouse","path":"browser/automated-auth"}},"user":{"mount":"gatehouse","path":"browser/qa-user"}}}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -111,10 +111,10 @@ func TestAutomatedAuthClientDialsOnlyCatalogServices(t *testing.T) {
 		return nil, net.ErrClosed
 	})
 	dial := client.Transport.(*http.Transport).DialContext
-	if _, err := dial(context.Background(), "tcp", "automated-auth.automated-auth.svc.cluster.local:8443"); err != net.ErrClosed {
+	if _, err := dial(context.Background(), "tcp", "auth-service.example-ns.svc.cluster.local:8443"); err != net.ErrClosed {
 		t.Errorf("catalog service refused: %v", err)
 	}
-	for _, addr := range []string{"automated-auth.automated-auth.svc.cluster.local:443", "auth.example.com:443", "collector.example.net:8443"} {
+	for _, addr := range []string{"auth-service.example-ns.svc.cluster.local:443", "auth.example.com:443", "collector.example.net:8443"} {
 		if _, err := dial(context.Background(), "tcp", addr); err == nil || err == net.ErrClosed {
 			t.Errorf("%s dialed", addr)
 		}
