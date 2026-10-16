@@ -158,7 +158,7 @@ var githubOperations = map[string]string{
 	"pr.comment":       "pull-requests",  // POST comments and review replies on a pull request in reach
 	"pr.edit":          "pull-requests",  // PATCH a body, or the App's own comment, in reach
 	"pr.label":         "pull-requests",  // POST /issues/{n}/labels, listed labels only, in reach
-	"pr.ready":         "pull-requests",  // mark a draft in reach ready (one GraphQL mutation)
+	"pr.ready":         "update-branch",  // mark a draft in reach ready: one GraphQL mutation, which GitHub refuses without contents write
 	"dispatch":         "contents-write", // POST /dispatches, listed event types only
 	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts; a commit's check runs and statuses
 	"deployments.read": "deployments",    // deployments and their statuses
@@ -1025,8 +1025,8 @@ type GitRequest struct {
 	Query string
 	// Permissions is the token scope the route needs: "pull-requests",
 	// "contents-write" (a repository dispatch), "actions", "deployments",
-	// "checks", "statuses", "update-branch" (pull requests and contents write)
-	// or "actions-write".
+	// "checks", "statuses", "update-branch" (pull requests and contents write,
+	// for a branch update or marking a draft ready) or "actions-write".
 	Permissions string
 	// Download marks a route GitHub answers with a redirect to a signed
 	// download URL, which the broker follows itself without the token.
