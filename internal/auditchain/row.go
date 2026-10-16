@@ -76,8 +76,9 @@ type Row struct {
 	Target string `json:"target,omitempty"`
 	// Operation is what an HTTP row asked to do, from the broker's fixed
 	// vocabulary: a github-api repository operation such as "pr.open",
-	// "git.fetch" or "git.push", or "graphql" for a GitHub GraphQL request no
-	// route admits. Never a path or body.
+	// "git.fetch" or "git.push", "graphql" for a GitHub GraphQL request no
+	// route admits, or the Slack Web API method a Slack entry's listed path
+	// names, such as "slack.conversations_history". Never a path or body.
 	Operation string `json:"operation,omitempty"`
 	// Branch is the head branch of what a CI restart (pr.update_branch,
 	// actions.rerun, actions.rerun_failed) acted on or was refused for, as
