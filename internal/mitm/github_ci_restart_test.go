@@ -42,13 +42,20 @@ const (
 
 func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFixture {
 	t.Helper()
+	return newRestartFixtureFor(t, operations, `"pool-agent"`, `"refPrefixes":[`+refPrefixes+`]`)
+}
+
+// newRestartFixtureFor is newRestartFixture with the pools both entries grant
+// and the git repository's prefix fields given whole.
+func newRestartFixtureFor(t *testing.T, operations, pools, prefixFields string) *restartFixture {
+	t.Helper()
 	f := &restartFixture{apiFixture: &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}}}
 	// Pull requests: 12 the pool's own, 13 from a person's branch, 14 from a
-	// fork, 15 unreadable. Runs: 21 a push and 22 a pull request from the
-	// pool's branch; 23 a push to the default branch (a deploy); 24 a dispatch,
-	// 25 a pull request from a fork, 27 a pull_request_target, 28 a
-	// workflow_run and 29 a schedule, each naming the pool's branch; 26
-	// unreadable.
+	// fork, 15 unreadable, 16 another pool's. Runs: 21 a push and 22 a pull
+	// request from the pool's branch; 23 a push to the default branch (a
+	// deploy); 24 a dispatch, 25 a pull request from a fork, 27 a
+	// pull_request_target, 28 a workflow_run and 29 a schedule, each naming
+	// the pool's branch; 26 unreadable; 30 a push to another pool's branch.
 	same, fork := `{"full_name":"example-org/example-repo"}`, `{"full_name":"someone/example-repo"}`
 	run := func(event, branch, head string) string {
 		return fmt.Sprintf(`{"event":%q,"head_branch":%q,"repository":%s,"head_repository":%s}`, event, branch, same, head)
@@ -57,6 +64,7 @@ func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFix
 		"/pulls/12":        `{"number":12,"head":{"ref":"cursor/pool-agent/x","repo":` + same + `}}`,
 		"/pulls/13":        `{"number":13,"head":{"ref":"person/x","repo":` + same + `}}`,
 		"/pulls/14":        `{"number":14,"head":{"ref":"cursor/pool-agent/x","repo":` + fork + `}}`,
+		"/pulls/16":        `{"number":16,"head":{"ref":"cursor/pool-other/x","repo":` + same + `}}`,
 		"/actions/runs/21": run("push", "cursor/pool-agent/x", same),
 		"/actions/runs/22": run("pull_request", "cursor/pool-agent/y", same),
 		"/actions/runs/23": run("push", "main", same),
@@ -65,6 +73,7 @@ func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFix
 		"/actions/runs/27": run("pull_request_target", "cursor/pool-agent/x", same),
 		"/actions/runs/28": run("workflow_run", "cursor/pool-agent/x", same),
 		"/actions/runs/29": run("schedule", "cursor/pool-agent/x", same),
+		"/actions/runs/30": run("push", "cursor/pool-other/x", same),
 	}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,10 +138,10 @@ func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFix
 	f.port, _ = strconv.Atoi(portText)
 	f.host = "api.example.com"
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api",
-		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
+		"pools":[%s],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
 		"operations":[%s]}]}},
-		{"name":"github","host":"example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
-		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":[%s]}]}}]}`, f.port, operations, refPrefixes)))
+		{"name":"github","host":"example.com","kind":"git","pools":[%s],"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"write",%s}]}}]}`, f.port, pools, operations, pools, prefixFields)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +272,32 @@ func TestCIRestartRefusesOtherTargets(t *testing.T) {
 	}
 	if writes := f.writes(); len(writes) != 0 {
 		t.Fatalf("GitHub received refused writes: %v", writes)
+	}
+}
+
+// One git entry serves two pools, each on its own branches: a CI restart
+// reads only the requesting pool's push prefixes, so pool-agent restarts its
+// own pull request and run and is refused on pool-other's before GitHub sees
+// a write.
+func TestCIRestartStaysOnThePoolsOwnBranches(t *testing.T) {
+	f := newRestartFixtureFor(t, allRestarts, `"pool-agent","pool-other"`,
+		`"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/"],"pool-other":["refs/heads/cursor/pool-other/"]}`)
+	for _, tc := range []struct {
+		method, path, outcome, branch string
+	}{
+		{"PUT", "/pulls/12/update-branch", "completed", "cursor/pool-agent/x"},
+		{"POST", "/actions/runs/21/rerun", "completed", "cursor/pool-agent/x"},
+		{"PUT", "/pulls/16/update-branch", "pull_request_target", "cursor/pool-other/x"},
+		{"POST", "/actions/runs/30/rerun", "run_target", "cursor/pool-other/x"},
+		{"POST", "/actions/runs/30/rerun-failed-jobs", "run_target", "cursor/pool-other/x"},
+	} {
+		code, _ := f.post(t, tc.method, restartRepo+tc.path, "", "")
+		if e := f.audit.last(); (code < 400) != (tc.outcome == "completed") || e.Outcome != tc.outcome || e.Branch != tc.branch {
+			t.Errorf("%s %s: code=%d outcome=%q branch=%q, want %q %q", tc.method, tc.path, code, e.Outcome, e.Branch, tc.outcome, tc.branch)
+		}
+	}
+	if writes := f.writes(); len(writes) != 2 {
+		t.Fatalf("GitHub received %v, want only the two writes on pool-agent's branch", writes)
 	}
 }
 

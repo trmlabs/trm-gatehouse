@@ -42,6 +42,13 @@ type apiFixture struct {
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
+	return newAPIFixtureFor(t, `["pool-agent"]`, `"refPrefixes":["refs/heads/cursor/pool-agent/"]`)
+}
+
+// newAPIFixtureFor serves the broker's pool, pool-agent, from github-api and
+// git entries granting pools, the git entry's repository carrying push.
+func newAPIFixtureFor(t *testing.T, pools, push string) *apiFixture {
+	t.Helper()
 	f := &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}, decoys: decoy.NewSource(nil)}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,9 +116,9 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	f.port, _ = strconv.Atoi(portText)
 	// The pool pushes only under cursor/pool-agent/, so it opens pull requests only from there.
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
-		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/example-app","access":"write"}]}},
-		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
-		"repos":[{"repo":"trmlabs/example-app","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
+		"pools":%[2]s,"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/example-app","access":"write"}]}},
+		{"name":"github","host":"git.example.com","kind":"git","pools":%[2]s,"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"trmlabs/example-app","access":"write",%[3]s}]}}]}`, f.port, pools, push)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +236,32 @@ func TestGitHubAPICommentsOnlyOnThePoolsPullRequests(t *testing.T) {
 	f.mu.Unlock()
 	if created != 0 {
 		t.Fatalf("GitHub received %d refused comments", created)
+	}
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/12/comments", "", `{"body":"note"}`); code != 201 {
+		t.Fatalf("comment on the pool's own pull request: %d", code)
+	}
+}
+
+// With one entry serving two pools, each on its own prefixes, the broker's
+// pool opens and comments only from and on its own branches: another pool's
+// pull request (13, from cursor/other-pool/) is out of reach.
+func TestGitHubAPIStaysOnThePoolsOwnPrefixes(t *testing.T) {
+	f := newAPIFixtureFor(t, `["pool-agent","other-pool"]`,
+		`"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/"],"other-pool":["refs/heads/cursor/other-pool/"]}`)
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/other-pool/x","base":"main"}`); code != 403 || f.audit.last().Outcome != "head" {
+		t.Fatalf("open from another pool's branch: %d %+v", code, f.audit.last())
+	}
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/13/comments", "", `{"body":"note"}`); code != 403 || f.audit.last().Outcome != "comment_target" {
+		t.Fatalf("comment on another pool's pull request: %d %+v", code, f.audit.last())
+	}
+	f.mu.Lock()
+	created := f.created
+	f.mu.Unlock()
+	if created != 0 {
+		t.Fatalf("GitHub received %d refused writes", created)
+	}
+	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/pulls", "", `{"head":"cursor/pool-agent/x","base":"main"}`); code != 201 {
+		t.Fatalf("open from the pool's own branch: %d", code)
 	}
 	if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/12/comments", "", `{"body":"note"}`); code != 201 {
 		t.Fatalf("comment on the pool's own pull request: %d", code)

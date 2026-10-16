@@ -19,6 +19,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/entitlement"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
@@ -88,15 +89,32 @@ func (a *HeaderAdapter) decoys() *decoy.Set {
 const placeholderMarker = "__vault_"
 
 // adapterDeny records a refusal, with the target the caller asked for, before
-// answering. If the row cannot be written the caller still learns nothing
-// beyond "unavailable".
+// answering with its reason (refusal.go). A passing refusal answers 503 or
+// 429 with Retry-After whatever status the caller chose, and the row records
+// the status sent. If the row cannot be written the caller still learns
+// nothing beyond "audit_unavailable".
 func (p *Proxy) adapterDeny(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome string) {
+	p.adapterDenyAs(w, event, target, status, outcome, refusalCode(outcome), 0)
+}
+
+// adapterDenyAs is adapterDeny with the code the agent sees given apart from
+// the audit outcome, and, from a rate limiter, its own wait (0 for none) in
+// place of the code's fixed Retry-After.
+func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome, code string, wait time.Duration) {
+	code, status, kind := refusalFor(code, status)
+	kind = kind.after(wait)
 	event.Event, event.Outcome, event.Status = auditchain.EventDenied, outcome, status
 	event.Target = auditchain.TargetField(target)
 	if p.adapter.Audit.Record(event) != nil {
-		status = http.StatusServiceUnavailable
+		code, status, kind = refusalFor("audit_unavailable", status)
 	}
-	http.Error(w, http.StatusText(status), status)
+	writeRefusal(w, status, code, kind)
+}
+
+// adapterRateDeny refuses a request over its workload's rate for an entry,
+// with the limiter's own wait as Retry-After.
+func (p *Proxy) adapterRateDeny(w http.ResponseWriter, event auditchain.Event, target string, d ratelimit.Decision) {
+	p.adapterDenyAs(w, event, target, http.StatusTooManyRequests, "rate_limited", "rate_limited", d.RetryAfter)
 }
 
 // outcomeDecoy refuses a request that presented a decoy credential: proof the
@@ -143,20 +161,21 @@ func (p *Proxy) refuseDecoyAtProxy(w http.ResponseWriter, r *http.Request, targe
 }
 
 // adapterUnauthenticatedDeny replaces the SQL audit for refusals that happen
-// before identity is known, so every refusal lands in the signed trail.
-func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int) {
-	p.adapterIdentityDeny(w, r, a, status, "", nil)
+// before identity is known, so every refusal lands in the signed trail. wait
+// is a rate limiter's own wait, or 0.
+func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, wait time.Duration) {
+	p.adapterIdentityDeny(w, r, a, status, "", nil, wait)
 }
 
 // adapterIdentityDeny records a refusal with the identity check that refused
 // it, as a fixed code in the row's decision field ("" when none applies), and
 // for a signing-key refusal the token's kid and the connection's peer.
-func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial) {
+func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial, wait time.Duration) {
 	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Decision: reason}
 	if key != nil {
 		event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 	}
-	p.adapterDeny(w, event, requestedTarget(r), status, "refused")
+	p.adapterDenyAs(w, event, requestedTarget(r), status, "refused", identityRefusalCode(status), wait)
 }
 
 type connectTargetKey struct{}
@@ -291,7 +310,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	entry, err := catalog.Match(host, port, r.Method, r.URL.Path, scope.Pool)
 	if entry != nil {
-		event.Binding = entry.Name
+		event.Binding, event.Operation = entry.Name, entry.Operation(r.URL.Path)
 	}
 	if refused(entry, err) {
 		return
@@ -365,13 +384,13 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	// shares one agent identity.
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
-		deny(http.StatusTooManyRequests, "rate_limited")
+		p.adapterRateDeny(w, event, target, enf.Decision)
 		return
 	}
 	defer enf.Release()
 	secret, err := a.Keys.Get(r.Context(), entry.Key)
 	if err != nil {
-		deny(http.StatusServiceUnavailable, "key_unavailable")
+		deny(http.StatusServiceUnavailable, keyOutcome(err))
 		return
 	}
 	password, pair := httpcatalog.PairPassword(secret.Value())
@@ -394,7 +413,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	admittedAt := time.Now()
@@ -431,7 +450,7 @@ func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles 
 	if err != nil {
 		if tooLarge != nil && tooLarge() {
 			finish(http.StatusRequestEntityTooLarge, "request_too_large")
-			http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+			refuseWith(w, http.StatusRequestEntityTooLarge, "request_too_large")
 			return
 		}
 		finish(http.StatusBadGateway, "upstream_error")
@@ -456,6 +475,7 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 		return
 	}
 	for name, values := range resp.Header {
+		// ShouldStripResponseHeader also drops RefusalHeader, the broker's own.
 		if brokercore.ShouldStripResponseHeader(name) || name == "X-Request-Id" || name == "Trailer" || name == "Content-Length" {
 			continue
 		}

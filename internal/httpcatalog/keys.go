@@ -55,15 +55,25 @@ const invalidateInterval = 30 * time.Second
 type cachedKey struct {
 	secret  Secret
 	fetched time.Time
-	deleted bool // Vault answered that there is no usable key
+	gone    error // Vault answered that there is no usable key: ErrKeyDeleted or ErrKeyNotHeaderSafe
 }
 
 var ErrKeyUnavailable = errors.New("destination key unavailable")
 
+// maxKeyBytes bounds a key the broker sends in a header.
+const maxKeyBytes = 8192
+
 // ErrKeyDeleted means Vault answered and has no usable key: the secret or its
-// current version is deleted or destroyed, or the field is missing, empty or
-// not header-safe. It is an ErrKeyUnavailable that no cached copy outlives.
+// current version is deleted or destroyed, or the field is missing or empty.
+// It is an ErrKeyUnavailable that no cached copy outlives.
 var ErrKeyDeleted = fmt.Errorf("%w: deleted in Vault", ErrKeyUnavailable)
+
+// ErrKeyNotHeaderSafe means Vault answered with a key no header may carry: one
+// holding a byte outside printable ASCII (0x21 to 0x7e), such as a trailing
+// newline or a space, or longer than maxKeyBytes. It is an ErrKeyDeleted, so
+// it is refused and cached the same way, but tells the operator the value
+// needs fixing, not restoring.
+var ErrKeyNotHeaderSafe = fmt.Errorf("%w: not header-safe", ErrKeyDeleted)
 
 func (k *Keys) settings() (time.Duration, time.Duration, time.Time) {
 	ttl, stale, now := k.TTL, k.MaxStale, time.Now()
@@ -113,11 +123,11 @@ func (k *Keys) Get(ctx context.Context, ref KeyRef) (Secret, error) {
 	case errors.Is(err, ErrKeyDeleted):
 		// A revoke: drop the cached key now rather than serving it as stale.
 		k.mu.Lock()
-		k.cache[ref] = cachedKey{fetched: now, deleted: true}
+		k.cache[ref] = cachedKey{fetched: now, gone: err}
 		k.mu.Unlock()
-		return Secret{}, ErrKeyDeleted
+		return Secret{}, err
 	case err != nil:
-		if have && !cached.deleted && now.Sub(cached.fetched) < ttl+stale {
+		if have && cached.gone == nil && now.Sub(cached.fetched) < ttl+stale {
 			return cached.secret, nil
 		}
 		return Secret{}, ErrKeyUnavailable
@@ -129,8 +139,8 @@ func (k *Keys) Get(ctx context.Context, ref KeyRef) (Secret, error) {
 }
 
 func (c cachedKey) result() (Secret, error) {
-	if c.deleted {
-		return Secret{}, ErrKeyDeleted
+	if c.gone != nil {
+		return Secret{}, c.gone
 	}
 	return c.secret, nil
 }
@@ -153,7 +163,8 @@ func (k *Keys) Invalidate(ref KeyRef) {
 }
 
 // read never puts Vault's response or the key into an error. It returns
-// ErrKeyDeleted when Vault answered without a usable key, and
+// ErrKeyDeleted when Vault answered without a usable key (ErrKeyNotHeaderSafe
+// when the key is one no header may carry), and
 // ErrKeyUnavailable when there was no answer: a network, permission or
 // server error, or a sealed Vault.
 func (k *Keys) read(ctx context.Context, ref KeyRef) (Secret, error) {
@@ -175,12 +186,15 @@ func (k *Keys) read(ctx context.Context, ref KeyRef) (Secret, error) {
 	data, _ := resp.Data["data"].(map[string]interface{})
 	metadata, _ := resp.Data["metadata"].(map[string]interface{})
 	value, _ := data[ref.Field].(string)
-	if value == "" || len(value) > 8192 {
+	if value == "" {
 		return Secret{}, ErrKeyDeleted
+	}
+	if len(value) > maxKeyBytes {
+		return Secret{}, ErrKeyNotHeaderSafe
 	}
 	for i := 0; i < len(value); i++ {
 		if value[i] < 0x21 || value[i] > 0x7e {
-			return Secret{}, ErrKeyDeleted // header-safe printable ASCII only
+			return Secret{}, ErrKeyNotHeaderSafe // header-safe printable ASCII only
 		}
 	}
 	version := 0

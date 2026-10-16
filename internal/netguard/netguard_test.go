@@ -834,6 +834,40 @@ func TestEgressRangesFileLogsAMissingFile(t *testing.T) {
 	}
 }
 
+// A refused file is logged by line number only: no entry text, a range or a
+// name alike, reaches the error or the log, so a path set to the wrong file
+// does not copy that file into the log every few seconds.
+func TestEgressRangesFileNeverLogsItsEntries(t *testing.T) {
+	var logs bytes.Buffer
+	previous, out, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(out); log.SetFlags(flags) })
+	path := filepath.Join(t.TempDir(), "egress")
+	now := time.Now()
+	f := &fileRanges{path: path, now: func() time.Time { return now }}
+	for _, tc := range []struct{ content, entry, line string }{
+		{"10.0.0.0/8\n", "10.0.0.0/8", "line 1: an entry is a range"},
+		{"127.0.0.1\n198.51.100.0/24, 127.0.0.2\n", "198.51.100.0/24", "line 2: an entry is a range"},
+		{"2001:db8::/64\n", "2001:db8::/64", "line 1: an entry is a range"},
+		{"secret-host.example\n", "secret-host", "line 1: an entry is not an address"},
+		{"127.0.0.1\nfe80::1%eth0\n", "eth0", "line 2: an entry is not an address"},
+	} {
+		logs.Reset()
+		_, err := parseHostAddresses(tc.content)
+		if err == nil || !strings.Contains(err.Error(), tc.line) || strings.Contains(err.Error(), tc.entry) {
+			t.Errorf("%q: %v, want %q without the entry", tc.content, err, tc.line)
+		}
+		if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(fileRangesInterval)
+		f.current()
+		if strings.Contains(logs.String(), tc.entry) || !strings.Contains(logs.String(), tc.line) {
+			t.Errorf("%q: log names the entry or not the line:\n%s", tc.content, logs.String())
+		}
+	}
+}
+
 // The file adds to AGENT_VAULT_EGRESS_RANGES rather than replacing it: an
 // address in the static ranges still dials when the file is set and does not
 // list it.

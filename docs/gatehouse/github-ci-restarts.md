@@ -4,7 +4,7 @@ An agent whose pull request fell behind its base branch, or whose CI run failed 
 
 ## Turning it on
 
-Add the operations to a repository in a `github-api` entry. The pool also needs a `git` entry for the same repository, on the git host that matches the API host (`github.com` for `api.github.com`), with write access and branch push prefixes:
+Add the operations to a repository in a `github-api` entry. The pool also needs a `git` entry for the same repository, on the git host that matches the API host (`github.com` for `api.github.com`), with write access and branch push prefixes for the pool, shared (`refPrefixes`) or its own (`poolRefPrefixes`):
 
 ```json
 {"name": "github-api", "host": "api.github.com", "kind": "github-api", "pools": ["<pool agent ID>"],
@@ -24,7 +24,7 @@ Add the operations to a repository in a `github-api` entry. The pool also needs 
 | `actions.rerun` | `POST /actions/runs/{id}/rerun`, with no body or `{}` | `actions: write` |
 | `actions.rerun_failed` | `POST /actions/runs/{id}/rerun-failed-jobs`, with no body or `{}` | `actions: write` |
 
-Without the opt-in, or without a `git` entry that lets the pool push to at least one branch prefix (`refs/heads/...`), the routes do not exist and are refused as `unlisted`. A `git` entry with no prefixes, only tag prefixes, or `refs/heads/` alone (every branch) gives no branch prefixes, so it enables nothing.
+Without the opt-in, or without a `git` entry that lets the pool push to at least one branch prefix (`refs/heads/...`), shared or its own, the routes do not exist and are refused as `unlisted`. A `git` entry with no prefixes, only tag prefixes, or `refs/heads/` alone (every branch) gives no branch prefixes, so it enables nothing.
 
 `gh run rerun <id>` and `gh run rerun <id> --failed` use these routes; they also read the run and its workflow first, which needs `actions.read`. `gh api -X PUT repos/<owner>/<repo>/pulls/<n>/update-branch` updates a branch. `gh pr update-branch` uses GraphQL and is not served by this route.
 
@@ -34,8 +34,8 @@ Every request is checked the same way, with nothing kept between requests:
 
 1. The route is listed for the repository and the pool, and the requester passes the `github-api` entry's authorization and also the `git` entry's (its tier and groups), as a push would.
 2. The broker mints a token for that one repository with only the scope above, and reads the target with it:
-   - **Branch update:** the pull request. Its head must be a branch of this repository (never a fork) under the `git` entry's push prefixes. The repository's `pullRequestPrefixes` do not count here: they let a pool comment on pull requests other agents or people opened, not write to their branches.
-   - **Rerun:** the workflow run. GitHub must have started it for a `push` or a `pull_request` event, in this repository, from a head branch of this repository under the push prefixes. A run of a branch outside the prefixes, such as the default branch (a deploy, for example), a scheduled or dispatched run, `pull_request_target`, `workflow_run`, and any run from a fork are refused.
+   - **Branch update:** the pull request. Its head must be a branch of this repository (never a fork) under the pool's push prefixes in the `git` entry: the shared `refPrefixes` and the pool's own `poolRefPrefixes`, never another pool's. The repository's `pullRequestPrefixes` and `poolPullRequestPrefixes` do not count here: they let a pool comment on pull requests other agents or people opened, not write to their branches.
+   - **Rerun:** the workflow run. GitHub must have started it for a `push` or a `pull_request` event, in this repository, from a head branch of this repository under the pool's push prefixes. A run of a branch outside the prefixes, such as the default branch (a deploy, for example), a scheduled or dispatched run, `pull_request_target`, `workflow_run`, and any run from a fork are refused.
 3. Any failed read (GitHub unreachable, an error status, a body that does not parse) refuses the request. The broker fails closed and never retries on the agent's behalf.
 4. GitHub receives the request rebuilt from the checked fields. A rerun's `enable_debug_logging` and any other field are refused.
 

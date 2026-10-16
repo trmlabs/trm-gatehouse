@@ -62,6 +62,13 @@ func runGit(t *testing.T, dir string, env []string, args ...string) (string, err
 
 func newGitFixture(t *testing.T) *gitFixture {
 	t.Helper()
+	return newGitFixtureFor(t, `["pool-agent"]`, `"refPrefixes":["refs/heads/cursor/"]`)
+}
+
+// newGitFixtureFor serves the broker's pool, pool-agent, from a git entry
+// granting pools whose trm-b2b binding carries push.
+func newGitFixtureFor(t *testing.T, pools, push string) *gitFixture {
+	t.Helper()
 	backend := filepath.Join(strings.TrimSpace(mustOutput(t, "git", "--exec-path")), "git-http-backend")
 	if _, err := os.Stat(backend); err != nil {
 		t.Skip("git http-backend not available")
@@ -128,10 +135,10 @@ func newGitFixture(t *testing.T) *gitFixture {
 	t.Cleanup(github.Close)
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(github.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
-	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github","host":"example.com","port":%d,"kind":"git","pools":["pool-agent"],
+	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github","host":"example.com","port":%d,"kind":"git","pools":%s,
 		"git":{"appID":7,"installationID":42,"repos":[
-			{"repo":"trmlabs/trm-b2b","access":"write","refPrefixes":["refs/heads/cursor/"]},
-			{"repo":"trmlabs/docs","access":"read"}]}}]}`, f.port)))
+			{"repo":"trmlabs/trm-b2b","access":"write",%s},
+			{"repo":"trmlabs/docs","access":"read"}]}}]}`, f.port, pools, push)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,6 +328,47 @@ func TestGitPushesOutsideTheBindingAreRefused(t *testing.T) {
 
 	if out, err := f.git(t, f.work, "clone", f.remote("trmlabs/secret"), filepath.Join(f.work, "secret")); err == nil || f.audit.last().Outcome != "unlisted" {
 		t.Fatalf("unlisted repository cloned: %s", out)
+	}
+}
+
+// One entry serves several pools, each pushing only under its own prefixes:
+// the broker's pool pushes its own branch and is refused on another pool's
+// before GitHub receives the pack. A pool the repository lists no prefixes
+// for may clone and never push.
+func TestGitPushesStayOnThePoolsOwnPrefixes(t *testing.T) {
+	f := newGitFixtureFor(t, `["pool-agent","pool-other"]`,
+		`"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/"],"pool-other":["refs/heads/cursor/pool-other/"]}`)
+	clone := filepath.Join(f.work, "trm-b2b")
+	if out, err := f.git(t, f.work, "clone", f.remote("trmlabs/trm-b2b"), clone); err != nil {
+		t.Fatal(out)
+	}
+	if out, err := f.git(t, clone, "commit", "--allow-empty", "-m", "agent change"); err != nil {
+		t.Fatal(out)
+	}
+	if out, err := f.git(t, clone, "push", "origin", "HEAD:refs/heads/cursor/pool-agent/x"); err != nil {
+		t.Fatalf("push to the pool's own prefix: %s", out)
+	}
+	f.mu.Lock()
+	packsBefore := f.receivePacks
+	f.mu.Unlock()
+	if out, err := f.git(t, clone, "push", "origin", "HEAD:refs/heads/cursor/pool-other/x"); err == nil || f.audit.last().Outcome != "ref_outside_binding" {
+		t.Fatalf("push to another pool's prefix: %s %+v", out, f.audit.last())
+	}
+	f.mu.Lock()
+	reached := f.receivePacks - packsBefore
+	f.mu.Unlock()
+	if reached != 0 || f.bareRef(t, "trmlabs/trm-b2b", "refs/heads/cursor/pool-other/x") != "" {
+		t.Fatalf("another pool's branch reached GitHub %d times", reached)
+	}
+
+	// The same repository, with no prefixes for the broker's pool.
+	f = newGitFixtureFor(t, `["pool-agent","pool-other"]`, `"poolRefPrefixes":{"pool-other":["refs/heads/cursor/pool-other/"]}`)
+	clone = filepath.Join(f.work, "trm-b2b")
+	if out, err := f.git(t, f.work, "clone", f.remote("trmlabs/trm-b2b"), clone); err != nil {
+		t.Fatalf("clone without push prefixes: %s", out)
+	}
+	if out, err := f.git(t, clone, "push", "origin", "HEAD:refs/heads/cursor/pool-agent/x"); err == nil || f.audit.last().Outcome != "read_only" {
+		t.Fatalf("push with no prefixes for the pool: %s %+v", out, f.audit.last())
 	}
 }
 

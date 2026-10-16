@@ -21,7 +21,8 @@ import (
 // forwardGit serves git smart-HTTP for a catalog git entry. The worker sends
 // no credential; the broker adds a token minted for this one repository with
 // contents read, or write only for a push to a write binding. GitHub's own
-// branch protection still governs every push, and RefPrefixes narrow it.
+// branch protection still governs every push, and the pool's ref prefixes
+// (httpcatalog GitRepo.PushPrefixes) narrow it.
 func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, git httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if git.Entry != nil {
@@ -44,7 +45,9 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	}
 	entry := git.Entry
 	if a.GitTokens == nil {
-		deny(http.StatusServiceUnavailable, "token_unavailable")
+		// Waiting does not help: only an operator (a restart, for a minter
+		// wired at startup) can give the broker one.
+		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
@@ -67,14 +70,14 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	}
 	body := &limitedBody{reader: r.Body, remaining: entry.MaxRequestBytes}
 	var outBody io.Reader = body
-	if git.Write && r.Method == http.MethodPost && len(git.Repo.RefPrefixes) > 0 {
+	if git.Write && r.Method == http.MethodPost && len(git.RefPrefixes) > 0 {
 		consumed, refs, err := readReceivePackCommands(body)
 		if err != nil {
 			deny(http.StatusBadRequest, "push_shape")
 			return
 		}
 		for _, ref := range refs {
-			if !hasAnyPrefix(ref, git.Repo.RefPrefixes) {
+			if !hasAnyPrefix(ref, git.RefPrefixes) {
 				deny(http.StatusForbidden, "ref_outside_binding")
 				return
 			}
@@ -83,7 +86,7 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
-		deny(http.StatusTooManyRequests, "rate_limited")
+		p.adapterRateDeny(w, event, target, enf.Decision)
 		return
 	}
 	defer enf.Release()
@@ -123,7 +126,7 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	admittedAt := time.Now()

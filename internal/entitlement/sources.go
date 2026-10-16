@@ -41,7 +41,7 @@ func (f FileSource) Lookup(_ context.Context, subject string, groups []string) (
 	}
 	user, ok := dir.Subjects[subject]
 	if !ok {
-		return Person{}, errors.New("subject not in directory")
+		return Person{}, ErrNotInDirectory
 	}
 	return Person{ObjectID: user.ObjectID, Enabled: user.Enabled, MemberOf: intersect(groups, user.Groups), Department: user.Department}, nil
 }
@@ -61,6 +61,9 @@ func intersect(asked, have []string) []string {
 }
 
 var objectID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// errNotFound is a directory call answered 404.
+var errNotFound = errors.New("directory returned 404")
 
 // GraphSource asks Microsoft Graph with an application token: the user by the
 // SSO subject, then POST /users/{id}/checkMemberGroups for the asked groups
@@ -98,13 +101,18 @@ func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string
 	// covers it, so no new permission is needed.
 	path := "/users/" + url.PathEscape(subject) + "?$select=id,userPrincipalName,accountEnabled,department"
 	if g.SubjectIsObjectID && !objectID.MatchString(subject) {
-		return Person{}, errors.New("subject is not an object ID")
+		return Person{}, ErrNotInDirectory
 	}
-	if err := g.call(ctx, http.MethodGet, path, nil, &user); err != nil || user.Enabled == nil || !objectID.MatchString(user.ID) {
+	err := g.call(ctx, http.MethodGet, path, nil, &user)
+	if errors.Is(err, errNotFound) {
+		return Person{}, ErrNotInDirectory
+	}
+	if err != nil || user.Enabled == nil || !objectID.MatchString(user.ID) {
 		return Person{}, errors.New("directory user lookup failed")
 	}
+	// The directory answered with another account than the subject names.
 	if (g.SubjectIsObjectID && user.ID != subject) || (!g.SubjectIsObjectID && (subject == "" || !strings.EqualFold(user.UPN, subject))) {
-		return Person{}, errors.New("directory user lookup failed")
+		return Person{}, ErrNotInDirectory
 	}
 	var memberOf []string
 	for start := 0; start < len(groups); start += checkMemberGroupsMax {
@@ -143,6 +151,9 @@ func (g GraphSource) call(ctx context.Context, method, path string, body []byte,
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return errNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("directory returned %d", resp.StatusCode)
 	}

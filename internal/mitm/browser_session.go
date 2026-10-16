@@ -54,7 +54,9 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 	}
 	entry := b.Entry
 	if a.BrowserTokens == nil {
-		deny(http.StatusServiceUnavailable, "token_unavailable")
+		// Waiting does not help: only an operator (a restart, for a minter
+		// wired at startup) can give the broker one.
+		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
@@ -91,13 +93,14 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
-		deny(http.StatusTooManyRequests, "rate_limited")
+		p.adapterRateDeny(w, event, target, enf.Decision)
 		return
 	}
 	defer enf.Release()
 	token, err := a.BrowserTokens.Token(r.Context(), entry)
 	if err != nil {
-		deny(http.StatusServiceUnavailable, "token_unavailable")
+		// No sign-in is tried again sooner, so an earlier retry is refused too.
+		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "token_unavailable", httpcatalog.ReloginInterval)
 		return
 	}
 	admittedAt := time.Now()
@@ -113,14 +116,14 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 		admitted.Outcome = "seed"
 	}
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	if b.Seed {
 		seed, err := browserSeed(entry, token, scope, time.Now())
 		if err != nil {
-			finish(http.StatusServiceUnavailable, "seed_unavailable")
-			http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			finish(http.StatusServiceUnavailable, seedOutcome(err))
+			refuse(w, seedOutcome(err))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -134,7 +137,7 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(body))
 	if err != nil {
 		finish(http.StatusBadRequest, "request_shape")
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		refuseWith(w, http.StatusBadRequest, "request_shape")
 		return
 	}
 	out.Host = expected
@@ -203,6 +206,10 @@ func (w noCookieWriter) Flush() {
 	}
 }
 
+// errSeedDeadline means the worker ends too soon for a browser session. It
+// only gets closer, so the refusal is lasting.
+var errSeedDeadline = errors.New("worker deadline too close for a browser session")
+
 // browserSeed is a Playwright storage state for the app's origin. It holds
 // what auth0-spa-js 2.x reads from localStorage, with the placeholder as the
 // access token and an unsigned ID token carrying the test user's non-secret
@@ -216,7 +223,7 @@ func browserSeed(entry *httpcatalog.Entry, token httpcatalog.BrowserToken, scope
 		expires = scope.NotAfter
 	}
 	if expires.Sub(now) < 2*time.Minute {
-		return nil, errors.New("worker deadline too close for a browser session")
+		return nil, errSeedDeadline
 	}
 	claims := map[string]any{}
 	for k, v := range token.Claims {
