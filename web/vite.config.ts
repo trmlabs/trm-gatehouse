@@ -1,17 +1,33 @@
-import { defineConfig } from "vite";
+import { writeFileSync } from "node:fs";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const API_TARGET = process.env.VITE_API_URL ?? "http://localhost:14321";
+const OUT_DIR = "../internal/server/webdist";
+
+// emptyOutDir also deletes webdist/.gitkeep, the tracked placeholder that lets
+// go:embed compile before any build; put it back once the bundle is written,
+// so a build leaves the Git tree clean.
+function keepGitkeep(): Plugin {
+  return {
+    name: "keep-gitkeep",
+    apply: "build",
+    writeBundle() {
+      writeFileSync(new URL(`${OUT_DIR}/.gitkeep`, import.meta.url), "");
+    },
+  };
+}
 
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    keepGitkeep(),
   ],
   base: "/",
   build: {
-    outDir: "../internal/server/webdist",
+    outDir: OUT_DIR,
     emptyOutDir: true,
     rolldownOptions: {
       output: {
