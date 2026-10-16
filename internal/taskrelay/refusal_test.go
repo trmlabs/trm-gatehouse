@@ -62,6 +62,7 @@ func TestBrokerReasonsBecomeFixedWords(t *testing.T) {
 		"pipelined_escape":         {"0A000", "Gatehouse refuses a statement with a backslash after an Execute"},
 		"statement_limit":          {"54000", "too many prepared statements"},
 		"not_entitled":             {"42501", "this person is not entitled to this database"},
+		"not_in_directory":         {"42501", "the directory has no account for this person"},
 		"no_person":                {"42501", "no person could be named for this session"},
 		"audit_unavailable":        {"08004", "could not write its audit record"},
 		"ledger_unavailable":       {"08004", "could not record the session in its accounting"},

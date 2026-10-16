@@ -43,12 +43,29 @@ type cached struct {
 // ErrLookupLimited refuses a directory lookup over the per-person budget.
 var ErrLookupLimited = errors.New("entitlement lookups over budget")
 
+// ErrNotInDirectory is a lookup the directory answered: it has no account for
+// the subject. Waiting does not make one appear, so it refuses as lasting,
+// apart from a directory that did not answer.
+var ErrNotInDirectory = errors.New("subject not in directory")
+
 const (
-	// DefaultLookupsPerMinute is each person's directory budget. A worker
-	// looping on a T2 entry asks once per request; past the budget it is
-	// refused before the directory is asked, so it cannot get the tenant
-	// throttled and fail every decision in the fleet.
+	// DefaultLookupsPerMinute is each person's directory budget unless the
+	// operator sets Cache.LookupsPerMinute (the broker's
+	// AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE). A worker looping on a T2
+	// entry asks once per request; past the budget it is refused before the
+	// directory is asked, so it cannot get the tenant throttled and fail every
+	// decision in the fleet.
 	DefaultLookupsPerMinute = 60
+	// DefaultMaxLookupsPerMinute is the highest per-person budget the broker
+	// accepts unless the operator raises it
+	// (AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX). Lookups of one person
+	// and group set in flight together share one directory call, so a
+	// person's lookups grow with the group sets they use and the directory's
+	// round trip, not with how many agents they run: 100 a second leaves room
+	// for a fleet of 10,000 to 100,000 concurrent agents. Each cache keeps
+	// its own budget, and a broker process has one for HTTP checks and one
+	// for PostgreSQL.
+	DefaultMaxLookupsPerMinute = 6000
 	// DefaultRecentAnswer is how old an answer a fresh lookup over budget
 	// still accepts instead of refusing.
 	DefaultRecentAnswer = 5 * time.Second
@@ -311,7 +328,9 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Outcome = "no_person"
 		return d
 	}
-	if len(entry.Requires) == 0 {
+	// No directory configured is an operator's to fix, never a passing
+	// outage: waiting does not make one appear.
+	if len(entry.Requires) == 0 || cache == nil || cache.Source == nil {
 		d.Outcome = "entitlement_config"
 		return d
 	}
@@ -326,6 +345,8 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 	case errors.Is(err, ErrLookupLimited):
 		d.Outcome = "entitlement_rate_limited"
 		return d
+	case errors.Is(err, ErrNotInDirectory):
+		d.Outcome = "not_in_directory"
 	case err != nil:
 		d.Outcome = "entitlement_unavailable"
 	case !person.Enabled:
@@ -338,7 +359,7 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 	}
 	// A recheck that refuses, or a fresh answer that refuses, forgets the
 	// person: none of their other sessions or entries rides an older answer.
-	if isRecheck(ctx) || (fresh && err == nil) {
+	if isRecheck(ctx) || (fresh && (err == nil || errors.Is(err, ErrNotInDirectory))) {
 		cache.Purge(who.Subject)
 	}
 	return d
