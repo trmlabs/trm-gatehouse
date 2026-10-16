@@ -78,6 +78,52 @@ func TestCredentialEncodesBasicUser(t *testing.T) {
 	}
 }
 
+// A Basic pair entry sends a "user:password" key as Basic credentials, and the
+// worker's placeholder stands for both halves, as a client given the
+// placeholder as its public and secret key encodes it.
+func TestCredentialEncodesBasicPair(t *testing.T) {
+	authorization := func(doc string) string { return strings.Replace(doc, `"x-api-key"`, `"authorization"`, 1) }
+	c, err := Parse([]byte(authorization(entryWith(`,"basicPair":true`))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.Entries()[0]
+	if got := e.Credential("pk-synthetic:sk-synthetic"); got != "Basic cGstc3ludGhldGljOnNrLXN5bnRoZXRpYw==" {
+		t.Fatalf("pair: %q", got)
+	}
+	if got := e.CallerCredential(); got != "Basic X192YXVsdF9TRVJQQVBJX0tFWV9fOl9fdmF1bHRfU0VSUEFQSV9LRVlfXw==" {
+		t.Fatalf("caller: %q", got)
+	}
+	user := Entry{BasicUser: true, Placeholder: "__vault_SERPAPI_KEY__"}
+	if user.CallerCredential() != user.Credential(user.Placeholder) {
+		t.Fatal("basicUser caller credential changed")
+	}
+	for name, doc := range map[string]string{
+		"other header":     entryWith(`,"basicPair":true`),
+		"with scheme":      authorization(entryWith(`,"basicPair":true,"scheme":"Bearer"`)),
+		"with basicUser":   authorization(entryWith(`,"basicPair":true,"basicUser":true`)),
+		"postgres entry":   `{"entries":[{"name":"db","kind":"postgres","host":"db.example.com","pools":["pool-a"],"basicPair":true,"postgres":{"database":"core","mount":"database","role":"readonly"}}]}`,
+		"browser session":  `{"entries":[` + browserEntryJSON(`,"basicPair":true`) + `]}`,
+		"gcp entry":        `{` + gcpPools + `,"entries":[` + strings.Replace(gcsEntry, `"kind":"gcp",`, `"kind":"gcp","basicPair":true,`, 1) + `]}`,
+		"git entry":        `{"entries":[` + strings.Replace(gitEntry, `"kind":"git",`, `"kind":"git","basicPair":true,`, 1) + `]}`,
+		"github-api entry": `{"entries":[` + strings.Replace(apiEntry, `"kind":"github-api",`, `"kind":"github-api","basicPair":true,`, 1) + `]}`,
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Errorf("%s: basicPair accepted", name)
+		}
+	}
+	for _, doc := range []string{`{"entries":[` + gitEntry + `]}`, `{"entries":[` + apiEntry + `]}`} {
+		if _, err := Parse([]byte(doc)); err != nil {
+			t.Fatalf("control git entry: %v", err)
+		}
+	}
+	for key, want := range map[string]bool{"pk:sk": true, "pk:sk:x": true, "pk": false, ":sk": false, "pk:": false, "": false} {
+		if password, ok := PairPassword(key); ok != want || (ok && password != strings.SplitN(key, ":", 2)[1]) {
+			t.Errorf("PairPassword(%q) = %q, %v", key, password, ok)
+		}
+	}
+}
+
 func TestMatchUsesSegmentsAndLongestPrefix(t *testing.T) {
 	other := strings.NewReplacer(`"serpapi"`, `"serpapi-search-v2"`, `["/search","/account/"]`, `["/search/v2"]`, `["get"]`, `["post"]`).Replace(validEntry)
 	c, err := Parse([]byte(`{"entries":[` + validEntry + `,` + other + `]}`))

@@ -50,7 +50,7 @@ The App acts as itself on GitHub, so branch protection and rulesets govern its p
 
 ## Opening pull requests (GitHub REST)
 
-A `github-api` entry lets agents work with pull requests in listed repositories, doing only the operations each repository lists, and never review, approve, merge or push through the API:
+A `github-api` entry lets agents work with pull requests in listed repositories, doing only the operations each repository lists. It never reviews, approves or merges a pull request, and never pushes through the API except for the opt-in `pr.update_branch`, which merges the base branch into a head under the pool's own push prefixes (see `docs/gatehouse/github-ci-restarts.md`):
 
 ```json
 {"name": "github-api", "host": "api.github.com", "kind": "github-api", "pools": ["<pool agent ID>"],
@@ -75,6 +75,8 @@ A `github-api` entry lets agents work with pull requests in listed repositories,
 | `dispatch` | `POST /dispatches` with one of the repository's `dispatchEvents` and an optional `client_payload` object. GitHub runs the matching workflows from the default branch | `contents: write` |
 | `actions.read` | Workflows, workflow runs, jobs, logs and artifacts (what `gh run list`, `view`, `watch` and `download` read). For a log or artifact download the broker follows GitHub's redirect to its signed download host itself, without the token; the broker's network policy must allow those hosts. Also a commit's statuses (`GET /commits/{sha}/status` and `/statuses`) and check runs (`GET /commits/{sha}/check-runs`, `GET /check-runs/{id}` and its annotations), by commit SHA only, each with a token holding only that permission | `actions: read`; `statuses: read`; `checks: read` |
 | `deployments.read` | Deployments and their statuses | `deployments: read` |
+| `pr.update_branch` | `PUT /pulls/{n}/update-branch` on a pull request whose head is under the pool's own push prefixes (never `pullRequestPrefixes`); opt-in, see `docs/gatehouse/github-ci-restarts.md` | `pull_requests: write`, `contents: write` |
+| `actions.rerun`, `actions.rerun_failed` | `POST /actions/runs/{id}/rerun` and `/rerun-failed-jobs` on a `push` or `pull_request` run from a branch under the pool's own push prefixes; opt-in, see `docs/gatehouse/github-ci-restarts.md` | `actions: write` |
 
 The App and each installation must hold `checks: read` and `statuses: read` for the check run and commit status routes, and `actions: read` and `deployments: read` for theirs; without a permission only its routes fail (503 `token_unavailable`).
 
