@@ -117,9 +117,9 @@ func (r Requester) Audited() string {
 // run any other way, such as a person's from the web or Slack
 // (not_automation), or by an Automation the catalog does not list
 // (automation_unlisted), is refused. A listed Automation's run is its own
-// whoever the token names: a person outside the configured domains, or a
-// service account, is served the same, and a person the token does name is
-// kept for the audit row only. On every Cursor pool the run's source and
+// whoever a user or service-account token names: a user outside the
+// configured domains, or a service account, is served the same, and a person
+// the token does name is kept for the audit row only. On every Cursor pool the run's source and
 // Automation are kept for the audit row, refused or not.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
 	pod, claimedRun := claims.Pod, claims.ClaimedRun
@@ -247,20 +247,14 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 }
 
 // Decide applies the entitlement decision for one entry. On a
-// cursor-automation pool, at every tier, T0 included, the entry must be one
-// the catalog lists for the run's Automation (automation_not_granted). That
-// listing is the approval: the pool's ceiling still caps the tier, but no
-// person's groups or account are checked, so the directory is never asked.
+// cursor-automation pool the requester is granted the entry only when the
+// catalog lists it for the run's Automation; entitlement.Decide refuses
+// anything else there (automation_not_granted), at every tier.
 func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool, entry httpcatalog.Entry, who Requester) entitlement.Decision {
-	if pool.Identity == httpcatalog.IdentityCursorAutomation {
-		if a, ok := pool.Automation(who.Subject); who.Kind != "automation" || !ok || !a.Uses(entry.Name) {
-			tier := entry.Tier
-			if tier == "" {
-				tier = "T0"
-			}
-			return entitlement.Decision{Tier: tier, Outcome: "automation_not_granted"}
-		}
+	requester := entitlement.Requester{Kind: who.Kind, Subject: who.Subject}
+	if a, ok := pool.Automation(who.Subject); ok && who.Kind == "automation" {
+		requester.Granted = a.Uses(entry.Name)
 	}
 	return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
-		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, entitlement.Requester{Kind: who.Kind, Subject: who.Subject})
+		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
 }

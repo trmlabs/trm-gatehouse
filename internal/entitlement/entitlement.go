@@ -259,6 +259,9 @@ type Entry struct {
 type Requester struct {
 	Kind    string // "person", "agent", "workload", "automation" or "none"
 	Subject string // the person's email; for an automation, its id
+	// Granted is set for an Automation the catalog lists the entry for. It
+	// is the only grant on a cursor-automation pool; false refuses there.
+	Granted bool
 }
 
 // Decision records why a request was allowed or refused, for the audit row.
@@ -285,15 +288,25 @@ func isRecheck(ctx context.Context) bool { v, _ := ctx.Value(recheckKey{}).(bool
 // A T2 admission always asks the directory now, within the person's lookup
 // budget; T1 admissions and rechecks may use the cache. A refusal on a recheck
 // or a fresh answer forgets everything cached about the person, so none of
-// their other sessions or entries rides a stale answer. An Automation's
-// entries are its own catalog grants, which the caller checks, so it never
-// needs the directory.
+// their other sessions or entries rides a stale answer.
+//
+// On a cursor-automation pool, at every tier, T0 included, the requester must
+// be an Automation the catalog lists the entry for (Granted), and nothing else
+// about it is checked: that listing is the approval, so no group is checked
+// and the directory is never asked. The pool's ceiling still caps the tier.
 func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Requester) Decision {
 	tier := entry.Tier
 	if tier == "" {
 		tier = "T0"
 	}
 	d := Decision{Tier: tier, Groups: append([]string(nil), entry.Requires...)}
+	if pool.Identity == "cursor-automation" {
+		d.Groups = nil
+		if who.Kind != "automation" || who.Subject == "" || !who.Granted {
+			d.Outcome = "automation_not_granted"
+			return d
+		}
+	}
 	// A pool below T0 reaches nothing; the catalog grants it no entry either.
 	if pool.Ceiling == "external" {
 		d.Outcome = "pool_external"
@@ -327,13 +340,6 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 			return d
 		}
 	case "cursor-automation":
-		// The catalog listing the entry for the Automation is the approval,
-		// and the caller checks it; no person's groups decide it.
-		if who.Kind != "automation" || who.Subject == "" {
-			d.Outcome = "no_automation"
-			return d
-		}
-		d.Groups = nil
 		d.Allowed, d.Outcome = true, "automation_granted"
 		return d
 	default:

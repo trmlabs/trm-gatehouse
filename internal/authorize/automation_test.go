@@ -232,7 +232,8 @@ func TestAutomationDecisions(t *testing.T) {
 	}
 	// A requester that is not a listed Automation is never served on the pool.
 	e, _ := catalog.Match("api.tracker.example", 443, "GET", "/v1/x", "automations")
-	for _, who := range []Requester{{Kind: "none"}, {Kind: "person", Subject: "alice@example.com"}, {Kind: "automation", Subject: "auto-9"}, {Kind: "automation"}} {
+	for _, who := range []Requester{{Kind: "none"}, {Kind: "person", Subject: "alice@example.com"}, {Kind: "automation", Subject: "auto-9"}, {Kind: "automation"},
+		{Kind: "person", Subject: "auto-1"}, {Kind: "none", Subject: "auto-1"}} {
 		if d := Decide(ctx, cache, pool, *e, who); d.Allowed || d.Outcome != "automation_not_granted" {
 			t.Errorf("%+v: %+v", who, d)
 		}

@@ -217,17 +217,18 @@ func (m slowMinter) Mint(ctx context.Context, scope AgentScope, svc *DatabaseSer
 	return m.fakeMinter.Mint(ctx, scope, svc)
 }
 
-// departmentResolver admits and reports a person whose directory department
-// has stray white space.
+// departmentResolver admits and reports a person, with the object ID and a
+// directory department that has stray white space.
 type departmentResolver struct{ svc *DatabaseService }
 
 func (r departmentResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _ string) (*DatabaseService, error) {
-	RecordRequester(ctx, Requester{Kind: "person", Subject: "user_1", Tier: "T1", Decision: "entitled", Department: "  Data   Science "})
+	RecordRequester(ctx, Requester{Kind: "person", Subject: "user_1", ObjectID: "oid-1", Tier: "T1", Decision: "entitled", Department: "  Data   Science "})
 	return r.svc, nil
 }
 
 // session_open records how long admission took, the credential mint
-// included, and the person's department as the directory gave it.
+// included, and the person's object ID and department as the directory gave
+// them.
 func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)
@@ -243,8 +244,8 @@ func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, func() bool { return len(audit.recorded()) == 2 }, "session close row")
 	got := audit.recorded()
-	if got[0].Event != auditchain.EventSessionOpen || got[0].Duration < 120 || got[0].RequesterDepartment != "Data Science" {
-		t.Fatalf("session_open row: %+v; want durationMs of at least the mint and the canonical department", got[0])
+	if got[0].Event != auditchain.EventSessionOpen || got[0].Duration < 120 || got[0].RequesterDepartment != "Data Science" || got[0].RequesterOID != "oid-1" {
+		t.Fatalf("session_open row: %+v; want durationMs of at least the mint, the object ID and the canonical department", got[0])
 	}
 	if got[1].Duration != 0 {
 		t.Fatalf("session_close row carries a duration: %+v", got[1])

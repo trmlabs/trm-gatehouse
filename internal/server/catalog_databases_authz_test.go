@@ -263,3 +263,46 @@ func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 		}
 	}
 }
+
+// liveCatalog is a catalog source a test replaces between calls.
+type liveCatalog struct{ current httpcatalog.Catalog }
+
+func (l *liveCatalog) Current() httpcatalog.Catalog { return l.current }
+
+// Removing an entry from an Automation's list, or the Automation from the
+// catalog, is how it is stopped: the next recheck of an open session refuses.
+func TestCatalogEditStopsAnAutomationsOpenSession(t *testing.T) {
+	httpcatalog.Environment.Store("staging")
+	t.Cleanup(func() { httpcatalog.Environment.Store("") })
+	parse := func(automations string) httpcatalog.Catalog {
+		t.Helper()
+		c, err := httpcatalog.Parse([]byte(`{"pools":[{"name":"automations","namespace":"n","serviceAccount":"worker","identity":"cursor-automation","ceiling":"T1"}],
+		 "entries":[
+		  {"name":"open","kind":"postgres","host":"db.example","pools":["automations"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
+		  {"name":"t1db","kind":"postgres","host":"db.example","pools":["automations"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}}],
+		 "automations":[` + automations + `]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	runs := cursorRuns{"svc": {Kind: runnerid.KindAgent, Subject: "service_account:3", Owner: "service_account:3", Run: "bc-3", Source: "AUTOMATIONS", Automation: "auto-1"}}
+	live := &liveCatalog{current: parse(`{"id":"auto-1","name":"explorer","owner":"platform-team","entries":["open","t1db"]}`)}
+	r := NewCatalogDatabaseResolver(live, runs, &entitlement.Cache{Source: directory{}}, &authorizetest.MemBinder{})
+	scope := pgproxy.AgentScope{ActorID: "a", Pool: "automations", WorkloadID: "pod-svc", ClaimedRun: "bc-3"}
+	admit := pgproxy.WithSession(context.Background(), "svc")
+	if _, err := r.ResolveDatabase(admit, scope, "t1db"); err != nil {
+		t.Fatalf("admission: %v", err)
+	}
+	for _, c := range []struct{ automations, outcome string }{
+		{`{"id":"auto-1","name":"explorer","owner":"platform-team","entries":["open"]}`, "automation_not_granted"},
+		{`{"id":"auto-2","name":"other","owner":"platform-team","entries":["t1db"]}`, "automation_unlisted"},
+	} {
+		live.current = parse(c.automations)
+		_, err := r.ResolveDatabase(pgproxy.WithRecheck(admit), scope, "t1db")
+		var refused *pgproxy.RefusedError
+		if !errors.As(err, &refused) || refused.Outcome != c.outcome {
+			t.Errorf("recheck after the edit: %v, want %s", err, c.outcome)
+		}
+	}
+}

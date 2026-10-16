@@ -258,10 +258,9 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			}
 		}
 	}
-	// The outcomes authorize.Resolve, authorize.Decide and entitlement.Decide
-	// return, other than the ones that allow the request, and the ones the
-	// GraphQL parser and target checks refuse with, which reach a deny as
-	// variables.
+	// The outcomes authorize.Resolve and entitlement.Decide return, other than
+	// the ones that allow the request, and the ones the GraphQL parser and
+	// target checks refuse with, which reach a deny as variables.
 	allows := map[string]bool{"t0": true, "entitled": true, "workload_entitled": true, "automation_granted": true}
 	for file, pattern := range map[string]*regexp.Regexp{
 		"../authorize/authorize.go":     regexp.MustCompile(`(?:return who, |\.Outcome(?:, [\w.]+)* = )"([a-z_]+)"`),
