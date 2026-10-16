@@ -200,6 +200,7 @@ Lasting codes answered with 503 and no `Retry-After`, which waiting does not cle
 |---|---|
 | `key_deleted` | The destination key was deleted, destroyed or emptied in Vault, which revokes it. |
 | `key_not_header_safe` | The key stored for the destination holds a byte outside printable ASCII (0x21 to 0x7e), such as a trailing newline, or is longer than 8192 bytes. The operator must rewrite it. |
+| `key_not_basic_pair` | The destination takes its key as HTTP Basic credentials, and the key stored for it is not a `user:password` pair with both halves set. The operator must rewrite it. |
 | `broker_misconfigured` | The broker is not set up to serve this kind of destination, for example it has no token minter for it. |
 | `seed_deadline` | The worker ends too soon for a browser session. Start a new run. |
 
