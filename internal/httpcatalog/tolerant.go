@@ -14,7 +14,7 @@ import (
 // and why. Names are catalog identifiers, so they are safe to log; reasons
 // never carry entry contents beyond what Parse's own errors name.
 type Dropped struct {
-	Kind   string // "entry", "pool" or "harness"
+	Kind   string // "entry", "pool", "harness" or "automation"
 	Name   string
 	Reason string
 }
@@ -27,11 +27,14 @@ type Dropped struct {
 //   - An entry, pool or harness that fails its own validation (an unknown
 //     field from a newer format, a bad grant or tier) is dropped.
 //   - Parts that conflict (a duplicate name, a shared route, host, test user
-//     or repository, overlapping harness images) are all dropped: the loader
-//     never picks a winner.
+//     or repository, overlapping harness images, a github-api entry's pull
+//     request prefix reaching another pool's push prefix in a git entry) are
+//     all dropped: the loader never picks a winner.
 //   - When the version defines pools, an entry granting a dropped or unknown
 //     pool is dropped. When it defines harnesses, a pool left with no harness
 //     is dropped, so dropping a harness never removes the harness check.
+//   - An Automation that fails its own validation, repeats another's id, or
+//     names a dropped or unknown entry is dropped: it reaches nothing.
 //
 // The kept parts are then checked again by Parse, the strict validator, so
 // the catalog returned is always one Parse accepts. A document that cannot be
@@ -40,9 +43,10 @@ type Dropped struct {
 // an empty catalog: nothing is reachable.
 func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	var file struct {
-		Harnesses []json.RawMessage `json:"harnesses,omitempty"`
-		Pools     []json.RawMessage `json:"pools,omitempty"`
-		Entries   []json.RawMessage `json:"entries"`
+		Harnesses   []json.RawMessage `json:"harnesses,omitempty"`
+		Pools       []json.RawMessage `json:"pools,omitempty"`
+		Entries     []json.RawMessage `json:"entries"`
+		Automations []json.RawMessage `json:"automations,omitempty"`
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -188,6 +192,41 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	entries = dropClaims(entries, func(e keptEntry) []claim { return entryClaims(e.entry) }, func(e keptEntry) {
 		drop("entry", e.entry.Name, errors.New("shares a host, route, test user or repository with another entry"))
 	})
+	entries = dropPullRequestCrossings(entries, func(e keptEntry) Entry { return e.entry }, func(e keptEntry, err error) {
+		drop("entry", e.entry.Name, err)
+	})
+
+	// Automations, each on its own against the kept entries. One naming a
+	// dropped entry goes too, as an entry granting a dropped pool does.
+	kept := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		kept[e.entry.Name] = true
+	}
+	type keptAutomation struct {
+		raw json.RawMessage
+		id  string
+	}
+	var automations []keptAutomation
+	for i, raw := range file.Automations {
+		var a Automation
+		err := strictDecode(raw, &a)
+		if err == nil {
+			err = a.validate()
+		}
+		for _, name := range a.Entries {
+			if err == nil && !kept[name] {
+				err = fmt.Errorf("names undefined or dropped entry %q", name)
+			}
+		}
+		if err != nil {
+			drop("automation", automationName(a.ID, i), err)
+			continue
+		}
+		automations = append(automations, keptAutomation{raw, a.ID})
+	}
+	automations = dropDuplicates(automations, func(a keptAutomation) string { return a.id }, func(a keptAutomation) {
+		drop("automation", a.id, errors.New("duplicate automation id"))
+	})
 
 	if len(entries) == 0 {
 		return Catalog{}, dropped, nil
@@ -204,15 +243,20 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	for i, e := range entries {
 		rawEntries[i] = e.raw
 	}
-	kept, err := json.Marshal(struct {
-		Harnesses []json.RawMessage `json:"harnesses,omitempty"`
-		Pools     []json.RawMessage `json:"pools,omitempty"`
-		Entries   []json.RawMessage `json:"entries"`
-	}{rawHarnesses, rawPools, rawEntries})
+	rawAutomations := make([]json.RawMessage, len(automations))
+	for i, a := range automations {
+		rawAutomations[i] = a.raw
+	}
+	document, err := json.Marshal(struct {
+		Harnesses   []json.RawMessage `json:"harnesses,omitempty"`
+		Pools       []json.RawMessage `json:"pools,omitempty"`
+		Entries     []json.RawMessage `json:"entries"`
+		Automations []json.RawMessage `json:"automations,omitempty"`
+	}{rawHarnesses, rawPools, rawEntries, rawAutomations})
 	if err != nil {
 		return Catalog{}, nil, err
 	}
-	c, err := Parse(kept)
+	c, err := Parse(document)
 	if err != nil {
 		return Catalog{}, nil, fmt.Errorf("catalog parts kept after dropping %d still fail validation: %w", len(dropped), err)
 	}
@@ -348,6 +392,35 @@ func dropClaims[T any](parts []T, claimsOf func(T) []claim, dropped func(T)) []T
 	for i, p := range parts {
 		if bad[i] {
 			dropped(p)
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept
+}
+
+// dropPullRequestCrossings drops every github-api entry whose pull request
+// prefixes reach another pool's push prefixes (pullRequestCrossings), and
+// each git entry it reaches into: as for any other conflict, both go.
+func dropPullRequestCrossings[T any](parts []T, entryOf func(T) Entry, dropped func(T, error)) []T {
+	all := make([]Entry, len(parts))
+	for i, p := range parts {
+		all[i] = entryOf(p)
+	}
+	reasons := map[string]error{}
+	for _, e := range all {
+		for _, c := range pullRequestCrossings(e, all) {
+			for _, name := range []string{e.Name, c.git} {
+				if reasons[name] == nil {
+					reasons[name] = c.err
+				}
+			}
+		}
+	}
+	kept := parts[:0:0]
+	for i, p := range parts {
+		if err := reasons[all[i].Name]; err != nil {
+			dropped(p, err)
 			continue
 		}
 		kept = append(kept, p)

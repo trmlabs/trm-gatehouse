@@ -15,8 +15,10 @@ import (
 
 // Names that must not appear, by the SHA-256 of the lowercase token, so this
 // file does not publish them itself. A token is a run of letters, digits, "_"
-// and "-", so a dotted host is checked one label at a time. An IPv4 range in
-// CIDR form is checked whole. The hashes are unsalted and the names short, so
+// and "-", so a dotted host is checked one label at a time. Every run of a
+// token's consecutive "-" or "_" separated parts is checked too, so a name
+// with a prefix or suffix attached is still caught. An IPv4 range in CIDR form
+// is checked whole. The hashes are unsalted and the names short, so
 // anyone can confirm a guess: this keeps names out of the tree, it does not
 // hide them.
 var deniedTokens = map[string]string{
@@ -82,6 +84,13 @@ var deniedTokens = map[string]string{
 	"676fd47aaecf9b13801c1eb8297b7b2205df99c8397c48d1e8db382b97029e74": "database role",
 	"8ae4083d184acb1c77da2012450c0c023a8a8ca5c802b2232ee557f356f3bea2": "network range",
 	"047f8aa724cd188af08e4e5153247c4f8291f8e1b4af319cfef935317d8349db": "network range",
+}
+
+// Two denied names are also parts of the broker's own constants, so they are
+// matched as whole tokens only.
+var wholeTokenOnly = map[string]bool{
+	"d897cc5356b8aa87160de3573b756069b708b15f64f13824176c8d22b3843923": true,
+	"b89e09a93cb2570fdbe167d4c2ddd40b83b1008053de8692f161462d6f694edf": true,
 }
 
 var (
@@ -153,12 +162,39 @@ func problems(name, line string) []string {
 		}
 	}
 	for _, tok := range append(token.FindAllString(line, -1), cidr.FindAllString(line, -1)...) {
-		sum := sha256.Sum256([]byte(strings.ToLower(tok)))
-		if kind, ok := deniedTokens[hex.EncodeToString(sum[:])]; ok {
-			found = append(found, kind)
+		whole := strings.ToLower(tok)
+		for _, run := range runs(whole) {
+			sum := sha256.Sum256([]byte(run))
+			key := hex.EncodeToString(sum[:])
+			if kind, ok := deniedTokens[key]; ok && (run == whole || !wholeTokenOnly[key]) {
+				found = append(found, kind)
+			}
 		}
 	}
 	return found
+}
+
+// runs returns every run of tok's consecutive parts, split at "-" and "_":
+// for "a-b_c" that is a, a-b, a-b_c, b, b_c and c. A token with no separator
+// is its own only run.
+func runs(tok string) []string {
+	var starts, ends []int
+	start := 0
+	for i := 0; i <= len(tok); i++ {
+		if i == len(tok) || tok[i] == '-' || tok[i] == '_' {
+			if i > start {
+				starts, ends = append(starts, start), append(ends, i)
+			}
+			start = i + 1
+		}
+	}
+	var out []string
+	for i := range starts {
+		for j := i; j < len(ends); j++ {
+			out = append(out, tok[starts[i]:ends[j]])
+		}
+	}
+	return out
 }
 
 func skipped(name string) bool {
@@ -225,5 +261,29 @@ func TestProblems(t *testing.T) {
 	}
 	if len(problems("SECURITY.md", securityContact)) != 0 {
 		t.Error("the security contact is flagged in SECURITY.md")
+	}
+	name := sha256.Sum256([]byte("denied-name"))
+	deniedTokens[hex.EncodeToString(name[:])] = "test name"
+	defer delete(deniedTokens, hex.EncodeToString(name[:]))
+	for line, want := range map[string]bool{
+		`pod: denied-name`:          true,
+		`pod: Denied-Name-7d9`:      true,
+		`pod: old-denied-name`:      true,
+		`pod: x_denied-name_backup`: true,
+		`pod: denied-names`:         false,
+		`pod: denied`:               false,
+		`pod: deniedname-7d9`:       false,
+	} {
+		if got := len(problems("x.go", line)) > 0; got != want {
+			t.Errorf("%s: flagged %v, want %v", line, got, want)
+		}
+	}
+	wholeTokenOnly[hex.EncodeToString(name[:])] = true
+	if len(problems("x.go", `pod: denied-name`)) == 0 || len(problems("x.go", `pod: denied-name-v1`)) != 0 {
+		t.Error("a whole-token-only name is not matched as a whole token only")
+	}
+	delete(wholeTokenOnly, hex.EncodeToString(name[:]))
+	if got := runs("a-b_c"); strings.Join(got, " ") != "a a-b a-b_c b b_c c" {
+		t.Errorf("runs(a-b_c) = %q", got)
 	}
 }

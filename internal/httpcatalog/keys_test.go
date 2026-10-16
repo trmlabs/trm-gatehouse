@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,6 +47,14 @@ func newFakeKV(t *testing.T) *fakeKV {
 			body = `{"data":{"data":{"other":"synthetic-other"},"metadata":{"version":2}}}`
 		case "value emptied":
 			body = `{"data":{"data":{"key":""},"metadata":{"version":2}}}`
+		case "trailing newline":
+			body = `{"data":{"data":{"key":"synthetic-key-two\n"},"metadata":{"version":2}}}`
+		case "inner space":
+			body = `{"data":{"data":{"key":"synthetic key-two"},"metadata":{"version":2}}}`
+		case "non-ascii":
+			body = `{"data":{"data":{"key":"synthetic-key-tw\u00f6"},"metadata":{"version":2}}}`
+		case "too long":
+			body = `{"data":{"data":{"key":"` + strings.Repeat("k", maxKeyBytes+1) + `"},"metadata":{"version":2}}}`
 		case "sealed":
 			status, body = http.StatusServiceUnavailable, `{"errors":["Vault is sealed"]}`
 		case "permission denied":
@@ -151,5 +160,47 @@ func TestUnreachableVaultKeepsGracePeriod(t *testing.T) {
 				t.Fatalf("key not served once Vault answered: %v", err)
 			}
 		})
+	}
+}
+
+// A stored key no header may carry (a byte outside printable ASCII, or too
+// long) is refused like a deleted one (at once, cached, never served stale),
+// but named as such, so the operator fixes the value instead of looking for a
+// deletion. A deleted key is never named not header-safe.
+func TestKeyNotHeaderSafeIsNamed(t *testing.T) {
+	ref := KeyRef{Mount: "gatehouse", Path: "vendors/example", Field: "key"}
+	for _, state := range []string{"trailing newline", "inner space", "non-ascii", "too long"} {
+		t.Run(state, func(t *testing.T) {
+			kv := newFakeKV(t)
+			now := time.Date(2026, 10, 9, 18, 0, 0, 0, time.UTC)
+			keys := &Keys{Vault: kv.client.Logical(), Now: func() time.Time { return now }}
+			get := func() (Secret, error) { return keys.Get(context.Background(), ref) }
+			if _, err := get(); err != nil {
+				t.Fatal(err)
+			}
+			kv.state.Store(state)
+			now = now.Add(time.Minute)
+			s, err := get()
+			if !errors.Is(err, ErrKeyNotHeaderSafe) || !errors.Is(err, ErrKeyDeleted) || !errors.Is(err, ErrKeyUnavailable) || s.Value() != "" {
+				t.Fatalf("unsafe key: %q %v", s.Value(), err)
+			}
+			reads := kv.reads.Load()
+			if _, err := get(); !errors.Is(err, ErrKeyNotHeaderSafe) || kv.reads.Load() != reads {
+				t.Fatalf("cached refusal lost its reason or read Vault again: %v", err)
+			}
+			kv.state.Store("sealed")
+			now = now.Add(time.Minute)
+			if s, err := get(); err == nil || s.Value() != "" {
+				t.Fatal("unsafe key's earlier value served during an outage")
+			}
+		})
+	}
+	for _, state := range []string{"version deleted", "secret deleted", "field removed", "value emptied"} {
+		kv := newFakeKV(t)
+		kv.state.Store(state)
+		keys := &Keys{Vault: kv.client.Logical()}
+		if _, err := keys.Get(context.Background(), ref); !errors.Is(err, ErrKeyDeleted) || errors.Is(err, ErrKeyNotHeaderSafe) {
+			t.Fatalf("%s: %v", state, err)
+		}
 	}
 }

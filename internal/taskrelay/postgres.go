@@ -529,6 +529,7 @@ var refusalsByReason = map[string]refusal{
 	"entitlement_unavailable":  {"42501", "Gatehouse could not check entitlements just now; retry shortly"},
 	"account_disabled":         {"42501", "Gatehouse: this person's account is disabled"},
 	"not_entitled":             {"42501", "Gatehouse: this person is not entitled to this database"},
+	"not_in_directory":         {"42501", "Gatehouse: the directory has no account for this person; tell the Gatehouse owners"},
 	"session_unexpected":       {"42501", "Gatehouse: this pool takes no runner session, but one was sent"},
 	"session_missing":          {"42501", "Gatehouse: this pool needs the person behind the run, but no run token was sent; retry shortly"},
 	"session_unverifiable":     {"42501", "Gatehouse could not verify this runner session"},

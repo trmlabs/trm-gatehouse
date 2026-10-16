@@ -93,7 +93,9 @@ type HarnessPath struct {
 }
 
 // HarnessAuthorization decides access for the "pool" (its ceiling and fixed
-// entitlements) or for the "person" behind each session (their groups).
+// entitlements), for the "person" behind each session (their groups), or for
+// the "automation" that started each run (the entries the catalog lists for
+// it, decided on its owner's account).
 // PoolName is the catalog pool the harness's agents are admitted into.
 type HarnessAuthorization struct {
 	Mode     string `json:"mode"`
@@ -118,8 +120,9 @@ const (
 	KeysRemote    = "remote"
 	KeysPinned    = "pinned"
 
-	AuthorizePool   = "pool"
-	AuthorizePerson = "person"
+	AuthorizePool       = "pool"
+	AuthorizePerson     = "person"
+	AuthorizeAutomation = "automation"
 )
 
 var (
@@ -193,9 +196,9 @@ func (h Harness) validate() error {
 		return fmt.Errorf("path.kind %q: sidecar or shared-proxy", h.Path.Kind)
 	}
 	switch h.Authorization.Mode {
-	case AuthorizePool, AuthorizePerson:
+	case AuthorizePool, AuthorizePerson, AuthorizeAutomation:
 	default:
-		return fmt.Errorf("authorization.mode %q: pool or person", h.Authorization.Mode)
+		return fmt.Errorf("authorization.mode %q: pool, person or automation", h.Authorization.Mode)
 	}
 	if !idPattern.MatchString(h.Authorization.PoolName) {
 		return errors.New("authorization.poolName is required")
@@ -214,11 +217,18 @@ func (h Harness) validate() error {
 			return errors.New("pod-token identity runs a sidecar, names no requester and authorizes the pool")
 		}
 	case IdentitySessionJWT:
+		if h.Authorization.Mode == AuthorizeAutomation {
+			// Only a Cursor run's token names the Automation that started it.
+			if h.Path.Kind != PathSidecar || requester != RequesterCursorOIDC {
+				return errors.New("an automation harness runs a sidecar and takes its automation from a Cursor run token (cursor-oidc)")
+			}
+			break
+		}
 		if h.Path.Kind != PathSidecar || requester == RequesterSignedAssertion || requester == RequesterPodAnnotation || h.Authorization.Mode != AuthorizePerson {
 			return errors.New("session-jwt identity runs a sidecar, takes its person from the session and authorizes the person")
 		}
 	case IdentityProxyAttested:
-		if h.Path.Kind != PathSharedProxy || requester == RequesterSessionJWT || requester == RequesterCursorOIDC {
+		if h.Path.Kind != PathSharedProxy || requester == RequesterSessionJWT || requester == RequesterCursorOIDC || h.Authorization.Mode == AuthorizeAutomation {
 			return errors.New("proxy-attested identity runs a shared proxy and takes no session token")
 		}
 		if requester == RequesterSignedAssertion {
@@ -275,7 +285,7 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string]H
 			return nil, fmt.Errorf("pool %q belongs to more than one harness", pool.Name)
 		}
 		personPool, person := personIdentities[pool.Identity]
-		if person != (h.Authorization.Mode == AuthorizePerson) {
+		if person != (h.Authorization.Mode == AuthorizePerson) || (pool.Identity == IdentityCursorAutomation) != (h.Authorization.Mode == AuthorizeAutomation) {
 			return nil, fmt.Errorf("harness %q authorizes the %s, but pool %q has identity %q", h.Name, h.Authorization.Mode, pool.Name, pool.Identity)
 		}
 		// Each source of a person is trusted only on its own kind of pool.
@@ -334,6 +344,9 @@ func (p Pool) Profile() Profile {
 	case "cursor-session":
 		h.Identity = HarnessIdentity{Kind: IdentitySessionJWT, Requester: &HarnessRequester{Kind: RequesterCursorOIDC}}
 		h.Authorization.Mode = AuthorizePerson
+	case IdentityCursorAutomation:
+		h.Identity = HarnessIdentity{Kind: IdentitySessionJWT, Requester: &HarnessRequester{Kind: RequesterCursorOIDC}}
+		h.Authorization.Mode = AuthorizeAutomation
 	}
 	return Profile{Harness: h}
 }

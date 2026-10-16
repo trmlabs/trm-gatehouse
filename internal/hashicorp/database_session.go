@@ -149,7 +149,8 @@ func (s *DatabaseSession) ReadCredential(ctx context.Context) (*DatabaseCredenti
 	}
 	credential, err := s.client.ReadDatabaseCredential(ctx, s.mount, s.role)
 	if err != nil {
-		return nil, fmt.Errorf("database credential issuance failed")
+		// The reason reaches only the broker's log, never the client.
+		return nil, fmt.Errorf("database credential issuance failed: %w", err)
 	}
 	return credential, nil
 }

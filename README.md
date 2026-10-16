@@ -46,7 +46,7 @@ Gatehouse release, and no version is supported for security fixes yet
 
 | Part | State |
 |---|---|
-| HTTP API keys, PostgreSQL logins and GitHub | Running at TRM for two agent platforms. HTTP and PostgreSQL are also tested against a real secrets manager and database in the [local demo](#try-it-in-5-minutes) |
+| HTTP API keys, PostgreSQL logins and GitHub | Running at TRM for two agent platforms. The [local demo](#try-it-in-5-minutes) also tests PostgreSQL logins, and HTTP keys in the strict profile, against a real secrets manager and database |
 | Google Cloud and browser sign-in | Built and tested on `main` |
 | Limiting an entry to people in named groups | Built. Off until a deployment turns on the directory lookup, which supports Microsoft Entra ID only |
 | Upstream Agent Vault features (vaults, web UI, proposals, TypeScript SDK) | Inherited unchanged. Gatehouse's strict profile does not use them |
@@ -55,8 +55,8 @@ Gatehouse release, and no version is supported for security fixes yet
 ## Try it in 5 minutes
 
 One container brings a test secrets manager and a test PostgreSQL database,
-runs with no network access, and proves the core behavior against them. You
-need Docker and nothing else.
+runs with no network access, and checks the core behavior. You need Docker and
+nothing else.
 
 ```sh
 git clone https://github.com/trmlabs/trm-gatehouse && cd trm-gatehouse
@@ -71,10 +71,13 @@ proved, and a reminder that a real deployment needs more checks.
 A nonzero exit is a failure. Some tests print a skip line asking for extra
 settings; those cover setups the container does not include.
 
-What the run proves:
+What the run proves. The HTTP checks use rules that name each key, as the
+strict profile does, not catalog entries, which differ where noted. The reply,
+audit and method checks use test doubles; the rest run against the real
+secrets manager and database:
 
-- A placeholder is swapped for the real key only for the catalog's host, path and method. Everything else is refused.
-- A key rotated in the secrets manager is used on the next request, and a deleted key is never sent.
+- A placeholder is swapped for the real key only for the configured host and path, and only on GET or HEAD. Everything else is refused.
+- A key rotated or deleted in the secrets manager takes effect on the next request. Catalog entries read each key at most once a minute, so there it takes effect within a minute ([keys and rotation](docs/gatehouse/http-header-adapter.md#keys-and-rotation)).
 - A reply that echoes the key back, in plain text or a common encoding, is cut off.
 - Every attempt is recorded before the request leaves, and a dropped connection is recorded as an unknown outcome, never replayed.
 - Without pooling (the default), every database connection gets a fresh login that is removed when it closes, even after the broker crashes.
@@ -234,6 +237,7 @@ Start with the [developer guide](docs/gatehouse/developer-guide.md), then the
 | [Google Cloud](docs/gatehouse/gcp-tokens.md) | Narrowed tokens for Cloud Storage and BigQuery |
 | [Browser sign-in](docs/gatehouse/browser-session.md) | Web apps signed in as a service account |
 | [Signed audit](docs/gatehouse/signed-audit.md) | The audit chain, checkpoints and verification |
+| [Decoy credentials](docs/gatehouse/decoy-credentials.md) | Planted keys that refuse and flag a session hunting for secrets |
 | [Task relay](examples/credential-proxy/task-relay/README.md) | Sandboxes that hold no identity token |
 | [Workload identity](examples/credential-proxy/kubernetes/README.md) | Kubernetes identity setup and fixtures |
 | [Running a fleet](docs/gatehouse/broker-fleet.md) and [database recovery](docs/gatehouse/database-recovery.md) | Several replicas, and recovery of interrupted database logins |
@@ -272,9 +276,7 @@ go test -race ./...   # the full test suite
 
 The test suite includes a check that refuses a list of known internal
 hostnames, project names and similar identifiers. It catches only what it
-lists, and one cloud project ID is still built into the sandbox image rule in
-`internal/imagerule` until that rule becomes configurable. Use `example.com`
-style placeholders.
+lists. Use `example.com` style placeholders.
 
 ## Contributing
 
@@ -288,6 +290,7 @@ Do not open a public issue with exploit details.
 
 ## License
 
-MIT. See [LICENSE](LICENSE), which keeps Infisical's copyright notice, and
-[NOTICE](NOTICE) for the fork's attribution. Gatehouse is maintained by
-[TRM Labs](https://trmlabs.com).
+MIT. [LICENSE](LICENSE) names Infisical Inc. and TRM Labs, Inc. as copyright
+holders. [NOTICE](NOTICE) carries the fork's attribution and the note from
+Infisical's original license on which files it covers. Gatehouse is
+maintained by [TRM Labs](https://trmlabs.com).

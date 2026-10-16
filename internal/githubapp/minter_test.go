@@ -74,7 +74,7 @@ func newFakeGitHub(t *testing.T) (*fakeGitHub, *httptest.Server) {
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"token": token, "expires_at": g.expires.Format(time.RFC3339),
-			"permissions": perms, "repositories": []map[string]string{{"full_name": "trmlabs/" + repo}}})
+			"permissions": perms, "repositories": []map[string]string{{"full_name": "example-org/" + repo}}})
 	}))
 	t.Cleanup(srv.Close)
 	return g, srv
@@ -163,7 +163,7 @@ func TestMinterAcceptsStatelessTokens(t *testing.T) {
 		g, srv := newFakeGitHub(t)
 		g.token = func(seq int32) string { return statelessToken(fmt.Sprintf("ghs_stateless%04d", seq), n) }
 		m := newMinter(g, srv, nil)
-		token, err := m.Token(context.Background(), app, "trmlabs/example-app", ContentsRead)
+		token, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead)
 		if err != nil {
 			t.Fatalf("%d-character token: %v", n, err)
 		}
@@ -183,8 +183,10 @@ func TestMinterRequestsOnlyOneRepoAndMinimumPermissions(t *testing.T) {
 		ActionsRead:       {"actions": "read", "metadata": "read"},
 		ChecksRead:        {"checks": "read", "metadata": "read"},
 		StatusesRead:      {"statuses": "read", "metadata": "read"},
+		ActionsWrite:      {"actions": "write", "metadata": "read"},
+		UpdateBranch:      {"contents": "write", "pull_requests": "write", "metadata": "read"},
 	} {
-		token, err := m.Token(context.Background(), app, "trmlabs/example-app", permissions)
+		token, err := m.Token(context.Background(), app, "example-org/example-app", permissions)
 		if err != nil || !strings.HasPrefix(token.Value(), "ghs_") {
 			t.Fatalf("mint %+v: %v", permissions, err)
 		}
@@ -206,21 +208,21 @@ func TestMinterCachesSharesAndRefreshes(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = m.Token(context.Background(), app, "trmlabs/example-app", ContentsWrite)
+			_, _ = m.Token(context.Background(), app, "example-org/example-app", ContentsWrite)
 		}()
 	}
 	wg.Wait()
 	if g.mints.Load() != 1 {
 		t.Fatalf("20 concurrent requests minted %d tokens", g.mints.Load())
 	}
-	if _, err := m.Token(context.Background(), app, "TRMLABS/example-app", ContentsRead); err != nil || g.mints.Load() != 2 {
+	if _, err := m.Token(context.Background(), app, "EXAMPLE-ORG/example-app", ContentsRead); err != nil || g.mints.Load() != 2 {
 		t.Fatal("read and write tokens must be separate")
 	}
 	now = now.Add(51 * time.Minute)
 	g.mu.Lock()
 	g.expires = now.Add(time.Hour)
 	g.mu.Unlock()
-	if _, err := m.Token(context.Background(), app, "trmlabs/example-app", ContentsWrite); err != nil || g.mints.Load() != 3 {
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsWrite); err != nil || g.mints.Load() != 3 {
 		t.Fatalf("token not refreshed ten minutes before expiry: mints=%d", g.mints.Load())
 	}
 }
@@ -229,7 +231,7 @@ func TestMinterRefusesAndRevokesAWiderToken(t *testing.T) {
 	g, srv := newFakeGitHub(t)
 	g.extraPerm = true
 	m := newMinter(g, srv, nil)
-	if _, err := m.Token(context.Background(), app, "trmlabs/example-app", ContentsRead); !errors.Is(err, ErrUnavailable) || g.revokes.Load() != 1 {
+	if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); !errors.Is(err, ErrUnavailable) || g.revokes.Load() != 1 {
 		t.Fatalf("wide token: err=%v revokes=%d", err, g.revokes.Load())
 	}
 }
@@ -240,7 +242,7 @@ func TestMinterBacksOffAndInvalidatesSparingly(t *testing.T) {
 	m := newMinter(g, srv, &now)
 	g.status = http.StatusInternalServerError
 	for range 10 {
-		if _, err := m.Token(context.Background(), app, "trmlabs/a", ContentsRead); err == nil || strings.Contains(err.Error(), "ghs_") {
+		if _, err := m.Token(context.Background(), app, "example-org/a", ContentsRead); err == nil || strings.Contains(err.Error(), "ghs_") {
 			t.Fatalf("failed mint: %v", err)
 		}
 	}
@@ -251,12 +253,12 @@ func TestMinterBacksOffAndInvalidatesSparingly(t *testing.T) {
 	g.status = http.StatusCreated
 	g.mu.Unlock()
 	now = now.Add(failureBackoff)
-	if _, err := m.Token(context.Background(), app, "trmlabs/a", ContentsRead); err != nil {
+	if _, err := m.Token(context.Background(), app, "example-org/a", ContentsRead); err != nil {
 		t.Fatal(err)
 	}
 	for range 50 {
-		m.Invalidate(app, "trmlabs/a", ContentsRead)
-		_, _ = m.Token(context.Background(), app, "trmlabs/a", ContentsRead)
+		m.Invalidate(app, "example-org/a", ContentsRead)
+		_, _ = m.Token(context.Background(), app, "example-org/a", ContentsRead)
 	}
 	if g.mints.Load() != 3 {
 		t.Fatalf("50 rejections inside 30s caused %d mints, want 3", g.mints.Load())
@@ -264,7 +266,7 @@ func TestMinterBacksOffAndInvalidatesSparingly(t *testing.T) {
 }
 
 func TestTokenNeverPrints(t *testing.T) {
-	tok := Token{value: "ghs_syntheticprint0000", Repo: "trmlabs/a"}
+	tok := Token{value: "ghs_syntheticprint0000", Repo: "example-org/a"}
 	for _, out := range []string{fmt.Sprint(tok), fmt.Sprintf("%v %+v %#v %s %q", tok, tok, tok, tok, tok)} {
 		if strings.Contains(out, "ghs_") {
 			t.Fatalf("token printed: %q", out)
@@ -300,7 +302,7 @@ func TestTransitAndKVSignersMintAcceptedJWTs(t *testing.T) {
 		"kv":      KVSigner{Vault: vault, Mount: "gatehouse", Path: "github-app", Field: "key"},
 	} {
 		m := &Minter{Signer: signer, API: srv.URL, Client: srv.Client()}
-		if _, err := m.Token(context.Background(), app, "trmlabs/"+name, ContentsRead); err != nil {
+		if _, err := m.Token(context.Background(), app, "example-org/"+name, ContentsRead); err != nil {
 			t.Fatalf("%s signer: %v", name, err)
 		}
 	}
@@ -310,7 +312,7 @@ func TestMinterRefusesUnsupportedPermissions(t *testing.T) {
 	g, srv := newFakeGitHub(t)
 	m := newMinter(g, srv, nil)
 	for _, p := range []Permissions{{}, {Contents: "admin"}, {PullRequests: "read"}} {
-		if _, err := m.Token(context.Background(), app, "trmlabs/a", p); err == nil {
+		if _, err := m.Token(context.Background(), app, "example-org/a", p); err == nil {
 			t.Fatalf("minted %+v", p)
 		}
 	}
@@ -336,27 +338,27 @@ func TestMinterRevokesTokensItNoLongerUses(t *testing.T) {
 			t.Fatalf("%s: %d revocations, want %d", what, got, want)
 		}
 	}
-	if _, err := m.Token(ctx, app, "trmlabs/a", ContentsRead); err != nil {
+	if _, err := m.Token(ctx, app, "example-org/a", ContentsRead); err != nil {
 		t.Fatal(err)
 	}
-	m.Invalidate(app, "trmlabs/a", ContentsRead)
+	m.Invalidate(app, "example-org/a", ContentsRead)
 	revokes(1, "rejected token")
 
-	for _, repo := range []string{"trmlabs/a", "trmlabs/b"} {
+	for _, repo := range []string{"example-org/a", "example-org/b"} {
 		if _, err := m.Token(ctx, app, repo, ContentsRead); err != nil {
 			t.Fatal(err)
 		}
 	}
-	m.Prune(func(_ int64, repo string, _ Permissions) bool { return repo == "trmlabs/a" })
+	m.Prune(func(_ int64, repo string, _ Permissions) bool { return repo == "example-org/a" })
 	revokes(2, "repository removed from the catalog")
 	before := g.mints.Load()
-	if _, err := m.Token(ctx, app, "trmlabs/a", ContentsRead); err != nil || g.mints.Load() != before {
+	if _, err := m.Token(ctx, app, "example-org/a", ContentsRead); err != nil || g.mints.Load() != before {
 		t.Fatalf("a still-granted token was dropped: %v", err)
 	}
 
 	m.RevokeAll()
 	revokes(3, "broker stopping")
-	if _, err := m.Token(ctx, app, "trmlabs/a", ContentsRead); err != nil || g.mints.Load() != before+1 {
+	if _, err := m.Token(ctx, app, "example-org/a", ContentsRead); err != nil || g.mints.Load() != before+1 {
 		t.Fatalf("a revoked token was reused: %v", err)
 	}
 }

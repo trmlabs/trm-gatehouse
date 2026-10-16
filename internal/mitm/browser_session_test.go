@@ -457,8 +457,9 @@ func TestBrowserAutomatedAuthKeepsSecretsBrokerSide(t *testing.T) {
 	// A refused login, whose answer names the user, fails closed.
 	f.loginErr.Store(true)
 	f.clock.Store(int64(time.Hour))
+	// The agent is told to wait out the sign-in interval, not 5 seconds.
 	if resp, _ := f.do(t, "GET", "https://api.example.com/v1/cases", bearerPlaceholder); resp == nil || resp.StatusCode != http.StatusServiceUnavailable ||
-		f.audit.last().Outcome != "token_unavailable" {
+		resp.Header.Get("Retry-After") != "60" || f.audit.last().Outcome != "token_unavailable" {
 		t.Fatalf("refused login: %v %+v", resp, f.audit.last())
 	}
 	events, _ := json.Marshal(f.audit.all())

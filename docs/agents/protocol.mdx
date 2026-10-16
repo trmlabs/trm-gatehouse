@@ -165,6 +165,47 @@ See [Proposals](/learn/proposals) for the full proposal lifecycle, including sto
 Path-based service matching changed how request log rows are filtered. The `matched_service` field in `GET /v1/vaults/{vault}/logs` rows holds the canonical service **name** for new rows; rows written before the upgrade still carry the matched **host**. Operators querying `?service=` should use the slug for new rows and the host for old rows. The matched service's `host` pattern is not returned in log rows — recover it by listing `GET /v1/vaults/{vault}/services` and filtering by `name`, or reading `/discover`.
 </Note>
 
+## Credential proxy refusals
+
+In the credential proxy profile with a broker catalog, every refusal from the broker carries an `X-Gatehouse-Refusal` header naming why, as a fixed code, and a one-line plain-text body of the form `<code>: <next step>`. The code is one of a fixed set and never contains request data. A request on an entry your pool is not granted is refused as `unlisted` (403), except that the method check runs first: a method that entry does not list is refused as `method` (405). The signed audit row records the refusal and the status sent; its outcome can be more specific than the code, such as `pool` where the agent sees `unlisted`, or an outcome with no code of its own where the agent sees `refused`.
+
+Decide by the header, not by the status alone. The broker strips `X-Gatehouse-Refusal` from every destination response, so only its own refusals carry it, while a destination's own status and `Retry-After` pass through unchanged.
+
+| Response | Meaning | What the agent does |
+|---|---|---|
+| `X-Gatehouse-Refusal` with `Retry-After` (503 or 429) | A passing refusal: the request was not sent upstream, and the same request can succeed shortly | Wait `Retry-After` seconds, then send the same request again. If the third retry is refused the same way, stop and report it. |
+| `X-Gatehouse-Refusal`, 503 without `Retry-After` | Waiting does not clear it: the broker cannot serve this destination until an operator acts, or, for `seed_deadline`, this worker ends too soon | Report it, or start a new run for `seed_deadline`. Do not retry in a loop. |
+| `X-Gatehouse-Refusal`, 403, 400, 405 or 413 | A lasting refusal: the catalog, the requester's access or the request's form does not allow it | Read the code and next step, then stop and report it, or change the request as the next step says. |
+| No `X-Gatehouse-Refusal` | The destination's own answer, or a 502 when the broker could not get or pass on that answer | The request may have been applied. Follow that service's retry rules; never assume it was not sent. |
+
+A refused CONNECT, before any request is sent, reaches the client as a failed tunnel, which HTTP clients report as a proxy or tunnel error rather than a response. The broker names its reason there too, but through the task relay the agent sees only a bare `403` (denied) or `503` (unavailable) with no reason code. Nothing was sent: report a 403, and retry a 503 after a pause.
+
+Passing codes answered with 503 and `Retry-After`, whatever check refused them:
+
+| Code | Cause |
+|---|---|
+| `session_missing` | The connection reached the broker without the runner session token its pool requires. The broker closes the connection, so the retry opens a new one, which carries a session that has arrived since. |
+| `entitlement_unavailable` | The directory did not answer the access check. |
+| `key_unavailable` | The destination key could not be read from Vault. |
+| `token_unavailable` | A short-lived token for the destination could not be minted. |
+| `target_lookup` | GitHub could not be asked what a GraphQL request's pull request or label is, so the broker could not check it. |
+| `seed_unavailable` | The browser session could not be prepared. |
+| `audit_unavailable` | The audit trail is not recording, so nothing is sent. |
+| `broker_unavailable` | This broker replica cannot take the request now, for example while it shuts down. |
+
+Passing codes answered with 429 and `Retry-After`: `entitlement_rate_limited` (too many access checks for this person in the last minute), `busy` (the broker is at its connection limit, or this address has too many failed sign-ins, where `Retry-After` is the limiter's own wait and can be minutes) and `rate_limited` (over the workload's request rate for the destination, where `Retry-After` is the limiter's own wait, or 1 second when it gives none).
+
+Lasting codes answered with 503 and no `Retry-After`, which waiting does not clear:
+
+| Code | Cause |
+|---|---|
+| `key_deleted` | The destination key was deleted, destroyed or emptied in Vault, which revokes it. |
+| `key_not_header_safe` | The key stored for the destination holds a byte outside printable ASCII (0x21 to 0x7e), such as a trailing newline, or is longer than 8192 bytes. The operator must rewrite it. |
+| `broker_misconfigured` | The broker is not set up to serve this kind of destination, for example it has no token minter for it. |
+| `seed_deadline` | The worker ends too soon for a browser session. Start a new run. |
+
+Other common lasting codes: `unlisted`, `method`, `not_entitled`, `not_in_directory` (the directory has no account for the person behind the run), `no_person`, `pool_ceiling`, `account_disabled`, `entitlement_config`, `request_shape`, `request_field`, `placeholder_misplaced`, `credential_header`, `request_too_large`, `read_only`, `identity` and the `session_*` codes other than `session_missing`.
+
 ## Security constraints
 
 - Never extract, log, or display credential values

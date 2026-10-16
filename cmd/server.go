@@ -659,6 +659,11 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 	} else if chain != nil {
 		opts.Audit = chain
 	}
+	if decoys, err := decoySource(context.Background(), client, os.Getenv, logger); err != nil {
+		return fmt.Errorf("postgres broker decoys: %w", err)
+	} else if decoys != nil {
+		opts.Decoys = decoys
+	}
 	if srv.CredentialProxyEnabled() {
 		minter, err := server.NewDurableVaultLeaseMinter(context.Background(), client, srv.CleanupStore())
 		if err != nil {

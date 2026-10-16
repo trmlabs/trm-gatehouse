@@ -44,6 +44,10 @@ type durableVaultFixture struct {
 	denyList bool
 	// revokeStatus, when set, answers every lease revoke with this status.
 	revokeStatus int
+	// credsStatus, when set, answers every credential read with this status
+	// and credsErrors, issuing nothing.
+	credsStatus int
+	credsErrors []string
 }
 
 // leaseRef is the child token a fixture lease ID belongs to.
@@ -100,6 +104,11 @@ func durableFixtureOn(t *testing.T, st *store.SQLStore) (*hashicorp.Client, *sto
 			}
 			if !persisted {
 				t.Error("mint happened before durable cleanup reference")
+			}
+			if f.credsStatus != 0 {
+				w.WriteHeader(f.credsStatus)
+				write(map[string]any{"errors": f.credsErrors})
+				return
 			}
 			f.issued++
 			f.live[ref] = true
@@ -491,6 +500,47 @@ func TestDurableLeaseLostIssuanceRevokesTheHeldChild(t *testing.T) {
 		t.Fatalf("unknown issuance not kept for its check: %d %v", len(records), err)
 	}
 	if err := m.Revoke(ctx, lease.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Vault refusing a credential read with 403 is its own evidence that nothing
+// was issued, so the record closes at once, even under a shared role the
+// broker cannot list. A 500 proves nothing and stays an unknown issuance. Both
+// failures carry Vault's answer for the broker's log.
+func TestDurableLeaseVaultRefusalClosesItsRecord(t *testing.T) {
+	client, st, f := durableFixture(t)
+	m := newDurableForTest(t, client, st)
+	ctx := context.Background()
+	svc := &DatabaseService{Name: "db", Mount: "database", Role: "shared.readonly"}
+	f.mu.Lock()
+	f.credsStatus, f.credsErrors = 403, []string{"1 error occurred:\n\t* permission denied\n\n"}
+	f.mu.Unlock()
+	_, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+	if err == nil || !strings.Contains(err.Error(), "database credential issuance failed: database credential read failed: Vault answered 403: 1 error occurred: * permission denied") {
+		t.Fatal("refusal lost Vault's answer:", err)
+	}
+	if records, err := st.ListDatabaseCleanup(ctx); err != nil || len(records) != 0 {
+		t.Fatalf("a refused read left an open record: %d %v", len(records), err)
+	}
+	f.mu.Lock()
+	f.credsStatus, f.credsErrors = 500, []string{`failed to execute query: ERROR: role "x" does not exist (SQLSTATE 42704)`}
+	f.mu.Unlock()
+	if _, err = m.Mint(ctx, AgentScope{VaultID: "vault"}, svc); err == nil || !strings.Contains(err.Error(), "Vault answered 500: failed to execute query") {
+		t.Fatal("server error lost Vault's answer:", err)
+	}
+	records, err := st.ListDatabaseCleanup(ctx)
+	if err != nil || len(records) != 1 || records[0].LeaseID != "" {
+		t.Fatalf("an ambiguous failure did not stay an unknown issuance: %d %v", len(records), err)
+	}
+	f.mu.Lock()
+	f.credsStatus = 0
+	f.mu.Unlock()
+	lease, err := m.Mint(ctx, AgentScope{VaultID: "vault"}, svc)
+	if err != nil {
+		t.Fatal("the database closed after a failed read:", err)
+	}
+	if err = m.Revoke(ctx, lease.ID); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -90,7 +90,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if p.rateLimit != nil && !isLoopbackPeer(r) {
 		if d := p.rateLimit.Check(ratelimit.TierAuth, mitmIPKey(r)); !d.Allow {
 			if p.strictCredentialProxy {
-				p.strictUnauthenticatedDeny(w, r, http.StatusTooManyRequests)
+				p.strictAuthLimitDeny(w, r, d)
 				return
 			}
 			ratelimit.WriteDenial(w, d, "Too many CONNECT attempts")
@@ -128,6 +128,9 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	token, hint, err := brokercore.ParseProxyAuth(r)
 	if err != nil {
 		p.recordAuthFailure(r)
+		if p.refuseDecoyAtProxy(w, r, target, nil) {
+			return
+		}
 		if p.strictCredentialProxy {
 			p.strictUnauthenticatedDeny(w, r, http.StatusProxyAuthRequired)
 			return
@@ -145,11 +148,19 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	connectScope, err := p.resolveScope(attested, token, hint, peer, peerErr, false)
 	if err != nil {
 		p.recordAuthFailure(r)
+		if p.refuseDecoyAtProxy(w, r, target, nil) {
+			return
+		}
 		if p.strictCredentialProxy {
 			p.strictIdentityDeny(w, r, err)
 			return
 		}
 		writeAuthError(w, err)
+		return
+	}
+	// The tunnel's own requests are checked one by one inside it; this is
+	// the CONNECT request itself.
+	if p.refuseDecoyAtProxy(w, r, target, connectScope) {
 		return
 	}
 	// With a catalog, refuse a host the caller's pool is not granted before

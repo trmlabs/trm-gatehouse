@@ -210,3 +210,22 @@ func TestFreshRefusalPurgesThePerson(t *testing.T) {
 		t.Fatalf("T1 after a fresh refusal rode the cache: %+v", d)
 	}
 }
+
+// A fresh answer that the directory has no account for the person forgets
+// them too: a cached T1 answer does not outlive the T2 lookup that found the
+// account gone.
+func TestFreshNotInDirectoryPurgesThePerson(t *testing.T) {
+	src := &fakeSource{person: Person{ObjectID: "oid", Enabled: true, MemberOf: []string{"g1", "g2"}}}
+	cache := &Cache{Source: src, TTL: time.Minute}
+	ctx := context.Background()
+	if d := Decide(ctx, cache, claudePool, t1Entry, carol); !d.Allowed {
+		t.Fatal("T1 admission refused")
+	}
+	src.err = ErrNotInDirectory
+	if d := Decide(ctx, cache, claudePool, t2Entry, carol); d.Allowed || d.Outcome != "not_in_directory" {
+		t.Fatalf("T2 admission: %+v", d)
+	}
+	if d := Decide(ctx, cache, claudePool, t1Entry, carol); d.Allowed || d.Outcome != "not_in_directory" {
+		t.Fatalf("T1 after the account was found gone rode the cache: %+v", d)
+	}
+}

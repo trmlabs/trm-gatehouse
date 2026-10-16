@@ -50,6 +50,8 @@ type Session struct {
 	Subject     string   // the lower-cased email for a person; the owner for an agent
 	Owner       string   // the vendor's stable owner (user:, agent: or service_account:), or ""
 	Run         string   // the Cursor run (cloud_agent_id); "" for Claude
+	Source      string   // Cursor: how the run started, upper-cased (AUTOMATIONS for an Automation); "" for Claude
+	Automation  string   // Cursor: the Automation that started the run (automation_id), or ""
 	Pools       []string // ccpool_ IDs in the audience (Claude)
 	Expires     time.Time
 	TokenSHA256 string

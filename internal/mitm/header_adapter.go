@@ -15,9 +15,11 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/decoy"
 	"github.com/Infisical/agent-vault/internal/entitlement"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
@@ -31,15 +33,17 @@ type HeaderAdapter struct {
 	// next request; an httpcatalog.Catalog or a live *httpcatalog.Source.
 	Catalog interface{ Current() httpcatalog.Catalog }
 	// Runner verifies Claude runner session tokens for claude-session pools,
-	// and Cursor run tokens for cursor-session pools when it is a
-	// runnerid.Verifiers; Entitlements answers live group membership. Without
-	// them, entries above T0 are refused on those pools.
+	// and Cursor run tokens for cursor-session and cursor-automation pools
+	// when it is a runnerid.Verifiers; Entitlements answers live group
+	// membership. Without them, entries above T0 are refused on those pools,
+	// and every entry on a cursor-automation pool, whose owner check needs
+	// the directory at T0 too.
 	Runner interface {
 		Verify(context.Context, string) (runnerid.Session, error)
 	}
 	Entitlements *entitlement.Cache
 	// Sessions pins each runner session to the first Pod presenting it.
-	// Without it, claude-session and cursor-session pools refuse every session.
+	// Without it, claude-session and Cursor pools refuse every session.
 	Sessions authorize.Binder
 	Keys     interface {
 		Get(context.Context, httpcatalog.KeyRef) (httpcatalog.Secret, error)
@@ -67,41 +71,113 @@ type HeaderAdapter struct {
 		Token(context.Context, *httpcatalog.Entry) (httpcatalog.GCPToken, error)
 		Invalidate(*httpcatalog.Entry)
 	}
+	// Decoys are the decoy credentials planted in worker sessions (see
+	// package decoy), read per request. Without them, none is recognized.
+	Decoys interface{ Current() *decoy.Set }
 }
 
 func (a *HeaderAdapter) valid() bool {
 	return a != nil && a.Catalog != nil && a.Keys != nil && a.Audit != nil
 }
 
+// decoys is the decoy set in force, or nil.
+func (a *HeaderAdapter) decoys() *decoy.Set {
+	if a == nil || a.Decoys == nil {
+		return nil
+	}
+	return a.Decoys.Current()
+}
+
 const placeholderMarker = "__vault_"
 
 // adapterDeny records a refusal, with the target the caller asked for, before
-// answering. If the row cannot be written the caller still learns nothing
-// beyond "unavailable".
+// answering with its reason (refusal.go). A passing refusal answers 503 or
+// 429 with Retry-After whatever status the caller chose, and the row records
+// the status sent. If the row cannot be written the caller still learns
+// nothing beyond "audit_unavailable".
 func (p *Proxy) adapterDeny(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome string) {
+	p.adapterDenyAs(w, event, target, status, outcome, refusalCode(outcome), 0)
+}
+
+// adapterDenyAs is adapterDeny with the code the agent sees given apart from
+// the audit outcome, and, from a rate limiter, its own wait (0 for none) in
+// place of the code's fixed Retry-After.
+func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome, code string, wait time.Duration) {
+	code, status, kind := refusalFor(code, status)
+	kind = kind.after(wait)
 	event.Event, event.Outcome, event.Status = auditchain.EventDenied, outcome, status
 	event.Target = auditchain.TargetField(target)
 	if p.adapter.Audit.Record(event) != nil {
-		status = http.StatusServiceUnavailable
+		code, status, kind = refusalFor("audit_unavailable", status)
 	}
-	http.Error(w, http.StatusText(status), status)
+	writeRefusal(w, status, code, kind)
+}
+
+// adapterRateDeny refuses a request over its workload's rate for an entry,
+// with the limiter's own wait as Retry-After.
+func (p *Proxy) adapterRateDeny(w http.ResponseWriter, event auditchain.Event, target string, d ratelimit.Decision) {
+	p.adapterDenyAs(w, event, target, http.StatusTooManyRequests, "rate_limited", "rate_limited", d.RetryAfter)
+}
+
+// outcomeDecoy refuses a request that presented a decoy credential: proof the
+// session went looking for secrets, so the row pages.
+const outcomeDecoy = "decoy_credential"
+
+// refuseDecoy refuses a request that presented a decoy credential and records
+// which decoy and where: binding "decoy/<owner pool>/<name>" and the surface
+// as the decision. It never forwards, and the row never holds the value. The
+// caller sees the same 403 as any refusal.
+func (p *Proxy) refuseDecoy(w http.ResponseWriter, event auditchain.Event, target string, m decoy.Match) {
+	event.Binding, event.Decision = "decoy/"+m.Label, m.Surface
+	p.adapterDeny(w, event, target, http.StatusForbidden, outcomeDecoy)
+}
+
+// refuseDecoyBody refuses a request whose body, already read, holds a decoy
+// credential, and reports whether it did.
+func (p *Proxy) refuseDecoyBody(w http.ResponseWriter, event auditchain.Event, target string, body []byte) bool {
+	m, ok := p.adapter.decoys().Body(body)
+	if ok {
+		p.refuseDecoy(w, event, target, m)
+	}
+	return ok
+}
+
+// refuseDecoyAtProxy refuses a CONNECT or absolute-form request whose own URL
+// or headers carry a decoy credential, such as one sent as the proxy
+// password, and reports whether it did. scope is nil when identity was not
+// established, and the row then names no pool.
+func (p *Proxy) refuseDecoyAtProxy(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope) bool {
+	if !p.strictCredentialProxy || !p.adapter.valid() {
+		return false
+	}
+	m, ok := p.adapter.decoys().Request(r)
+	if !ok {
+		return false
+	}
+	event := auditchain.Event{Method: auditMethod(r.Method)}
+	if scope != nil {
+		event.Pool, event.Agent, event.PodUID = scope.Pool, scope.AgentID, scope.WorkloadID
+	}
+	p.refuseDecoy(w, event, target, m)
+	return true
 }
 
 // adapterUnauthenticatedDeny replaces the SQL audit for refusals that happen
-// before identity is known, so every refusal lands in the signed trail.
-func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int) {
-	p.adapterIdentityDeny(w, r, a, status, "", nil)
+// before identity is known, so every refusal lands in the signed trail. wait
+// is a rate limiter's own wait, or 0.
+func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, wait time.Duration) {
+	p.adapterIdentityDeny(w, r, a, status, "", nil, wait)
 }
 
 // adapterIdentityDeny records a refusal with the identity check that refused
 // it, as a fixed code in the row's decision field ("" when none applies), and
 // for a signing-key refusal the token's kid and the connection's peer.
-func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial) {
+func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial, wait time.Duration) {
 	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Decision: reason}
 	if key != nil {
 		event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 	}
-	p.adapterDeny(w, event, requestedTarget(r), status, "refused")
+	p.adapterDenyAs(w, event, requestedTarget(r), status, "refused", identityRefusalCode(status), wait)
 }
 
 type connectTargetKey struct{}
@@ -174,6 +250,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusForbidden, "authentication")
 		return
 	}
+	// A decoy anywhere in the URL or headers is refused before routing, so
+	// every entry kind, and a host or path no entry lists, is covered.
+	if m, ok := a.decoys().Request(r); ok {
+		p.refuseDecoy(w, event, target, m)
+		return
+	}
 	if err := a.Audit.Admit(); err != nil {
 		deny(http.StatusServiceUnavailable, "audit_unavailable")
 		return
@@ -203,6 +285,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		}
 		return
 	}
+	if r.URL.Path == "/graphql" {
+		if granted, ok := catalog.GitHubAPIRepos(host, port, scope.Pool); ok {
+			p.forwardGitHubGraphQL(w, r, target, host, port, scope, event, catalog, granted)
+			return
+		}
+	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
 		event.Operation = githubAPIOperation(api, r.URL.Path)
 		// A code-returning route also needs the git entry it relies on to
@@ -230,7 +318,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	entry, err := catalog.Match(host, port, r.Method, r.URL.Path, scope.Pool)
 	if entry != nil {
-		event.Binding = entry.Name
+		event.Binding, event.Operation = entry.Name, entry.Operation(r.URL.Path)
 	}
 	if refused(entry, err) {
 		return
@@ -254,6 +342,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	// A model API's body quotes whatever the agent read, so only its headers
+	// and URL count as presenting a decoy.
+	if err == nil && !entry.Transcript && p.refuseDecoyBody(w, event, target, body) {
+		return
+	}
 	switch {
 	case err != nil:
 		deny(http.StatusBadRequest, "request_shape")
@@ -269,13 +362,13 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		// reach the vendor verbatim.
 		deny(http.StatusBadRequest, "placeholder_misplaced")
 		return
-	case entry.CheckRequestFields(r.URL.RawQuery, r.Header.Values("Content-Type"), body) != nil:
+	case entry.CheckRequestFields(r.URL.Path, r.URL.RawQuery, r.Header.Values("Content-Type"), body) != nil:
 		// A limited parameter (a Slack channel) missing, repeated, placed
-		// twice or not listed.
+		// twice or not listed, or a key the method does not take.
 		deny(http.StatusForbidden, "request_field")
 		return
 	}
-	expectedCredential := entry.Credential(entry.Placeholder)
+	expectedCredential := entry.CallerCredential()
 	forwarded := http.Header{}
 	for name, values := range r.Header {
 		if name == entry.Header {
@@ -299,12 +392,17 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	// shares one agent identity.
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
-		deny(http.StatusTooManyRequests, "rate_limited")
+		p.adapterRateDeny(w, event, target, enf.Decision)
 		return
 	}
 	defer enf.Release()
 	secret, err := a.Keys.Get(r.Context(), entry.Key)
 	if err != nil {
+		deny(http.StatusServiceUnavailable, keyOutcome(err))
+		return
+	}
+	password, pair := httpcatalog.PairPassword(secret.Value())
+	if entry.BasicPair && !pair {
 		deny(http.StatusServiceUnavailable, "key_unavailable")
 		return
 	}
@@ -323,7 +421,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	admittedAt := time.Now()
@@ -337,6 +435,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	if entry.BasicUser {
 		// The encoded user name alone, as a vendor might echo it.
 		values["basic"] = strings.TrimPrefix(credential, "Basic ")
+	}
+	if entry.BasicPair {
+		// The password alone; the encoded pair is already one of the key's
+		// screened encodings. The user half is usually a public key, so it is
+		// not screened.
+		values["password"] = password
 	}
 	needles := secretRepresentations(values)
 	p.relayScreened(w, out, needles, entry.MaxResponseBytes, finish, func(*http.Response) {
@@ -354,7 +458,7 @@ func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles 
 	if err != nil {
 		if tooLarge != nil && tooLarge() {
 			finish(http.StatusRequestEntityTooLarge, "request_too_large")
-			http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+			refuseWith(w, http.StatusRequestEntityTooLarge, "request_too_large")
 			return
 		}
 		finish(http.StatusBadGateway, "upstream_error")
@@ -379,6 +483,7 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 		return
 	}
 	for name, values := range resp.Header {
+		// ShouldStripResponseHeader also drops RefusalHeader, the broker's own.
 		if brokercore.ShouldStripResponseHeader(name) || name == "X-Request-Id" || name == "Trailer" || name == "Content-Length" {
 			continue
 		}

@@ -72,8 +72,8 @@ Have a maintainer approve the target repository, proposed patch and description
 before opening an upstream contribution. This repository does not automatically
 open upstream contributions.
 
-Retain upstream copyright and license notices. The top-level license contains
-third-party and possible enterprise-directory exceptions; review the actual
+Retain upstream copyright and license notices. NOTICE keeps upstream's
+third-party and enterprise-directory (`ee/`) exceptions; review the actual
 files being distributed rather than assuming every future import is MIT.
 
 ## Publication boundary

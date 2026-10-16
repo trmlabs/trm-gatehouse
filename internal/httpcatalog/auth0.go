@@ -79,6 +79,10 @@ var ErrBrowserLogin = errors.New("browser test-user login failed")
 // token. Invalidate also keeps a token younger than this.
 const reloginInterval = time.Minute
 
+// ReloginInterval is how long a failed sign-in keeps refusing: no entry signs
+// in again sooner, so a broker tells the agent to wait this long.
+const ReloginInterval = reloginInterval
+
 // signInTimeout bounds a sign-in, which runs detached from the request that
 // started it.
 const signInTimeout = 90 * time.Second

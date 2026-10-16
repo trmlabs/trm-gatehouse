@@ -15,6 +15,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/broker"
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
 )
 
@@ -61,13 +62,15 @@ func (p *Proxy) finishStrictAudit(ctx context.Context, id, result string, status
 	return p.durableAudit.Finish(ctx, id, requestlog.Outcome{Result: result, Status: status})
 }
 
-func (p *Proxy) strictDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int) {
+// strictDeny refuses before the catalog. wait is a rate limiter's own wait,
+// sent as Retry-After by the catalog adapter, or 0.
+func (p *Proxy) strictDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, wait time.Duration) {
 	if p.adapter != nil {
 		if !p.adapter.valid() {
-			http.Error(w, "audit unavailable", http.StatusServiceUnavailable)
+			refuse(w, "broker_misconfigured")
 			return
 		}
-		p.adapterUnauthenticatedDeny(w, r, a, status)
+		p.adapterUnauthenticatedDeny(w, r, a, status, wait)
 		return
 	}
 	a.Decision = "deny"
@@ -90,7 +93,14 @@ func (p *Proxy) strictDeny(w http.ResponseWriter, r *http.Request, a requestlog.
 
 // strictUnauthenticatedDeny deliberately omits unverified identity and routing.
 func (p *Proxy) strictUnauthenticatedDeny(w http.ResponseWriter, r *http.Request, status int) {
-	p.strictDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status)
+	p.strictDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, 0)
+}
+
+// strictAuthLimitDeny is strictUnauthenticatedDeny for an address over its
+// failed sign-in budget: a 429 whose Retry-After is the limiter's own wait,
+// which can be minutes, not a fixed few seconds.
+func (p *Proxy) strictAuthLimitDeny(w http.ResponseWriter, r *http.Request, d ratelimit.Decision) {
+	p.strictDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusTooManyRequests, d.RetryAfter)
 }
 
 // strictIdentityDeny refuses a caller whose identity was not admitted (403).
@@ -98,7 +108,7 @@ func (p *Proxy) strictUnauthenticatedDeny(w http.ResponseWriter, r *http.Request
 func (p *Proxy) strictIdentityDeny(w http.ResponseWriter, r *http.Request, err error) {
 	reason := brokercore.DenialReason(err)
 	if p.adapter != nil && p.adapter.valid() && reason != "" {
-		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusForbidden, "identity_"+reason, brokercore.DenialKey(err))
+		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusForbidden, "identity_"+reason, brokercore.DenialKey(err), 0)
 		return
 	}
 	p.strictUnauthenticatedDeny(w, r, http.StatusForbidden)
@@ -107,14 +117,14 @@ func (p *Proxy) strictIdentityDeny(w http.ResponseWriter, r *http.Request, err e
 func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, host string, port int, useTLS bool, scope *brokercore.ProxyScope) {
 	if p.adapter != nil {
 		if !p.adapter.valid() {
-			http.Error(w, "credential adapter unavailable", http.StatusServiceUnavailable)
+			refuse(w, "broker_misconfigured")
 			return
 		}
 		p.forwardCatalog(w, r, target, host, port, useTLS, scope)
 		return
 	}
 	attempt := strictAttempt(scope, nil, r.Method, host, target, "deny")
-	deny := func(status int) { p.strictDeny(w, r, attempt, status) }
+	deny := func(status int) { p.strictDeny(w, r, attempt, status, 0) }
 	// The first release is a read-only, header-only workflow. Reject unsupported
 	// request surfaces before reading any Vault credential or opening upstream.
 	if scope == nil {

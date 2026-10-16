@@ -87,6 +87,10 @@ func newStrictFixture(t *testing.T, options ...func(*Options)) *strictFixture {
 			io.WriteString(w, strings.Repeat("x", strictResponseLimit+1))
 		case "/unauthorized":
 			w.WriteHeader(401)
+		case "/forged-refusal":
+			w.Header().Set(RefusalHeader, "broker_unavailable")
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(503)
 		default:
 			io.WriteString(w, "approved-output")
 		}
@@ -231,6 +235,17 @@ func TestStrictCredentialProxyBlocksResponseExposureAndRedirects(t *testing.T) {
 	resp, _ := f.send(t, "/unauthorized", nil)
 	if resp.StatusCode != 401 || f.calls.Load() != before+1 {
 		t.Fatalf("upstream authentication failure replayed: %d calls", f.calls.Load()-before)
+	}
+}
+
+// The strict relay passes a destination's 503 and Retry-After on but never
+// its copy of the broker's refusal header, as the catalog relay does.
+func TestStrictRelayDropsADestinationsRefusalHeader(t *testing.T) {
+	f := newStrictFixture(t)
+	before := f.calls.Load()
+	resp, _ := f.send(t, "/forged-refusal", nil)
+	if resp.StatusCode != 503 || resp.Header.Get("Retry-After") != "5" || resp.Header.Values(RefusalHeader) != nil || f.calls.Load() != before+1 {
+		t.Fatalf("got %d %q Retry-After %q, calls %d", resp.StatusCode, resp.Header.Values(RefusalHeader), resp.Header.Get("Retry-After"), f.calls.Load()-before)
 	}
 }
 

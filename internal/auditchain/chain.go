@@ -83,14 +83,20 @@ type Event struct {
 	NotAfter string
 	DNSNames string // comma-separated lower-case DNS names the certificate holds
 	Target   string // refusals: see Row; set it with TargetField
+	Branch   string // CI restarts: see Row; set it with BranchField
 	// Operation, Database and RequesterDepartment: see Row. Set Database with
 	// DatabaseField and RequesterDepartment with DepartmentField.
 	Operation           string
 	Database            string
 	RequesterDepartment string
-	Method              string
-	Status              int
-	Duration            int64 // milliseconds
+	// Source, Automation, AutomationName and AutomationOwner: see Row.
+	Source          string
+	Automation      string
+	AutomationName  string
+	AutomationOwner string
+	Method          string
+	Status          int
+	Duration        int64 // milliseconds
 }
 
 var (
@@ -189,7 +195,8 @@ func (e Event) Validate() error {
 	if e.CacheAgeSec < 0 {
 		return ErrInvalidEvent
 	}
-	for _, v := range []string{e.Pool, e.Agent, e.PodUID, e.Binding, e.Session, e.Outcome, e.Requester, e.RequesterKind, e.RequesterOID, e.TokenSHA256, e.Tier, e.Decision, e.Kid, e.KidSHA256, e.Peer} {
+	for _, v := range []string{e.Pool, e.Agent, e.PodUID, e.Binding, e.Session, e.Outcome, e.Requester, e.RequesterKind, e.RequesterOID, e.TokenSHA256, e.Tier, e.Decision, e.Kid, e.KidSHA256, e.Peer,
+		e.Source, e.Automation, e.AutomationName, e.AutomationOwner} {
 		if !identifier(v, true) {
 			return ErrInvalidEvent
 		}
@@ -201,6 +208,9 @@ func (e Event) Validate() error {
 		return ErrInvalidEvent
 	}
 	if e.Target != "" && TargetField(e.Target) != e.Target {
+		return ErrInvalidEvent
+	}
+	if e.Branch != "" && BranchField(e.Branch) != e.Branch {
 		return ErrInvalidEvent
 	}
 	if e.Operation != "" && !operationName.MatchString(e.Operation) {
@@ -288,6 +298,23 @@ func DepartmentField(department string) string {
 	return department
 }
 
+// maxBranchBytes bounds the branch name a row may carry.
+const maxBranchBytes = 255
+
+// BranchField returns a git branch name GitHub reported for a row's branch:
+// the name itself when it is at most 255 bytes of printable ASCII other than
+// a space, a quote or a backslash, or "invalid". GitHub chooses it from what a
+// pusher named, so nothing else enters the row.
+func BranchField(name string) string {
+	if name == "" {
+		return ""
+	}
+	if len(name) > maxBranchBytes || !identifier(name, false) {
+		return "invalid"
+	}
+	return name
+}
+
 // TargetField returns the canonical form of a requested host or host:port
 // for a row's target: a lower-case DNS name or IP address, with the port when
 // one was given, or "invalid" when the input is anything else. Its result is
@@ -344,7 +371,8 @@ func (c *Chain) Record(e Event) error {
 	_, err := c.appendLocked(Row{Event: e.Event, Pool: e.Pool, Agent: e.Agent, PodUID: e.PodUID, Binding: e.Binding, Session: e.Session, Outcome: e.Outcome, Requester: e.Requester,
 		RequesterKind: e.RequesterKind, RequesterOID: e.RequesterOID, TokenSHA256: e.TokenSHA256, Tier: e.Tier, Decision: e.Decision, Groups: e.Groups, CacheAgeSec: e.CacheAgeSec,
 		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
-		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment,
+		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment, Branch: e.Branch,
+		Source: e.Source, Automation: e.Automation, AutomationName: e.AutomationName, AutomationOwner: e.AutomationOwner,
 		Method: e.Method, Status: e.Status, Duration: e.Duration})
 	return err
 }
