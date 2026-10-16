@@ -3,6 +3,7 @@ package hashicorp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -289,5 +290,58 @@ func TestDatabaseMintNilDataStillRevokesKnownLease(t *testing.T) {
 	_, err := newClientForServer(t, srv.URL).ReadDatabaseCredential(context.Background(), "database", "readonly")
 	if err == nil || !revoked.Load() {
 		t.Fatal("malformed issuance leaked its known lease")
+	}
+}
+
+// A failed credential read names Vault's status and messages, so the broker's
+// log says why, and marks the answers that prove nothing was issued.
+func TestDatabaseMintReportsVaultAnswer(t *testing.T) {
+	for _, test := range []struct {
+		status    int
+		errors    []string
+		want      string
+		notIssued bool
+	}{
+		{403, []string{"1 error occurred:\n\t* permission denied\n\n"}, "Vault answered 403: 1 error occurred: * permission denied", true},
+		{400, []string{"unknown role: reader"}, "Vault answered 400: unknown role: reader", true},
+		{500, []string{`failed to execute query: ERROR: role "citus_dynamic_role" does not exist (SQLSTATE 42704)`},
+			`Vault answered 500: failed to execute query: ERROR: role "citus_dynamic_role" does not exist (SQLSTATE 42704)`, false},
+		{503, nil, "Vault answered 503: no message", false},
+		{500, []string{"a", "b", "c", "d", "e", "f"}, "Vault answered 500: a; b; c; d; and 2 more", false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(test.status)
+			writeJSON(w, map[string]any{"errors": test.errors})
+		}))
+		_, err := newClientForServer(t, srv.URL).ReadDatabaseCredential(context.Background(), "database", "reader")
+		srv.Close()
+		if err == nil || err.Error() != "database credential read failed: "+test.want {
+			t.Errorf("status %d: got %v, want %q", test.status, err, test.want)
+		}
+		if errors.Is(err, ErrCredentialNotIssued) != test.notIssued {
+			t.Errorf("status %d: not-issued %v, want %v", test.status, errors.Is(err, ErrCredentialNotIssued), test.notIssued)
+		}
+	}
+}
+
+func TestDatabaseMintReportsMissingRoleAndNoAnswer(t *testing.T) {
+	srv, _ := stubDatabaseVault(t, "database", nil, "")
+	_, err := newClientForServer(t, srv.URL).ReadDatabaseCredential(context.Background(), "database", "nope")
+	if err == nil || !errors.Is(err, ErrCredentialNotIssued) || !strings.Contains(err.Error(), "Vault answered 404: no credential at database/creds/nope") {
+		t.Fatalf("missing role: %v", err)
+	}
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	_, err = newClientForServer(t, gone.URL).ReadDatabaseCredential(context.Background(), "database", "reader")
+	if err == nil || errors.Is(err, ErrCredentialNotIssued) || err.Error() != "database credential read failed: no answer from Vault (network)" {
+		t.Fatalf("unreachable Vault: %v", err)
+	}
+}
+
+func TestDatabaseMintMessageIsBounded(t *testing.T) {
+	long := strings.Repeat("x", 1000) + "\n\n\tend"
+	got := vaultMessages([]string{long, "  ", "postgres://u:p@h password: hunter2, at or near \"tok\""})
+	if !strings.HasPrefix(got, strings.Repeat("x", 300)+"...; ") || strings.Contains(got, "hunter2") || strings.Contains(got, "u:p@") || strings.Contains(got, `"tok"`) {
+		t.Fatalf("unbounded or unmasked: %q", got)
 	}
 }
