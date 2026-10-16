@@ -41,6 +41,11 @@ type Entry struct {
 	// password, the way clients such as axios and curl -u encode it. The
 	// header is Authorization and the scheme is Basic, so neither is set.
 	BasicUser bool `json:"basicUser,omitempty"`
+	// BasicPair sends the key, stored as "user:password", as HTTP Basic
+	// credentials, for vendors that issue a key pair (a public and a secret
+	// key). The worker sends the placeholder as both user name and password.
+	// The header is Authorization and the scheme is Basic, so neither is set.
+	BasicPair bool `json:"basicPair,omitempty"`
 	// Placeholder is what a worker may send in Header instead of the key, so
 	// SDKs that insist on a key still work. The worker may also omit Header.
 	Placeholder string `json:"placeholder"`
@@ -125,6 +130,13 @@ var githubOperations = map[string]string{
 	"dispatch":         "contents-write", // POST /dispatches, listed event types only
 	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts; a commit's check runs and statuses
 	"deployments.read": "deployments",    // deployments and their statuses
+
+	// CI restarts: each acts only on a branch of this repository the pool may
+	// push to, under the push prefixes of the git entry a push would use, for
+	// a requester that entry authorizes (see GitHubAPIMatch).
+	"pr.update_branch":     "update-branch", // PUT /pulls/{n}/update-branch merges the base into the head
+	"actions.rerun":        "actions-write", // POST /actions/runs/{id}/rerun, a push or pull_request run
+	"actions.rerun_failed": "actions-write", // POST /actions/runs/{id}/rerun-failed-jobs, likewise
 }
 
 // githubRouteScopes are the scopes an operation's routes need besides its own
@@ -506,6 +518,9 @@ func (e *Entry) normalize() error {
 	if e.BasicUser && (e.Header != "Authorization" || e.Scheme != "") {
 		return errors.New("basicUser needs header Authorization and no scheme")
 	}
+	if e.BasicPair && (e.Header != "Authorization" || e.Scheme != "" || e.BasicUser) {
+		return errors.New("basicPair needs header Authorization, no scheme and no basicUser")
+	}
 	if !placeholder.MatchString(e.Placeholder) {
 		return errors.New("placeholder must look like __vault_NAME__")
 	}
@@ -543,7 +558,7 @@ func (e *Entry) normalize() error {
 }
 
 func (e *Entry) normalizePostgres() error {
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.Placeholder != "" || e.Key != (KeyRef{}) ||
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) ||
 		len(e.ForwardHeaders) > 0 || e.Git != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
 		return errors.New("postgres entries take only host, port, pools and postgres settings")
 	}
@@ -643,7 +658,7 @@ func (e *Entry) normalizeGit() error {
 	if e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil {
 		return errors.New("postgres settings require kind postgres")
 	}
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
 		return errors.New("git entries derive paths, methods and credentials; leave them unset")
 	}
 	g := e.Git
@@ -755,8 +770,9 @@ type GitRequest struct {
 	// broker comments only on a pull request whose head is one of HeadPrefixes.
 	CommentsOn int64
 	// CloneEntry is the git entry a code-returning route (a pull request's
-	// files, a compare) relies on. The broker authorizes the requester against
-	// it as well as Entry, so a code read never reaches further than a clone.
+	// files, a compare) or a CI restart relies on. The broker authorizes the
+	// requester against it as well as Entry, so a code read never reaches
+	// further than a clone, nor a CI restart further than a push.
 	CloneEntry *Entry
 	// The fields below describe every github-api request. Route names it
 	// (see githubAPIRoutes), Operation is the repository operation that opened
@@ -774,11 +790,18 @@ type GitRequest struct {
 	Query string
 	// Permissions is the token scope the route needs: "pull-requests",
 	// "contents-write" (a repository dispatch), "actions", "deployments",
-	// "checks" or "statuses".
+	// "checks", "statuses", "update-branch" (pull requests and contents write)
+	// or "actions-write".
 	Permissions string
 	// Download marks a route GitHub answers with a redirect to a signed
 	// download URL, which the broker follows itself without the token.
 	Download bool
+	// RestartOf is the pull request (pr.update_branch) or workflow run
+	// (actions.rerun, actions.rerun_failed) a CI restart acts on. The broker
+	// acts only when its head is a branch of this repository under
+	// HeadPrefixes, here the push prefixes of CloneEntry, the git entry a push
+	// to the repository would use.
+	RestartOf int64
 }
 
 // GitMatch routes a request to a git entry. ok is false when the host has no
@@ -845,9 +868,13 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 // mark it ready. A pull request's files and a compare return code, so they
 // exist only for a pool whose git entry can clone the repository, which the
 // broker then authorizes too (CloneEntry). Labels, repository dispatch, Actions
-// reads (with check runs and commit statuses) and deployment reads exist only
-// where the repository grants them. Reviews, merges, pushes through the API
-// and everything else are unlisted.
+// reads (with check runs and commit statuses), deployment reads and CI
+// restarts exist only where the repository grants them; a CI restart also
+// needs the git entry a push would use to grant the pool branch prefixes,
+// which then hold its target's head (HeadPrefixes), and authorizes the
+// requester against that entry too (CloneEntry). Reviews, merging a pull
+// request, pushes through the API other than a CI restart's branch update
+// (which merges the base into the head) and everything else are unlisted.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -910,6 +937,17 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 					return GitRequest{}, true, ErrUnlisted
 				}
 			}
+			if route.restart > 0 {
+				// A CI restart writes to, or runs again, a branch the pool could
+				// push to itself: only where the git entry a push would use lets
+				// the pool push to branch prefixes, only on those branches, and
+				// only for a requester that entry authorizes too.
+				git := c.cloneEntry(host, repo, pool)
+				if matched.HeadPrefixes = pushPrefixes(git, repo); len(matched.HeadPrefixes) == 0 {
+					return GitRequest{}, true, ErrUnlisted
+				}
+				matched.CloneEntry, matched.RestartOf = git, route.restart
+			}
 			switch {
 			case route.name == "open-pull":
 				matched.OpensPullRequest, matched.HeadPrefixes = true, c.pushBranchPrefixes(repo, pool)
@@ -933,19 +971,9 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 // may come only from one of them; none means none may be opened.
 func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 	var out []string
-	for _, e := range c.entries {
-		if e.Kind != "git" || e.Git == nil || !contains(e.Pools, pool) {
-			continue
-		}
-		for _, r := range e.Git.Repos {
-			if r.Repo != repo || r.Access != "write" {
-				continue
-			}
-			for _, prefix := range r.RefPrefixes {
-				if branch, ok := strings.CutPrefix(prefix, "refs/heads/"); ok && branch != "" {
-					out = append(out, branch)
-				}
-			}
+	for i := range c.entries {
+		if e := &c.entries[i]; e.Kind == "git" && contains(e.Pools, pool) {
+			out = append(out, pushPrefixes(e, repo)...)
 		}
 	}
 	return out
@@ -960,6 +988,7 @@ type githubRoute struct {
 	download         bool
 	scope            string // the token scope when not the operation's own (githubRouteScopes)
 	code             bool   // reads repository content: only for a pool that can clone the repository
+	restart          int64  // the pull request or workflow run a CI restart acts on
 }
 
 func (g githubRoute) granted(r GitRepo) bool { return r.Allows(g.op) }
@@ -1028,6 +1057,8 @@ func githubAPIRoutes(rest []string) []githubRoute {
 		return []githubRoute{{name: "check-run", method: http.MethodGet, op: "actions.read", scope: "checks"}}
 	case n == 3 && rest[0] == "check-runs" && number(rest[1]) > 0 && rest[2] == "annotations":
 		return []githubRoute{{name: "check-annotations", method: http.MethodGet, op: "actions.read", query: pageQuery, scope: "checks"}}
+	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "update-branch":
+		return []githubRoute{{name: "update-branch", method: http.MethodPut, op: "pr.update_branch", restart: number(rest[1])}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "ready":
 		// Not a GitHub REST route: GitHub marks a draft ready only through
 		// GraphQL, so the broker makes that one mutation for this path.
@@ -1061,6 +1092,10 @@ func githubAPIRoutes(rest []string) []githubRoute {
 			return read(artifactQuery)
 		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "logs":
 			return download
+		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "rerun":
+			return []githubRoute{{name: "rerun", method: http.MethodPost, op: "actions.rerun", restart: number(rest[2])}}
+		case n == 4 && rest[1] == "runs" && number(rest[2]) > 0 && rest[3] == "rerun-failed-jobs":
+			return []githubRoute{{name: "rerun-failed", method: http.MethodPost, op: "actions.rerun_failed", restart: number(rest[2])}}
 		case n == 4 && rest[1] == "workflows" && workflowFile.MatchString(rest[2]) && rest[3] == "runs":
 			return read(runQuery)
 		case n == 3 && rest[1] == "workflows" && workflowFile.MatchString(rest[2]):
@@ -1199,8 +1234,9 @@ func (c Catalog) Entries() []Entry { return append([]Entry(nil), c.entries...) }
 // GitGranted reports whether some entry still lets the installation's tokens
 // reach repo at a scope: "contents-read" (a git entry), "contents-write" (a git
 // entry with write access, or a github-api repository with dispatch),
-// "pull-requests", "actions", "deployments", "checks" or "statuses" (a
-// github-api repository with an operation that needs that scope).
+// "pull-requests", "actions", "deployments", "checks", "statuses",
+// "update-branch" or "actions-write" (a github-api repository with an
+// operation that needs that scope).
 func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
@@ -1226,12 +1262,15 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 type GitHubScope struct {
 	Repos                                                []string
 	PullRequests, Actions, Deployments, Checks, Statuses bool
+	// ActionsWrite: a CI restart runs a workflow run again.
+	ActionsWrite bool
 }
 
 // GitScope returns every repository the catalog lists for an installation,
-// and whether any github-api entry on it opens pull requests, reads Actions,
-// reads deployments, or reads check runs or commit statuses (which
-// actions.read also does).
+// and whether any github-api entry on it opens pull requests (or updates a
+// pull request's branch), reads Actions, reads deployments, reads check runs
+// or commit statuses (which actions.read also does), or runs a workflow run
+// again.
 func (c Catalog) GitScope(installation int64) GitHubScope {
 	var s GitHubScope
 	for _, e := range c.entries {
@@ -1241,11 +1280,12 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 		for _, r := range e.Git.Repos {
 			s.Repos = append(s.Repos, r.Repo)
 			if e.Kind == "github-api" {
-				s.PullRequests = s.PullRequests || r.grantsScope("pull-requests")
+				s.PullRequests = s.PullRequests || r.grantsScope("pull-requests") || r.grantsScope("update-branch")
 				s.Actions = s.Actions || r.grantsScope("actions")
 				s.Deployments = s.Deployments || r.grantsScope("deployments")
 				s.Checks = s.Checks || r.grantsScope("checks")
 				s.Statuses = s.Statuses || r.grantsScope("statuses")
+				s.ActionsWrite = s.ActionsWrite || r.grantsScope("actions-write")
 			}
 		}
 	}
@@ -1281,6 +1321,27 @@ func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
 		}
 	}
 	return nil
+}
+
+// pushPrefixes are the branch names (refs/heads/ removed) git entry e lets its
+// pools push to in repo: none when e is nil, the repository is read-only there,
+// or it has no branch prefixes.
+func pushPrefixes(e *Entry, repo string) []string {
+	if e == nil || e.Git == nil {
+		return nil
+	}
+	var out []string
+	for _, r := range e.Git.Repos {
+		if r.Repo != repo || r.Access != "write" {
+			continue
+		}
+		for _, prefix := range r.RefPrefixes {
+			if branch, ok := strings.CutPrefix(prefix, "refs/heads/"); ok && branch != "" {
+				out = append(out, branch)
+			}
+		}
+	}
+	return out
 }
 
 // clusterLocal reports whether host is a Kubernetes Service name, the only
@@ -1431,14 +1492,34 @@ func grantable(e Entry, p Pool, defined bool) error {
 	return fmt.Errorf("%s entries are never granted to a pool with no verified identity", e.Tier)
 }
 
-// Credential is the header value that carries v: v after Scheme, or for a
-// Basic user, "Basic " and the base64 of v and an empty password.
+// Credential is the header value that carries v: v after Scheme, for a Basic
+// user "Basic " and the base64 of v and an empty password, or for a Basic
+// pair "Basic " and the base64 of v, which holds "user:password".
 func (e *Entry) Credential(v string) string {
 	switch {
 	case e.BasicUser:
 		return "Basic " + base64.StdEncoding.EncodeToString([]byte(v+":"))
+	case e.BasicPair:
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(v))
 	case e.Scheme != "":
 		return e.Scheme + " " + v
 	}
 	return v
+}
+
+// CallerCredential is the only value a worker may send in Header: the
+// placeholder encoded as the key would be, and for a Basic pair, the
+// placeholder as both user name and password.
+func (e *Entry) CallerCredential() string {
+	if e.BasicPair {
+		return e.Credential(e.Placeholder + ":" + e.Placeholder)
+	}
+	return e.Credential(e.Placeholder)
+}
+
+// PairPassword is the password half of a Basic pair key, and false when v is
+// not "user:password" with both halves set, so a malformed key is never sent.
+func PairPassword(v string) (string, bool) {
+	user, password, ok := strings.Cut(v, ":")
+	return password, ok && user != "" && password != ""
 }

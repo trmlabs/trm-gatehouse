@@ -297,6 +297,24 @@ func TestScopeAllowsChecksAndStatusesWithActions(t *testing.T) {
 	}
 }
 
+// A CI restart grant holds Actions write, so an installation holding it is
+// not reported; one holding it without that grant is.
+func TestScopeAllowsActionsWriteOnlyWithARestartGrant(t *testing.T) {
+	for _, granted := range []bool{true, false} {
+		g, m := newScopeGitHub(t)
+		var logs bytes.Buffer
+		m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+		g.permissions["actions"], g.repos = "write", []string{"trmlabs/example-repo"}
+		m.Scope = func(int64) Scope { return Scope{Repos: []string{"trmlabs/example-repo"}, Actions: true, ActionsWrite: granted} }
+		if _, err := m.Token(context.Background(), app, "trmlabs/example-repo", ActionsWrite); err != nil {
+			t.Fatalf("granted=%v: %v", granted, err)
+		}
+		if reported := strings.Contains(logs.String(), "holds actions write"); reported == granted {
+			t.Fatalf("granted=%v: reported=%v, log: %s", granted, reported, logs.String())
+		}
+	}
+}
+
 func TestScopeRechecksAfterTTLRetryAndCatalogChange(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	now := time.Now()

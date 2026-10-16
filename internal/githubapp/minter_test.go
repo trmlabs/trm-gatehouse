@@ -183,6 +183,8 @@ func TestMinterRequestsOnlyOneRepoAndMinimumPermissions(t *testing.T) {
 		ActionsRead:       {"actions": "read", "metadata": "read"},
 		ChecksRead:        {"checks": "read", "metadata": "read"},
 		StatusesRead:      {"statuses": "read", "metadata": "read"},
+		ActionsWrite:      {"actions": "write", "metadata": "read"},
+		UpdateBranch:      {"contents": "write", "pull_requests": "write", "metadata": "read"},
 	} {
 		token, err := m.Token(context.Background(), app, "trmlabs/example-app", permissions)
 		if err != nil || !strings.HasPrefix(token.Value(), "ghs_") {
