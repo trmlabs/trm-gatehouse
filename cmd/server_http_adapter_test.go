@@ -153,6 +153,8 @@ func TestGitScopeNamesEveryTokenScope(t *testing.T) {
 		githubapp.DeploymentsRead:   "deployments",
 		githubapp.ChecksRead:        "checks",
 		githubapp.StatusesRead:      "statuses",
+		githubapp.ActionsWrite:      "actions-write",
+		githubapp.UpdateBranch:      "update-branch",
 	} {
 		if got := gitScope(p); got != want {
 			t.Errorf("gitScope(%+v) = %q, want %q", p, got, want)
