@@ -1,6 +1,7 @@
 package mitm
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -21,15 +22,19 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
+// downloadToken is the installation token the fake GitHub mints.
+const downloadToken = "ghs_syntheticdownloadtoken"
+
 // downloadFixture fronts a fake api.github.com whose job log, size bytes
-// long, is served from a signed download host as GitHub does.
+// long, is served from a signed download host as GitHub does. When plantAt is
+// not negative, the log carries the installation token at that byte.
 type downloadFixture struct {
 	client *http.Client
 	port   int
 	audit  *adapterAudit
 }
 
-func newDownloadFixture(t *testing.T, limits string, size int64) *downloadFixture {
+func newDownloadFixture(t *testing.T, limits string, size, plantAt int64) *downloadFixture {
 	t.Helper()
 	saved := githubDownloadHosts
 	githubDownloadHosts = []string{"com"} // the fake serves every host as example.com
@@ -45,7 +50,7 @@ func newDownloadFixture(t *testing.T, limits string, size int64) *downloadFixtur
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{"token": "ghs_syntheticdownloadtoken", "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": downloadToken, "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
 				"permissions": body.Permissions, "repositories": []map[string]string{{"full_name": "example-org/" + body.Repositories[0]}}})
 		case "/repos/example-org/example-repo/actions/jobs/11/logs":
 			w.Header().Set("Location", "https://example.com/signed/job.log?sig=abc")
@@ -53,7 +58,12 @@ func newDownloadFixture(t *testing.T, limits string, size int64) *downloadFixtur
 		case "/signed/job.log":
 			w.Header().Set("Content-Type", "text/plain")
 			for sent := int64(0); sent < size; sent += int64(len(line)) {
-				if _, err := w.Write(line[:min(int64(len(line)), size-sent)]); err != nil {
+				chunk := line[:min(int64(len(line)), size-sent)]
+				if plantAt >= sent && plantAt < sent+int64(len(chunk)) {
+					chunk = append([]byte(nil), chunk...)
+					copy(chunk[plantAt-sent:], downloadToken)
+				}
+				if _, err := w.Write(chunk); err != nil {
 					return
 				}
 			}
@@ -108,7 +118,7 @@ func (f *downloadFixture) get(t *testing.T) (int, int64, error) {
 // limit; one over a limit set in the catalog is cut off and audited.
 func TestGitHubAPIDownloadsStreamUpToTheLimit(t *testing.T) {
 	const size = 24 << 20
-	f := newDownloadFixture(t, ``, size)
+	f := newDownloadFixture(t, ``, size, -1)
 	code, n, err := f.get(t)
 	if code != 200 || n != size || err != nil {
 		t.Fatalf("default limit: %d, %d bytes, %v", code, n, err)
@@ -117,12 +127,32 @@ func TestGitHubAPIDownloadsStreamUpToTheLimit(t *testing.T) {
 		t.Fatalf("default limit audited %q %d", e.Outcome, e.Status)
 	}
 
-	f = newDownloadFixture(t, `"maxResponseBytes":8388608,`, size)
+	f = newDownloadFixture(t, `"maxResponseBytes":8388608,`, size, -1)
 	code, n, err = f.get(t)
 	if err == nil || n > 8<<20 {
 		t.Fatalf("explicit limit: %d, %d bytes, %v; want a cut-off body of at most 8 MiB", code, n, err)
 	}
 	if e := f.audit.last(); e.Outcome != "response_too_large" || e.Status != 200 {
 		t.Fatalf("explicit limit audited %q %d", e.Outcome, e.Status)
+	}
+}
+
+// The token screen still covers a download past the old 8 MiB limit: an
+// installation token echoed at 12 MiB into a 24 MiB log is cut off before it
+// reaches the worker and audited as secret_echo.
+func TestGitHubAPIDownloadCutsOffAnEchoedTokenPastTheOldLimit(t *testing.T) {
+	const size, plantAt = 24 << 20, 12<<20 + 100
+	f := newDownloadFixture(t, ``, size, plantAt)
+	resp, err := f.client.Get("https://api.example.com:" + strconv.Itoa(f.port) + "/repos/example-org/example-repo/actions/jobs/11/logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err == nil || bytes.Contains(body, []byte(downloadToken)) || int64(len(body)) > plantAt {
+		t.Fatalf("got %d bytes, %v; want a body cut off before the token at byte %d", len(body), err, plantAt)
+	}
+	if e := f.audit.last(); e.Outcome != "secret_echo" {
+		t.Fatalf("audited %q %d, want secret_echo", e.Outcome, e.Status)
 	}
 }
