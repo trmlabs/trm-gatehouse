@@ -782,3 +782,43 @@ func TestGitHubCIRestartsNeedPushPrefixes(t *testing.T) {
 		}
 	}
 }
+
+// One git entry serves several pools on their own branches: a CI restart
+// reads the pool's own push prefixes beside the shared ones, never another
+// pool's and never its pull request prefixes, and a pool with none has no
+// restart routes.
+func TestGitHubCIRestartsUseThePoolsOwnPrefixes(t *testing.T) {
+	api := strings.Replace(poolsAPIEntry, `"pr.ready"]`, `"pr.ready","pr.update_branch","actions.rerun"]`, 1)
+	if api == poolsAPIEntry {
+		t.Fatal("fixture replacement did not apply")
+	}
+	routes := []struct{ method, path string }{
+		{"PUT", "/repos/trmlabs/trm-b2b/pulls/12/update-branch"},
+		{"POST", "/repos/trmlabs/trm-b2b/actions/runs/34/rerun"},
+	}
+	shared := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
+	for git, wants := range map[string]map[string]string{
+		poolsGitEntry: {"pool-a": "[cursor/pool-a/]", "pool-b": "[cursor/pool-b/ factory/]"},
+		shared:        {"pool-a": "[shared/ cursor/pool-a/]", "pool-b": "[shared/ cursor/pool-b/ factory/]", "pool-c": "[shared/]"},
+	} {
+		c, err := Parse([]byte(`{"entries":[` + git + `,` + api + `]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pool := range []string{"pool-a", "pool-b", "pool-c"} {
+			for _, route := range routes {
+				m, _, err := c.GitHubAPIMatch("api.github.com", 443, route.method, route.path, "", pool)
+				want, ok := wants[pool]
+				if !ok {
+					if !errors.Is(err, ErrUnlisted) {
+						t.Errorf("%s with no push prefix: %s %s: %v %v", pool, route.method, route.path, err, m.HeadPrefixes)
+					}
+					continue
+				}
+				if err != nil || m.RestartOf == 0 || fmt.Sprint(m.HeadPrefixes) != want {
+					t.Errorf("%s %s %s reaches %v (%v), want %s", pool, route.method, route.path, m.HeadPrefixes, err, want)
+				}
+			}
+		}
+	}
+}
