@@ -66,6 +66,7 @@ var refusals = map[string]refusalKind{
 	"broker_misconfigured":   {status: http.StatusServiceUnavailable, next: "the broker is not set up to serve this destination; " + nextReport},
 	"key_deleted":            {status: http.StatusServiceUnavailable, next: "the destination key was deleted, emptied or revoked in Vault; " + nextReport},
 	"key_not_header_safe":    {status: http.StatusServiceUnavailable, next: "the stored destination key cannot be sent in a header; " + nextReport},
+	"key_not_basic_pair":     {status: http.StatusServiceUnavailable, next: "the stored destination key is not the user:password pair this destination sends; " + nextReport},
 	"seed_deadline":          {status: http.StatusServiceUnavailable, next: "this worker ends too soon for a browser session; start a new run."},
 	"authentication":         {next: "the broker could not identify this workload; check the proxy credentials, then report it."},
 	"identity":               {next: "the broker refused this workload's identity; " + nextReport},

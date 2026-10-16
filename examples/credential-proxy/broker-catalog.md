@@ -148,7 +148,7 @@ One bad input never stops the broker or freezes the catalog, and nothing fails o
 | Event | What the broker does |
 |---|---|
 | One entry fails validation (an unknown field from a newer format, a bad host, grant or tier) | Leaves that entry out and logs `broker catalog part left out` with the version, kind, name and reason. The rest of the version applies, so removals in it take effect. The left-out entry is unreachable. |
-| Entries conflict (a duplicate name, a shared route, host, test user or repository, or a `github-api` entry's pull request prefix on a push prefix another pool holds alone in the `git` entry) | Leaves every entry in the conflict out; it never picks a winner. |
+| Entries conflict (a duplicate name, a shared route, host, test user or repository, or a `github-api` entry's pull request prefix on a push prefix in the `git` entry that a pool it reaches cannot push to) | Leaves every entry in the conflict out; it never picks a winner. |
 | A pool or harness fails validation or conflicts | Leaves it out with every entry that grants that pool. When the catalog lists harnesses, a pool left without one is left out too, so the harness check is never switched off. |
 | The document cannot be decoded at all (truncated, or a new top-level section) | Logs `broker catalog version rejected` and keeps the last good catalog. |
 | Vault cannot serve the catalog at startup | Starts from the last version this store accepted (each accepted version is kept in the `broker_catalog` table) and reloads from Vault when it answers. With no stored copy, it starts with an empty catalog that refuses everything, reports `catalog` not ready on `GET /ready`, and loads the first version Vault serves. |

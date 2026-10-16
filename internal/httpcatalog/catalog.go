@@ -871,14 +871,16 @@ type pullRequestCrossing struct {
 // pullRequestCrossings checks each repository of a github-api entry against
 // the git entry a clone of it would use, the same pairing the code-reading
 // routes use: no pull request prefix may start, or be started by, a push
-// prefix another pool holds alone there (compared as refs, ignoring case, as
-// checkPoolPrefixes compares). Otherwise a pool's comment, edit, label and
-// ready routes would act on that pool's pull requests. A pool's own pull
-// request prefixes reach that pool only, the shared ones every pool of the
-// github-api entry, and the git entry's shared push prefixes belong to every
-// pool, so they cross nothing. It returns one crossing per repository, each
-// naming its git entry. As in checkPoolPrefixes, sorting puts every prefix
-// right before the ones it starts, so each is compared only with those.
+// prefix there that a pool it reaches does not hold (compared as refs,
+// ignoring case, as checkPoolPrefixes compares). Otherwise that pool's
+// comment, edit, label and ready routes would act on pull requests from
+// branches only other pools push to. A pool's own pull request prefixes reach
+// that pool only, the shared ones every pool of the github-api entry. A pool's
+// own push prefixes are held by that pool alone, the git entry's shared ones
+// by each pool of the git entry, so a shared push prefix crosses only a pool
+// outside it. It returns one crossing per repository, each naming its git
+// entry. As in checkPoolPrefixes, sorting puts every prefix right before the
+// ones it starts, so each is compared only with those.
 func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	if api.Kind != "github-api" || api.Git == nil {
 		return nil
@@ -886,15 +888,18 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	type owned struct {
 		prefix, spelled string // prefix: the ref, lowercased; spelled: as written
 		push            bool
-		pool            string // "": a shared pull request prefix
+		pool            string // "": shared by every pool of its entry
 	}
 	var out []pullRequestCrossing
 	for _, r := range api.Git.Repos {
 		git, gr := pairedGit(entries, api.Host, r.Repo)
-		if gr == nil || len(gr.PoolRefPrefixes) == 0 {
+		if gr == nil || (len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0) {
 			continue
 		}
 		var all []owned
+		for _, prefix := range gr.RefPrefixes {
+			all = append(all, owned{strings.ToLower(prefix), prefix, true, ""})
+		}
 		for pool, prefixes := range gr.PoolRefPrefixes {
 			for _, prefix := range prefixes {
 				all = append(all, owned{strings.ToLower(prefix), prefix, true, pool})
@@ -917,11 +922,17 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 			if b.push {
 				push, head = b, a
 			}
+			holds := func(pool string) bool {
+				if push.pool == "" {
+					return contains(git.Pools, pool)
+				}
+				return pool == push.pool
+			}
 			if head.pool != "" {
-				return head.pool != push.pool
+				return !holds(head.pool)
 			}
 			for _, pool := range api.Pools {
-				if pool != push.pool {
+				if !holds(pool) {
 					return true
 				}
 			}
@@ -935,8 +946,8 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 					if all[j].push {
 						push, head = all[j], all[i]
 					}
-					out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (pool %q) in entry %q",
-						r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, push.pool, git.Name)})
+					out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (%s) in entry %q",
+						r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, holder(push.pool), git.Name)})
 					break scan
 				}
 			}
