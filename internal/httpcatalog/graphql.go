@@ -20,14 +20,14 @@ import (
 // to a repository operation (githubOperations), and
 // GitHub receives the parsed document printed again with its variables
 // re-encoded, so GitHub executes exactly what was checked. The fields mapped
-// are the ones gh 2.x sends for pr view, list, status, checks, comment, edit
-// (body and labels), ready, ready --undo and create:
+// are the ones gh 2.x sends for pr view, list (with --search too), status,
+// checks, comment, edit (body and labels), ready, ready --undo and create:
 //
 //	repository(owner, name) { pullRequest }      pr.read
 //	repository(owner, name) { pullRequests }     pr.list
 //	repository(owner, name) { defaultBranchRef } pr.list
 //	repository(owner, name) { labels }           pr.label (to find a label's ID)
-//	search(query: "repo:owner/name ...", type: ISSUE)  pr.list
+//	search(query: "repo:owner/name ...", type: ISSUE or ISSUE_ADVANCED)  pr.list
 //	node(id) { ... on PullRequest }              pr.read
 //	addComment(input: $input)                    pr.comment
 //	updatePullRequest(input: $input)             pr.edit (body only)
@@ -172,6 +172,13 @@ var githubSchemaFeatures = map[string][]string{
 	"PullRequest":                        {"isInMergeQueue", "isMergeQueueEnabled"},
 	"StatusCheckRollupContextConnection": {"checkRunCount", "checkRunCountsByState", "statusContextCount", "statusContextCountsByState"},
 	"WorkflowRun":                        {"event"},
+}
+
+// githubSchemaEnums answers gh pr list --search's own detection, of
+// __type(name: "SearchType") { enumValues(includeDeprecated: true) { name } },
+// the same way: with the pull request search types github.com has.
+var githubSchemaEnums = map[string][]string{
+	"SearchType": {"ISSUE", "ISSUE_ADVANCED"},
 }
 
 // graphqlRepositoryFields are the fields allowed directly under
@@ -749,7 +756,8 @@ func hasPage(f *ast.Field) bool {
 
 // featureDetection recognizes gh's schema feature detection: a query of
 // only __type(name: "<known type>") { fields(includeDeprecated: true) { name } }
-// fields. ok reports that it is one, answered with the broker's own reply.
+// fields, or enumValues in place of fields for a known enum. ok reports that
+// it is one, answered with the broker's own reply.
 func featureDetection(op *ast.OperationDefinition, vars map[string]any) ([]byte, bool, error) {
 	if op.Operation != ast.Query || len(op.SelectionSet) == 0 {
 		return nil, false, nil
@@ -761,14 +769,17 @@ func featureDetection(op *ast.OperationDefinition, vars map[string]any) ([]byte,
 			return nil, false, nil
 		}
 		var fields []string
+		kind := "fields"
 		if len(f.Arguments) == 1 && f.Arguments[0].Name == "name" && f.Arguments[0].Value.Kind == ast.StringValue {
-			fields = githubSchemaFeatures[f.Arguments[0].Value.Raw]
+			if fields = githubSchemaFeatures[f.Arguments[0].Value.Raw]; fields == nil {
+				fields, kind = githubSchemaEnums[f.Arguments[0].Value.Raw], "enumValues"
+			}
 		}
 		if fields == nil || len(f.Directives) > 0 || len(f.SelectionSet) != 1 || len(vars) > 0 || len(op.VariableDefinitions) > 0 || len(op.Directives) > 0 {
 			return nil, true, ErrGraphQLIntrospection
 		}
 		inner, ok := f.SelectionSet[0].(*ast.Field)
-		if !ok || inner.Name != "fields" || inner.Alias != "fields" && inner.Alias != "" || len(inner.Directives) > 0 ||
+		if !ok || inner.Name != kind || inner.Alias != kind && inner.Alias != "" || len(inner.Directives) > 0 ||
 			len(inner.Arguments) != 1 || inner.Arguments[0].Name != "includeDeprecated" || inner.Arguments[0].Value.Kind != ast.BooleanValue ||
 			inner.Arguments[0].Value.Raw != "true" || len(inner.SelectionSet) != 1 {
 			return nil, true, ErrGraphQLIntrospection
@@ -788,7 +799,7 @@ func featureDetection(op *ast.OperationDefinition, vars map[string]any) ([]byte,
 		for _, n := range fields {
 			list = append(list, map[string]string{"name": n})
 		}
-		data[key] = map[string]any{"fields": list}
+		data[key] = map[string]any{kind: list}
 	}
 	answer, err := json.Marshal(map[string]any{"data": data})
 	return answer, true, err
@@ -868,13 +879,23 @@ func repositoryArgs(args map[string]any) (string, bool) {
 	return repo, repoPattern.MatchString(repo) && !strings.Contains(repo, "..")
 }
 
-// searchArgs reads a pull request search: type ISSUE, and a query naming
-// exactly one repository with repo: and no other owner, organization or
-// repository qualifier.
+// searchArgs reads a pull request search: type ISSUE or ISSUE_ADVANCED, and
+// a query naming exactly one repository with repo: and no other owner,
+// organization or repository qualifier. Advanced search reads AND, OR and
+// parentheses, so the query has no AND, OR or NOT, and parentheses only as gh
+// writes them, alone around the --search terms ("( text ) is:merged
+// repo:owner/name type:pr") with no repo: inside: every term is then ANDed
+// with the one repo:, read either way. Printable ASCII only, so GitHub splits
+// the terms where this reading does.
 func searchArgs(args map[string]any) (string, bool) {
 	query, ok := args["query"].(string)
-	if !ok || args["type"] != "ISSUE" {
+	if !ok || args["type"] != "ISSUE" && args["type"] != "ISSUE_ADVANCED" {
 		return "", false
+	}
+	for _, r := range query {
+		if r < ' ' || r > '~' {
+			return "", false
+		}
 	}
 	for key := range args {
 		switch key {
@@ -883,10 +904,25 @@ func searchArgs(args map[string]any) (string, bool) {
 			return "", false
 		}
 	}
-	repo := ""
+	repo, depth := "", 0
 	for _, term := range strings.Fields(query) {
-		if strings.ContainsAny(term, "()") {
+		switch {
+		case term == "(":
+			if depth++; depth > 1 {
+				return "", false
+			}
+			continue
+		case term == ")":
+			if depth--; depth < 0 {
+				return "", false
+			}
+			continue
+		case strings.ContainsAny(term, "()"):
 			return "", false // grouping could hide a qualifier from this reading
+		}
+		switch strings.ToUpper(term) {
+		case "AND", "OR", "NOT":
+			return "", false
 		}
 		negated := strings.HasPrefix(term, "-")
 		key, v, found := strings.Cut(strings.TrimLeft(strings.ToLower(term), "-"), ":")
@@ -895,7 +931,7 @@ func searchArgs(args map[string]any) (string, bool) {
 		case negated && (key == "repo" || key == "org" || key == "user" || key == "owner"):
 			return "", false
 		case key == "repo":
-			if repo != "" {
+			if repo != "" || depth > 0 {
 				return "", false
 			}
 			repo = v
@@ -906,7 +942,7 @@ func searchArgs(args map[string]any) (string, bool) {
 			return "", false
 		}
 	}
-	return repo, repo != "" && repoPattern.MatchString(repo) && !strings.Contains(repo, "..")
+	return repo, depth == 0 && repo != "" && repoPattern.MatchString(repo) && !strings.Contains(repo, "..")
 }
 
 // mutationRoot maps the one mutation to its operation and node IDs. Its input

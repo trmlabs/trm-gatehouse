@@ -396,6 +396,7 @@ var ghCommands = []struct {
 	{"pr-list-all-json", []string{"pr.read", "pr.list"}},
 	{"pr-list-head", []string{"pr.read", "pr.list"}},
 	{"pr-list-limit-200", []string{"pr.read", "pr.list"}},
+	{"pr-list-search", []string{"pr.read", "pr.list"}},
 	{"pr-status", []string{"pr.read", "pr.list"}},
 	{"pr-comment", []string{"pr.read", "pr.comment"}},
 	{"pr-edit-body", []string{"pr.read", "pr.edit"}},
@@ -436,7 +437,7 @@ func (f *graphqlFixture) replay(t *testing.T, fixture string) string {
 			return f.audit.last().Outcome
 		}
 		if r.Path == "/graphql" && strings.Contains(r.Body, "__type(") {
-			if len(f.relayed()) != before || !strings.Contains(reply, `"fields"`) {
+			if len(f.relayed()) != before || !strings.Contains(reply, `"fields"`) && !strings.Contains(reply, `"enumValues"`) {
 				t.Errorf("%s request %d: feature detection reached GitHub or was not answered: %s", fixture, i, reply)
 			}
 		} else if r.Path == "/graphql" && len(f.relayed()) != before+1 {

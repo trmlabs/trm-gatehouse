@@ -84,6 +84,12 @@ func build(set ast.SelectionSet, frags map[string]*ast.FragmentDefinition, typ, 
 				out[key] = typ
 			case s.Name == "fields": // feature detection: report every feature gh looks for
 				out[key] = []any{map[string]any{"name": "isInMergeQueue"}, map[string]any{"name": "checkRunCount"}, map[string]any{"name": "event"}}
+			case s.Name == "enumValues": // gh pr list --search asks which search types exist: set RECORDER_SEARCH_TYPES
+				values := []any{}
+				for _, v := range strings.Split(os.Getenv("RECORDER_SEARCH_TYPES"), ",") {
+					values = append(values, map[string]any{"name": v})
+				}
+				out[key] = values
 			case len(s.SelectionSet) == 0:
 				out[key] = scalar(s.Name, parent)
 			case s.Name == "milestone" || s.Name == "autoMergeRequest" || s.Name == "parent":

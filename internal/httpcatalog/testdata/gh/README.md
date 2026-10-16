@@ -23,8 +23,11 @@ which `HTTP_PROXY` routes to the recorder. Use a fresh cache directory: gh
 caches feature-detection answers for a day. Replace the recorder's node ID
 in mutations with `{{PR}}`, `{{LABEL}}` or `{{REPO}}` (a repository's ID).
 
-Two commands need the recorder to answer differently. Start it with
+Three commands need the recorder to answer differently. Start it with
 `RECORDER_NOT_DRAFT=1` for `gh pr ready 12 --undo`, which does nothing to a
-draft, and with `RECORDER_NO_PULL_REQUESTS=1` for
+draft, with `RECORDER_NO_PULL_REQUESTS=1` for
 `gh pr create --head cursor/pool-agent/x --base main --title t --body b`,
-which stops when the branch already has an open pull request.
+which stops when the branch already has an open pull request, and with
+`RECORDER_SEARCH_TYPES=ISSUE,ISSUE_ADVANCED` (the broker's own answer) for
+`gh pr list -R example-org/example-repo --state merged --search <sha> --json number`,
+which asks which search types GitHub has.

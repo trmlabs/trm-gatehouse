@@ -62,6 +62,9 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-list-all-json", [][]string{list}, nil},
 		{"pr-list-head", [][]string{list}, nil},
 		{"pr-list-limit-200", [][]string{list}, nil},
+		// gh pr list --search asks which search types exist, answered by
+		// the broker, then searches with the terms in parentheses.
+		{"pr-list-search", [][]string{nil, list}, nil},
 		{"pr-status", [][]string{list}, nil},
 		{"pr-comment", [][]string{read, {"pr.comment", "pr.read"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-edit-body", [][]string{read, read, {"pr.edit"}}, [][]GraphQLTarget{nil, nil, {{fixturePR, TargetPullRequestWrite}}}},
@@ -235,6 +238,18 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"search excluding a repository", graphqlBody(`query { search(query: "is:pr -repo:o/r", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search two repositories", graphqlBody(`query { search(query: "repo:o/r repo:o/s", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search code", graphqlBody(`query { search(query: "repo:o/r token", type: REPOSITORY, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		// Advanced search reads OR and parentheses: only gh's one group of
+		// terms, with no repository in it, is read as the search's.
+		{"advanced search with OR", graphqlBody(`query { search(query: "repo:o/r OR is:pr", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with or", graphqlBody(`query { search(query: "repo:o/r or is:pr", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with OR in a group", graphqlBody(`query { search(query: "( a OR is:pr ) repo:o/r", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with a repository in a group", graphqlBody(`query { search(query: "( repo:p/s ) is:pr", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with nested groups", graphqlBody(`query { search(query: "( ( a ) ) repo:o/r", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with an open group", graphqlBody(`query { search(query: "repo:o/r ( a", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search closing a group first", graphqlBody(`query { search(query: "a ) repo:o/r (", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with a negated group", graphqlBody(`query { search(query: "-( a ) repo:o/r", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"advanced search with a zero-width space", graphqlBody(`query { search(query: "is:pr\u200bOR\u200bx repo:o/r", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
+		{"search of discussions", graphqlBody(`query { search(query: "repo:o/r", type: DISCUSSION, first: 5) { discussionCount } }`, nil), ErrGraphQLUnmapped},
 		{"merge", graphqlBody(`mutation($input: MergePullRequestInput!) { mergePullRequest(input: $input) { clientMutationId } }`,
 			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A"}}), ErrGraphQLUnmapped},
 		{"approve", graphqlBody(`mutation($input: AddPullRequestReviewInput!) { addPullRequestReview(input: $input) { clientMutationId } }`,
@@ -310,6 +325,10 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"schema introspection", graphqlBody(`query { __schema { types { name } } }`, nil), ErrGraphQLIntrospection},
 		{"type of another name", graphqlBody(`query { __type(name: "Repository") { fields(includeDeprecated: true) { name } } }`, nil), ErrGraphQLIntrospection},
 		{"type with more fields", graphqlBody(`query { __type(name: "PullRequest") { fields(includeDeprecated: true) { name args { name } } } }`, nil), ErrGraphQLIntrospection},
+		{"enum values of another enum", graphqlBody(`query { __type(name: "PullRequestState") { enumValues(includeDeprecated: true) { name } } }`, nil), ErrGraphQLIntrospection},
+		{"enum values of a type", graphqlBody(`query { __type(name: "PullRequest") { enumValues(includeDeprecated: true) { name } } }`, nil), ErrGraphQLIntrospection},
+		{"fields of the search type", graphqlBody(`query { __type(name: "SearchType") { fields(includeDeprecated: true) { name } } }`, nil), ErrGraphQLIntrospection},
+		{"search type with more fields", graphqlBody(`query { __type(name: "SearchType") { enumValues(includeDeprecated: true) { name description } } }`, nil), ErrGraphQLIntrospection},
 		{"type beside a repository", graphqlBody(`query { repository(owner: "o", name: "r") { pullRequest(number: 1) { id } } __type(name: "PullRequest") { name } }`, nil), ErrGraphQLIntrospection},
 		{"nested introspection", graphqlBody(repoQuery(`pullRequest(number: 1) { __type(name: "User") { name } }`), repoVars), ErrGraphQLIntrospection},
 
