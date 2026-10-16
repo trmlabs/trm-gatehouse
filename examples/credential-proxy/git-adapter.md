@@ -87,10 +87,11 @@ A pull request is in reach when its head is a branch of the same repository unde
 
 ### GraphQL (`gh pr` commands)
 
-`POST /graphql` on a `github-api` host is served only for repositories that list the `graphql` operation, so an entry written for REST does not widen when the broker starts serving GraphQL. Each request is checked against the same operations; nothing passes through. The broker parses each request, maps every top-level field or mutation to an operation, and sends GitHub the parsed document printed again with its variables re-encoded, so GitHub runs exactly what was checked. The mapping covers what gh 2.89.0 sends for `gh pr view`, `list`, `status`, `checks`, `comment`, `edit --body`, `edit --add-label`, `ready`, `ready --undo` and `create` (`gh pr diff` is REST):
+`POST /graphql` on a `github-api` host is served only for repositories that list the `graphql` operation, so an entry written for REST does not widen when the broker starts serving GraphQL. Each request is checked against the same operations; nothing passes through. The broker parses each request, maps every top-level field or mutation to an operation, and sends GitHub the parsed document printed again with its variables re-encoded, so GitHub runs exactly what was checked. The mapping covers what gh 2.89.0 sends for `gh pr view`, `list`, `status`, `checks`, `comment`, `edit --body`, `edit --add-label`, `ready`, `ready --undo` and `create`, and for `gh repo view` and the repository read `gh repo clone` makes before cloning through the `git` entry (`gh pr diff` is REST):
 
 | GraphQL | Operation |
 |---|---|
+| `repository(owner, name)` with plain values (`createdAt`, `id`, settings), `owner { login }` and a fork's `parent` | `pr.read` (every query needs it) |
 | `repository(owner, name) { pullRequest }`, `node(id) { ... on PullRequest }` | `pr.read` |
 | `repository(owner, name) { pullRequests }` or `{ defaultBranchRef }`, `search(query: "repo:owner/name ...", type: ISSUE)` | `pr.list` |
 | `repository(owner, name) { labels }` (gh looks up a label's ID) | `pr.label` |

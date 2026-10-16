@@ -70,6 +70,10 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-ready", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-ready-undo", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-create", [][]string{list, list, {"pr.open", "pr.read"}}, [][]GraphQLTarget{nil, nil, {{fixtureRepo, TargetRepository}}}},
+		// gh repo view --json createdAt and gh repo clone read the repository
+		// itself; the clone then goes through the git entry.
+		{"repo-view-json", [][]string{read}, nil},
+		{"repo-clone", [][]string{list}, nil},
 		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
 		{"pr-checks-json", [][]string{read, read}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequest}}}},
 	} {

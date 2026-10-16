@@ -403,6 +403,8 @@ var ghCommands = []struct {
 	{"pr-ready", []string{"pr.read", "pr.ready"}},
 	{"pr-ready-undo", []string{"pr.read", "pr.ready"}},
 	{"pr-create", []string{"pr.read", "pr.list", "pr.open"}},
+	{"repo-view-json", []string{"pr.read"}},
+	{"repo-clone", []string{"pr.read", "pr.list"}}, // its GraphQL read; the clone is the git entry's
 	{"pr-checks", []string{"pr.read"}},
 	{"pr-checks-json", []string{"pr.read"}},
 	{"pr-diff", []string{"pr.read"}},

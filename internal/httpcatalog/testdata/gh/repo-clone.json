@@ -1,0 +1,17 @@
+{
+ "gh": "2.89.0",
+ "recorded": "local mock server, no GitHub token",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/graphql",
+   "headers": {
+    "Accept": "application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview",
+    "Content-Type": "application/json; charset=utf-8",
+    "Graphql-Features": "merge_queue",
+    "X-Github-Api-Version": "2022-11-28"
+   },
+   "body": "{\"query\":\"\\n\\tfragment repo on Repository {\\n\\t\\tid\\n\\t\\tname\\n\\t\\towner { login }\\n\\t\\thasIssuesEnabled\\n\\t\\tdescription\\n\\t\\thasWikiEnabled\\n\\t\\tviewerPermission\\n\\t\\tdefaultBranchRef {\\n\\t\\t\\tname\\n\\t\\t}\\n\\t}\\n\\n\\tquery RepositoryInfo($owner: String!, $name: String!) {\\n\\t\\trepository(owner: $owner, name: $name) {\\n\\t\\t\\t...repo\\n\\t\\t\\tparent {\\n\\t\\t\\t\\t...repo\\n\\t\\t\\t}\\n\\t\\t\\tmergeCommitAllowed\\n\\t\\t\\trebaseMergeAllowed\\n\\t\\t\\tsquashMergeAllowed\\n\\t\\t}\\n\\t}\",\"variables\":{\"name\":\"example-repo\",\"owner\":\"example-org\"}}"
+  }
+ ]
+}
