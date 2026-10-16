@@ -30,7 +30,9 @@ func scalar(name, parent string) any {
 	case l == "number" || l == "databaseid" || strings.HasSuffix(l, "count") || l == "additions" || l == "deletions":
 		return 12
 	case l == "isdraft":
-		return true
+		return os.Getenv("RECORDER_NOT_DRAFT") == "" // set it to record gh pr ready --undo
+	case l == "viewerpermission":
+		return "WRITE"
 	case strings.HasPrefix(l, "requires") || strings.HasSuffix(l, "allowed") || strings.HasPrefix(l, "is") || strings.HasPrefix(l, "has") ||
 		strings.HasPrefix(l, "viewer") || strings.HasPrefix(l, "maintainer") || l == "includescreatededit" || l == "locked":
 		return false
@@ -84,7 +86,7 @@ func build(set ast.SelectionSet, frags map[string]*ast.FragmentDefinition, typ, 
 				out[key] = []any{map[string]any{"name": "isInMergeQueue"}, map[string]any{"name": "checkRunCount"}, map[string]any{"name": "event"}}
 			case len(s.SelectionSet) == 0:
 				out[key] = scalar(s.Name, parent)
-			case s.Name == "milestone" || s.Name == "autoMergeRequest":
+			case s.Name == "milestone" || s.Name == "autoMergeRequest" || s.Name == "parent":
 				out[key] = nil
 			default:
 				t := ""
@@ -98,9 +100,12 @@ func build(set ast.SelectionSet, frags map[string]*ast.FragmentDefinition, typ, 
 					p = s.Name
 				}
 				obj := build(s.SelectionSet, frags, t, p)
-				if lists[s.Name] {
+				switch {
+				case lists[s.Name] && parent == "pullRequests" && os.Getenv("RECORDER_NO_PULL_REQUESTS") != "":
+					out[key] = []any{} // set it to record gh pr create, which stops on an open pull request
+				case lists[s.Name]:
 					out[key] = []any{obj}
-				} else {
+				default:
 					out[key] = obj
 				}
 			}

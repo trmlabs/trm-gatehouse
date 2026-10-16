@@ -39,6 +39,7 @@ func readGhFixture(t *testing.T, name string) ghFixture {
 const (
 	fixturePR    = "PR_kwDNA-jNB9A" // [0, 1000, 2000]
 	fixtureLabel = "LA_kwDNA-jNB9E" // [0, 1000, 2001]
+	fixtureRepo  = "R_kgDNA-g"      // [0, 1000]
 )
 
 // Every GraphQL request gh sends for the supported commands maps to the
@@ -68,6 +69,7 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 			[][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequestWrite}, {fixtureLabel, TargetLabel}}}},
 		{"pr-ready", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-ready-undo", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-create", [][]string{list, list, {"pr.open", "pr.read"}}, [][]GraphQLTarget{nil, nil, {{fixtureRepo, TargetRepository}}}},
 		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
 		{"pr-checks-json", [][]string{read, read}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequest}}}},
 	} {
@@ -76,7 +78,7 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 			if r.Path != "/graphql" {
 				continue
 			}
-			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel, "{{REPO}}", fixtureRepo).Replace(r.Body)
 			got, err := ParseGitHubGraphQL([]byte(body))
 			if err != nil {
 				t.Fatalf("%s request %d: %v", tc.fixture, i, err)
@@ -99,9 +101,10 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 			if !reflect.DeepEqual(got.Targets, targets) {
 				t.Errorf("%s request %d: targets %v, want %v", tc.fixture, i, got.Targets, targets)
 			}
-			// Only gh pr ready's mutation needs contents write.
-			if wantContents := tc.fixture == "pr-ready" && i == 1; got.ContentsWrite != wantContents {
-				t.Errorf("%s request %d: contents write %v, want %v", tc.fixture, i, got.ContentsWrite, wantContents)
+			// Only gh pr ready's and gh pr create's mutations need contents.
+			wantContents := map[string]string{"pr-ready 1": "write", "pr-create 2": "read"}[fmt.Sprintf("%s %d", tc.fixture, i)]
+			if got.Contents != wantContents {
+				t.Errorf("%s request %d: contents %q, want %q", tc.fixture, i, got.Contents, wantContents)
 			}
 			if want != nil {
 				// The rebuilt request parses to the same result.
@@ -119,18 +122,26 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 	}
 }
 
-// The ready mutation's token carries contents write, so its payload may read
-// back the pull request's id, number and draft state and nothing more; every
-// other request's token has no contents.
-func TestGraphQLReadyNeedsContentsWrite(t *testing.T) {
+// The ready mutation's token carries contents write and create's contents
+// read, so their payload may read back the pull request's id, URL, number and
+// draft state and nothing more; every other request's token has no contents.
+// Create names its head and base for the caller to check.
+func TestGraphQLContentsMutations(t *testing.T) {
 	ready := `mutation($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { __typename clientMutationId pullRequest { __typename id number isDraft } } }`
 	got, err := ParseGitHubGraphQL(graphqlBody(ready, map[string]any{"input": map[string]any{"pullRequestId": fixturePR}}))
-	if err != nil || !got.ContentsWrite || got.Write != "pr.ready" {
+	if err != nil || got.Contents != "write" || got.Write != "pr.ready" {
 		t.Fatalf("ready: %+v %v", got, err)
+	}
+	create := `mutation($input: CreatePullRequestInput!) { createPullRequest(input: $input) { pullRequest { id url number isDraft } } }`
+	got, err = ParseGitHubGraphQL(graphqlBody(create, map[string]any{"input": map[string]any{"repositoryId": fixtureRepo,
+		"headRefName": "cursor/pool-agent/x", "baseRefName": "main", "title": "t", "draft": true}}))
+	if err != nil || got.Contents != "read" || got.Write != "pr.open" || got.Head != "cursor/pool-agent/x" || got.Base != "main" ||
+		!reflect.DeepEqual(got.Targets, []GraphQLTarget{{fixtureRepo, TargetRepository}}) {
+		t.Fatalf("create: %+v %v", got, err)
 	}
 	comment := `mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }`
 	got, err = ParseGitHubGraphQL(graphqlBody(comment, map[string]any{"input": map[string]any{"subjectId": fixturePR, "body": "x"}}))
-	if err != nil || got.ContentsWrite {
+	if err != nil || got.Contents != "" {
 		t.Fatalf("comment: %+v %v", got, err)
 	}
 }
@@ -147,6 +158,17 @@ func TestGraphQLRefusals(t *testing.T) {
 	}
 	comment := func(input map[string]any) []byte {
 		return graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { clientMutationId } }`, map[string]any{"input": input})
+	}
+	create := func(change map[string]any, payload string) []byte {
+		input := map[string]any{"repositoryId": fixtureRepo, "headRefName": "cursor/pool-agent/x", "baseRefName": "main", "title": "t"}
+		for k, v := range change {
+			if v == nil {
+				delete(input, k)
+			} else {
+				input[k] = v
+			}
+		}
+		return graphqlBody(`mutation($input: CreatePullRequestInput!) { createPullRequest(input: $input) { `+payload+` } }`, map[string]any{"input": input})
 	}
 	ready := func(payload string) []byte {
 		return graphqlBody(`mutation($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { `+payload+` } }`,
@@ -232,6 +254,14 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"ready with an unused fragment", graphqlBody(`mutation($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { clientMutationId } } fragment f on PullRequest { number }`,
 			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A"}}), ErrGraphQLUnmapped},
 		{"ready reading another payload field", ready(`pullRequest { id } clientMutationId __typename actor { login }`), ErrGraphQLUnmapped},
+		// createPullRequest opens from this repository only, with string
+		// names and boolean flags, and its token carries contents read.
+		{"create from a fork", create(map[string]any{"headRepositoryId": "R_kgDNB9A"}, `pullRequest { id }`), ErrGraphQLUnmapped},
+		{"create with draft not a boolean", create(map[string]any{"draft": "true"}, `pullRequest { id }`), ErrGraphQLUnmapped},
+		{"create with an empty head", create(map[string]any{"headRefName": ""}, `pullRequest { id }`), ErrGraphQLUnmapped},
+		{"create without a title", create(map[string]any{"title": nil}, `pullRequest { id }`), ErrGraphQLUnmapped},
+		{"create reading the body", create(nil, `pullRequest { body }`), ErrGraphQLUnmapped},
+		{"create reading the repository", create(nil, `pullRequest { id repository { name } }`), ErrGraphQLUnmapped},
 		{"comment with an empty target", comment(map[string]any{"subjectId": "", "body": "x"}), ErrGraphQLUnmapped},
 		{"literal input", graphqlBody(`mutation { addComment(input: {subjectId: "PR_kwDNA-jNB9A", body: "x"}) { clientMutationId } }`, nil), ErrGraphQLUnmapped},
 		{"edit the title", graphqlBody(`mutation($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { clientMutationId } }`,
@@ -392,11 +422,12 @@ func TestGraphQLAuditOperation(t *testing.T) {
 		"pr-edit-add-label": {"graphql", "graphql", "graphql", "pr.label"},
 		"pr-ready":          {"graphql", "pr.ready"},
 		"pr-ready-undo":     {"graphql", "pr.ready"},
+		"pr-create":         {"graphql", "graphql", "pr.open"},
 		"pr-list":           {"graphql"},
 	} {
 		var got []string
 		for _, r := range readGhFixture(t, fixture).Requests {
-			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel, "{{REPO}}", fixtureRepo).Replace(r.Body)
 			req, err := ParseGitHubGraphQL([]byte(body))
 			if err != nil {
 				t.Fatalf("%s: %v", fixture, err)
@@ -439,7 +470,7 @@ func TestGraphQLMarksFileListsAsCode(t *testing.T) {
 			if r.Path != "/graphql" {
 				continue
 			}
-			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel, "{{REPO}}", fixtureRepo).Replace(r.Body)
 			if got, err := ParseGitHubGraphQL([]byte(body)); err == nil && got.Code {
 				t.Errorf("%s: a gh default command reads file lists", filepath.Base(f))
 			}
@@ -463,7 +494,7 @@ func TestGraphQLMarksCheckStatusReads(t *testing.T) {
 	} {
 		var got []string
 		for _, r := range readGhFixture(t, fixture).Requests {
-			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel).Replace(r.Body)
+			body := strings.NewReplacer("{{PR}}", fixturePR, "{{LABEL}}", fixtureLabel, "{{REPO}}", fixtureRepo).Replace(r.Body)
 			req, err := ParseGitHubGraphQL([]byte(body))
 			if err != nil {
 				t.Fatalf("%s: %v", fixture, err)
@@ -510,9 +541,14 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 		{"gh's own headRepository read", pr + `headRepository { __typename id name nameWithOwner } isCrossRepository` + prEnd, "pr.read", ""},
 
 		{"another field of a nested repository", pr + `repository { issues(first: 1) { totalCount } }` + prEnd, "graphql_unmapped", ""},
-		{"a nested repository's owner", pr + `baseRepository { owner { login } }` + prEnd, "graphql_unmapped", ""},
-		{"an interface fragment inside a repository", pr + `repository { ... on RepositoryInfo { owner { login } } }` + prEnd, "graphql_unmapped", ""},
-		{"a fragment spread inside a repository", pr + `repository { ...r }` + prEnd, "graphql_unmapped", `fragment r on Repository { name }`},
+		{"a nested repository's owner beyond plain values", pr + `baseRepository { owner { ... on User { email } } }` + prEnd, "graphql_unmapped", ""},
+		{"an interface fragment inside a repository", pr + `repository { ... on RepositoryInfo { owner { ... on User { email } } } }` + prEnd, "graphql_unmapped", ""},
+		{"a spread of a fragment on another type inside a repository", pr + `repository { ...r }` + prEnd, "graphql_unmapped", `fragment r on RepositoryInfo { owner { ... on User { email } } }`},
+		// gh pr create's repository read: plain values, the owner's login, a
+		// fork's parent and a fragment on Repository, checked as the root.
+		{"a repository's plain values, owner and parent", pr + `repository { id name viewerPermission owner { login } parent { ...r } }` + prEnd,
+			listed, `fragment r on Repository { id owner { login } defaultBranchRef { name } }`},
+		{"a fork's parent's other fields", pr + `repository { parent { issues(first: 1) { totalCount } } }` + prEnd, "graphql_unmapped", ""},
 		{"a user's repositories", pr + `author { ... on User { repositories(first: 1) { nodes { name } } } }` + prEnd, "graphql_unmapped", ""},
 		{"a user's watched repositories", pr + `author { ... on User { watching(first: 1) { nodes { name } } } }` + prEnd, "graphql_unmapped", ""},
 		{"a user's starred repositories", pr + `author { ... on User { starredRepositories(first: 1) { nodes { name } } } }` + prEnd, "graphql_unmapped", ""},

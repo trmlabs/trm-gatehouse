@@ -107,7 +107,17 @@ var (
 	deployProd = nodeID("LA", 1000, 502)
 	otherLabel = nodeID("LA", 2000, 503)
 	publicPR   = nodeID("PR", 1000, 77)
+	exampleR   = repoNodeID(1000) // example-repo itself
+	secretR    = repoNodeID(3000)
 )
+
+// repoNodeID builds a current-format GitHub repository node ID: "R_" and
+// base64url MessagePack [0, repository] with a 32-bit integer.
+func repoNodeID(repo uint32) string {
+	b := []byte{0x92, 0x00, 0xce, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(b[3:], repo)
+	return "R_" + base64.RawURLEncoding.EncodeToString(b)
+}
 
 type fakeNode struct {
 	typ, repo, headRepo, headRef, name string
@@ -127,6 +137,8 @@ var fakeNodes = map[string]fakeNode{
 	// Its ID names example-repo, but GitHub answers with a public
 	// repository's pull request, which any token can see.
 	publicPR: {"PullRequest", "public-repo", "public-repo", "cursor/pool-agent/x", "", true},
+	exampleR: {"Repository", "example-repo", "", "", "", false},
+	secretR:  {"Repository", "secret-repo", "", "", "", false},
 }
 
 const graphqlCatalogTemplate = `{%s"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
@@ -278,7 +290,9 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 					continue
 				}
 				node := map[string]any{"__typename": n.typ, "repository": map[string]string{"nameWithOwner": "example-org/" + n.repo}}
-				if n.typ == "PullRequest" {
+				if n.typ == "Repository" {
+					node = map[string]any{"__typename": n.typ, "nameWithOwner": "example-org/" + n.repo}
+				} else if n.typ == "PullRequest" {
 					headOwner := "example-org/"
 					if strings.Contains(n.headRepo, "/") {
 						headOwner = ""
@@ -388,6 +402,7 @@ var ghCommands = []struct {
 	{"pr-edit-add-label", []string{"pr.read", "pr.label"}},
 	{"pr-ready", []string{"pr.read", "pr.ready"}},
 	{"pr-ready-undo", []string{"pr.read", "pr.ready"}},
+	{"pr-create", []string{"pr.read", "pr.list", "pr.open"}},
 	{"pr-checks", []string{"pr.read"}},
 	{"pr-checks-json", []string{"pr.read"}},
 	{"pr-diff", []string{"pr.read"}},
@@ -412,7 +427,7 @@ func (f *graphqlFixture) replay(t *testing.T, fixture string) string {
 		t.Fatal(err)
 	}
 	for i, r := range fx.Requests {
-		body := strings.NewReplacer("{{PR}}", ownPR, "{{LABEL}}", preview).Replace(r.Body)
+		body := strings.NewReplacer("{{PR}}", ownPR, "{{LABEL}}", preview, "{{REPO}}", exampleR).Replace(r.Body)
 		before := len(f.relayed())
 		code, reply := f.send(t, r.Method, r.Path, r.Headers, body)
 		if code != http.StatusOK {
@@ -468,19 +483,26 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 			t.Fatalf("relayed without X-Github-Next-Global-ID: %s", body)
 		}
 	}
-	// Only gh pr ready's mutation carried a token with contents, and write,
-	// which GitHub requires for it. Nested fields can reach files and
-	// history, which only a git entry grants, so no other request may.
+	// Only gh pr ready's mutation carried a token with contents write, and
+	// gh pr create's with contents read, which GitHub requires for each.
+	// Nested fields can reach files and history, which only a git entry
+	// grants, so no other request may.
 	f.mu.Lock()
 	withContents := f.withContents
 	f.mu.Unlock()
+	sent := map[string]bool{}
 	for _, c := range withContents {
-		if !strings.HasPrefix(c, "write ") || !strings.Contains(c, "markPullRequestReadyForReview") {
+		switch {
+		case strings.HasPrefix(c, "write ") && strings.Contains(c, "markPullRequestReadyForReview"):
+			sent["ready"] = true
+		case strings.HasPrefix(c, "read ") && strings.Contains(c, "createPullRequest"):
+			sent["create"] = true
+		default:
 			t.Errorf("GraphQL request made with a contents token: %s", c)
 		}
 	}
-	if len(withContents) == 0 {
-		t.Error("gh pr ready's mutation was sent without contents write")
+	if !sent["ready"] || !sent["create"] {
+		t.Errorf("sent with the contents GitHub requires: %v, want ready and create", sent)
 	}
 	// gh pr edit --title is refused: pr.edit changes only the body.
 	if outcome := f.replay(t, "pr-edit-title"); outcome != "graphql_unmapped" {
@@ -545,6 +567,53 @@ func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 	}
 	if got := f.relayed(); len(got) != 6 || !strings.HasPrefix(got[3], "read-repo ") {
 		t.Fatalf("relayed %v", got)
+	}
+}
+
+// gh pr create opens a pull request only as REST's pr.open does: in the
+// repository its ID names, which GitHub confirms, from a branch of that
+// repository under the pool's own push prefixes (never its pull request
+// prefixes), onto a plain branch name, with a token holding contents read.
+func TestGitHubGraphQLOpensPullRequestsAsREST(t *testing.T) {
+	f := newGraphQLFixture(t)
+	create := func(repo, head, base string) string {
+		b, _ := json.Marshal(map[string]any{"query": "mutation($input: CreatePullRequestInput!) { createPullRequest(input: $input) { pullRequest { id url } } }",
+			"variables": map[string]any{"input": map[string]any{"repositoryId": repo, "headRefName": head, "baseRefName": base, "title": "t", "body": "b", "draft": false}}})
+		return string(b)
+	}
+	for _, tc := range []struct {
+		name, body, outcome string
+		status              int
+	}{
+		{"a head under the repository's pull request prefixes", create(exampleR, "factory/fix", "main"), "head", 403},
+		{"a person's branch", create(exampleR, "person/x", "main"), "head", 403},
+		{"the bare push prefix", create(exampleR, "cursor/pool-agent/", "main"), "head", 403},
+		{"a base that leaves the repository", create(exampleR, "cursor/pool-agent/x", "someone:main"), "request_shape", 400},
+		{"a base with a path step", create(exampleR, "cursor/pool-agent/x", "a/../b"), "request_shape", 400},
+		{"an unlisted repository", create(secretR, "cursor/pool-agent/x", "main"), "unlisted", 403},
+		{"a pull request's ID as the repository", create(ownPR, "cursor/pool-agent/x", "main"), "unlisted", 403},
+	} {
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != tc.status || f.audit.last().Outcome != tc.outcome {
+			t.Errorf("%s: %d %q, want %d %q", tc.name, code, f.audit.last().Outcome, tc.status, tc.outcome)
+		}
+	}
+	if got := f.relayed(); len(got) != 0 {
+		t.Fatalf("GitHub received refused requests: %v", got)
+	}
+	// Without pr.open the repository grants no create at all.
+	f.use(t, "pr.read", "pr.list")
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, create(exampleR, "cursor/pool-agent/x", "main")); code != 403 || f.audit.last().Outcome != "unlisted" {
+		t.Errorf("without pr.open: %d %q", code, f.audit.last().Outcome)
+	}
+	f.use(t, allPullRequestOps...)
+	if code, reply := f.send(t, http.MethodPost, "/graphql", nil, create(exampleR, "cursor/pool-agent/x", "main")); code != 200 || f.audit.last().Operation != "pr.open" {
+		t.Fatalf("own branch: %d %s %q", code, reply, f.audit.last().Outcome)
+	}
+	f.mu.Lock()
+	perms := f.relayedPerms[len(f.relayedPerms)-1]
+	f.mu.Unlock()
+	if perms["contents"] != "read" || perms["pull_requests"] != "write" {
+		t.Fatalf("create token: %v", perms)
 	}
 }
 

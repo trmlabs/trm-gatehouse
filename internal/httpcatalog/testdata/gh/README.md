@@ -1,8 +1,8 @@
 # gh GraphQL fixtures
 
 Each file is one gh command's requests, as gh 2.89.0 sent them, used by
-`graphql_test.go` and `internal/mitm/github_graphql_test.go`. `{{PR}}` and
-`{{LABEL}}` stand for the node IDs gh had just read. They were recorded
+`graphql_test.go` and `internal/mitm/github_graphql_test.go`. `{{PR}}`,
+`{{LABEL}}` and `{{REPO}}` stand for the node IDs gh had just read. They were recorded
 against `recorder/`, a local stand-in for GitHub, with a placeholder token:
 nothing reached GitHub and no real token was used.
 
@@ -21,4 +21,10 @@ gh pr view 12   # one command at a time; move /tmp/gh-calls.jsonl's lines into a
 gh sends `github.localhost` traffic in plain HTTP to `api.github.localhost`,
 which `HTTP_PROXY` routes to the recorder. Use a fresh cache directory: gh
 caches feature-detection answers for a day. Replace the recorder's node ID
-in mutations with `{{PR}}` or `{{LABEL}}`.
+in mutations with `{{PR}}`, `{{LABEL}}` or `{{REPO}}` (a repository's ID).
+
+Two commands need the recorder to answer differently. Start it with
+`RECORDER_NOT_DRAFT=1` for `gh pr ready 12 --undo`, which does nothing to a
+draft, and with `RECORDER_NO_PULL_REQUESTS=1` for
+`gh pr create --head cursor/pool-agent/x --base main --title t --body b`,
+which stops when the branch already has an open pull request.

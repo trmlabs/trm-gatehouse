@@ -21,7 +21,7 @@ import (
 // GitHub receives the parsed document printed again with its variables
 // re-encoded, so GitHub executes exactly what was checked. The fields mapped
 // are the ones gh 2.x sends for pr view, list, status, checks, comment, edit
-// (body and labels), ready and ready --undo:
+// (body and labels), ready, ready --undo and create:
 //
 //	repository(owner, name) { pullRequest }      pr.read
 //	repository(owner, name) { pullRequests }     pr.list
@@ -34,6 +34,7 @@ import (
 //	addLabelsToLabelable(input: $input)          pr.label
 //	markPullRequestReadyForReview(input: $input) pr.ready
 //	convertPullRequestToDraft(input: $input)     pr.ready (back to draft)
+//	createPullRequest(input: $input)             pr.open (head under the pool's push prefixes)
 //
 // Every query also needs pr.read, as does a mutation whose payload selects
 // more than __typename or clientMutationId, since below those fields any
@@ -49,8 +50,9 @@ import (
 // repository is one the root's is related to, and the fields that read files
 // and history are refused at any depth (graphqlContentFields). The token
 // GitHub sees is minted for the one repository with pull requests and no
-// contents, except the ready mutation's (GitHubGraphQL.ContentsWrite), so a
-// nested field reaches no other private repository either. Node IDs (a
+// contents, except for the two mutations GitHub refuses without it
+// (GitHubGraphQL.Contents), so a nested field reaches no other private
+// repository either. Node IDs (a
 // mutation's target, node's id) do not name their repository; the broker
 // resolves each one before sending (GraphQLTarget).
 
@@ -115,12 +117,17 @@ type GitHubGraphQL struct {
 	// token also carries actions read where the repository grants it
 	// (actions.read), as REST's workflow run routes.
 	Actions bool
-	// ContentsWrite marks markPullRequestReadyForReview, which GitHub refuses
-	// to a token without contents write: its token also carries contents
-	// write, as REST's pr.ready does, and its payload may read back only the
-	// pull request's id, number and draft state (readyPayload), so the wider
-	// token reaches nothing else.
-	ContentsWrite bool
+	// Contents is the contents permission the request's token needs, for the
+	// two mutations GitHub refuses without it: "write" for
+	// markPullRequestReadyForReview and "read" for createPullRequest (GitHub
+	// reads the head and base refs), as REST's pr.ready and pr.open tokens
+	// carry. Their payload may read back only the pull request's id, URL,
+	// number and draft state (fixedPayload), so the wider token reaches
+	// nothing else. Empty for every other request.
+	Contents string
+	// Head and Base are createPullRequest's branch names. The caller holds
+	// the head to the pool's own push prefixes, as REST's pr.open does.
+	Head, Base string
 	// Code marks a request that reads which files a pull request changes
 	// (graphqlPathFields): as for REST's pull request files, it is served only
 	// to a pool whose git entry may clone the repository, for a requester that
@@ -142,8 +149,9 @@ func (g GitHubGraphQL) AuditOperation() string {
 type GraphQLTarget struct {
 	ID string
 	// Kind is TargetPullRequest (in the repository), TargetPullRequestWrite
-	// (in the repository, its head in the pool's reach, as for a REST write)
-	// or TargetLabel (one of the repository's labels).
+	// (in the repository, its head in the pool's reach, as for a REST write),
+	// TargetLabel (one of the repository's labels) or TargetRepository (the
+	// repository itself).
 	Kind string
 }
 
@@ -151,6 +159,8 @@ const (
 	TargetPullRequest      = "pull-request"
 	TargetPullRequestWrite = "pull-request-write"
 	TargetLabel            = "label"
+	// TargetRepository is the repository createPullRequest names by ID.
+	TargetRepository = "repository"
 )
 
 // githubSchemaFeatures answers gh's pull request feature detection, the only
@@ -177,11 +187,13 @@ var graphqlRepositoryFields = map[string]string{
 
 // graphqlRepositoryField reports a field whose value is a repository: a
 // pull request's, label's or commit's repository, a pull request's
-// baseRepository and headRepository, an event's fromRepository. Named by
+// baseRepository and headRepository, an event's fromRepository, a fork's
+// parent (an issue's parent is checked the same way, which only refuses
+// more). Named by
 // convention, since the parser has no schema; isCrossRepository matches too,
 // a plain value with nothing below it to check.
 func graphqlRepositoryField(name string) bool {
-	return name == "repository" || strings.HasSuffix(name, "Repository")
+	return name == "repository" || strings.HasSuffix(name, "Repository") || name == "parent"
 }
 
 // graphqlLookupField reports a field that, given arguments, looks a
@@ -224,9 +236,11 @@ type graphqlMutation struct {
 	fields map[string]bool
 	target string // the field naming the pull request
 	labels bool   // labelIds lists labels to resolve
-	// contents marks a mutation GitHub refuses without contents write
-	// (GitHubGraphQL.ContentsWrite); its payload is held to readyPayload.
-	contents bool
+	// contents is the contents permission GitHub refuses the mutation
+	// without (GitHubGraphQL.Contents); its payload is held to fixedPayload.
+	contents string
+	// flags are input fields that take a boolean; every other is a string.
+	flags map[string]bool
 }
 
 var graphqlMutations = map[string]graphqlMutation{
@@ -236,10 +250,15 @@ var graphqlMutations = map[string]graphqlMutation{
 	"addLabelsToLabelable": {op: "pr.label", fields: map[string]bool{"labelableId": true, "labelIds": true, "clientMutationId": false},
 		target: "labelableId", labels: true},
 	"markPullRequestReadyForReview": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId",
-		contents: true},
+		contents: "write"},
 	// gh pr ready --undo: the same draft state, the other way, under the same
 	// operation and the same reach.
 	"convertPullRequestToDraft": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId"},
+	// gh pr create: a pull request in this repository (never headRepositoryId,
+	// a fork), from a head the caller holds to the pool's push prefixes.
+	"createPullRequest": {op: "pr.open", fields: map[string]bool{"repositoryId": true, "baseRefName": true, "headRefName": true, "title": true,
+		"body": false, "draft": false, "maintainerCanModify": false, "clientMutationId": false}, target: "repositoryId",
+		contents: "read", flags: map[string]bool{"draft": true, "maintainerCanModify": true}},
 }
 
 // ParseGitHubGraphQL checks one GraphQL request body against the mapping
@@ -295,7 +314,7 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 		}
 		return nil
 	}
-	c := &graphqlCheck{vars: vars, defaults: defaults, ops: map[string]bool{}}
+	c := &graphqlCheck{vars: vars, defaults: defaults, ops: map[string]bool{}, frags: frags}
 	c.selections(op.SelectionSet)
 	// A fragment is spread only below the root (queryRoot and mutationRoot
 	// refuse one at the root), so its fields are checked as nested ones.
@@ -353,12 +372,12 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 			return GitHubGraphQL{}, err
 		}
 	case ast.Mutation:
-		if err := mutationRoot(op.SelectionSet, vars, ops, &out.Targets, &out.Write, &out.ContentsWrite); err != nil {
+		if err := mutationRoot(op.SelectionSet, vars, ops, &out); err != nil {
 			return GitHubGraphQL{}, err
 		}
-		// Its token carries contents write, so nothing but its fixed payload
-		// (readyPayload) may be in the document.
-		if out.ContentsWrite && len(doc.Fragments) > 0 {
+		// Its token carries contents, so nothing but its fixed payload
+		// (fixedPayload) may be in the document.
+		if out.Contents != "" && len(doc.Fragments) > 0 {
 			return GitHubGraphQL{}, ErrGraphQLUnmapped
 		}
 	default: // subscriptions
@@ -517,7 +536,8 @@ type graphqlCheck struct {
 	vars     map[string]any
 	defaults func(string) *ast.Value
 	aliases  int
-	depth    int             // 0 for the root's fields
+	depth    int // 0 for the root's fields
+	frags    map[string]*ast.FragmentDefinition
 	ops      map[string]bool // operations fields below the root need (repository, graphqlPullRequestList)
 	code     bool            // a field of graphqlPathFields appears
 	checks   bool            // a field of graphqlCheckFields appears
@@ -603,27 +623,50 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 	}
 }
 
-// repository checks a selection on a repository reached anywhere, as
-// queryRoot checks the root one's: a field of graphqlRepositoryFields needs
-// its operation, a plain value (no arguments, no selection, such as name) is
-// allowed, and anything else is refused, as is a fragment spread, so nothing
-// below a repository goes unmapped. selections still walks it all for the
-// other checks.
+// repository checks a selection on a repository reached anywhere, the root
+// one included: a field of graphqlRepositoryFields needs its operation; a
+// plain value (no arguments, no selection, such as name or id), the owner's
+// plain values (owner { login }) and a repository it leads to (a fork's
+// parent, checked in turn) are allowed; a fragment spread only of a fragment
+// on Repository, whose definition is checked the same way; and anything else
+// is refused, so nothing below a repository goes unmapped. gh pr create reads
+// the repository's id, owner, settings and parent this way. selections still
+// walks it all for the other checks.
 func (c *graphqlCheck) repository(set ast.SelectionSet) {
 	for _, s := range set {
 		switch s := s.(type) {
 		case *ast.Field:
-			if op, ok := graphqlRepositoryFields[s.Name]; ok {
+			op, mapped := graphqlRepositoryFields[s.Name]
+			switch {
+			case mapped:
 				c.ops[op] = true
-			} else if len(s.Arguments) > 0 || len(s.SelectionSet) > 0 {
+			case len(s.Arguments) > 0:
+				c.fail(ErrGraphQLUnmapped)
+			case len(s.SelectionSet) == 0, graphqlRepositoryField(s.Name):
+			case s.Name == "owner" && plainFields(s.SelectionSet):
+			default:
 				c.fail(ErrGraphQLUnmapped)
 			}
 		case *ast.InlineFragment:
 			c.repository(s.SelectionSet)
 		case *ast.FragmentSpread:
-			c.fail(ErrGraphQLUnmapped)
+			if f := c.frags[s.Name]; f == nil || f.TypeCondition != "Repository" {
+				c.fail(ErrGraphQLUnmapped)
+			}
 		}
 	}
+}
+
+// plainFields reports a selection of plain values only: fields with no
+// alias, arguments, directives or selection, and no fragments.
+func plainFields(set ast.SelectionSet) bool {
+	for _, s := range set {
+		f, ok := s.(*ast.Field)
+		if !ok || f.Alias != "" && f.Alias != f.Name || len(f.Arguments) > 0 || len(f.Directives) > 0 || len(f.SelectionSet) > 0 {
+			return false
+		}
+	}
+	return len(set) > 0
 }
 
 // pageSize reports whether a first or last value is a whole number GitHub
@@ -774,22 +817,10 @@ func queryRoot(set ast.SelectionSet, vars map[string]any, defaults func(string) 
 				return ErrGraphQLUnmapped
 			}
 			repos[repo] = true
+			// Its selection is checked as every repository's is
+			// (graphqlCheck.repository), which adds the operations it needs.
 			if len(f.SelectionSet) == 0 {
 				return ErrGraphQLUnmapped
-			}
-			for _, sub := range f.SelectionSet {
-				field, ok := sub.(*ast.Field)
-				if !ok {
-					return ErrGraphQLUnmapped
-				}
-				if field.Name == "__typename" {
-					continue
-				}
-				op, ok := graphqlRepositoryFields[field.Name]
-				if !ok {
-					return ErrGraphQLUnmapped
-				}
-				ops[op] = true
 			}
 		case "search":
 			repo, ok := searchArgs(args)
@@ -881,7 +912,7 @@ func searchArgs(args map[string]any) (string, bool) {
 // mutationRoot maps the one mutation to its operation and node IDs. Its input
 // must be a variable: GitHub then reads the very JSON value checked here, not
 // a literal its own lexer might read differently.
-func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool, targets *[]GraphQLTarget, write *string, contents *bool) error {
+func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool, out *GitHubGraphQL) error {
 	if len(set) != 1 {
 		return ErrGraphQLUnmapped
 	}
@@ -904,6 +935,12 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 		if key == "labelIds" {
 			continue
 		}
+		if m.flags[key] {
+			if _, ok := v.(bool); !ok {
+				return ErrGraphQLUnmapped
+			}
+			continue
+		}
 		if s, ok := v.(string); !ok || s == "" && key != "body" && key != "clientMutationId" {
 			return ErrGraphQLUnmapped
 		}
@@ -913,11 +950,11 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 			return ErrGraphQLUnmapped
 		}
 	}
-	if m.contents && !readyPayload(f.SelectionSet) {
+	if m.contents != "" && !fixedPayload(f.SelectionSet) {
 		return ErrGraphQLUnmapped
 	}
 	ops[m.op] = true
-	*write, *contents = m.op, m.contents
+	out.Write, out.Contents = m.op, m.contents
 	// A mutation's payload is a selection like any query's: from it a pull
 	// request, its comments or the repository's other pull requests can be
 	// read. Anything beyond __typename and clientMutationId needs pr.read.
@@ -926,7 +963,12 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 			ops["pr.read"] = true
 		}
 	}
-	*targets = append(*targets, GraphQLTarget{ID: input[m.target].(string), Kind: TargetPullRequestWrite})
+	if m.op == "pr.open" {
+		out.Head, out.Base = input["headRefName"].(string), input["baseRefName"].(string)
+		out.Targets = append(out.Targets, GraphQLTarget{ID: input[m.target].(string), Kind: TargetRepository})
+		return nil
+	}
+	out.Targets = append(out.Targets, GraphQLTarget{ID: input[m.target].(string), Kind: TargetPullRequestWrite})
 	if m.labels {
 		labels, ok := input["labelIds"].([]any)
 		if !ok || len(labels) == 0 || len(labels) > maxGraphQLLabels {
@@ -937,18 +979,18 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 			if !ok || id == "" {
 				return ErrGraphQLUnmapped
 			}
-			*targets = append(*targets, GraphQLTarget{ID: id, Kind: TargetLabel})
+			out.Targets = append(out.Targets, GraphQLTarget{ID: id, Kind: TargetLabel})
 		}
 	}
 	return nil
 }
 
-// readyPayload reports whether a markPullRequestReadyForReview payload reads
-// back no more than gh pr ready does: __typename, clientMutationId, and the
-// pull request's __typename, id, number and isDraft, each a plain field with
-// no alias, argument, directive or fragment. Its token carries contents write
-// (GitHubGraphQL.ContentsWrite), so nothing else may be read with it.
-func readyPayload(set ast.SelectionSet) bool {
+// fixedPayload reports whether the payload of a mutation whose token carries
+// contents (GitHubGraphQL.Contents) reads back no more than gh pr ready and
+// gh pr create do: __typename, clientMutationId, and the pull request's
+// __typename, id, url, number and isDraft, each a plain field with no alias,
+// argument, directive or fragment. Nothing else may be read with that token.
+func fixedPayload(set ast.SelectionSet) bool {
 	plain := func(sel ast.Selection, names ...string) (*ast.Field, bool) {
 		f, ok := sel.(*ast.Field)
 		if !ok || f.Alias != "" && f.Alias != f.Name || len(f.Arguments) > 0 || len(f.Directives) > 0 {
@@ -974,7 +1016,7 @@ func readyPayload(set ast.SelectionSet) bool {
 			return false
 		default:
 			for _, sub := range f.SelectionSet {
-				if g, ok := plain(sub, "__typename", "id", "number", "isDraft"); !ok || len(g.SelectionSet) > 0 {
+				if g, ok := plain(sub, "__typename", "id", "url", "number", "isDraft"); !ok || len(g.SelectionSet) > 0 {
 					return false
 				}
 			}

@@ -24,10 +24,11 @@ import (
 // contents. Below a mapped field GraphQL can reach a repository's files and
 // history, which only a git entry grants; without contents GitHub refuses
 // those fields. (REST's pull request token carries contents read for opening
-// pull requests, which GraphQL here never does.) The one exception is the
-// ready mutation, which GitHub refuses without contents write: its token
-// carries it, and its payload may read back only the pull request's id,
-// number and draft state (httpcatalog GitHubGraphQL.ContentsWrite).
+// pull requests, which GraphQL here never does.) The exceptions are the two
+// mutations GitHub refuses without contents: ready (contents write) and
+// create (contents read). Their tokens carry it, and their payload may read
+// back only the pull request's id, URL, number and draft state (httpcatalog
+// GitHubGraphQL.Contents).
 var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
 
 // forwardGitHubGraphQL serves POST /graphql on a github-api host. The request
@@ -228,6 +229,23 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 			return
 		}
 	}
+	if req.Head != "" {
+		// Opening a pull request holds to REST's pr.open, asked of the same
+		// route: its head a branch of this repository under the pool's own
+		// push prefixes, and its base a plain branch name.
+		open, _, err := catalog.GitHubAPIMatch(host, port, http.MethodPost, "/repos/"+api.Repo.Repo+"/pulls", "", scope.Pool)
+		switch {
+		case err != nil || !open.OpensPullRequest:
+			deny(http.StatusForbidden, "unlisted")
+			return
+		case !headInReach(api.Repo.Repo, api.Repo.Repo, req.Head, open.HeadPrefixes):
+			deny(http.StatusForbidden, "head")
+			return
+		case strings.Contains(req.Base, ":") || unsafeBranch(req.Base):
+			deny(http.StatusBadRequest, "request_shape")
+			return
+		}
+	}
 	if int64(len(body)) > entry.MaxRequestBytes {
 		deny(http.StatusRequestEntityTooLarge, "request_too_large")
 		return
@@ -248,8 +266,8 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	if req.Actions && api.Repo.GrantsScope("actions") {
 		permissions.Actions = "read"
 	}
-	if req.ContentsWrite {
-		permissions.Contents = "write"
+	if req.Contents != "" {
+		permissions.Contents = req.Contents
 	}
 	token, err := a.GitTokens.Token(r.Context(), app, api.Repo.Repo, permissions)
 	if err != nil {
@@ -345,6 +363,11 @@ func lookupStatus(outcome string) int {
 // targetOutcomeFor names a refused node target in the audit trail, as REST
 // names the same refusal.
 func targetOutcomeFor(req httpcatalog.GitHubGraphQL) string {
+	for _, t := range req.Targets {
+		if t.Kind == httpcatalog.TargetRepository {
+			return "unlisted" // a repository to open a pull request in, as REST's
+		}
+	}
 	for _, op := range req.Operations {
 		if op == "pr.comment" {
 			return "comment_target"
@@ -413,18 +436,29 @@ func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []
 // relays, so gh holds no other kind.
 func nodeRepositoryID(id string) (int64, bool) {
 	prefix, payload, ok := strings.Cut(id, "_")
-	if !ok || prefix != "PR" && prefix != "LA" || len(payload) > 64 {
+	if !ok || prefix != "PR" && prefix != "LA" && prefix != "R" || len(payload) > 64 {
 		return 0, false
 	}
+	// A repository's own ID is [0, repository ID]; the others carry an object
+	// ID after it.
+	header := byte(0x93)
+	if prefix == "R" {
+		header = 0x92
+	}
 	data, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil || len(data) < 4 || data[0] != 0x93 || data[1] != 0x00 {
+	if err != nil || len(data) < 3 || data[0] != header || data[1] != 0x00 {
 		return 0, false
 	}
 	repo, rest, ok := msgpackUint(data[2:])
 	if !ok || repo == 0 {
 		return 0, false
 	}
-	if _, rest, ok = msgpackUint(rest); !ok || len(rest) != 0 {
+	if prefix != "R" {
+		if _, rest, ok = msgpackUint(rest); !ok {
+			return 0, false
+		}
+	}
+	if len(rest) != 0 {
 		return 0, false
 	}
 	return repo, true
@@ -477,8 +511,8 @@ func (p *Proxy) repositoryDatabaseID(r *http.Request, target, host string, g htt
 
 // nodeFact is what GitHub says one node is.
 type nodeFact struct {
-	Type     string // "PullRequest" or "Label"
-	Repo     string // owner/name
+	Type     string // "PullRequest", "Label" or "Repository"
+	Repo     string // owner/name: the node's repository, or the repository itself
 	HeadRepo string // a pull request's head repository
 	HeadRef  string // a pull request's head branch
 	Name     string // a label's name
@@ -488,7 +522,8 @@ type nodeFact struct {
 // token: a node outside that repository comes back empty.
 const nodesLookup = `query($ids: [ID!]!) { nodes(ids: $ids) { __typename ` +
 	`... on PullRequest { headRefName repository { nameWithOwner } headRepository { nameWithOwner } } ` +
-	`... on Label { name repository { nameWithOwner } } } }`
+	`... on Label { name repository { nameWithOwner } } ` +
+	`... on Repository { nameWithOwner } } }`
 
 // checkGraphQLTargets confirms every node ID with GitHub: a pull request in
 // the repository (and, for a write, its head in reach), or a label in the
@@ -510,10 +545,11 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 		var reply struct {
 			Data struct {
 				Nodes []*struct {
-					Type       string `json:"__typename"`
-					HeadRef    string `json:"headRefName"`
-					Name       string `json:"name"`
-					Repository *struct {
+					Type          string `json:"__typename"`
+					HeadRef       string `json:"headRefName"`
+					Name          string `json:"name"`
+					NameWithOwner string `json:"nameWithOwner"` // a repository's own
+					Repository    *struct {
 						NameWithOwner string `json:"nameWithOwner"`
 					} `json:"repository"`
 					HeadRepository *struct {
@@ -530,10 +566,18 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 			return "target_lookup"
 		}
 		for i, n := range reply.Data.Nodes {
-			if n == nil || n.Repository == nil {
+			repo := ""
+			switch {
+			case n == nil:
+			case n.Type == "Repository":
+				repo = n.NameWithOwner
+			case n.Repository != nil:
+				repo = n.Repository.NameWithOwner
+			}
+			if repo == "" {
 				continue // not visible to this repository's token: refused below
 			}
-			f := nodeFact{Type: n.Type, Repo: n.Repository.NameWithOwner, HeadRef: n.HeadRef, Name: n.Name}
+			f := nodeFact{Type: n.Type, Repo: repo, HeadRef: n.HeadRef, Name: n.Name}
 			if n.HeadRepository != nil {
 				f.HeadRepo = n.HeadRepository.NameWithOwner
 			}
@@ -548,6 +592,10 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 		case httpcatalog.TargetLabel:
 			if !inRepo || f.Type != "Label" || !containsString(api.Repo.Labels, f.Name) {
 				return "request_shape"
+			}
+		case httpcatalog.TargetRepository:
+			if !inRepo || f.Type != "Repository" {
+				return "unlisted"
 			}
 		case httpcatalog.TargetPullRequestWrite:
 			if !inRepo || f.Type != "PullRequest" || !headInReach(api.Repo.Repo, f.HeadRepo, f.HeadRef, api.HeadPrefixes) {
