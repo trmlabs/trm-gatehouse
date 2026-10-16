@@ -74,7 +74,10 @@ func TestAllowedMatchesThePulledImage(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	t.Cleanup(func() { _ = SetRegistry(testRegistry) })
-	if err := SetRegistry(""); err != nil || ValidPrefix(teamA) {
+	// teamA has dots, which the prefix shape refuses with or without a
+	// registry; repo/tenant/ has the shape, so only the unset registry
+	// refuses it.
+	if err := SetRegistry(""); err != nil || ValidPrefix(teamA) || ValidPrefix("repo/tenant/") {
 		t.Fatalf("no registry still admitted a prefix: %v", err)
 	}
 	for _, r := range []string{
