@@ -108,8 +108,8 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 			if !reflect.DeepEqual(got.Targets, targets) {
 				t.Errorf("%s request %d: targets %v, want %v", tc.fixture, i, got.Targets, targets)
 			}
-			// Only gh pr ready's and gh pr create's mutations need contents.
-			wantContents := map[string]string{"pr-ready 1": "write", "pr-create 2": "read"}[fmt.Sprintf("%s %d", tc.fixture, i)]
+			// Only gh pr ready's (both ways) and gh pr create's mutations need contents.
+			wantContents := map[string]string{"pr-ready 1": "write", "pr-ready-undo 1": "write", "pr-create 2": "read"}[fmt.Sprintf("%s %d", tc.fixture, i)]
 			if got.Contents != wantContents {
 				t.Errorf("%s request %d: contents %q, want %q", tc.fixture, i, got.Contents, wantContents)
 			}

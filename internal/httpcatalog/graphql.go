@@ -259,8 +259,9 @@ var graphqlMutations = map[string]graphqlMutation{
 	"markPullRequestReadyForReview": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId",
 		contents: "write"},
 	// gh pr ready --undo: the same draft state, the other way, under the same
-	// operation and the same reach.
-	"convertPullRequestToDraft": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId"},
+	// operation, reach and contents write.
+	"convertPullRequestToDraft": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId",
+		contents: "write"},
 	// gh pr create: a pull request in this repository (never headRepositoryId,
 	// a fork), from a head the caller holds to the pool's push prefixes.
 	"createPullRequest": {op: "pr.open", fields: map[string]bool{"repositoryId": true, "baseRefName": true, "headRefName": true, "title": true,
@@ -508,7 +509,7 @@ func value(v *ast.Value, vars map[string]any, defaults func(string) *ast.Value) 
 
 // graphqlContentFields and graphqlContentTypes are the main ways to a
 // repository's files and history, which only a git entry grants. Every
-// GraphQL token but pr.ready's has no contents permission, so GitHub refuses
+// GraphQL token but pr.ready's and pr.open's has no contents permission, so GitHub refuses
 // these reads anyway; they are refused here too, at any depth, so the parser
 // holds them whatever the token. gh reads none of them.
 var (

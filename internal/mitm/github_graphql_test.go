@@ -486,8 +486,8 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 			t.Fatalf("relayed without X-Github-Next-Global-ID: %s", body)
 		}
 	}
-	// Only gh pr ready's mutation carried a token with contents write, and
-	// gh pr create's with contents read, which GitHub requires for each.
+	// Only gh pr ready's mutations (both ways) carried a token with contents
+	// write, and gh pr create's with contents read, as GitHub requires.
 	// Nested fields can reach files and history, which only a git entry
 	// grants, so no other request may.
 	f.mu.Lock()
@@ -498,14 +498,16 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 		switch {
 		case strings.HasPrefix(c, "write ") && strings.Contains(c, "markPullRequestReadyForReview"):
 			sent["ready"] = true
+		case strings.HasPrefix(c, "write ") && strings.Contains(c, "convertPullRequestToDraft"):
+			sent["undo"] = true
 		case strings.HasPrefix(c, "read ") && strings.Contains(c, "createPullRequest"):
 			sent["create"] = true
 		default:
 			t.Errorf("GraphQL request made with a contents token: %s", c)
 		}
 	}
-	if !sent["ready"] || !sent["create"] {
-		t.Errorf("sent with the contents GitHub requires: %v, want ready and create", sent)
+	if !sent["ready"] || !sent["undo"] || !sent["create"] {
+		t.Errorf("sent with the contents GitHub requires: %v, want ready, undo and create", sent)
 	}
 	// gh pr edit --title is refused: pr.edit changes only the body.
 	if outcome := f.replay(t, "pr-edit-title"); outcome != "graphql_unmapped" {
