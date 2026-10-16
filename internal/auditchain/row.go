@@ -50,8 +50,8 @@ type Row struct {
 	// Authorization decision fields (see mitm authorize). On an automation
 	// row, requester is the person the run's token names; tier, decision,
 	// groups, cacheAgeSec, requesterOID and requesterDepartment come from the
-	// decision on automationOwner's account, or decision is automation_runner,
-	// with no groups or object ID, when the run is not the owner's.
+	// decision on automationOwner's account. A run that is not the owner's
+	// records only tier and decision automation_not_owner.
 	RequesterKind string `json:"requesterKind,omitempty"` // person, agent, workload, automation or none
 	RequesterOID  string `json:"requesterOID,omitempty"`  // Entra object ID of the person named by requester
 	TokenSHA256   string `json:"tokenSHA256,omitempty"`   // runner session token hash; never the token

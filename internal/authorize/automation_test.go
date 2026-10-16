@@ -161,8 +161,8 @@ func TestAutomationDecisions(t *testing.T) {
 		{"explorer", "ledger", "entitled", true},
 		{"explorer", "vault", "entitled", true},
 		// Not the owner: refused at every tier, whatever their own groups.
-		{"bob-explorer", "tracker", "automation_runner", false},
-		{"bob-explorer", "vault", "automation_runner", false},
+		{"bob-explorer", "tracker", "automation_not_owner", false},
+		{"bob-explorer", "vault", "automation_not_owner", false},
 		// Not listed for this Automation, though granted to the pool.
 		{"reader", "ledger", "automation_not_granted", false},
 		// An owner whose account is gone stops the Automation at every tier.
@@ -191,7 +191,7 @@ func TestAutomationDecisions(t *testing.T) {
 		}
 	}
 	// A listed Automation with no run person is refused, not served as the owner.
-	if d := Decide(ctx, cache, pool, *e, Requester{Kind: "automation", Subject: "auto-1"}); d.Allowed || d.Outcome != "automation_runner" {
+	if d := Decide(ctx, cache, pool, *e, Requester{Kind: "automation", Subject: "auto-1"}); d.Allowed || d.Outcome != "automation_not_owner" {
 		t.Errorf("no run person: %+v", d)
 	}
 }
@@ -260,8 +260,8 @@ func TestAutomationOwnerChecksUseTheAutomationsBudget(t *testing.T) {
 		return Decide(ctx, cache, pool, *vault, who)
 	}
 	// Every run of auto-1 spends auto-1's budget for the owner check.
-	for i, token := range []string{"explorer", "explorer"} {
-		if d := decide(token); !d.Allowed {
+	for i := range 2 {
+		if d := decide("explorer"); !d.Allowed {
 			t.Fatalf("request %d: %+v", i, d)
 		}
 	}

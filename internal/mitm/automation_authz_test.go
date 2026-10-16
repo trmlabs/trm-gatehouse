@@ -49,7 +49,7 @@ func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 	open, _ := catalog.Match("api.vendor.example", 443, "GET", "/open/x", "automations")
 	for token, want := range map[string]struct{ refusal, name, owner, requester, oid string }{
 		"listed":   {"", "explorer", "owner@example.com", "owner@example.com", "oid-owner@example.com"},
-		"runner":   {"automation_runner", "explorer", "owner@example.com", "bob@example.com", ""},
+		"runner":   {"automation_not_owner", "explorer", "owner@example.com", "bob@example.com", ""},
 		"unlisted": {"automation_unlisted", "", "", "", ""},
 	} {
 		event := auditchain.Event{Event: auditchain.EventHTTPRequest}

@@ -116,7 +116,7 @@ func (r Requester) Audited() string {
 // run any other way, such as a person's from the web or Slack
 // (not_automation), by an Automation the catalog does not list
 // (automation_unlisted), or whose run names no person (automation_no_person),
-// is refused. Whether that person may run it is Decide's check. On every
+// is refused. Whether that person is its owner is Decide's check. On every
 // Cursor pool the run's source and Automation are kept for the audit row,
 // refused or not.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
@@ -211,7 +211,9 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 				return who, ""
 			}
 			// Either sign of an Automation counts, so a token carrying only
-			// one of them is not served as a person by default.
+			// one of them is not served as a person by default. A new
+			// automated source that sets neither would still be served as
+			// its person.
 			if (s.Source == runnerid.SourceAutomations || s.Automation != "") && !pool.AutomationRunsAsPerson {
 				return who, "automation_on_person_pool"
 			}
@@ -248,7 +250,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 // Decide applies the entitlement decision for one entry. On a
 // cursor-automation pool, at every tier, T0 included: the entry must be one
 // the catalog lists for the run's Automation (automation_not_granted); the
-// run's person must be its owner (automation_runner); and the entry is then
+// run's person must be its owner (automation_not_owner); and the entry is then
 // decided on the owner's account, which must be enabled. The owner's check is
 // charged to the Automation's own lookup budget, not the owner's.
 //
@@ -272,7 +274,7 @@ func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool
 		return refused
 	}
 	if who.RunPerson == "" || who.RunPerson != a.Owner {
-		refused.Outcome, refused.Groups = "automation_runner", nil
+		refused.Outcome, refused.Groups = "automation_not_owner", nil
 		return refused
 	}
 	requester.Subject, requester.Budget = a.Owner, "automation:"+a.ID

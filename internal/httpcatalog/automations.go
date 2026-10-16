@@ -23,13 +23,12 @@ type Automation struct {
 	// owner could not, and it stops, at every tier, when the owner's account
 	// is disabled.
 	Owner string `json:"owner"`
-	// RunnerGroup is refused at load. It was to let a group's members run
-	// the Automation on the owner's account, but it would limit who runs
-	// it only if Cursor named the person who set off each run, and the run
-	// tokens seen so far name only the owner. Until a run by someone else
-	// shows who Cursor names, only runs whose token names the owner are
-	// served. The field stays so a catalog that sets it gets this reason,
-	// not an unknown-field error.
+	// RunnerGroup is refused at load: a group allowed to run the Automation
+	// on the owner's account would limit who runs it only if Cursor named
+	// the person who set off each run, and the run tokens seen so far name
+	// only the owner. Only runs whose token names the owner are served. The
+	// field is declared so a catalog that sets it gets that reason, not an
+	// unknown-field error.
 	RunnerGroup string `json:"runnerGroup,omitempty"`
 	// Entries are the catalog entries the Automation may use. Each must also
 	// be granted to the pool its runs land on.
@@ -52,7 +51,7 @@ func (a *Automation) validate() error {
 		return errors.New("owner must be a lower-case email address")
 	}
 	if a.RunnerGroup != "" {
-		return errors.New("runnerGroup is not accepted yet: it would not limit who runs the Automation, since run tokens seen so far name only its owner")
+		return errors.New("runnerGroup is not accepted: run tokens name only the owner, so it would limit no one")
 	}
 	if len(a.Entries) == 0 {
 		return errors.New("entries must name at least one catalog entry")

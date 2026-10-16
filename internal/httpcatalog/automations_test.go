@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -163,22 +164,29 @@ func TestAutomationRunsAsPersonIsForCursorSessionPools(t *testing.T) {
 	if p, _ := catalog.Pool("cursor-workers"); !p.AutomationRunsAsPerson {
 		t.Fatal("the opt-in was not kept")
 	}
-	for name, at := range map[string]struct {
-		catalog map[string]any
-		pool    int
-	}{
-		"cursor-automation pool": {automationCatalog(), 0},
-		"pool-mode pool":         {harnessCatalog(), 0},
-		"claude-session pool":    {harnessCatalog(), 1},
-	} {
-		p := at.catalog["pools"].([]any)[at.pool].(map[string]any)
+	at := func(c map[string]any, i int, identity string) map[string]any {
+		p := c["pools"].([]any)[i].(map[string]any)
+		if identity != "" {
+			p["identity"] = identity
+		}
 		p["automationRunsAsPerson"] = true
-		if _, err := parseCatalog(t, at.catalog); err == nil || !strings.Contains(err.Error(), "automationRunsAsPerson") {
+		return c
+	}
+	for name, c := range map[string]map[string]any{
+		"cursor-automation pool": at(automationCatalog(), 0, ""),
+		"pool-mode pool":         at(harnessCatalog(), 0, ""),
+		"claude-session pool":    at(harnessCatalog(), 1, ""),
+		"attested-person pool":   at(harnessCatalog(), 2, "attested-person"),
+		"workload pool":          at(harnessCatalog(), 2, "workload"),
+	} {
+		if _, err := parseCatalog(t, c); err == nil || !strings.Contains(err.Error(), "automationRunsAsPerson") {
 			t.Errorf("%s: %v", name, err)
 		}
-		data, _ := json.Marshal(at.catalog)
-		catalog, dropped, err := ParseTolerant(data)
-		if _, kept := catalog.Pool(p["name"].(string)); err != nil || kept || len(dropped) == 0 || dropped[0].Kind != "pool" {
+		data, _ := json.Marshal(c)
+		_, dropped, err := ParseTolerant(data)
+		if err != nil || !slices.ContainsFunc(dropped, func(d Dropped) bool {
+			return d.Kind == "pool" && strings.Contains(d.Reason, "automationRunsAsPerson")
+		}) {
 			t.Errorf("%s: tolerant: %v %+v", name, err, dropped)
 		}
 	}
