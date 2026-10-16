@@ -90,7 +90,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if p.rateLimit != nil && !isLoopbackPeer(r) {
 		if d := p.rateLimit.Check(ratelimit.TierAuth, mitmIPKey(r)); !d.Allow {
 			if p.strictCredentialProxy {
-				p.strictUnauthenticatedDeny(w, r, http.StatusTooManyRequests)
+				p.strictAuthLimitDeny(w, r, d)
 				return
 			}
 			ratelimit.WriteDenial(w, d, "Too many CONNECT attempts")

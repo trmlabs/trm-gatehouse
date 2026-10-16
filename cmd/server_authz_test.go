@@ -1,6 +1,10 @@
 package cmd
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Infisical/agent-vault/internal/entitlement"
+)
 
 func TestRunnerPersonDomains(t *testing.T) {
 	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
@@ -114,5 +118,44 @@ func TestGraphSettings(t *testing.T) {
 	}
 	if _, err := loadAuthorization(env(map[string]string{"AGENT_VAULT_ENTITLEMENTS": "graph"})); err == nil {
 		t.Error("graph without its settings accepted")
+	}
+}
+
+// Each person's directory budget is a setting: today's 60 by default, and any
+// positive count up to a ceiling that is itself a setting, 6,000 by default.
+// A budget over the ceiling fails at start rather than removing the guard.
+func TestEntitlementLookupsPerMinute(t *testing.T) {
+	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
+	with := func(budget, ceiling string) map[string]string {
+		values := map[string]string{"AGENT_VAULT_ENTITLEMENTS": "file:/nonexistent/entitlements.json"}
+		if budget != "" {
+			values["AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE"] = budget
+		}
+		if ceiling != "" {
+			values["AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX"] = ceiling
+		}
+		return values
+	}
+	a, err := loadAuthorization(env(with("", "")))
+	if err != nil || a.entitlements == nil || a.entitlements.LookupsPerMinute != entitlement.DefaultLookupsPerMinute || entitlement.DefaultLookupsPerMinute != 60 ||
+		entitlement.DefaultMaxLookupsPerMinute != 6000 {
+		t.Fatalf("default: %+v %v", a.entitlements, err)
+	}
+	for _, c := range []struct {
+		budget, ceiling string
+		want            int
+	}{{"1", "", 1}, {"600", "", 600}, {"6000", "", 6000}, {"250000", "250000", 250000}, {"", "1000000", 60}} {
+		if a, err := loadAuthorization(env(with(c.budget, c.ceiling))); err != nil || a.entitlements.LookupsPerMinute != c.want {
+			t.Errorf("budget %q ceiling %q: %+v %v", c.budget, c.ceiling, a.entitlements, err)
+		}
+	}
+	for _, c := range []struct{ budget, ceiling string }{
+		{"0", ""}, {"-5", ""}, {"ten", ""}, {"1.5", ""},
+		{"6001", ""}, {"250000", ""}, {"100", "99"}, {"", "30"},
+		{"60", "0"}, {"60", "-1"}, {"60", "lots"},
+	} {
+		if _, err := loadAuthorization(env(with(c.budget, c.ceiling))); err == nil {
+			t.Errorf("budget %q ceiling %q accepted", c.budget, c.ceiling)
+		}
 	}
 }

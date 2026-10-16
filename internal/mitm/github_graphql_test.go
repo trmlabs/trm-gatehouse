@@ -535,6 +535,39 @@ func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 	}
 }
 
+// A GraphQL write reaches a pull request under the pool's own pull request
+// prefixes (poolPullRequestPrefixes), as a REST write does, and never one
+// under another pool's list in the same entry.
+func TestGitHubGraphQLWritesHonorPoolPullRequestPrefixes(t *testing.T) {
+	f := newGraphQLFixture(t)
+	f.useRaw(t, `{"entries":[{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent","pool-other"],
+		"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
+		"operations":["graphql","pr.read","pr.comment","pr.ready"],"poolPullRequestPrefixes":{"pool-agent":["factory/"],"pool-other":["person/"]}}]}},
+		{"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`)
+	comment := func(id string) string {
+		return graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": id, "body": "x"})
+	}
+	ready := func(id string) string {
+		return graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput", map[string]any{"pullRequestId": id})
+	}
+	// prefixPR's head, factory/fix, is under pool-agent's own list only.
+	for _, body := range []string{comment(prefixPR), ready(prefixPR)} {
+		if code, reply := f.send(t, http.MethodPost, "/graphql", nil, body); code != 200 {
+			t.Errorf("own pull request prefix: %s: %d %s %q", body, code, reply, f.audit.last().Outcome)
+		}
+	}
+	// personPR's head, person/x, is under pool-other's list.
+	for body, outcome := range map[string]string{comment(personPR): "comment_target", ready(personPR): "pull_request_target"} {
+		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 403 || f.audit.last().Outcome != outcome {
+			t.Errorf("another pool's pull request prefix: %s: %d %q, want %q", body, code, f.audit.last().Outcome, outcome)
+		}
+	}
+	if got := f.relayed(); len(got) != 2 {
+		t.Fatalf("relayed %v", got)
+	}
+}
+
 // A lookup GitHub does not answer refuses; nothing is sent on a guess.
 func TestGitHubGraphQLLookupFailureRefuses(t *testing.T) {
 	f := newGraphQLFixture(t)

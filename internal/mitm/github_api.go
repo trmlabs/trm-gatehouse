@@ -35,10 +35,14 @@ const readyMutation = `mutation($id: ID!) { markPullRequestReadyForReview(input:
 // forwardGitHubAPI serves the GitHub REST routes a github-api entry lists
 // (httpcatalog GitHubAPIMatch) for one listed repository, with a token minted
 // for that repository and only the scope the route needs. It can never
-// approve, review, merge or push: those are unlisted. A write to an existing
+// approve, review or merge a pull request, and it pushes only through a CI
+// restart's branch update: the rest are unlisted. A write to an existing
 // pull request (comment, label, body edit, ready) goes ahead only when its
 // head is under the pool's push prefixes or the repository's pull request
-// prefixes, and a comment edit only on the App's own comment there.
+// prefixes, and a comment edit only on the App's own comment there. A CI
+// restart (a pull request's branch update, which merges the base into the
+// head, or a workflow run run again) goes ahead only on a branch under the
+// pool's own push prefixes (restartInScope).
 func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, api httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if api.Entry != nil {
@@ -58,11 +62,13 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	}
 	entry := api.Entry
 	if a.GitTokens == nil {
-		deny(http.StatusServiceUnavailable, "token_unavailable")
+		// Waiting does not help: only an operator (a restart, for a minter
+		// wired at startup) can give the broker one.
+		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
-	jsonBody := api.Write && api.Route != "ready"
+	jsonBody := api.Write && api.Route != "ready" && api.RestartOf == 0
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
 		unsafePath(r.URL.Path) || r.Header.Get("Upgrade") != "" || r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 ||
 		(jsonBody && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json")) {
@@ -111,6 +117,8 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		body, ok = dispatchFrom(body, api.Repo.DispatchEvents)
 	case "ready":
 		ok = len(bytes.TrimSpace(body)) == 0 || string(bytes.TrimSpace(body)) == "{}"
+	case "update-branch", "rerun", "rerun-failed":
+		body, ok = restartBody(body, api.Route == "update-branch")
 	}
 	if !ok {
 		deny(http.StatusBadRequest, "request_shape")
@@ -118,7 +126,7 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
-		deny(http.StatusTooManyRequests, "rate_limited")
+		p.adapterRateDeny(w, event, target, enf.Decision)
 		return
 	}
 	defer enf.Release()
@@ -128,6 +136,14 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	if err != nil {
 		deny(http.StatusServiceUnavailable, "token_unavailable")
 		return
+	}
+	if api.RestartOf > 0 {
+		branch, inScope := p.restartInScope(r, target, expected, api, token.Value())
+		event.Branch = auditchain.BranchField(branch)
+		if !inScope {
+			deny(http.StatusForbidden, restartOutcome(api.Route))
+			return
+		}
 	}
 	var nodeID string
 	if api.CommentID > 0 {
@@ -167,7 +183,7 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 			out.Header[name] = append([]string(nil), v...)
 		}
 	}
-	if api.Route == "ready" {
+	if api.Route == "ready" || (api.RestartOf > 0 && len(body) > 0) {
 		out.Header.Set("Content-Type", "application/json")
 	}
 	credential := "Bearer " + token.Value()
@@ -177,7 +193,7 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	admittedAt := time.Now()
@@ -209,6 +225,10 @@ func routePermissions(scope string) githubapp.Permissions {
 		return githubapp.ChecksRead
 	case "statuses":
 		return githubapp.StatusesRead
+	case "update-branch":
+		return githubapp.UpdateBranch
+	case "actions-write":
+		return githubapp.ActionsWrite
 	}
 	return githubapp.PullRequestsWrite
 }

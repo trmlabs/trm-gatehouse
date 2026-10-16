@@ -289,7 +289,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := a.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	admittedAt := time.Now()
@@ -312,7 +312,7 @@ func (p *Proxy) answerGitHubGraphQL(w http.ResponseWriter, event auditchain.Even
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
 	if err := p.adapter.Audit.Record(admitted); err != nil {
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		refuse(w, "audit_unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

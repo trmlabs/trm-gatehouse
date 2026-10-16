@@ -96,5 +96,5 @@ HTTPS call: `NODE_EXTRA_CA_CERTS` for Node, the NSS store for Chromium.
 ## Before staging
 
 - For `password-realm`, an Auth0 confidential client with the grant, limited to the test-user connection, in the staging tenant. For `automated-auth`, the service's profile for the app and its key in Vault.
-- The broker's egress (`AGENT_VAULT_NETWORK_ALLOWLIST`, `AGENT_VAULT_EGRESS_RANGES` and the namespace's network policy) allows the Auth0 tenant's addresses and, for `automated-auth`, the service's.
+- The broker's egress (`AGENT_VAULT_NETWORK_ALLOWLIST`, `AGENT_VAULT_EGRESS_RANGES` or `AGENT_VAULT_EGRESS_RANGES_FILE`, and the namespace's network policy) allows the Auth0 tenant's addresses and, for `automated-auth`, the service's.
 - Test users only. SSO and MFA employee accounts cannot use this, and the catalog never lists production.
