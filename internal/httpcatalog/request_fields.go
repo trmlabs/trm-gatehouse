@@ -10,13 +10,14 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // RequestField limits one request parameter of a header entry to listed
 // values. The parameter must appear exactly once in the whole request, in the
 // query string or in a JSON object or form body, as a string equal to one of
-// Values. A Slack entry must limit "channel", so a worker can post only to the
-// listed channels and never to a person or a group conversation.
+// Values. A Slack entry must limit "channel", so a worker can reach only the
+// listed channels and never a person or a group conversation.
 type RequestField struct {
 	Name   string   `json:"name"`
 	Values []string `json:"values"`
@@ -32,15 +33,28 @@ var (
 	slackChannel = regexp.MustCompile(`^C[A-Z0-9]{8,20}$`)
 )
 
-// slackMethods are the only Slack Web API paths an entry may list. Each takes
-// one channel and posts or edits a message there. Other methods name a person
-// or a second conversation in another parameter (files.completeUploadExternal
-// channel_id, conversations.invite users, chat.postEphemeral user), which the
-// channel rule would not see.
-var slackMethods = map[string]bool{"/api/chat.postMessage": true, "/api/chat.update": true}
+// slackMethods are the only Slack Web API paths an entry may list, each with
+// every parameter Slack documents for it except token (the key goes in the
+// header). Each was checked to name its one conversation in channel: it posts
+// or edits a message, adds a reaction, or reads a channel's messages or a
+// thread. Any other method is refused until it is checked and listed here.
+// Some name a person or a second conversation in another parameter
+// (files.completeUploadExternal channel_id, conversations.invite users,
+// chat.postEphemeral user), which the channel rule would not see.
+var slackMethods = map[string][]string{
+	"/api/chat.postMessage": {"channel", "as_user", "attachments", "blocks", "current_draft_last_updated_ts", "icon_emoji", "icon_url",
+		"link_names", "markdown_text", "metadata", "mrkdwn", "parse", "reply_broadcast", "text", "thread_ts", "unfurl_app_links",
+		"unfurl_links", "unfurl_media", "username"},
+	"/api/chat.update": {"channel", "ts", "as_user", "attachments", "blocks", "file_ids", "link_names", "markdown_text", "metadata",
+		"parse", "reply_broadcast", "text", "unfurled_attachments"},
+	"/api/reactions.add":         {"channel", "name", "timestamp"},
+	"/api/conversations.history": {"channel", "cursor", "include_all_metadata", "inclusive", "latest", "limit", "oldest"},
+	"/api/conversations.replies": {"channel", "ts", "cursor", "include_all_metadata", "inclusive", "latest", "limit", "oldest"},
+}
 
 // ErrRequestField is a request whose limited parameters are missing,
-// repeated, placed twice or not listed, or whose body cannot be read safely.
+// repeated, placed twice or not listed, that uses a key it may not, or whose
+// body cannot be read safely.
 var ErrRequestField = errors.New("request field not allowed")
 
 // slackHost reports whether host is Slack's Web API.
@@ -72,18 +86,19 @@ func (e *Entry) normalizeRequestFields() error {
 			return errors.New("a Slack entry must limit channel to listed channel IDs (requestFields)")
 		}
 		for _, p := range e.PathPrefixes {
-			if !slackMethods[p] {
-				return fmt.Errorf("slack path %q is not allowed; list only /api/chat.postMessage and /api/chat.update", p)
+			if _, ok := slackMethods[p]; !ok {
+				return fmt.Errorf("slack path %q is not allowed; list only /api/chat.postMessage, /api/chat.update, /api/reactions.add, /api/conversations.history and /api/conversations.replies", p)
 			}
 		}
 	}
 	return nil
 }
 
-// CheckRequestFields holds a request to the entry's RequestFields. rawQuery is
-// the query string, contentTypes every Content-Type header value and body the
-// whole request body. Every refusal is ErrRequestField.
-func (e *Entry) CheckRequestFields(rawQuery string, contentTypes []string, body []byte) error {
+// CheckRequestFields holds a request to the entry's RequestFields. path is the
+// request path, rawQuery the query string, contentTypes every Content-Type
+// header value and body the whole request body. Every refusal is
+// ErrRequestField.
+func (e *Entry) CheckRequestFields(path, rawQuery string, contentTypes []string, body []byte) error {
 	if len(e.RequestFields) == 0 {
 		return nil
 	}
@@ -117,16 +132,29 @@ func (e *Entry) CheckRequestFields(rawQuery string, contentTypes []string, body 
 			return ErrRequestField
 		}
 	}
-	for _, f := range e.RequestFields {
-		// Some parsers fold channel[] or channel[0] into channel; a key like
-		// that beside the limited one could name a second conversation.
-		for _, values := range []url.Values{query, form} {
-			for key := range values {
-				if key != f.Name && strings.HasPrefix(key, f.Name+"[") {
-					return ErrRequestField
-				}
+	// A vendor's parser may read a key as another name: PHP and its ports
+	// drop leading spaces, cut at a NUL byte and fold channel[] or channel[0]
+	// into channel. A key like that beside the limited one could name a
+	// second conversation, so a Slack request may use only the parameters its
+	// method takes, and any request only plain keys.
+	slack := slackHost(e.Host)
+	allowed := slackMethods[path] // none for a path that is not exactly a listed method
+	refused := func(key string) bool {
+		return (slack && !contains(allowed, key)) || strings.ContainsFunc(key, foldedRune)
+	}
+	for _, values := range []url.Values{query, form} {
+		for key := range values {
+			if refused(key) {
+				return ErrRequestField
 			}
 		}
+	}
+	for key := range object {
+		if refused(key) {
+			return ErrRequestField
+		}
+	}
+	for _, f := range e.RequestFields {
 		var found []string
 		found = append(found, query[f.Name]...)
 		found = append(found, form[f.Name]...)
@@ -142,6 +170,12 @@ func (e *Entry) CheckRequestFields(rawQuery string, contentTypes []string, body 
 		}
 	}
 	return nil
+}
+
+// foldedRune reports a character some parser drops, cuts at or reads as
+// structure in a parameter name: whitespace, a control byte or a bracket.
+func foldedRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r) || r == '[' || r == ']'
 }
 
 // uniqueObject decodes a JSON object whose top-level keys are all distinct;

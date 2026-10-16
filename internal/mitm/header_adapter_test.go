@@ -131,7 +131,7 @@ func (s *scopeResolver) set(scope *brokercore.ProxyScope) {
 
 func newAdapterFixture(t *testing.T, options ...func(*Options)) *adapterFixture {
 	t.Helper()
-	return newAdapterFixtureWith(t, false, options...)
+	return newAdapterFixtureWith(t, "", options...)
 }
 
 // basicKey is how a vendor expecting the key as a Basic user name sees it.
@@ -139,17 +139,21 @@ func basicKey(key string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(key+":"))
 }
 
-// newAdapterFixtureWith builds the fixture with a Bearer entry, or with basic
-// set, an entry whose vendor takes the key as an HTTP Basic user name.
-func newAdapterFixtureWith(t *testing.T, basic bool, options ...func(*Options)) *adapterFixture {
+// newAdapterFixtureWith builds the fixture with a Bearer entry, or with auth
+// "basicUser" or "basicPair", an entry whose vendor takes the key as an HTTP
+// Basic user name or as a "user:password" pair.
+func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options)) *adapterFixture {
 	t.Helper()
 	f := &adapterFixture{keys: &adapterKeys{value: adapterKeyV1}, audit: &adapterAudit{}, acceptsV: adapterKeyV1, release: make(chan struct{})}
 	f.vendor = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.calls.Add(1)
 		f.seen.Store(r.Header.Clone())
 		want := "Bearer " + f.acceptsV
-		if basic {
+		switch auth {
+		case "basicUser":
 			want = basicKey(f.acceptsV)
+		case "basicPair":
+			want = "Basic " + base64.StdEncoding.EncodeToString([]byte(f.acceptsV))
 		}
 		if r.Header.Get("Authorization") != want {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -180,7 +184,7 @@ func newAdapterFixtureWith(t *testing.T, basic bool, options ...func(*Options)) 
 			w.Header().Set("X-Debug", "Bearer "+adapterKeyV1)
 			fmt.Fprint(w, "ok")
 		case "/v1/echo-basic":
-			fmt.Fprint(w, strings.TrimPrefix(basicKey(adapterKeyV1), "Basic "))
+			fmt.Fprint(w, strings.TrimPrefix(want, "Basic "))
 		default:
 			fmt.Fprint(w, "ok")
 		}
@@ -189,8 +193,8 @@ func newAdapterFixtureWith(t *testing.T, basic bool, options ...func(*Options)) 
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(f.vendor.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
 	scheme := `"scheme":"Bearer"`
-	if basic {
-		scheme = `"basicUser":true`
+	if auth != "" {
+		scheme = `"` + auth + `":true`
 	}
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{
 		"name":"llm","host":"example.com","port":%d,"pathPrefixes":["/v1/chat","/v1/stream","/v1/echo-split","/v1/echo-header","/v1/echo-basic"],
@@ -241,7 +245,8 @@ func (f *adapterFixture) do(t *testing.T, method, path, body string, mutate func
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, readErr := io.ReadAll(resp.Body)
-	for _, key := range []string{adapterKeyV1, adapterKeyV2, basicKey(adapterKeyV1)[6:], basicKey(adapterKeyV2)[6:]} {
+	pair := base64.StdEncoding.EncodeToString([]byte(f.acceptsV)) // the encoded key, as a Basic pair sends it
+	for _, key := range []string{adapterKeyV1, adapterKeyV2, basicKey(adapterKeyV1)[6:], basicKey(adapterKeyV2)[6:], pair} {
 		if strings.Contains(string(data), key) || strings.Contains(fmt.Sprint(resp.Header), key) {
 			t.Fatal("key reached the worker")
 		}
@@ -391,7 +396,7 @@ func TestAdapterRejectsMisplacedPlaceholdersAndRoutingHeaders(t *testing.T) {
 // same way, or nothing; the bare placeholder or its own key is refused, and an
 // echo of the encoded key is cut off.
 func TestAdapterSendsKeyAsBasicUser(t *testing.T) {
-	f := newAdapterFixtureWith(t, true)
+	f := newAdapterFixtureWith(t, "basicUser")
 	placeholder := func(r *http.Request) { r.Header.Set("Authorization", basicKey("__vault_LLM_KEY__")) }
 	for _, mutate := range []func(*http.Request){placeholder, func(r *http.Request) { r.Header.Del("Authorization") }} {
 		code, body, err := f.do(t, "POST", "/v1/chat/completions", `{}`, mutate)
@@ -414,6 +419,52 @@ func TestAdapterSendsKeyAsBasicUser(t *testing.T) {
 	f.do(t, "GET", "/v1/echo-basic", "", placeholder)
 	if got := f.audit.last(); got.Event != auditchain.EventHTTPResponse || got.Outcome != "secret_echo" {
 		t.Fatalf("encoded key echo: %+v", got)
+	}
+}
+
+// A vendor that takes a key pair as Basic credentials (a public and a secret
+// key) gets the stored "user:password" key that way. The worker sends the
+// placeholder as both halves, or nothing; any other value is refused, a key
+// that is not a pair is never sent, and an echo of the encoded pair or of the
+// password alone is cut off.
+func TestAdapterSendsKeyPairAsBasic(t *testing.T) {
+	f := newAdapterFixtureWith(t, "basicPair")
+	pair := "pk-synthetic-adapter:" + adapterKeyV1
+	f.keys.mu.Lock()
+	f.keys.value, f.acceptsV = pair, pair
+	f.keys.mu.Unlock()
+	encode := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(s)) }
+	placeholder := func(r *http.Request) { r.Header.Set("Authorization", encode("__vault_LLM_KEY__:__vault_LLM_KEY__")) }
+	for _, mutate := range []func(*http.Request){placeholder, func(r *http.Request) { r.Header.Del("Authorization") }} {
+		code, body, err := f.do(t, "POST", "/v1/chat/completions", `{}`, mutate)
+		if err != nil || code != 200 || body != `{"method":"POST","bytes":2}` {
+			t.Fatalf("pair: %d %q %v", code, body, err)
+		}
+	}
+	for name, value := range map[string]string{
+		"user only":        basicKey("__vault_LLM_KEY__"),
+		"bare placeholder": "Basic __vault_LLM_KEY__",
+		"own pair":         encode("pk-worker-own:sk-worker-own"),
+		"own user":         encode("pk-worker-own:__vault_LLM_KEY__"),
+	} {
+		calls := f.calls.Load()
+		code, _, _ := f.do(t, "POST", "/v1/chat/completions", `{}`, func(r *http.Request) { r.Header.Set("Authorization", value) })
+		if code != 400 || f.calls.Load() != calls || f.audit.last().Outcome != "credential_header" {
+			t.Fatalf("%s: %d %+v", name, code, f.audit.last())
+		}
+	}
+	for _, path := range []string{"/v1/echo-basic", "/v1/echo-split"} {
+		f.do(t, "GET", path, "", placeholder)
+		if got := f.audit.last(); got.Event != auditchain.EventHTTPResponse || got.Outcome != "secret_echo" {
+			t.Fatalf("%s: %+v", path, got)
+		}
+	}
+	f.keys.mu.Lock()
+	f.keys.value = adapterKeyV1
+	f.keys.mu.Unlock()
+	calls := f.calls.Load()
+	if code, _, _ := f.do(t, "POST", "/v1/chat/completions", `{}`, placeholder); code != 503 || f.calls.Load() != calls || f.audit.last().Outcome != "key_unavailable" {
+		t.Fatalf("key that is not a pair: %d %+v", code, f.audit.last())
 	}
 }
 
@@ -561,6 +612,52 @@ func TestAdapterHoldsRequestFieldsToListedValues(t *testing.T) {
 		code, _, err := f.do(t, "POST", tc.path, tc.body, nil)
 		if err != nil || code != http.StatusForbidden || f.calls.Load() != calls || f.audit.last().Outcome != "request_field" {
 			t.Errorf("%s: %d %v outcome=%q, vendor calls %d->%d", name, code, err, f.audit.last().Outcome, calls, f.calls.Load())
+		}
+	}
+}
+
+// A Slack entry forwards a call that uses only its method's parameters and
+// refuses a key Slack could read as a second channel, or one the method does
+// not take, before anything reaches Slack.
+func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{
+			"name":"slack","host":"slack.com","port":%d,"pathPrefixes":["/api/conversations.history"],"methods":["GET"],
+			"header":"Authorization","scheme":"Bearer","placeholder":"__vault_LLM_KEY__",
+			"key":{"mount":"gatehouse","path":"vendors/slack","field":"key"},"pools":["pool-agent"],
+			"requestFields":[{"name":"channel","values":["C0123456789"]}]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	// The test vendor's certificate names example.com, not slack.com.
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	call := func(query string) int {
+		t.Helper()
+		r, err := http.NewRequest("GET", "https://slack.com:"+strconv.Itoa(f.port)+"/api/conversations.history?"+query, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := call("channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 {
+		t.Fatalf("listed channel: %d, vendor calls %d", code, f.calls.Load())
+	}
+	for name, query := range map[string]string{
+		"leading space":                 "channel=C0123456789&%20channel=D0123456789",
+		"NUL":                           "channel=C0123456789&channel%00=D0123456789",
+		"not a parameter of the method": "channel=C0123456789&name=eyes",
+	} {
+		if code := call(query); code != http.StatusForbidden || f.calls.Load() != 1 || f.audit.last().Outcome != "request_field" {
+			t.Errorf("%s: %d outcome=%q, vendor calls %d", name, code, f.audit.last().Outcome, f.calls.Load())
 		}
 	}
 }
