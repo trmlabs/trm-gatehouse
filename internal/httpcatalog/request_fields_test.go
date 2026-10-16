@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Infisical/agent-vault/internal/auditchain"
 )
 
 const slackEntry = `{"name":"slack","host":"slack.com","pathPrefixes":["/api/chat.postMessage","/api/chat.update"],"methods":["POST"],
@@ -86,6 +88,39 @@ func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 	sub := strings.Replace(slackEntry, `"host":"slack.com"`, `"host":"api.slack.com"`, 1)
 	if _, err := Parse([]byte(`{"entries":[` + sub + `]}`)); err != nil {
 		t.Errorf("subdomain with the rule and listed methods: %v", err)
+	}
+}
+
+// A Slack entry names each listed method as its audit operation, one the
+// audit chain accepts (a name it refuses would fail every call to that method
+// as audit_unavailable); any other path or entry names none.
+func TestSlackOperationNamesTheMethod(t *testing.T) {
+	want := map[string]string{
+		"/api/chat.postMessage":      "slack.chat_post_message",
+		"/api/chat.update":           "slack.chat_update",
+		"/api/reactions.add":         "slack.reactions_add",
+		"/api/conversations.history": "slack.conversations_history",
+		"/api/conversations.replies": "slack.conversations_replies",
+	}
+	if len(want) != len(slackMethods) {
+		t.Fatalf("%d Slack methods, %d names checked", len(slackMethods), len(want))
+	}
+	slack := &Entry{Host: "slack.com"}
+	for path := range slackMethods {
+		got := slack.Operation(path)
+		if err := (auditchain.Event{Event: auditchain.EventHTTPResponse, Operation: got}).Validate(); got != want[path] || err != nil {
+			t.Errorf("%s: %q (%v), want %q", path, got, err, want[path])
+		}
+	}
+	for name, got := range map[string]string{
+		"unlisted method":  slack.Operation("/api/conversations.invite"),
+		"below a method":   slack.Operation("/api/chat.postMessage/x"),
+		"another host":     (&Entry{Host: "api.linear.app"}).Operation("/api/chat.postMessage"),
+		"no entry matched": (*Entry)(nil).Operation("/api/chat.postMessage"),
+	} {
+		if got != "" {
+			t.Errorf("%s: %q", name, got)
+		}
 	}
 }
 
