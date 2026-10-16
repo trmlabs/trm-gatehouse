@@ -201,8 +201,10 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 			return nil, err
 		}
 		minter := &githubapp.Minter{Signer: signer, API: api, Log: srv.Logger(), ScopeMode: scopeMode, Scope: func(installation int64) githubapp.Scope {
-			s := source.Current().GitScope(installation)
-			return githubapp.Scope{Repos: s.Repos, PullRequests: s.PullRequests, Actions: s.Actions, Deployments: s.Deployments, Checks: s.Checks, Statuses: s.Statuses}
+			// A conversion, not a field list: a scope added to one type and not
+			// the other stops the build, instead of going unmapped and making
+			// the installation check report every installation that holds it.
+			return githubapp.Scope(source.Current().GitScope(installation))
 		}}
 		adapter.GitTokens = minter
 		// A catalog change that removes or narrows a repository revokes the
@@ -259,12 +261,16 @@ func gitScope(p githubapp.Permissions) string {
 	switch {
 	case p.Actions == "read":
 		return "actions"
+	case p.Actions == "write":
+		return "actions-write"
 	case p.Deployments == "read":
 		return "deployments"
 	case p.Checks == "read":
 		return "checks"
 	case p.Statuses == "read":
 		return "statuses"
+	case p.PullRequests == "write" && p.Contents == "write":
+		return "update-branch"
 	case p.PullRequests == "write":
 		return "pull-requests"
 	case p.Contents == "write":

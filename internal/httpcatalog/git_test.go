@@ -316,6 +316,7 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		"GET deployments", "GET deployments/1", "GET deployments/1/statuses",
 		"GET actions/workflows/ci.yml", "GET pulls/1/files", "GET compare/main...feature", "GET commits/abc1234/status",
 		"GET commits/abc1234/statuses", "GET commits/abc1234/check-runs", "GET check-runs/1", "GET check-runs/1/annotations",
+		"PUT pulls/1/update-branch", "POST actions/runs/1/rerun", "POST actions/runs/1/rerun-failed-jobs",
 	}
 	want := map[string][]string{
 		"pr.open":    {"POST pulls"},
@@ -331,6 +332,10 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 			"GET actions/workflows/ci.yml", "GET commits/abc1234/status", "GET commits/abc1234/statuses", "GET commits/abc1234/check-runs",
 			"GET check-runs/1", "GET check-runs/1/annotations"},
 		"deployments.read": {"GET deployments", "GET deployments/1", "GET deployments/1/statuses"},
+		// CI restarts also need a git entry with push prefixes (TestGitHubCIRestartsNeedPushPrefixes).
+		"pr.update_branch":     nil,
+		"actions.rerun":        nil,
+		"actions.rerun_failed": nil,
 	}
 	if len(want) != len(githubOperations) {
 		t.Fatalf("the vocabulary has %d operations, this test covers %d", len(githubOperations), len(want))
@@ -370,7 +375,7 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 		if fmt.Sprint(got) != fmt.Sprint(routes) {
 			t.Errorf("%s opens %v, want %v", op, got, routes)
 		}
-		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments", "checks", "statuses"} {
+		for _, scope := range []string{"pull-requests", "contents-write", "actions", "deployments", "checks", "statuses", "update-branch", "actions-write"} {
 			want := githubOperations[op] == scope || contains(githubRouteScopes[op], scope)
 			if c.GitGranted(42, "trmlabs/trm-b2b", scope) != want {
 				t.Errorf("%s: GitGranted(%s) = %v", op, scope, !want)
@@ -442,5 +447,79 @@ func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
 	}
 	if _, err := match(altPort); !errors.Is(err, ErrUnlisted) {
 		t.Errorf("only an alternate port lists the repository: %v", err)
+	}
+}
+
+// A CI restart (a branch update, a rerun) exists only where the repository
+// opts in and the git entry a push would use lets the pool push to branch
+// prefixes. Its head must then be under those prefixes alone, never the
+// repository's pullRequestPrefixes, and the requester must pass that git
+// entry too.
+func TestGitHubCIRestartsNeedPushPrefixes(t *testing.T) {
+	api := `{"name":"github-api","host":"api.github.com","kind":"github-api","pools":["pool-a"],
+		"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
+		"operations":["pr.comment","pr.update_branch","actions.rerun","actions.rerun_failed"],"pullRequestPrefixes":["factory/"]}]}}`
+	git := func(host, access, prefixes string) string {
+		return `{"name":"github","host":"` + host + `","kind":"git","pools":["pool-a"],"git":{"appID":7,"installationID":42,
+			"repos":[{"repo":"example-org/example-repo","access":"` + access + `"` + prefixes + `}]}}`
+	}
+	routes := map[string]struct{ method, op, scope string }{
+		"/repos/example-org/example-repo/pulls/12/update-branch":            {"PUT", "pr.update_branch", "update-branch"},
+		"/repos/example-org/example-repo/actions/runs/34/rerun":             {"POST", "actions.rerun", "actions-write"},
+		"/repos/example-org/example-repo/actions/runs/34/rerun-failed-jobs": {"POST", "actions.rerun_failed", "actions-write"},
+	}
+	c, err := Parse([]byte(`{"entries":[` + api + `,` + git("github.com", "write", `,"refPrefixes":["refs/heads/agent/","refs/tags/agent/"]`) + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range routes {
+		m, _, err := c.GitHubAPIMatch("api.github.com", 443, want.method, path, "", "pool-a")
+		if err != nil || m.Operation != want.op || m.Permissions != want.scope || m.RestartOf == 0 || m.Target != 0 ||
+			m.CloneEntry == nil || m.CloneEntry.Name != "github" || fmt.Sprint(m.HeadPrefixes) != "[agent/]" {
+			t.Errorf("%s: %v %+v", path, err, m)
+		}
+		if _, _, err := c.GitHubAPIMatch("api.github.com", 443, want.method, path, "", "pool-b"); !errors.Is(err, ErrPool) {
+			t.Errorf("%s for another pool: %v", path, err)
+		}
+	}
+	if !c.GitGranted(42, "example-org/example-repo", "update-branch") || !c.GitGranted(42, "example-org/example-repo", "actions-write") ||
+		c.GitGranted(42, "example-org/example-repo", "actions") {
+		t.Error("GitGranted does not follow the restart operations")
+	}
+	if s := c.GitScope(42); !s.PullRequests || !s.ActionsWrite || s.Actions {
+		t.Errorf("GitScope = %+v", s)
+	}
+	// Each restart operation alone sets the installation scope its token needs.
+	for op, want := range map[string][2]bool{ // pull requests write, actions write
+		"pr.update_branch":     {true, false},
+		"actions.rerun":        {false, true},
+		"actions.rerun_failed": {false, true},
+	} {
+		c, err := Parse([]byte(`{"entries":[{"name":"github-api","host":"api.github.com","kind":"github-api","pools":["pool-a"],
+			"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write","operations":["` + op + `"]}]}}]}`))
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		if s := c.GitScope(42); s.PullRequests != want[0] || s.ActionsWrite != want[1] || s.Actions || s.Deployments || s.Checks || s.Statuses {
+			t.Errorf("%s alone: GitScope = %+v", op, s)
+		}
+	}
+	for name, doc := range map[string]string{
+		"no git entry":         api,
+		"read-only git entry":  api + `,` + git("github.com", "read", ``),
+		"push anywhere":        api + `,` + git("github.com", "write", ``),
+		"tag prefixes only":    api + `,` + git("github.com", "write", `,"refPrefixes":["refs/tags/agent/"]`),
+		"git entry elsewhere":  api + `,` + git("git.example.com", "write", `,"refPrefixes":["refs/heads/agent/"]`),
+		"every branch is none": api + `,` + git("github.com", "write", `,"refPrefixes":["refs/heads/"]`),
+	} {
+		c, err := Parse([]byte(`{"entries":[` + doc + `]}`))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for path, want := range routes {
+			if _, _, err := c.GitHubAPIMatch("api.github.com", 443, want.method, path, "", "pool-a"); !errors.Is(err, ErrUnlisted) {
+				t.Errorf("%s: %s: %v", name, path, err)
+			}
+		}
 	}
 }

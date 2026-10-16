@@ -37,7 +37,7 @@ type JWTSigner interface {
 type Permissions struct {
 	Contents     string // "", "read" or "write"
 	PullRequests string // "" or "write"
-	Actions      string // "" or "read"
+	Actions      string // "", "read" or "write"
 	Deployments  string // "" or "read"
 	Checks       string // "" or "read"
 	Statuses     string // "" or "read"
@@ -59,11 +59,16 @@ var (
 	// StatusesRead reads a commit's statuses.
 	ChecksRead   = Permissions{Checks: "read"}
 	StatusesRead = Permissions{Statuses: "read"}
+	// ActionsWrite runs a workflow run again. UpdateBranch merges a pull
+	// request's base into its head: GitHub asks an App for contents write on
+	// the head repository besides pull requests write.
+	ActionsWrite = Permissions{Actions: "write"}
+	UpdateBranch = Permissions{Contents: "write", PullRequests: "write"}
 )
 
 func (p Permissions) valid() bool {
 	return (p.Contents == "" || p.Contents == "read" || p.Contents == "write") && (p.PullRequests == "" || p.PullRequests == "write") &&
-		(p.Actions == "" || p.Actions == "read") && (p.Deployments == "" || p.Deployments == "read") &&
+		(p.Actions == "" || p.Actions == "read" || p.Actions == "write") && (p.Deployments == "" || p.Deployments == "read") &&
 		(p.Checks == "" || p.Checks == "read") && (p.Statuses == "" || p.Statuses == "read") && p != Permissions{}
 }
 
