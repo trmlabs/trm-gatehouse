@@ -291,6 +291,7 @@ Do not open a public issue with exploit details.
 
 ## License
 
-MIT. See [LICENSE](LICENSE), which keeps Infisical's copyright notice, and
-[NOTICE](NOTICE) for the fork's attribution. Gatehouse is maintained by
-[TRM Labs](https://trmlabs.com).
+MIT. [LICENSE](LICENSE) names Infisical Inc. and TRM Labs, Inc. as copyright
+holders. [NOTICE](NOTICE) carries the fork's attribution and the note from
+Infisical's original license on which files it covers. Gatehouse is
+maintained by [TRM Labs](https://trmlabs.com).
