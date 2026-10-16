@@ -56,9 +56,10 @@ func TestRefusalNamesItsReason(t *testing.T) {
 		{"another pool's host reads as unlisted", "pool", "", 403, 0, "unlisted", 403, "", false},
 		{"unlisted", "unlisted", "", 403, 0, "unlisted", 403, "", false},
 		{"method keeps 405", "method", "", 405, 0, "method", 405, "", false},
-		{"rate limit keeps 429", "rate_limited", "", 429, 0, "rate_limited", 429, "", false},
+		{"rate limit with no limiter wait still sends a second", "rate_limited", "", 429, 0, "rate_limited", 429, "1", false},
 		{"rate limit sends the limiter's wait, rounded up", "rate_limited", "", 429, 2500 * time.Millisecond, "rate_limited", 429, "3", false},
-		{"a code with no entry names itself", "some_future_check", "", 403, 0, "some_future_check", 403, "", false},
+		{"an outcome with no entry answers refused", "some_future_check", "", 403, 0, "refused", 403, "", false},
+		{"a code with no entry answers refused", "token_unavailable", "some_future_code", 503, 0, "refused", 503, "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -84,6 +85,33 @@ func TestRefusalNamesItsReason(t *testing.T) {
 				t.Fatalf("audit row: %+v", row)
 			}
 		})
+	}
+}
+
+// An outcome a later change builds from an error or a reason, which has no
+// entry in the table, never reaches the agent: it sees "refused" and the
+// generic next step, by every path a refusal is written, and the audit row
+// keeps the specific outcome.
+func TestUnknownOutcomeStaysInTheAuditRow(t *testing.T) {
+	outcome := "lookup_failed:alice@example.test"
+	audit := &adapterAudit{}
+	p := &Proxy{adapter: &HeaderAdapter{Audit: audit}}
+	written := map[string]*httptest.ResponseRecorder{}
+	written["adapterDeny"] = httptest.NewRecorder()
+	p.adapterDeny(written["adapterDeny"], auditchain.Event{}, "api.vendor.example:443", http.StatusForbidden, outcome)
+	if row := audit.last(); row.Outcome != outcome || row.Status != http.StatusForbidden {
+		t.Fatalf("audit row: %+v", row)
+	}
+	written["adapterDenyAs"] = httptest.NewRecorder()
+	p.adapterDenyAs(written["adapterDenyAs"], auditchain.Event{}, "api.vendor.example:443", http.StatusForbidden, "refused", outcome, 0)
+	written["refuseWith"] = httptest.NewRecorder()
+	refuseWith(written["refuseWith"], http.StatusForbidden, outcome)
+	for path, rec := range written {
+		body := rec.Body.String()
+		if rec.Code != http.StatusForbidden || rec.Header().Get(RefusalHeader) != "refused" || rec.Header().Get("Retry-After") != "" ||
+			body != "refused: "+refusals["refused"].next+"\n" || strings.Contains(body, "lookup") || strings.Contains(body, "alice") {
+			t.Errorf("%s: got %d %q %q", path, rec.Code, rec.Header().Get(RefusalHeader), body)
+		}
 	}
 }
 
@@ -169,7 +197,7 @@ func TestSignInLimitSendsTheLimitersWait(t *testing.T) {
 // from an ...Outcome helper, and every refusal outcome the authorize and
 // entitlement packages return, which the adapters pass on as variables. A new
 // outcome written in any of those shapes without an entry here fails this
-// test instead of falling back to "report it and do not retry".
+// test instead of reaching the agent only as the generic "refused".
 func TestRefusalTableIsComplete(t *testing.T) {
 	for code, kind := range refusals {
 		if kind.next == "" || strings.ContainsAny(kind.next, "\r\n") || strings.ContainsFunc(kind.next, func(r rune) bool { return r > 0x7e }) {
@@ -179,8 +207,9 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			t.Errorf("%s: Retry-After on status %d", code, kind.status)
 		}
 	}
+	// "pool" answers as "unlisted"; every other outcome needs its own entry.
 	check := func(file, outcome string) {
-		if _, ok := refusals[refusalCode(outcome)]; !ok {
+		if _, ok := refusals[outcome]; !ok && outcome != "pool" {
 			t.Errorf("%s refuses with %q, which has no next step", file, outcome)
 		}
 	}

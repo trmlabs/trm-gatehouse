@@ -89,13 +89,12 @@ func (p *Proxy) adapterDeny(w http.ResponseWriter, event auditchain.Event, targe
 // the audit outcome, and, from a rate limiter, its own wait (0 for none) in
 // place of the code's fixed Retry-After.
 func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome, code string, wait time.Duration) {
-	status, kind := refusalFor(code, status)
+	code, status, kind := refusalFor(code, status)
 	kind = kind.after(wait)
 	event.Event, event.Outcome, event.Status = auditchain.EventDenied, outcome, status
 	event.Target = auditchain.TargetField(target)
 	if p.adapter.Audit.Record(event) != nil {
-		code = "audit_unavailable"
-		status, kind = refusalFor(code, status)
+		code, status, kind = refusalFor("audit_unavailable", status)
 	}
 	writeRefusal(w, status, code, kind)
 }

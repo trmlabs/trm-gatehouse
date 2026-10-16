@@ -13,15 +13,17 @@ import (
 
 // RefusalHeader names, on every response the catalog adapter refuses, why it
 // refused: a fixed code an agent can branch on without parsing prose. The
-// body carries the same code and a one-line next step. A code is fixed text,
-// never request data, and says no more about the catalog than the status
-// already does: a host no entry for the caller's pool names answers
-// "unlisted" whether or not another pool's entry names it. The audit row
-// records the refusal and the status sent; its outcome can be more specific
-// than the code ("pool" where the agent sees "unlisted") or less ("refused"
-// for a check made before the request reached the catalog). The broker sets
-// this header only on its own refusals and strips it from every upstream
-// response, so its presence means the request was refused here.
+// body carries the same code and a one-line next step. A code is fixed text
+// from the refusals table, never request data, and says no more about the
+// catalog than the status already does. A request on an entry the caller's
+// pool is not granted answers "unlisted" (403), except that the method check
+// runs first: a method that entry does not list answers "method" (405). The
+// audit row records the refusal and the status sent; its outcome can be more
+// specific than the code ("pool" where the agent sees "unlisted", or an
+// outcome with no table entry where the agent sees "refused") or less
+// ("refused" for a check made before the request reached the catalog). The
+// broker sets this header only on its own refusals and strips it from every
+// upstream response, so its presence means the request was refused here.
 const RefusalHeader = brokercore.RefusalHeader
 
 // refusalKind is how one refusal code answers. A passing refusal (one the
@@ -56,7 +58,9 @@ var refusals = map[string]refusalKind{
 	"entitlement_unavailable":  {status: http.StatusServiceUnavailable, retryAfter: 5, next: "the directory could not confirm your access; " + nextRetry},
 	"entitlement_rate_limited": {status: http.StatusTooManyRequests, retryAfter: 60, next: "too many access checks for this person in the last minute; " + nextRetry},
 	"busy":                     {status: http.StatusTooManyRequests, retryAfter: 5, next: "the broker is at its connection limit, or this address has too many failed sign-ins; " + nextRetry},
-	"rate_limited":             {status: http.StatusTooManyRequests, next: "this workload is over its request rate for the destination; wait for Retry-After when present, otherwise pause, then retry; if the third retry is refused the same way, stop and report it."},
+	// The limiter's own wait replaces this second when it gives one; when it
+	// gives none, the second still keeps an agent from retrying at once.
+	"rate_limited": {status: http.StatusTooManyRequests, retryAfter: 1, next: "this workload is over its request rate for the destination; " + nextRetry},
 
 	// Lasting: the same request will be refused again.
 	"broker_misconfigured":   {status: http.StatusServiceUnavailable, next: "the broker is not set up to serve this destination; " + nextReport},
@@ -106,13 +110,14 @@ var refusals = map[string]refusalKind{
 
 // refusalCode is the code an agent sees for an audit outcome: the outcome
 // itself, except that "pool" is told apart from "unlisted" in the audit row
-// only. A code with no entry in refusals still names itself, with a generic
-// next step.
+// only, and an outcome with no entry in refusals answers "refused". Only the
+// table's fixed codes reach the agent, so an outcome a later change builds
+// from an error or a reason stays in the audit row.
 func refusalCode(outcome string) string {
-	switch outcome {
-	case "pool":
+	if outcome == "pool" {
 		return "unlisted"
-	case "":
+	}
+	if _, ok := refusals[outcome]; !ok {
 		return "refused"
 	}
 	return outcome
@@ -135,17 +140,18 @@ func identityRefusalCode(status int) string {
 	return "identity"
 }
 
-// refusalFor resolves a code and the status its caller chose into the status
-// to answer with and how to answer.
-func refusalFor(code string, status int) (int, refusalKind) {
+// refusalFor resolves a code and the status its caller chose into the code,
+// status and kind to answer with. A code with no entry answers as "refused",
+// whatever path it came by.
+func refusalFor(code string, status int) (string, int, refusalKind) {
 	kind, ok := refusals[code]
 	if !ok {
-		kind = refusalKind{next: nextReport}
+		code, kind = "refused", refusals["refused"]
 	}
 	if kind.status != 0 {
 		status = kind.status
 	}
-	return status, kind
+	return code, status, kind
 }
 
 // after is kind with a limiter's own wait as its Retry-After, rounded up to a
@@ -176,7 +182,7 @@ func writeRefusal(w http.ResponseWriter, status int, code string, kind refusalKi
 // one made after the request was admitted, whose response row records it. A
 // code with a fixed status answers with that status; any other keeps status.
 func refuseWith(w http.ResponseWriter, status int, code string) {
-	status, kind := refusalFor(code, status)
+	code, status, kind := refusalFor(code, status)
 	writeRefusal(w, status, code, kind)
 }
 
