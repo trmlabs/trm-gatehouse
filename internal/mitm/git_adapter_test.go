@@ -24,6 +24,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/decoy"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
@@ -47,6 +48,7 @@ type gitFixture struct {
 	requests                           []string          // contents permission per mint
 	gitCalls                           []string          // METHOD repo:service seen with a valid token
 	receivePacks                       int               // POSTs to git-receive-pack that reached GitHub at all
+	decoys                             *decoy.Source     // empty until a test plants decoys
 }
 
 func runGit(t *testing.T, dir string, env []string, args ...string) (string, error) {
@@ -64,7 +66,7 @@ func newGitFixture(t *testing.T) *gitFixture {
 	if _, err := os.Stat(backend); err != nil {
 		t.Skip("git http-backend not available")
 	}
-	f := &gitFixture{root: t.TempDir(), work: t.TempDir(), home: t.TempDir(), audit: &adapterAudit{}, minted: map[string]string{}}
+	f := &gitFixture{root: t.TempDir(), work: t.TempDir(), home: t.TempDir(), audit: &adapterAudit{}, minted: map[string]string{}, decoys: decoy.NewSource(nil)}
 	env := f.env()
 	for _, repo := range []string{"trmlabs/trm-b2b", "trmlabs/docs", "trmlabs/secret"} {
 		bare := filepath.Join(f.root, repo+".git")
@@ -137,7 +139,7 @@ func newGitFixture(t *testing.T) *gitFixture {
 	scope := &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1"}
 	proxyURL, _, p := setupProxy(t, validTokenResolver("workload-token", scope), &fakeCredProvider{}, func(o *Options) {
 		o.StrictCredentialProxy = true
-		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter}
+		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter, Decoys: f.decoys}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	githubAddr := strings.TrimPrefix(github.URL, "https://")

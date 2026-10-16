@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/decoy"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
@@ -36,11 +37,12 @@ type apiFixture struct {
 	reads   int
 	echo    bool
 	last    string // the last body GitHub received
+	decoys  *decoy.Source
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
-	f := &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}}
+	f := &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}, decoys: decoy.NewSource(nil)}
 	var seq int
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/app/installations/42/access_tokens" {
@@ -121,7 +123,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	scope := &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1"}
 	proxyURL, roots, p := setupProxy(t, validTokenResolver("workload-token", scope), &fakeCredProvider{}, func(o *Options) {
 		o.StrictCredentialProxy = true
-		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter}
+		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter, Decoys: f.decoys}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	addr := strings.TrimPrefix(github.URL, "https://")

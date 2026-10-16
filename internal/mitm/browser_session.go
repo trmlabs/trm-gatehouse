@@ -72,6 +72,9 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	if err == nil && p.refuseDecoyBody(w, event, target, body) {
+		return
+	}
 	switch {
 	case err != nil:
 		deny(http.StatusBadRequest, "request_shape")
