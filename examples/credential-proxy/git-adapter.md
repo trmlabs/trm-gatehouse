@@ -61,6 +61,8 @@ A `github-api` entry lets agents work with pull requests in listed repositories,
     "pullRequestPrefixes": ["factory/"], "labels": ["preview"]}]}}
 ```
 
+Responses, including log and artifact downloads, stream to the worker through the token screen. One longer than the entry's `maxResponseBytes` (default 4 GiB, at most 8 GiB) is cut off and audited as `response_too_large`.
+
 `operations` comes from this vocabulary. A repository that lists none gets `pr.open`, `pr.read` and `pr.comment`. Paths are under `/repos/{owner}/{repo}`:
 
 | Operation | Routes | Token scope |

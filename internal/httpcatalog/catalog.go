@@ -56,7 +56,7 @@ type Entry struct {
 	// API version. Every other caller header except a fixed safe set is dropped.
 	ForwardHeaders   []string `json:"forwardHeaders,omitempty"`
 	MaxRequestBytes  int64    `json:"maxRequestBytes,omitempty"`  // default 1 MiB; git 1 GiB (a push)
-	MaxResponseBytes int64    `json:"maxResponseBytes,omitempty"` // default 32 MiB; git 4 GiB
+	MaxResponseBytes int64    `json:"maxResponseBytes,omitempty"` // default 32 MiB; git and github-api 4 GiB
 	// RequestFields limit request parameters to listed values (see
 	// RequestField). Header entries only; a Slack entry must limit channel.
 	RequestFields []RequestField `json:"requestFields,omitempty"`
@@ -544,6 +544,11 @@ func (e *Entry) normalize() error {
 	case "git":
 		return e.normalizeGit()
 	case "github-api":
+		// A write body is small JSON. A response keeps the git default, since
+		// a log or artifact download streams hundreds of MiB.
+		if e.MaxRequestBytes == 0 {
+			e.MaxRequestBytes = 1 << 20
+		}
 		if err := e.normalizeGit(); err != nil {
 			return err
 		}
@@ -554,12 +559,6 @@ func (e *Entry) normalize() error {
 			if err := r.normalizeGitHubAPI(); err != nil {
 				return err
 			}
-		}
-		if e.MaxRequestBytes == 1<<30 {
-			e.MaxRequestBytes = 1 << 20
-		}
-		if e.MaxResponseBytes == 4<<30 {
-			e.MaxResponseBytes = 8 << 20
 		}
 		if e.MaxRequestBytes > 16<<20 {
 			return errors.New("github-api request limit is at most 16 MiB")
