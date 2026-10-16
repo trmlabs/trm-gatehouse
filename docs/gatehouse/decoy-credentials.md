@@ -20,7 +20,7 @@ A Basic credential is decoded, and percent-encoding and JSON `\u` escapes are un
 Out of reach:
 - A git push's pack data, which is compressed and streamed.
 - Any host outside the pool's catalog. The broker refuses that CONNECT before TLS, so it never sees the request.
-- Behind the [task relay](task-relay/README.md), the CONNECT headers and the PostgreSQL password. The relay sends the broker its own CONNECT and proof, and refuses any sandbox password but the placeholder (recorded as `denied:placeholder`), so alert on the relay's refusals for relayed sandboxes. Requests inside a relayed tunnel are checked as above.
+- Behind the [task relay](../../examples/credential-proxy/task-relay/README.md), the CONNECT headers and the PostgreSQL password. The relay sends the broker its own CONNECT and proof, and refuses any sandbox password but the placeholder (recorded as `denied:placeholder`), so alert on the relay's refusals for relayed sandboxes. Requests inside a relayed tunnel are checked as above.
 
 Give decoys the shape of credentials for hosts the pool does reach through the broker.
 

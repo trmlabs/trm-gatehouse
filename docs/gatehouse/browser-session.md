@@ -4,8 +4,8 @@ An agent's own browser (Playwright) can use a web app as a logged-in test user
 without ever holding the user's password, the login client's secret or a
 token. The browser loads the app with a ready-made login state that contains
 only placeholders. When the app calls its API, Gatehouse swaps the placeholder
-for a real access token it obtained for the test user. This retires the staging
-email, password and automated-auth private key that agents hold today.
+for a real access token it obtained for the test user. The test user's email
+and password and the sign-in secrets stay in Vault.
 
 ## How it works
 
@@ -20,13 +20,13 @@ email, password and automated-auth private key that agents hold today.
 | Cookies | Never pass, in either direction: a cookie the app or API sets after a bearer call would be a session credential of its own. |
 | Screening | Every response is screened for the real token. A response that carries it is cut off. |
 
-The staging app (trm-b2b `packages/enterprise`) never decodes the access
-token. It reads `sub` and `org_id` from the ID token, keeps tokens in
-localStorage and streams agent chat over `fetch`, which passes as an ordinary
-response. WebSocket upgrades are refused until an app needs them.
+This suits a single-page app that keeps its Auth0 tokens in localStorage,
+since the seed fills localStorage, and never decodes the access token: it reads
+`sub` and `org_id` from the ID token. Streaming over `fetch` passes as an
+ordinary response. WebSocket upgrades are refused until an app needs them.
 
-`browser-seed-check.mjs` loads auth0-spa-js 2.1.3 in Chromium, configured like
-the staging app, with a seed from `TestBrowserSeedFile`. The client reports a
+[`browser-seed-check.mjs`](../../examples/credential-proxy/browser-seed-check.mjs) loads auth0-spa-js 2.1.3 in Chromium, configured like
+an organization-enabled app, with a seed from `TestBrowserSeedFile`. The client reports a
 signed-in user, returns the placeholder from `getTokenSilently`, returns `sub`
 and `org_id` from `getIdTokenClaims`, and makes no network call.
 
@@ -35,7 +35,7 @@ and `org_id` from `getIdTokenClaims`, and makes no network call.
 | `auth0.login` | How | When |
 |---|---|---|
 | `password-realm` (default) | Auth0's password-realm grant through a confidential client (`auth0.realm`, `auth0.tokenClient`). | An app whose Auth0 application is not organization-enabled. |
-| `automated-auth` | TRM's automated-auth service drives the app's Universal Login with the entry's organization. | An organization-enabled app. Auth0 refuses the password-realm grant for those, and the TRM Enterprise API refuses a token without `org_id`. |
+| `automated-auth` | A sign-in service (`automatedAuth`) drives the app's Universal Login with the entry's organization. | An organization-enabled app. Auth0 refuses the password-realm grant for those, and an API that requires `org_id` refuses a token without it. |
 
 With `automated-auth`, Gatehouse calls `POST <url>/v1/auth/login` with the service key, the profile, the organization and the user's email and password, all from Vault except the profile and organization. It then:
 
@@ -58,25 +58,24 @@ A browser-session entry acts as its test user, often an admin of its organizatio
 
 ## Catalog entry
 
-An example staging app (placeholder values):
+An example app (placeholder values):
 
 ```json
-{"name": "enterprise-staging", "kind": "browser-session", "host": "api.staging.example.com",
- "placeholder": "__vault_ENTERPRISE_STAGING__", "pools": ["<one pool>"],
+{"name": "example-app", "kind": "browser-session", "host": "api.example.com",
+ "placeholder": "__vault_EXAMPLE_APP__", "pools": ["<one pool>"],
  "pathPrefixes": ["<the API paths the workers need>"],
- "readOnlyPaths": ["/users-organizations"],
- "deniedPaths": ["/v1/parent-organizations/*/users", "/v1/parent-organizations/*/invitations",
-                 "/v1/parent-organizations/*/environments/*/groups/*/members", "/v1/users/*/email", "/v1/intel-vault"],
+ "readOnlyPaths": ["/v1/settings"],
+ "deniedPaths": ["/v1/organizations/*/users", "/v1/organizations/*/members", "/v1/users/*/email"],
  "browserSession": {
-   "appHost": "app.staging.example.com",
-   "auth0": {"domain": "auth.staging.example.com", "clientID": "<SPA client ID>",
-             "audience": "https://app.staging.example.com/", "login": "automated-auth"},
-   "automatedAuth": {"url": "https://automated-auth.staging.example.com", "profile": "app-staging",
-                     "orgID": "org_example", "key": {"mount": "gatehouse", "path": "browser/automated-auth"}},
-   "user": {"mount": "gatehouse", "path": "browser/enterprise-staging/user"}}}
+   "appHost": "app.example.com",
+   "auth0": {"domain": "auth.example.com", "clientID": "<SPA client ID>",
+             "audience": "https://app.example.com/", "login": "automated-auth"},
+   "automatedAuth": {"url": "https://signin.example.com", "profile": "example-app",
+                     "orgID": "org_example", "key": {"mount": "gatehouse", "path": "browser/signin-service"}},
+   "user": {"mount": "gatehouse", "path": "browser/example-app/user"}}}
 ```
 
-- `key` holds `private_key`, the automated-auth service key. `user` holds `email` and `password`. They live only in Vault.
+- `key` holds `private_key`, the sign-in service's key. `user` holds `email` and `password`. They live only in Vault.
 - One pool per entry, and a test user in one entry only, so its session and audit trail belong to one pool.
 - A `password-realm` entry drops `automatedAuth` and sets `auth0.realm` and `auth0.tokenClient` (`client_id` and `client_secret` of a confidential client allowed the grant for that connection only).
 - `forwardHeaders` adds request headers to the browser set.
@@ -86,15 +85,15 @@ An example staging app (placeholder values):
 ```js
 const proxy = { server: 'http://127.0.0.1:14322' }; // the worker's Gatehouse sidecar
 const api = await request.newContext({ proxy });
-const seed = await (await api.get('https://api.staging.example/.gatehouse/browser-seed')).json();
+const seed = await (await api.get('https://api.example.com/.gatehouse/browser-seed')).json();
 const context = await browser.newContext({ proxy, storageState: seed });
 ```
 
 The worker image trusts Gatehouse's interception CA, as for every proxied
 HTTPS call: `NODE_EXTRA_CA_CERTS` for Node, the NSS store for Chromium.
 
-## Before staging
+## Before you enable an entry
 
-- For `password-realm`, an Auth0 confidential client with the grant, limited to the test-user connection, in the staging tenant. For `automated-auth`, the service's profile for the app and its key in Vault.
+- For `password-realm`, an Auth0 confidential client with the grant, limited to the test-user connection, in a non-production tenant. For `automated-auth`, the service's profile for the app and its key in Vault.
 - The broker's egress (`AGENT_VAULT_NETWORK_ALLOWLIST`, `AGENT_VAULT_EGRESS_RANGES` or `AGENT_VAULT_EGRESS_RANGES_FILE`, and the namespace's network policy) allows the Auth0 tenant's addresses and, for `automated-auth`, the service's.
 - Test users only. SSO and MFA employee accounts cannot use this, and the catalog never lists production.

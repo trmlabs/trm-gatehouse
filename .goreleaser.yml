@@ -34,6 +34,7 @@ archives:
     name_template: "agent-vault_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE*
+      - NOTICE*
       - README*
 
 checksum:

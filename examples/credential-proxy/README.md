@@ -6,7 +6,7 @@ reads or issues credentials through Vault, and refuses requests it cannot
 safely authorize or record.
 
 This directory supplies local verification and a proposed deployment profile.
-It does not establish that a TRM production deployment has passed acceptance.
+It does not establish that any production deployment has passed acceptance.
 
 For a managed Kubernetes sandbox that must hold **no identity credential**, use
 [the separate task relay](task-relay/README.md). Its operator-owned pairing maps
@@ -121,14 +121,20 @@ value outside those bounds is dropped, so the upstream default or the Vault
 role's setting applies. This closes the startup packet as a way to clear or
 extend a role-level limit such as `statement_timeout`; an in-session `SET`
 remains governed by the role's SQL permissions.
-Follow [database recovery](database-recovery.md) before clearing a quarantine.
+Follow [database recovery](../../docs/gatehouse/database-recovery.md) before clearing a quarantine.
 
 ## Deployment requirements
 
-- Run one broker with persistent state, no overlapping active replacement, and
-  monitoring for disk pressure, unknown audit outcomes and pending cleanup.
+- Run the broker with persistent state and monitoring for disk pressure,
+  unknown audit outcomes and pending cleanup. On SQLite, run one replica with
+  no overlapping active replacement; for more than one replica, use a shared
+  PostgreSQL store as described in [running a fleet](../../docs/gatehouse/broker-fleet.md).
 - Keep agent containers in separate pods. Never share broker memory, volumes,
   Vault authorization or administrative access with agent code.
+- Enforce with admission policy that only the pool controller creates Pods in
+  a worker or agent namespace, and that no one changes their owner references
+  or requester annotation afterwards. Gatehouse checks those fields but does
+  not ship the policy, and RBAC alone does not hold this.
 - Expose only encrypted proxy entry points. PostgreSQL's loopback protocol needs
   a compatible client/server tunnel; an ordinary public HTTP ingress does not
   solve this. Verify certificates and server names on every remote leg.
@@ -144,7 +150,7 @@ Follow [database recovery](database-recovery.md) before clearing a quarantine.
 
 ## Record acceptance
 
-Record results in the shared implementation document beside each requirement.
+Record results beside each requirement in your deployment review.
 Include revision, environment, exact command, expected/observed result, and a
 private test-run or review link. Local fixtures do not close deployed routing,
 managed-database behavior or production operational checks.

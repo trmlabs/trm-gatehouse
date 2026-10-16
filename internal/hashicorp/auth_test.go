@@ -110,15 +110,15 @@ func TestLogin_AppRoleCustomMount(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("VAULT_ROLE_ID", "r")
 	t.Setenv("VAULT_SECRET_ID", "s")
-	t.Setenv("VAULT_APPROLE_MOUNT", "prod-approle")
+	t.Setenv("VAULT_APPROLE_MOUNT", "example-approle")
 	cfg := vaultapi.DefaultConfig()
 	cfg.Address = srv.URL
 	api, _ := vaultapi.NewClient(cfg)
 	if _, err := login(context.Background(), api, AuthAppRole); err != nil {
 		t.Fatalf("login(AppRole, custom mount): %v", err)
 	}
-	if gotPath != "/v1/auth/prod-approle/login" {
-		t.Errorf("login path = %q, want /v1/auth/prod-approle/login", gotPath)
+	if gotPath != "/v1/auth/example-approle/login" {
+		t.Errorf("login path = %q, want /v1/auth/example-approle/login", gotPath)
 	}
 }
 

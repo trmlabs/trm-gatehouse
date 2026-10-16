@@ -1,3 +1,6 @@
+# Inherited from Infisical's Agent Vault and disabled in this repository: the
+# job below runs only in Infisical/agent-vault. A Gatehouse release needs its
+# own reviewed workflow.
 name: Release
 
 on:

@@ -22,11 +22,11 @@ another, even with the token Gatehouse used.
 
 ```json
 {"name": "team-files", "kind": "gcp", "host": "storage.googleapis.com", "tier": "T1",
- "requires": ["<Entra group object ID>"], "placeholder": "__vault_GCP__", "pools": ["claude"],
+ "requires": ["<directory group object ID>"], "placeholder": "__vault_GCP__", "pools": ["claude"],
  "gcp": {"bucket": "example-agent-files", "prefix": "teams/analytics/", "role": "roles/storage.objectViewer"}}
 
 {"name": "bq-cases", "kind": "gcp", "host": "bigquery.googleapis.com", "tier": "T1",
- "requires": ["<Entra group object ID>"], "placeholder": "__vault_GCP__", "pools": ["claude"],
+ "requires": ["<directory group object ID>"], "placeholder": "__vault_GCP__", "pools": ["claude"],
  "pathPrefixes": ["/bigquery/v2/projects/example-analytics/"],
  "gcp": {"serviceAccount": "bq-cases@example-analytics.iam.gserviceaccount.com",
          "scopes": ["https://www.googleapis.com/auth/bigquery"]}}
@@ -37,37 +37,32 @@ another, even with the token Gatehouse used.
 - **Paths:** downscoped entries default to the bucket's JSON API paths. Impersonating entries must list their paths.
 - **On the worker:** set the client's access token to the placeholder, for example `CLOUDSDK_AUTH_ACCESS_TOKEN=__vault_GCP__`, and send HTTPS through the Gatehouse sidecar.
 
-## IAM, a second-repo step
+## Google Cloud IAM
 
-The service accounts and grants are GCP IAM, so they live in
-**trm-global-infrastructure**, not trm-infra. Each new entry is a PR there,
-then a catalog PR.
+The service accounts and grants are Google Cloud IAM, usually managed in a
+different repository from the catalog. Each new entry is an IAM change there,
+then a catalog change.
 
-**Where, for staging.** Find the staging broker's cluster and its project with
-`gcloud container clusters list`. That project's Terraform can sit under a
-production-named folder, so search for the project ID rather than the folder
-name. Name every Gatehouse staging account and binding `gatehouse-staging-*`.
-
-**One identity pool for both clusters.** Clusters in the same project share
-its Workload Identity pool. A member is named only by namespace and service
+**One identity pool per project.** Clusters in the same project share its
+Workload Identity pool. A member is named only by namespace and service
 account, never by cluster:
-`serviceAccount:PROJECT_ID.svc.id.goog[gatehouse/gatehouse]` (the staging chart's service account, from `fullnameOverride: gatehouse` in `broker.values.yaml`; confirm it with `kubectl -n gatehouse get serviceaccount` before writing the binding).
-A production broker must use a different namespace (or project), or it would
-inherit the staging grants.
+`serviceAccount:PROJECT_ID.svc.id.goog[<namespace>/<service account>]`, using
+the broker's own namespace and service account. A production broker must use a
+different namespace (or project) from a non-production one, or it would inherit
+the non-production grants.
 
 1. **Broker identity:**
-   - Create `gatehouse-staging-broker`, bound with `roles/iam.workloadIdentityUser` to the member above, on that service account only.
-   - Follow the `daytona_staging_workload_identity_user` pattern in `workload_identity.tf`.
+   - Create a broker service account, bound with `roles/iam.workloadIdentityUser` to the member above, on that service account only.
 2. **Impersonating entry:**
-   - Create `gatehouse-staging-<entry>`, holding only the entry's role on the entry's resource (for example `roles/bigquery.dataViewer` on one dataset, plus `roles/bigquery.jobUser` where queries run).
-   - Grant `gatehouse-staging-broker` `roles/iam.serviceAccountTokenCreator` on that service account alone, with `google_service_account_iam_member`.
+   - Create one service account per entry, holding only the entry's role on the entry's resource (for example `roles/bigquery.dataViewer` on one dataset, plus `roles/bigquery.jobUser` where queries run).
+   - Grant the broker service account `roles/iam.serviceAccountTokenCreator` on that service account alone, for example with `google_service_account_iam_member`.
    - **Never grant TokenCreator at project or folder level.** The broker may mint only for the accounts the catalog names.
 3. **Downscoped entry:**
-   - A boundary only narrows what the broker already holds. Grant the broker the entry's object role on that bucket alone, with `google_storage_bucket_iam_member` in `infrastructure/buckets/`, never at project level.
+   - A boundary only narrows what the broker already holds. Grant the broker the entry's object role on that bucket alone, for example with `google_storage_bucket_iam_member`, never at project level.
    - Keep each such bucket for agent data only, because the broker's base grant covers the whole bucket.
 
 ## Deferred: AWS
 
 AWS requests are signed per request (SigV4), so Gatehouse would have to
 re-sign each request rather than add a header, from an STS AssumeRole session
-with a session policy. TRM's AWS use is small today, so this waits for demand.
+with a session policy. This waits for demand.

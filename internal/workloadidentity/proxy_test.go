@@ -28,11 +28,11 @@ func setupProxy(t *testing.T) *proxyFixture {
 	c := f.r.config
 	c.TrustDomains = []TrustDomain{rc.td}
 	c.Bindings = append(append([]Binding(nil), c.Bindings...), Binding{
-		Namespace: "gatehouse-edge", ServiceAccount: "gatehouse-edge", ServiceAccountUID: "edge-account-uid",
+		Namespace: "example-edge", ServiceAccount: "example-edge", ServiceAccountUID: "edge-account-uid",
 		AgentID: "agent", VaultID: "vault", TrustDomain: "agent-sandbox",
 		Proxy: &ProxyBinding{Profiles: []ProxyProfile{
 			{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes"},
-			{Namespace: "orion-sandboxes", Profile: "agent-sandbox-orion", Pool: "orion"}},
+			{Namespace: "research-sandboxes", Profile: "agent-sandbox-research", Pool: "research"}},
 			OwnerKind: "Sandbox", ImageDigests: []string{workerDigest}, SourceCIDRs: []string{"10.200.0.0/24"}, MaxSessionSeconds: 1800},
 	})
 	r, err := New(c, &fakeStore{status: "active", role: "proxy"})
@@ -41,13 +41,13 @@ func setupProxy(t *testing.T) *proxyFixture {
 	}
 	// The catalog's profiles: one per namespace, from the sandbox cluster.
 	r.SetProfiles(func(pool string) (Profile, bool) {
-		profile := Profile{Issuer: remoteIssuer, Audience: "gatehouse-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
+		profile := Profile{Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
 			ImageDigests: []string{workerDigest}}
 		switch pool {
 		case "sandboxes":
 			profile.Name, profile.Namespaces = "agent-sandbox-developers", []string{"agent-sandboxes"}
-		case "orion":
-			profile.Name, profile.Namespaces = "agent-sandbox-orion", []string{"orion-sandboxes"}
+		case "research":
+			profile.Name, profile.Namespaces = "agent-sandbox-research", []string{"research-sandboxes"}
 		default:
 			return Profile{}, false
 		}
@@ -132,16 +132,16 @@ func TestNamespacePicksTheProfile(t *testing.T) {
 	if err != nil || developers.Pool != "sandboxes" {
 		t.Fatalf("developers: %v %+v", err, developers)
 	}
-	orion := p.a
-	orion.Namespace, orion.Profile = "orion-sandboxes", "agent-sandbox-orion"
-	if scope, err := p.r.Attest(p.ctx(t, orion), token, linkIP); err != nil || scope.Pool != "orion" {
-		t.Fatalf("orion: %v %+v", err, scope)
+	research := p.a
+	research.Namespace, research.Profile = "research-sandboxes", "agent-sandbox-research"
+	if scope, err := p.r.Attest(p.ctx(t, research), token, linkIP); err != nil || scope.Pool != "research" {
+		t.Fatalf("research: %v %+v", err, scope)
 	}
 	for name, mutate := range map[string]func(a *Attestation){
-		"unknown namespace":               func(a *Attestation) { a.Namespace = "other-sandboxes" },
-		"another namespace's profile":     func(a *Attestation) { a.Profile = "agent-sandbox-orion" },
-		"orion namespace, developer pool": func(a *Attestation) { a.Namespace = "orion-sandboxes" },
-		"no profile":                      func(a *Attestation) { a.Profile = "" },
+		"unknown namespace":                  func(a *Attestation) { a.Namespace = "other-sandboxes" },
+		"another namespace's profile":        func(a *Attestation) { a.Profile = "agent-sandbox-research" },
+		"research namespace, developer pool": func(a *Attestation) { a.Namespace = "research-sandboxes" },
+		"no profile":                         func(a *Attestation) { a.Profile = "" },
 	} {
 		a := p.a
 		mutate(&a)
@@ -151,7 +151,7 @@ func TestNamespacePicksTheProfile(t *testing.T) {
 	}
 	// A catalog profile from another trust domain, or none, admits nothing.
 	p.r.SetProfiles(func(string) (Profile, bool) {
-		return Profile{Name: "agent-sandbox-developers", Issuer: p.pool.c.Issuer, Audience: "gatehouse-edge", Remote: true, Kind: IdentityProxyAttested,
+		return Profile{Name: "agent-sandbox-developers", Issuer: p.pool.c.Issuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested,
 			OwnerKind: "Sandbox", Namespaces: []string{"agent-sandboxes"}, ImageDigests: []string{workerDigest}}, true
 	})
 	if _, err := p.r.Attest(p.ctx(t, p.a), token, linkIP); err == nil {
@@ -196,7 +196,7 @@ func TestProxyAttestedRefusals(t *testing.T) {
 		},
 		"another account in the proxy namespace": func(t *testing.T, p *proxyFixture) input {
 			c := p.rc.claims()
-			c.Subject, c.Kubernetes.ServiceAccount.Name = "system:serviceaccount:gatehouse-edge:default", "default"
+			c.Subject, c.Kubernetes.ServiceAccount.Name = "system:serviceaccount:example-edge:default", "default"
 			return input{p.ctx(t, p.a), p.rc.token(c), linkIP}
 		},
 		"wrong audience": func(t *testing.T, p *proxyFixture) input {
@@ -260,7 +260,7 @@ func TestAdmissionMatchesTheDeclaredProfile(t *testing.T) {
 	profiles := map[string]Profile{
 		"database-developers": {Issuer: ownIssuer, Audience: "gatehouse", Kind: IdentityPodToken, OwnerKind: "ReplicaSet",
 			Namespaces: []string{"pool"}, ImageDigests: []string{workerDigest, sidecarDigest}},
-		"sandboxes": {Name: "agent-sandbox-developers", Issuer: remoteIssuer, Audience: "gatehouse-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
+		"sandboxes": {Name: "agent-sandbox-developers", Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
 			Namespaces: []string{"agent-sandboxes"}, ImageDigests: []string{workerDigest}},
 	}
 	p.r.SetProfiles(func(pool string) (Profile, bool) { pr, ok := profiles[pool]; return pr, ok })
@@ -345,7 +345,7 @@ func TestNamespaceInTwoProxyBindingsIsRefused(t *testing.T) {
 	p := setupProxy(t)
 	c := p.r.config
 	second := c.Bindings[1]
-	second.ServiceAccount, second.ServiceAccountUID = "gatehouse-edge-2", "edge-2-uid"
+	second.ServiceAccount, second.ServiceAccountUID = "example-edge-2", "edge-2-uid"
 	proxy := *second.Proxy
 	proxy.Profiles = []ProxyProfile{{Namespace: "agent-sandboxes", Profile: "other", Pool: "other"}}
 	second.Proxy = &proxy
@@ -399,8 +399,8 @@ func TestProxyRecheckLimits(t *testing.T) {
 }
 
 const (
-	orionPrefix     = "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/orion/"
-	developerPrefix = "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-developers-staging/"
+	researchPrefix  = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/research/"
+	developerPrefix = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/"
 )
 
 // With image prefixes, each namespace runs what its tenant path pulled, and
@@ -412,7 +412,7 @@ func TestProxyImagePrefixes(t *testing.T) {
 	proxy := *c.Bindings[1].Proxy
 	proxy.Profiles = []ProxyProfile{
 		{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes", ImagePrefix: developerPrefix},
-		{Namespace: "orion-sandboxes", Profile: "agent-sandbox-orion", Pool: "orion", ImagePrefix: orionPrefix}}
+		{Namespace: "research-sandboxes", Profile: "agent-sandbox-research", Pool: "research", ImagePrefix: researchPrefix}}
 	proxy.ImageDigests = []string{sidecarDigest} // a platform sidecar
 	c.Bindings[1].Proxy = &proxy
 	r, err := New(c, &fakeStore{status: "active", role: "proxy"})
@@ -420,33 +420,33 @@ func TestProxyImagePrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.SetProfiles(func(pool string) (Profile, bool) {
-		profile := Profile{Issuer: remoteIssuer, Audience: "gatehouse-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
+		profile := Profile{Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
 			ImageDigests: []string{sidecarDigest}}
 		switch pool {
 		case "sandboxes":
 			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-developers", []string{"agent-sandboxes"}, developerPrefix
-		case "orion":
-			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-orion", []string{"orion-sandboxes"}, orionPrefix
+		case "research":
+			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-research", []string{"research-sandboxes"}, researchPrefix
 		default:
 			return Profile{}, false
 		}
 		return profile, true
 	})
 	token := p.rc.token(p.rc.claims())
-	orion := p.a
-	orion.Namespace, orion.Profile = "orion-sandboxes", "agent-sandbox-orion"
+	research := p.a
+	research.Namespace, research.Profile = "research-sandboxes", "agent-sandbox-research"
 	for name, c := range map[string]struct {
 		a      Attestation
 		images []string
 		ok     bool
 	}{
-		"orion agent with the platform sidecar": {orion, []string{orionPrefix + "agent@" + workerDigest, "registry.example/gcsfuse@" + sidecarDigest}, true},
-		"developer agent":                       {p.a, []string{developerPrefix + "team/tool@" + otherDigest}, true},
-		"the proxy image as an agent":           {orion, []string{"us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-images-staging/gatehouse/proxy@" + workerDigest}, false},
-		"a developer image in orion":            {orion, []string{developerPrefix + "tool@" + otherDigest}, false},
-		"an orion image in developers":          {p.a, []string{orionPrefix + "agent@" + workerDigest}, false},
-		"an unlisted platform image":            {orion, []string{orionPrefix + "agent@" + workerDigest, "registry.example/other@" + otherDigest}, false},
-		"a tag, not a pull":                     {orion, []string{orionPrefix + "agent:latest"}, false},
+		"research agent with the platform sidecar": {research, []string{researchPrefix + "agent@" + workerDigest, "registry.example/gcsfuse@" + sidecarDigest}, true},
+		"developer agent":                          {p.a, []string{developerPrefix + "team/tool@" + otherDigest}, true},
+		"the proxy image as an agent":              {research, []string{"us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/gatehouse/proxy@" + workerDigest}, false},
+		"a developer image in research":            {research, []string{developerPrefix + "tool@" + otherDigest}, false},
+		"an research image in developers":          {p.a, []string{researchPrefix + "agent@" + workerDigest}, false},
+		"an unlisted platform image":               {research, []string{researchPrefix + "agent@" + workerDigest, "registry.example/other@" + otherDigest}, false},
+		"a tag, not a pull":                        {research, []string{researchPrefix + "agent:latest"}, false},
 	} {
 		a := c.a
 		a.Images = c.images
@@ -456,18 +456,18 @@ func TestProxyImagePrefixes(t *testing.T) {
 	}
 	// The catalog profile must name the binding's prefix.
 	r.SetProfiles(func(pool string) (Profile, bool) {
-		return Profile{Name: "agent-sandbox-orion", Issuer: remoteIssuer, Audience: "gatehouse-edge", Remote: true, Kind: IdentityProxyAttested,
-			OwnerKind: "Sandbox", Namespaces: []string{"orion-sandboxes"}, ImagePrefix: developerPrefix, ImageDigests: []string{sidecarDigest}}, true
+		return Profile{Name: "agent-sandbox-research", Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested,
+			OwnerKind: "Sandbox", Namespaces: []string{"research-sandboxes"}, ImagePrefix: developerPrefix, ImageDigests: []string{sidecarDigest}}, true
 	})
-	orion.Images = []string{orionPrefix + "agent@" + workerDigest}
-	if _, err := r.Attest(p.ctx(t, orion), token, linkIP); err == nil {
+	research.Images = []string{researchPrefix + "agent@" + workerDigest}
+	if _, err := r.Attest(p.ctx(t, research), token, linkIP); err == nil {
 		t.Error("admitted under a catalog profile with another prefix")
 	}
 	for name, mutate := range map[string]func(b *ProxyBinding){
 		"overlapping prefixes": func(b *ProxyBinding) {
-			b.Profiles[1].ImagePrefix = "us-central1-docker.pkg.dev/trm-agent-sandbox/agent-sandbox-developers-staging/"
+			b.Profiles[1].ImagePrefix = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/"
 		},
-		"another project":       func(b *ProxyBinding) { b.Profiles[1].ImagePrefix = "us-central1-docker.pkg.dev/other/repo/orion/" },
+		"another project":       func(b *ProxyBinding) { b.Profiles[1].ImagePrefix = "us-central1-docker.pkg.dev/other/repo/research/" },
 		"no prefix, no digests": func(b *ProxyBinding) { b.Profiles[1].ImagePrefix, b.ImageDigests = "", nil },
 	} {
 		cc := c
@@ -490,7 +490,7 @@ func TestRefusalsNameTheirCheck(t *testing.T) {
 	unknown := p.a
 	unknown.Namespace = "other-sandboxes"
 	wrongProfile := p.a
-	wrongProfile.Profile = "agent-sandbox-orion"
+	wrongProfile.Profile = "agent-sandbox-research"
 	for want, call := range map[string]func() error{
 		"proxy_source": func() error {
 			_, err := p.r.Attest(p.ctx(t, p.a), token, netip.MustParseAddr("10.201.0.7"))
@@ -525,13 +525,13 @@ func TestRefusalsNameTheirCheck(t *testing.T) {
 // setupProfiles restores the fixture's catalog profiles.
 func setupProfiles(p *proxyFixture) {
 	p.r.SetProfiles(func(pool string) (Profile, bool) {
-		profile := Profile{Issuer: remoteIssuer, Audience: "gatehouse-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
+		profile := Profile{Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
 			ImageDigests: []string{workerDigest}}
 		switch pool {
 		case "sandboxes":
 			profile.Name, profile.Namespaces = "agent-sandbox-developers", []string{"agent-sandboxes"}
-		case "orion":
-			profile.Name, profile.Namespaces = "agent-sandbox-orion", []string{"orion-sandboxes"}
+		case "research":
+			profile.Name, profile.Namespaces = "agent-sandbox-research", []string{"research-sandboxes"}
 		default:
 			return Profile{}, false
 		}

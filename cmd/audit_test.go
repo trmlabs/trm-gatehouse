@@ -87,10 +87,10 @@ func TestBrokerAuditChainSettings(t *testing.T) {
 	t.Setenv("AGENT_VAULT_AUDIT_CHAIN", "1")
 	for _, env := range []map[string]string{
 		{},
-		{"AGENT_VAULT_AUDIT_HMAC_PATH": "gatehouse/audit-hmac"},
-		{"AGENT_VAULT_AUDIT_TRANSIT_KEY": "gatehouse-audit"},
-		{"AGENT_VAULT_AUDIT_HMAC_PATH": "gatehouse/audit-hmac", "AGENT_VAULT_AUDIT_TRANSIT_KEY": "gatehouse-audit"},                                          // no replica name
-		{"AGENT_VAULT_AUDIT_HMAC_PATH": "gatehouse/audit-hmac", "AGENT_VAULT_AUDIT_TRANSIT_KEY": "gatehouse-audit", "AGENT_VAULT_AUDIT_REPLICA": "broker-0"}, // no Vault client
+		{"AGENT_VAULT_AUDIT_HMAC_PATH": "gatehouse/example-audit-hmac"},
+		{"AGENT_VAULT_AUDIT_TRANSIT_KEY": "example-audit-signing"},
+		{"AGENT_VAULT_AUDIT_HMAC_PATH": "gatehouse/example-audit-hmac", "AGENT_VAULT_AUDIT_TRANSIT_KEY": "example-audit-signing"},                                          // no replica name
+		{"AGENT_VAULT_AUDIT_HMAC_PATH": "gatehouse/example-audit-hmac", "AGENT_VAULT_AUDIT_TRANSIT_KEY": "example-audit-signing", "AGENT_VAULT_AUDIT_REPLICA": "broker-0"}, // no Vault client
 	} {
 		if _, err := brokerAuditChain(context.Background(), nil, nil, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler)); err == nil {
 			t.Fatalf("incomplete audit settings accepted: %v", env)

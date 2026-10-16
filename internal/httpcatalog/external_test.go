@@ -7,13 +7,13 @@ import (
 
 // A pool at the external ceiling may exist, but no entry may grant it.
 func TestExternalPoolHoldsNoEntries(t *testing.T) {
-	pools := `{"name":"p","namespace":"n","serviceAccount":"s"},{"name":"orion","namespace":"o","serviceAccount":"s","ceiling":"external"}`
+	pools := `{"name":"p","namespace":"n","serviceAccount":"s"},{"name":"research","namespace":"o","serviceAccount":"s","ceiling":"external"}`
 	if _, err := Parse([]byte(`{"pools":[` + pools + `],"entries":[{` + entryBase + `}]}`)); err != nil {
 		t.Fatalf("external pool with no entries refused: %v", err)
 	}
 	for name, grant := range map[string]string{
-		"T0 entry":   `"pools":["p","orion"]`,
-		"only grant": `"pools":["orion"]`,
+		"T0 entry":   `"pools":["p","research"]`,
+		"only grant": `"pools":["research"]`,
 	} {
 		entry := strings.Replace(entryBase, `"pools":["p"]`, grant, 1)
 		if _, err := Parse([]byte(`{"pools":[` + pools + `],"entries":[{` + entry + `}]}`)); err == nil {
@@ -21,9 +21,9 @@ func TestExternalPoolHoldsNoEntries(t *testing.T) {
 		}
 	}
 	for name, pool := range map[string]string{
-		"with a person":   `{"name":"orion","namespace":"o","serviceAccount":"s","ceiling":"external","identity":"claude-session","ccpoolID":"ccpool_abc"}`,
-		"with a workload": `{"name":"orion","namespace":"o","serviceAccount":"s","ceiling":"external","identity":"workload"}`,
-		"unknown ceiling": `{"name":"orion","namespace":"o","serviceAccount":"s","ceiling":"T-1"}`,
+		"with a person":   `{"name":"research","namespace":"o","serviceAccount":"s","ceiling":"external","identity":"claude-session","ccpoolID":"ccpool_abc"}`,
+		"with a workload": `{"name":"research","namespace":"o","serviceAccount":"s","ceiling":"external","identity":"workload"}`,
+		"unknown ceiling": `{"name":"research","namespace":"o","serviceAccount":"s","ceiling":"T-1"}`,
 	} {
 		if _, err := Parse([]byte(`{"pools":[{"name":"p","namespace":"n","serviceAccount":"s"},` + pool + `],"entries":[{` + entryBase + `}]}`)); err == nil {
 			t.Errorf("%s: accepted", name)

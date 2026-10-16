@@ -42,7 +42,7 @@ checkout and starts real PostgreSQL 16 and HashiCorp Vault 1.19.4 in one disposa
 container. Image downloads and the Go build need network access; the running
 container has external networking disabled, no published ports, and no host
 mounts. It creates synthetic records, a local owner and a dedicated agent.
-If your environment sets `SSL_CERT_FILE` (for example, a TRM-managed Zscaler
+If your environment sets `SSL_CERT_FILE` (for example, a corporate proxy's
 CA bundle), the launcher supplies that bundle to the build; certificate
 verification remains enabled. The bundle is not copied into the runtime image.
 Your local Agent Vault configuration is untouched. Exit or Ctrl+C removes the
@@ -76,7 +76,7 @@ AGENT_VAULT_TOKEN=$(agent-vault agent create database-agent --vault demo:proxy -
 export AGENT_VAULT_TOKEN
 ```
 
-This PR does **not** support the `agent-vault vault token` scoped-session path for
+The PostgreSQL broker does **not** support the `agent-vault vault token` scoped-session path for
 PostgreSQL connections. Those sessions currently lack the actor ID required by
 the broker for per-actor limits and audit attribution, and fail authentication.
 Do not remove the actor check to make such tokens work. Supporting scoped sessions

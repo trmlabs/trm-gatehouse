@@ -1,6 +1,6 @@
 # Observe broker cleanup
 
-A trusted manager can check whether a dedicated database broker has finished its own cleanup. The response contains counts, not credentials or lease identifiers. This is an optional staging integration surface, disabled unless configured. It does not prove that the database contains no residual roles or sessions.
+A trusted manager can check whether a dedicated database broker has finished its own cleanup. The response contains counts, not credentials or lease identifiers. This is an optional integration surface, disabled unless configured. It does not prove that the database contains no residual roles or sessions.
 
 ## Configure the trusted observer
 

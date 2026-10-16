@@ -40,7 +40,7 @@ Evidence:
 > fix for broker tables (`fix(store): migrate-db carries the broker's tables`).
 > Older binaries copy no pending cleanup records, so every credential still
 > waiting for revocation would be forgotten and its database login left
-> behind. The live staging store needs this fix before any move.
+> behind.
 
 1. Create an empty PostgreSQL database for the store. Put its URL in a Secret; it holds a password, so never pass it on a command line you log.
 2. Stop the broker: `kubectl scale statefulset <broker> --replicas=0`. Wait until its Pod is gone. Records left by a crash are safe: they move with the data.

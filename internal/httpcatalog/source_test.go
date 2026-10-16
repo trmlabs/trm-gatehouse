@@ -205,8 +205,8 @@ func TestPathPrefixesRefuseSemicolons(t *testing.T) {
 // can follow a catalog change.
 func TestGitGranted(t *testing.T) {
 	doc := `{"entries":[
-		{"name":"git","kind":"git","host":"github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/a","access":"write"},{"repo":"trmlabs/b","access":"read"}]}},
-		{"name":"api","kind":"github-api","host":"api.github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/a","access":"write"}]}}]}`
+		{"name":"git","kind":"git","host":"github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/a","access":"write"},{"repo":"example-org/b","access":"read"}]}},
+		{"name":"api","kind":"github-api","host":"api.github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/a","access":"write"}]}}]}`
 	c, err := Parse([]byte(doc))
 	if err != nil {
 		t.Fatal(err)
@@ -216,14 +216,14 @@ func TestGitGranted(t *testing.T) {
 		repo, scope  string
 		want         bool
 	}{
-		{42, "trmlabs/a", "contents-write", true},
-		{42, "TrmLabs/A", "contents-read", true},
-		{42, "trmlabs/b", "contents-read", true},
-		{42, "trmlabs/b", "contents-write", false},
-		{42, "trmlabs/a", "pull-requests", true},
-		{42, "trmlabs/b", "pull-requests", false},
-		{43, "trmlabs/a", "contents-read", false},
-		{42, "trmlabs/c", "contents-read", false},
+		{42, "example-org/a", "contents-write", true},
+		{42, "Example-Org/A", "contents-read", true},
+		{42, "example-org/b", "contents-read", true},
+		{42, "example-org/b", "contents-write", false},
+		{42, "example-org/a", "pull-requests", true},
+		{42, "example-org/b", "pull-requests", false},
+		{43, "example-org/a", "contents-read", false},
+		{42, "example-org/c", "contents-read", false},
 	} {
 		if got := c.GitGranted(tc.installation, tc.repo, tc.scope); got != tc.want {
 			t.Errorf("GitGranted(%d, %s, %s) = %v, want %v", tc.installation, tc.repo, tc.scope, got, tc.want)
@@ -235,17 +235,17 @@ func TestGitGranted(t *testing.T) {
 // broker's installation scope check.
 func TestGitScope(t *testing.T) {
 	doc := `{"entries":[
-		{"name":"git","kind":"git","host":"github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/a","access":"write"},{"repo":"trmlabs/b","access":"read"}]}},
-		{"name":"other","kind":"git","host":"github.com","pools":["pool-b"],"git":{"appID":7,"installationID":43,"repos":[{"repo":"trmlabs/c","access":"read"}]}},
-		{"name":"api","kind":"github-api","host":"api.github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"trmlabs/a","access":"write"}]}}]}`
+		{"name":"git","kind":"git","host":"github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/a","access":"write"},{"repo":"example-org/b","access":"read"}]}},
+		{"name":"other","kind":"git","host":"github.com","pools":["pool-b"],"git":{"appID":7,"installationID":43,"repos":[{"repo":"example-org/c","access":"read"}]}},
+		{"name":"api","kind":"github-api","host":"api.github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/a","access":"write"}]}}]}`
 	c, err := Parse([]byte(doc))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := c.GitScope(42); fmt.Sprint(s.Repos) != "[trmlabs/a trmlabs/b trmlabs/a]" || !s.PullRequests || s.Actions || s.Deployments || s.Checks || s.Statuses {
+	if s := c.GitScope(42); fmt.Sprint(s.Repos) != "[example-org/a example-org/b example-org/a]" || !s.PullRequests || s.Actions || s.Deployments || s.Checks || s.Statuses {
 		t.Errorf("GitScope(42) = %+v", s)
 	}
-	if s := c.GitScope(43); fmt.Sprint(s.Repos) != "[trmlabs/c]" || s.PullRequests {
+	if s := c.GitScope(43); fmt.Sprint(s.Repos) != "[example-org/c]" || s.PullRequests {
 		t.Errorf("GitScope(43) = %+v", s)
 	}
 	if s := c.GitScope(44); s.Repos != nil {
