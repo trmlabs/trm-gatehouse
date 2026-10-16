@@ -161,7 +161,7 @@ func readOnlyBroker(t *testing.T, readOnly bool, pool *PoolOptions) (*fakeUpstre
 	audit := &recordingAudit{}
 	_, addr := startBroker(t, Options{
 		Auth:      &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-uuid-1", WorkloadID: "pod-1", Pool: "cursor"}},
-		Databases: &fakeResolver{svc: &DatabaseService{Name: "analytics", Addr: upstream.addr(), Mount: "database", Role: "staging.us.pg1.app-readonly", SSLMode: "disable", MaxConns: 2, ReadOnly: readOnly}},
+		Databases: &fakeResolver{svc: &DatabaseService{Name: "analytics", Addr: upstream.addr(), Mount: "database", Role: "staging.us.example.app-readonly", SSLMode: "disable", MaxConns: 2, ReadOnly: readOnly}},
 		Leases:    &fakeMinter{lease: lease},
 		Pool:      pool,
 		Audit:     audit,
