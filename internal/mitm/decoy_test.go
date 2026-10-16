@@ -196,7 +196,7 @@ func TestGitDecoyCredentialIsRefused(t *testing.T) {
 	f := newGitFixture(t)
 	plantDecoys(t, f.decoys)
 	header := "http.extraHeader=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+decoyGitHub))
-	if out, err := f.git(t, f.work, "-c", header, "ls-remote", f.remote("trmlabs/example-app")); err == nil {
+	if out, err := f.git(t, f.work, "-c", header, "ls-remote", f.remote("example-org/example-app")); err == nil {
 		t.Fatalf("ls-remote with a decoy succeeded: %s", out)
 	}
 	checkDecoyRow(t, f.audit.last(), "pool-a/github_token", decoy.SurfaceHeader, "pool-agent", "example.com:"+strconv.Itoa(f.port))
@@ -215,7 +215,7 @@ func TestGitHubAPIBodyDecoyIsRefused(t *testing.T) {
 	// GitHub decodes JSON escapes, and the broker rebuilds the body decoded,
 	// so an escaped decoy is still one.
 	for _, body := range []string{`{"body":"found it: ` + decoyGitHub + `"}`, `{"body":"\u0073` + decoyGitHub[1:] + `"}`} {
-		if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/12/comments", "", body); code != http.StatusForbidden {
+		if code, _ := f.post(t, "POST", "/repos/example-org/example-app/issues/12/comments", "", body); code != http.StatusForbidden {
 			t.Fatalf("%s: status %d", body, code)
 		}
 		checkDecoyRow(t, f.audit.last(), "pool-a/github_token", decoy.SurfaceBody, "pool-agent", "example.com:"+strconv.Itoa(f.port))
