@@ -23,14 +23,13 @@ type Automation struct {
 	// owner could not, and it stops, at every tier, when the owner's account
 	// is disabled.
 	Owner string `json:"owner"`
-	// RunnerGroup, optional, is the Entra group whose members may also start
-	// the Automation's runs. A member acts with the owner's access for the
-	// listed entries, whatever their own groups. Without it, a run whose
-	// token names anyone other than the owner is refused. The broker sees
-	// only the person the run token names, never who edited the Automation
-	// or set off its trigger: a run Cursor attributes to the owner is served
-	// on the owner's account, so whoever can edit or trigger an Automation
-	// that runs as its owner acts with the owner's access.
+	// RunnerGroup is refused at load. It was to let a group's members run
+	// the Automation on the owner's account, but it would limit who runs
+	// it only if Cursor named the person who set off each run, and the run
+	// tokens seen so far name only the owner. Until a run by someone else
+	// shows who Cursor names, only runs whose token names the owner are
+	// served. The field stays so a catalog that sets it gets this reason,
+	// not an unknown-field error.
 	RunnerGroup string `json:"runnerGroup,omitempty"`
 	// Entries are the catalog entries the Automation may use. Each must also
 	// be granted to the pool its runs land on.
@@ -52,8 +51,8 @@ func (a *Automation) validate() error {
 	if len(a.Owner) > 254 || !automationOwner.MatchString(a.Owner) {
 		return errors.New("owner must be a lower-case email address")
 	}
-	if a.RunnerGroup != "" && !groupID.MatchString(a.RunnerGroup) {
-		return errors.New("runnerGroup must be an Entra object ID")
+	if a.RunnerGroup != "" {
+		return errors.New("runnerGroup is not accepted yet: it would not limit who runs the Automation, since run tokens seen so far name only its owner")
 	}
 	if len(a.Entries) == 0 {
 		return errors.New("entries must name at least one catalog entry")

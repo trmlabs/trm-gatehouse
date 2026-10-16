@@ -196,6 +196,13 @@ type Pool struct {
 	BaseGroup string `json:"baseGroup,omitempty"`
 	// Entitlements are a workload pool's fixed groups.
 	Entitlements []string `json:"entitlements,omitempty"`
+	// AutomationRunsAsPerson, cursor-session only, serves a run a Cursor
+	// Automation started as the person its run token names, with this pool's
+	// entries and that person's groups, as if they had started it. Off by
+	// default: such a run is refused (automation_on_person_pool), so an
+	// Automation reaches only what the catalog lists for it, on a
+	// cursor-automation pool.
+	AutomationRunsAsPerson bool `json:"automationRunsAsPerson,omitempty"`
 
 	harness     *Harness              // the declared profile naming this pool, if any
 	automations map[string]Automation // the catalog's Automations, on a cursor-automation pool
@@ -1360,6 +1367,11 @@ func (p Pool) validate() error {
 		if g != "" && !groupID.MatchString(g) {
 			return fmt.Errorf("groups must be Entra object IDs")
 		}
+	}
+	// Only a cursor-session pool serves a run as its person; any other pool
+	// either never sees an Automation's run or decides it per Automation.
+	if p.AutomationRunsAsPerson && p.Identity != "cursor-session" {
+		return fmt.Errorf("automationRunsAsPerson is for cursor-session pools only")
 	}
 	switch p.Identity {
 	case "", "none":

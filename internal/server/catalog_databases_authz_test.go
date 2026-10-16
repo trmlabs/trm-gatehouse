@@ -216,7 +216,7 @@ func (c cursorRuns) VerifyCursor(_ context.Context, token string) (runnerid.Sess
 // On an automation pool the database path records what the HTTP path does,
 // allowed or refused: the person whose run it is as the requester, with their
 // own object ID, and the run's source and Automation. The entry is decided on
-// the owner's account: bob is in the runner group but not the entry's group.
+// the owner's account.
 func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })
@@ -224,26 +224,26 @@ func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	 "entries":[
 	  {"name":"open","kind":"postgres","host":"db.example","pools":["automations"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
 	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["automations"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}}],
-	 "automations":[{"id":"auto-1","name":"explorer","owner":"alice@example.com","runnerGroup":"` + t2Group + `","entries":["t1db"]}]}`))
+	 "automations":[{"id":"auto-1","name":"explorer","owner":"alice@example.com","entries":["t1db"]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs := cursorRuns{"bob": {Kind: runnerid.KindPerson, Subject: "bob@example.com", Owner: "user:2", Run: "bc-1", Source: "AUTOMATIONS", Automation: "auto-1"}}
-	cache := &entitlement.Cache{Source: directory{"alice@example.com": {t1Group}, "bob@example.com": {t2Group}}}
+	runs := cursorRuns{"alice": {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-1", Source: "AUTOMATIONS", Automation: "auto-1"}}
+	cache := &entitlement.Cache{Source: directory{"alice@example.com": {t1Group}}}
 	r := NewCatalogDatabaseResolver(httpcatalog.NewSource(catalog, 1), runs, cache, &authorizetest.MemBinder{})
 	for _, c := range []struct{ database, decision, oid string }{
-		{"t1db", "entitled", "oid-bob@example.com"},
+		{"t1db", "entitled", "oid-alice@example.com"},
 		// Granted to the pool but not listed for the Automation.
 		{"open", "automation_not_granted", ""},
 	} {
 		var record pgproxy.Requester
-		ctx := pgproxy.WithRequesterRecord(pgproxy.WithSession(context.Background(), "bob"), &record)
+		ctx := pgproxy.WithRequesterRecord(pgproxy.WithSession(context.Background(), "alice"), &record)
 		_, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{ActorID: "a", Pool: "automations", WorkloadID: "pod-a", ClaimedRun: "bc-1"}, c.database)
 		var refused *pgproxy.RefusedError
 		if (c.decision == "entitled") != (err == nil) || (err != nil && (!errors.As(err, &refused) || refused.Outcome != c.decision)) {
 			t.Fatalf("%s: %v", c.database, err)
 		}
-		if record.Kind != "automation" || record.Subject != "bob@example.com" || record.ObjectID != c.oid || record.Decision != c.decision ||
+		if record.Kind != "automation" || record.Subject != "alice@example.com" || record.ObjectID != c.oid || record.Decision != c.decision ||
 			record.Source != "AUTOMATIONS" || record.Automation != "auto-1" || record.AutomationName != "explorer" || record.AutomationOwner != "alice@example.com" {
 			t.Errorf("%s: recorded %+v", c.database, record)
 		}

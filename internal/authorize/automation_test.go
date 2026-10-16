@@ -11,15 +11,12 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-const (
-	automationGroup = "11111111-2222-3333-4444-555555555555"
-	teamGroup       = "66666666-7777-8888-9999-000000000000"
-)
+const automationGroup = "11111111-2222-3333-4444-555555555555"
 
-// automationCatalog has one pool deciding per Automation, a T0 and a T1
-// entry granted to it, and three Automations: auto-1 (alice's, which her team
-// may also run), auto-2 (owned by an account that is gone) and auto-3
-// (alice's alone, the T0 entry only).
+// automationCatalog has one pool deciding per Automation, a T0, a T1 and a
+// T2 entry granted to it, and three Automations: auto-1 (alice's, every
+// entry), auto-2 (owned by an account that is gone) and auto-3 (alice's, the
+// T0 entry only).
 func automationCatalog(t *testing.T) httpcatalog.Catalog {
 	t.Helper()
 	entry := func(name, extra string) string {
@@ -31,7 +28,7 @@ func automationCatalog(t *testing.T) httpcatalog.Catalog {
 		"entries":[` + entry("tracker", "") + `,` + entry("ledger", `,"tier":"T1","requires":["`+automationGroup+`"]`) + `,` +
 		entry("vault", `,"tier":"T2","requires":["`+automationGroup+`"]`) + `],
 		"automations":[
-			{"id":"auto-1","name":"explorer","owner":"alice@example.com","runnerGroup":"` + teamGroup + `","entries":["tracker","ledger","vault"]},
+			{"id":"auto-1","name":"explorer","owner":"alice@example.com","entries":["tracker","ledger","vault"]},
 			{"id":"auto-2","name":"auditor","owner":"gone@example.com","entries":["tracker","ledger"]},
 			{"id":"auto-3","name":"reader","owner":"alice@example.com","entries":["tracker"]}]}`))
 	if err != nil {
@@ -45,20 +42,16 @@ func automationRun(person, run, automation string) runnerid.Session {
 }
 
 var automationRuns = cursorRuns{
-	"explorer":       automationRun("alice@example.com", "bc-1", "auto-1"),
-	"auditor":        automationRun("gone@example.com", "bc-2", "auto-2"),
-	"reader":         automationRun("alice@example.com", "bc-3", "auto-3"),
-	"bob-explorer":   automationRun("bob@example.com", "bc-10", "auto-1"),
-	"carol-explorer": automationRun("carol@example.com", "bc-11", "auto-1"),
-	"dave-explorer":  automationRun("dave@example.com", "bc-12", "auto-1"),
-	"erin-explorer":  automationRun("erin@example.com", "bc-15", "auto-1"),
-	"bob-reader":     automationRun("bob@example.com", "bc-13", "auto-3"),
-	"svc":            {Kind: runnerid.KindAgent, Subject: "service_account:9", Owner: "service_account:9", Run: "bc-14", Source: "AUTOMATIONS", Automation: "auto-1"},
-	"unlisted":       automationRun("alice@example.com", "bc-4", "auto-9"),
-	"web":            {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-5", Source: "WEBSITE"},
-	"slack":          {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-6", Source: "SLACK"},
-	"no-id":          {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-7", Source: "AUTOMATIONS"},
-	"no-src":         {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-8", Automation: "auto-1"},
+	"explorer":     automationRun("alice@example.com", "bc-1", "auto-1"),
+	"auditor":      automationRun("gone@example.com", "bc-2", "auto-2"),
+	"reader":       automationRun("alice@example.com", "bc-3", "auto-3"),
+	"bob-explorer": automationRun("bob@example.com", "bc-10", "auto-1"),
+	"svc":          {Kind: runnerid.KindAgent, Subject: "service_account:9", Owner: "service_account:9", Run: "bc-14", Source: "AUTOMATIONS", Automation: "auto-1"},
+	"unlisted":     automationRun("alice@example.com", "bc-4", "auto-9"),
+	"web":          {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-5", Source: "WEBSITE"},
+	"slack":        {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-6", Source: "SLACK"},
+	"no-id":        {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-7", Source: "AUTOMATIONS"},
+	"no-src":       {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-8", Automation: "auto-1"},
 }
 
 // directoryOf answers group lookups from a fixed table; a person not in it,
@@ -85,6 +78,17 @@ func (d directoryOf) Lookup(_ context.Context, subject string, groups []string) 
 	return entitlement.Person{ObjectID: "oid-" + subject, Enabled: enabled, MemberOf: in}, nil
 }
 
+// countingDirectory counts the directory calls a cache makes.
+type countingDirectory struct {
+	directoryOf
+	calls int
+}
+
+func (d *countingDirectory) Lookup(ctx context.Context, subject string, groups []string) (entitlement.Person, error) {
+	d.calls++
+	return d.directoryOf.Lookup(ctx, subject, groups)
+}
+
 func TestAutomationRunNamesItsAutomation(t *testing.T) {
 	pool, _ := automationCatalog(t).Pool("automations")
 	who, refusal := Resolve(context.Background(), pool, "explorer", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, automationRuns, &authorizetest.MemBinder{})
@@ -93,7 +97,8 @@ func TestAutomationRunNamesItsAutomation(t *testing.T) {
 		who.Source != "AUTOMATIONS" || who.Automation != "auto-1" || who.TokenSHA256 != "sha-explorer" {
 		t.Fatalf("%q %+v", refusal, who)
 	}
-	// The audit names the person whose run it is, not the catalog owner.
+	// The audit names the person whose run it is, not the catalog owner,
+	// even though Decide then refuses a run that is not the owner's.
 	who, _ = Resolve(context.Background(), pool, "bob-explorer", Claims{Pod: "pod-b", ClaimedRun: "bc-10"}, automationRuns, &authorizetest.MemBinder{})
 	if who.Audited() != "bob@example.com" || who.AutomationOwner != "alice@example.com" {
 		t.Fatalf("bob's run: %+v", who)
@@ -128,12 +133,12 @@ func TestAutomationPoolRefusesOtherRuns(t *testing.T) {
 func TestAutomationDecisions(t *testing.T) {
 	catalog := automationCatalog(t)
 	pool, _ := catalog.Pool("automations")
-	cache := &entitlement.Cache{Source: directoryOf{
-		"alice@example.com": {automationGroup, teamGroup},
-		"bob@example.com":   {teamGroup},
-		"carol@example.com": {},
-		"erin@example.com":  {teamGroup, "disabled"},
+	// bob's own groups would admit him to every entry.
+	source := &countingDirectory{directoryOf: directoryOf{
+		"alice@example.com": {automationGroup},
+		"bob@example.com":   {automationGroup},
 	}}
+	cache := &entitlement.Cache{Source: source}
 	ctx := context.Background()
 	decide := func(token, entry string) entitlement.Decision {
 		t.Helper()
@@ -154,18 +159,10 @@ func TestAutomationDecisions(t *testing.T) {
 	}{
 		{"explorer", "tracker", "t0", true},
 		{"explorer", "ledger", "entitled", true},
-		// A team member runs it on the owner's account.
-		{"bob-explorer", "tracker", "t0", true},
-		{"bob-explorer", "ledger", "entitled", true},
-		// Not the owner and not in the runner group, or disabled: refused, T0 too.
-		{"carol-explorer", "tracker", "automation_runner", false},
-		{"dave-explorer", "tracker", "automation_runner", false},
-		// In the runner group, but the account is disabled.
-		{"erin-explorer", "tracker", "automation_runner", false},
 		{"explorer", "vault", "entitled", true},
-		{"bob-explorer", "vault", "entitled", true},
-		// No runner group: only the owner's runs.
-		{"bob-reader", "tracker", "automation_runner", false},
+		// Not the owner: refused at every tier, whatever their own groups.
+		{"bob-explorer", "tracker", "automation_runner", false},
+		{"bob-explorer", "vault", "automation_runner", false},
 		// Not listed for this Automation, though granted to the pool.
 		{"reader", "ledger", "automation_not_granted", false},
 		// An owner whose account is gone stops the Automation at every tier.
@@ -176,15 +173,15 @@ func TestAutomationDecisions(t *testing.T) {
 		if d.Allowed != c.allowed || d.Outcome != c.outcome {
 			t.Errorf("%s on %s: %+v, want %s", c.token, c.entry, d, c.outcome)
 		}
-		// The decision is the owner's (bob is not in the ledger's group),
-		// but the row's object ID is the run person's, as its requester is.
 		if person := automationRuns[c.token].Subject; c.allowed && d.ObjectID != "oid-"+person {
 			t.Errorf("%s on %s records object ID %q, not the run person's", c.token, c.entry, d.ObjectID)
 		}
 	}
-	// A runner refusal records the runner and the group checked.
-	if d := decide("carol-explorer", "ledger"); d.ObjectID != "oid-carol@example.com" || len(d.Groups) != 1 || d.Groups[0] != teamGroup {
-		t.Errorf("carol's refusal: %+v", d)
+	// A refusal at the owner check asks the directory nothing and names no
+	// groups or person.
+	before := source.calls
+	if d := decide("bob-explorer", "ledger"); d.ObjectID != "" || len(d.Groups) != 0 || source.calls != before {
+		t.Errorf("bob's refusal: %+v after %d directory calls", d, source.calls-before)
 	}
 	// A requester that is not an Automation is never served on the pool.
 	e, _ := catalog.Match("api.tracker.example", 443, "GET", "/v1/x", "automations")
@@ -199,78 +196,39 @@ func TestAutomationDecisions(t *testing.T) {
 	}
 }
 
-// A person pool is unchanged: an Automation's run there is its person's, as
-// before, and only the audit fields are new.
-func TestPersonPoolIsUnchangedForAutomationRuns(t *testing.T) {
-	who, refusal := Resolve(context.Background(), cursorPool, "explorer", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, automationRuns, &authorizetest.MemBinder{})
-	if refusal != "" || who.Kind != "person" || who.Subject != "alice@example.com" || who.AutomationName != "" || who.Source != "AUTOMATIONS" || who.Automation != "auto-1" {
-		t.Fatalf("%q %+v", refusal, who)
-	}
-	who, refusal = Resolve(context.Background(), cursorPool, "alice-1", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, &authorizetest.MemBinder{})
-	if refusal != "" || who.Kind != "person" || who.Source != "" || who.Automation != "" || who.Audited() != "alice@example.com" {
-		t.Fatalf("person run: %q %+v", refusal, who)
-	}
-}
-
-// countingDirectory counts the directory calls a cache makes.
-type countingDirectory struct {
-	directoryOf
-	calls int
-}
-
-func (d *countingDirectory) Lookup(ctx context.Context, subject string, groups []string) (entitlement.Person, error) {
-	d.calls++
-	return d.directoryOf.Lookup(ctx, subject, groups)
-}
-
-// Leaving the runner group takes effect for T2 at once, as a person's group
-// change does on a person pool; T0 and T1 may ride the cached answer. The
-// fresh refusal forgets every cached answer about the person, not only the
-// runner group's.
-func TestRunnerGroupIsLookedUpFreshAtT2(t *testing.T) {
-	catalog := automationCatalog(t)
-	pool, _ := catalog.Pool("automations")
-	directory := directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}}
-	source := &countingDirectory{directoryOf: directory}
-	cache := &entitlement.Cache{Source: source}
+// An Automation's run on a person pool is refused unless the pool opts in,
+// so by default the catalog's Automation list is the only way an Automation
+// gets access. Either sign of an Automation counts, and the refusal still
+// records what the token said. A person's own run is unaffected.
+func TestPersonPoolRefusesAutomationRunsUnlessItOptsIn(t *testing.T) {
 	ctx := context.Background()
-	who, refusal := Resolve(ctx, pool, "bob-explorer", Claims{Pod: "pod-bob", ClaimedRun: "bc-10"}, automationRuns, &authorizetest.MemBinder{})
-	if refusal != "" {
-		t.Fatal(refusal)
-	}
-	entry := func(name string) httpcatalog.Entry {
-		e, err := catalog.Match("api."+name+".example", 443, "GET", "/v1/x", "automations")
-		if err != nil {
-			t.Fatal(err)
+	for _, token := range []string{"explorer", "no-id", "no-src", "svc"} {
+		run := automationRuns[token]
+		who, refusal := Resolve(ctx, cursorPool, token, Claims{Pod: "pod-" + token, ClaimedRun: run.Run}, automationRuns, &authorizetest.MemBinder{})
+		if refusal != "automation_on_person_pool" || who.Kind != "none" || who.Audited() != "" || who.Source != run.Source || who.Automation != run.Automation {
+			t.Errorf("%s: %q %+v", token, refusal, who)
 		}
-		return *e
 	}
-	if d := Decide(ctx, cache, pool, entry("tracker"), who); !d.Allowed {
-		t.Fatalf("bob as a member: %+v", d)
+	// Opted in, the run is its person's, with the audit fields.
+	optedIn := httpcatalog.Pool{Identity: "cursor-session", AutomationRunsAsPerson: true}
+	who, refusal := Resolve(ctx, optedIn, "explorer", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, automationRuns, &authorizetest.MemBinder{})
+	if refusal != "" || who.Kind != "person" || who.Subject != "alice@example.com" || who.AutomationName != "" || who.Source != "AUTOMATIONS" || who.Automation != "auto-1" {
+		t.Fatalf("opted in: %q %+v", refusal, who)
 	}
-	// Another cached answer about bob, for another group.
-	if _, _, err := cache.Lookup(ctx, "bob@example.com", []string{automationGroup}); err != nil {
-		t.Fatal(err)
+	// Opting in serves a person, never a run that names none.
+	if _, refusal := Resolve(ctx, optedIn, "svc", Claims{Pod: "pod-svc", ClaimedRun: "bc-14"}, automationRuns, &authorizetest.MemBinder{}); refusal != "no_person" {
+		t.Fatalf("service account opted in: %q", refusal)
 	}
-	directory["bob@example.com"] = nil // removed from the group
-	if d := Decide(ctx, cache, pool, entry("ledger"), who); !d.Allowed {
-		t.Fatalf("T1 should ride the cached answer: %+v", d)
-	}
-	if d := Decide(ctx, cache, pool, entry("vault"), who); d.Allowed || d.Outcome != "automation_runner" {
-		t.Fatalf("T2 after leaving the group: %+v", d)
-	}
-	// The fresh refusal forgot bob, so T0 is refused now too.
-	if d := Decide(ctx, cache, pool, entry("tracker"), who); d.Allowed || d.Outcome != "automation_runner" {
-		t.Fatalf("T0 after the fresh refusal: %+v", d)
-	}
-	// And his answer for the other group is gone: asking again reaches the
-	// directory instead of the cache.
-	before := source.calls
-	if _, _, err := cache.Lookup(ctx, "bob@example.com", []string{automationGroup}); err != nil {
-		t.Fatal(err)
-	}
-	if source.calls != before+1 {
-		t.Fatal("bob's other cached answer survived the fresh refusal")
+	// A person's run, from any surface, is served on either pool.
+	for _, pool := range []httpcatalog.Pool{cursorPool, optedIn} {
+		who, refusal = Resolve(ctx, pool, "alice-1", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, &authorizetest.MemBinder{})
+		if refusal != "" || who.Kind != "person" || who.Source != "" || who.Automation != "" || who.Audited() != "alice@example.com" {
+			t.Fatalf("person run: %q %+v", refusal, who)
+		}
+		who, refusal = Resolve(ctx, pool, "slack", Claims{Pod: "pod-c", ClaimedRun: "bc-6"}, automationRuns, &authorizetest.MemBinder{})
+		if refusal != "" || who.Kind != "person" || who.Source != "SLACK" || who.Audited() != "alice@example.com" {
+			t.Fatalf("person run from Slack: %q %+v", refusal, who)
+		}
 	}
 }
 
@@ -282,7 +240,7 @@ func TestAutomationOwnerChecksUseTheAutomationsBudget(t *testing.T) {
 	pool, _ := catalog.Pool("automations")
 	now := time.Unix(1_700_000_000, 0)
 	cache := &entitlement.Cache{
-		Source:           directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}},
+		Source:           directoryOf{"alice@example.com": {automationGroup}},
 		LookupsPerMinute: 2,
 		Now:              func() time.Time { return now },
 	}
@@ -301,8 +259,8 @@ func TestAutomationOwnerChecksUseTheAutomationsBudget(t *testing.T) {
 		now = now.Add(10 * time.Second) // past the recent answer an over-budget lookup may reuse
 		return Decide(ctx, cache, pool, *vault, who)
 	}
-	// alice's and bob's runs of auto-1 share auto-1's budget for the owner check.
-	for i, token := range []string{"explorer", "bob-explorer"} {
+	// Every run of auto-1 spends auto-1's budget for the owner check.
+	for i, token := range []string{"explorer", "explorer"} {
 		if d := decide(token); !d.Allowed {
 			t.Fatalf("request %d: %+v", i, d)
 		}
@@ -313,50 +271,5 @@ func TestAutomationOwnerChecksUseTheAutomationsBudget(t *testing.T) {
 	// alice's own budget is untouched, so her own T2 sessions are still served.
 	if _, _, err := cache.Fresh(ctx, "alice@example.com", []string{automationGroup}); err != nil {
 		t.Fatalf("alice's own lookup after her Automation's: %v", err)
-	}
-}
-
-// A refusal at the runner check describes the runner group's lookup: the age
-// of a cached answer, and the runner group on a lookup that was rate limited.
-func TestRunnerCheckRefusalsDescribeTheRunnerLookup(t *testing.T) {
-	catalog := automationCatalog(t)
-	pool, _ := catalog.Pool("automations")
-	now := time.Unix(1_700_000_000, 0)
-	cache := &entitlement.Cache{
-		Source:           directoryOf{"alice@example.com": {automationGroup, teamGroup}, "bob@example.com": {teamGroup}, "carol@example.com": {}},
-		LookupsPerMinute: 1,
-		Now:              func() time.Time { return now },
-	}
-	ctx := context.Background()
-	decide := func(token, name string) entitlement.Decision {
-		t.Helper()
-		run := automationRuns[token]
-		who, refusal := Resolve(ctx, pool, token, Claims{Pod: "pod-" + token, ClaimedRun: run.Run}, automationRuns, &authorizetest.MemBinder{})
-		if refusal != "" {
-			t.Fatalf("%s: %q", token, refusal)
-		}
-		e, err := catalog.Match("api."+name+".example", 443, "GET", "/v1/x", "automations")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return Decide(ctx, cache, pool, *e, who)
-	}
-	// carol is not in the runner group. Her T0 refusal is cached, so the
-	// next one two minutes later rides that answer and says how old it is.
-	if d := decide("carol-explorer", "tracker"); d.Outcome != "automation_runner" || d.CacheAge != 0 {
-		t.Fatalf("first refusal: %+v", d)
-	}
-	now = now.Add(2 * time.Minute)
-	if d := decide("carol-explorer", "tracker"); d.Outcome != "automation_runner" || d.CacheAge != 2*time.Minute ||
-		len(d.Groups) != 1 || d.Groups[0] != teamGroup || d.ObjectID != "oid-carol@example.com" {
-		t.Fatalf("cached refusal: %+v", d)
-	}
-	// bob's second T2 run within the minute is over his own lookup budget.
-	if d := decide("bob-explorer", "vault"); !d.Allowed {
-		t.Fatalf("bob's first T2 run: %+v", d)
-	}
-	now = now.Add(10 * time.Second) // past the recent answer an over-budget lookup may reuse
-	if d := decide("bob-explorer", "vault"); d.Outcome != "entitlement_rate_limited" || len(d.Groups) != 1 || d.Groups[0] != teamGroup {
-		t.Fatalf("over the runner's budget: %+v", d)
 	}
 }

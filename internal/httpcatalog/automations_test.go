@@ -124,7 +124,8 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 		"upper-case owner": {"id": "auto-9", "name": "x", "owner": "Owner@example.com", "entries": []any{"vendor"}},
 		"unsafe name":      {"id": "auto-9", "name": "an \"x\"", "owner": "owner@example.com", "entries": []any{"vendor"}},
 		"unknown field":    {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "pools": []any{"p"}},
-		"bad runner group": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "runnerGroup": "engineers", "entries": []any{"vendor"}},
+		// Refused until a run shows Cursor names anyone but the owner.
+		"runner group": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "runnerGroup": "11111111-2222-3333-4444-555555555555", "entries": []any{"vendor"}},
 	} {
 		c := automationCatalog()
 		c["automations"] = append(c["automations"].([]any), a)
@@ -143,6 +144,42 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 		}
 		if catalog.Automations() != want || len(dropped) == 0 || dropped[len(dropped)-1].Kind != "automation" {
 			t.Errorf("%s: kept %d, dropped %+v", name, catalog.Automations(), dropped)
+		}
+	}
+}
+
+// Only a cursor-session pool may serve an Automation's run as its person.
+// The opt-in on any other pool refuses the catalog, and a tolerant load
+// drops that pool.
+func TestAutomationRunsAsPersonIsForCursorSessionPools(t *testing.T) {
+	c := automationCatalog()
+	pool := c["pools"].([]any)[0].(map[string]any)
+	pool["identity"], pool["automationRunsAsPerson"] = "cursor-session", true
+	harnessAt(c, 0)["authorization"].(map[string]any)["mode"] = "person"
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := catalog.Pool("cursor-workers"); !p.AutomationRunsAsPerson {
+		t.Fatal("the opt-in was not kept")
+	}
+	for name, at := range map[string]struct {
+		catalog map[string]any
+		pool    int
+	}{
+		"cursor-automation pool": {automationCatalog(), 0},
+		"pool-mode pool":         {harnessCatalog(), 0},
+		"claude-session pool":    {harnessCatalog(), 1},
+	} {
+		p := at.catalog["pools"].([]any)[at.pool].(map[string]any)
+		p["automationRunsAsPerson"] = true
+		if _, err := parseCatalog(t, at.catalog); err == nil || !strings.Contains(err.Error(), "automationRunsAsPerson") {
+			t.Errorf("%s: %v", name, err)
+		}
+		data, _ := json.Marshal(at.catalog)
+		catalog, dropped, err := ParseTolerant(data)
+		if _, kept := catalog.Pool(p["name"].(string)); err != nil || kept || len(dropped) == 0 || dropped[0].Kind != "pool" {
+			t.Errorf("%s: tolerant: %v %+v", name, err, dropped)
 		}
 	}
 }
