@@ -707,6 +707,43 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 			t.Errorf("%s reason: %s", d.Name, d.Reason)
 		}
 	}
+	// The git entry's shared push prefixes are held by each pool of that entry,
+	// so a github-api pool outside it may not reach them either, by its own
+	// pull request prefixes or the shared ones.
+	withD := strings.Replace(poolsAPIEntry, `"pools":["pool-a","pool-b","pool-c"]`, `"pools":["pool-a","pool-b","pool-c","pool-d"]`, 1)
+	outside := func(field, value string) string {
+		return strings.Replace(withD, `"poolPullRequestPrefixes":{"pool-a":["review/"]}`, `"`+field+`":`+value, 1)
+	}
+	if withD == poolsAPIEntry || outside("pullRequestPrefixes", `[]`) == withD {
+		t.Fatal("fixture replacement did not apply")
+	}
+	sharedOnly := `{"name":"github","host":"github.com","kind":"git","pools":["pool-a","pool-b","pool-c"],"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/shared/"]}]}}`
+	for name, api := range map[string]string{
+		"inside a shared push prefix, ignoring case":        outside("poolPullRequestPrefixes", `{"pool-d":["Shared/X/"]}`),
+		"equal to a shared push prefix":                     outside("poolPullRequestPrefixes", `{"pool-d":["shared/"]}`),
+		"a shared prefix with a pool outside the git entry": outside("pullRequestPrefixes", `["shared/x/"]`),
+	} {
+		for _, git := range []string{sharedPush, sharedOnly} {
+			for order, doc := range []string{git + `,` + api, api + `,` + git} {
+				if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil || !strings.Contains(err.Error(), "overlaps push prefix") {
+					t.Errorf("%s (order %d): %v", name, order, err)
+				}
+			}
+		}
+	}
+	if _, err := Parse([]byte(`{"entries":[` + sharedPush + `,` + outside("poolPullRequestPrefixes", `{"pool-d":["renovate/"]}`) + `]}`)); err != nil {
+		t.Errorf("a pool outside the git entry, off every push prefix, refused: %v", err)
+	}
+	c, dropped, err = ParseTolerant([]byte(`{"entries":[` + validEntry + `,` + sharedPush + `,` + outside("poolPullRequestPrefixes", `{"pool-d":["shared/x/"]}`) + `]}`))
+	if err != nil || entryNames(c) != "serpapi" || droppedNames(dropped) != "entry:github,entry:github-api" {
+		t.Fatalf("tolerant, shared push prefix: kept %q dropped %q err %v", entryNames(c), droppedNames(dropped), err)
+	}
+	for _, d := range dropped {
+		if !strings.Contains(d.Reason, `"shared/x/" (pool "pool-d") in entry "github-api" overlaps push prefix "refs/heads/shared/" (shared by every pool) in entry "github"`) {
+			t.Errorf("%s reason: %s", d.Name, d.Reason)
+		}
+	}
 }
 
 // A CI restart (a branch update, a rerun) exists only where the repository
