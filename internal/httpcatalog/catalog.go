@@ -91,10 +91,10 @@ type GitBinding struct {
 // under the shared prefixes and its own, and a pool with none pushes nothing,
 // so one entry serves many pools without any pushing to another's branches.
 type GitRepo struct {
-	Repo            string              `json:"repo"` // owner/name
-	Access          string              `json:"access"`
-	RefPrefixes     []string            `json:"refPrefixes,omitempty"`
-	PoolRefPrefixes map[string][]string `json:"poolRefPrefixes,omitempty"`
+	Repo            string       `json:"repo"` // owner/name
+	Access          string       `json:"access"`
+	RefPrefixes     []string     `json:"refPrefixes,omitempty"`
+	PoolRefPrefixes PoolPrefixes `json:"poolRefPrefixes,omitempty"`
 	// The rest apply to github-api entries only.
 	// Operations are what the pool may do in this repository, from the
 	// vocabulary in githubOperations; unset means DefaultGitHubOperations.
@@ -106,12 +106,36 @@ type GitRepo struct {
 	PullRequestPrefixes []string `json:"pullRequestPrefixes,omitempty"`
 	// PoolPullRequestPrefixes are pull request prefixes for one pool of the
 	// entry each, besides the shared PullRequestPrefixes.
-	PoolPullRequestPrefixes map[string][]string `json:"poolPullRequestPrefixes,omitempty"`
+	PoolPullRequestPrefixes PoolPrefixes `json:"poolPullRequestPrefixes,omitempty"`
 	// Labels are the only labels pr.label may add.
 	Labels []string `json:"labels,omitempty"`
 	// DispatchEvents are the only repository_dispatch event types dispatch may
 	// send. A dispatch runs workflows from the default branch, never the pool's.
 	DispatchEvents []string `json:"dispatchEvents,omitempty"`
+}
+
+// PoolPrefixes maps each pool of an entry to prefixes of its own
+// (poolRefPrefixes, poolPullRequestPrefixes).
+type PoolPrefixes map[string][]string
+
+// errNullPoolPrefixes refuses a per-pool field written as null, which would
+// decode to no map, as if the field were absent. For poolRefPrefixes that
+// fails open: a repository that lists no push prefix holds no pool to any
+// branch, so an empty value rendered as null would let every pool of the
+// entry push anywhere. poolPullRequestPrefixes refuses it alike.
+var errNullPoolPrefixes = errors.New("poolRefPrefixes and poolPullRequestPrefixes may not be null; list each pool with its prefixes, or leave the field out")
+
+// UnmarshalJSON decodes the map and refuses null (errNullPoolPrefixes).
+func (p *PoolPrefixes) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errNullPoolPrefixes
+	}
+	var m map[string][]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	*p = m
+	return nil
 }
 
 // DefaultGitHubOperations are a github-api repository's operations when it
@@ -435,6 +459,11 @@ func Parse(data []byte) (Catalog, error) {
 				return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q share a route", other, e.Name)
 			}
 			routes[route] = e.Name
+		}
+	}
+	for _, e := range file.Entries {
+		if crossings := pullRequestCrossings(e, file.Entries); len(crossings) > 0 {
+			return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q: %w", e.Name, crossings[0].git, crossings[0].err)
 		}
 	}
 	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses}, nil
@@ -782,6 +811,91 @@ func holder(pool string) string {
 		return "shared by every pool"
 	}
 	return "pool " + strconv.Quote(pool)
+}
+
+// pullRequestCrossing is a github-api entry whose pull request prefixes reach
+// a pool's own push prefixes in another entry, the git entry a clone of the
+// repository would use (pairedGit).
+type pullRequestCrossing struct {
+	git string // the git entry's name
+	err error
+}
+
+// pullRequestCrossings checks each repository of a github-api entry against
+// the git entry a clone of it would use, the same pairing the code-reading
+// routes use: no pull request prefix may start, or be started by, a push
+// prefix another pool holds alone there (compared as refs, ignoring case, as
+// checkPoolPrefixes compares). Otherwise a pool's comment, edit, label and
+// ready routes would act on that pool's pull requests. A pool's own pull
+// request prefixes reach that pool only, the shared ones every pool of the
+// github-api entry, and the git entry's shared push prefixes belong to every
+// pool, so they cross nothing. It returns one crossing per repository, each
+// naming its git entry. As in checkPoolPrefixes, sorting puts every prefix
+// right before the ones it starts, so each is compared only with those.
+func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
+	if api.Kind != "github-api" || api.Git == nil {
+		return nil
+	}
+	type owned struct {
+		prefix, spelled string // prefix: the ref, lowercased; spelled: as written
+		push            bool
+		pool            string // "": a shared pull request prefix
+	}
+	var out []pullRequestCrossing
+	for _, r := range api.Git.Repos {
+		git, gr := pairedGit(entries, api.Host, r.Repo)
+		if gr == nil || len(gr.PoolRefPrefixes) == 0 {
+			continue
+		}
+		var all []owned
+		for pool, prefixes := range gr.PoolRefPrefixes {
+			for _, prefix := range prefixes {
+				all = append(all, owned{strings.ToLower(prefix), prefix, true, pool})
+			}
+		}
+		for _, prefix := range r.PullRequestPrefixes {
+			all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, ""})
+		}
+		for pool, prefixes := range r.PoolPullRequestPrefixes {
+			for _, prefix := range prefixes {
+				all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, pool})
+			}
+		}
+		sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
+		crosses := func(a, b owned) bool {
+			if a.push == b.push {
+				return false // each field's own overlaps are checkPoolPrefixes'
+			}
+			push, head := a, b
+			if b.push {
+				push, head = b, a
+			}
+			if head.pool != "" {
+				return head.pool != push.pool
+			}
+			for _, pool := range api.Pools {
+				if pool != push.pool {
+					return true
+				}
+			}
+			return false
+		}
+	scan:
+		for i := range all {
+			for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
+				if crosses(all[i], all[j]) {
+					push, head := all[i], all[j]
+					if all[j].push {
+						push, head = all[j], all[i]
+					}
+					out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (pool %q) in entry %q",
+						r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, push.pool, git.Name)})
+					break scan
+				}
+			}
+		}
+	}
+	return out
 }
 
 // normalizeGitHubAPI checks a github-api repository's operations and their
@@ -1363,30 +1477,37 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 // stands in for it.
 const cloneGitPort = 443
 
-// cloneEntry returns the git entry a clone of repo would use, chosen the way
+// cloneEntry returns the git entry a clone of repo would use (pairedGit), or
+// nil when there is none or it does not grant the pool (where a clone would
+// get ErrPool).
+func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
+	e, _ := pairedGit(c.entries, apiHost, repo)
+	if e == nil || !contains(e.Pools, pool) {
+		return nil
+	}
+	return e
+}
+
+// pairedGit returns the git entry a clone of repo would use for a github-api
+// entry on apiHost, and its listing of the repository, chosen the way
 // GitMatch chooses it: the git entry on the git host and port that lists the
 // repository (the catalog allows one per host and port), or nil when there is
-// none or it does not grant the pool (where a clone would get ErrPool). The git
-// host is the API host without its "api." label, as github.com is for
-// api.github.com, and the port is cloneGitPort.
-func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
+// none. The git host is the API host without its "api." label, as github.com
+// is for api.github.com, and the port is cloneGitPort.
+func pairedGit(entries []Entry, apiHost, repo string) (*Entry, *GitRepo) {
 	gitHost := strings.TrimPrefix(apiHost, "api.")
-	for i := range c.entries {
-		e := &c.entries[i]
+	for i := range entries {
+		e := &entries[i]
 		if e.Kind != "git" || e.Git == nil || e.Host != gitHost || e.Port != cloneGitPort {
 			continue
 		}
-		for _, r := range e.Git.Repos {
-			if r.Repo != repo {
-				continue
+		for j := range e.Git.Repos {
+			if e.Git.Repos[j].Repo == repo {
+				return e, &e.Git.Repos[j]
 			}
-			if !contains(e.Pools, pool) {
-				return nil
-			}
-			return e
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // clusterLocal reports whether host is a Kubernetes Service name, the only

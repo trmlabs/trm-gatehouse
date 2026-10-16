@@ -564,9 +564,13 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 		"same pull request prefix for two pools": heads(`{"pool-a":["review/"],"pool-b":["review/"]}`),
 		"nested pull request prefixes":           heads(`{"pool-a":["review/"],"pool-b":["review/b/"]}`),
 		"pull request prefixes with reads only":  strings.Replace(heads(`{"pool-a":["review/"]}`), `"operations":["pr.open","pr.read","pr.comment","pr.edit","pr.label","pr.ready"],"labels":["preview"]`, `"operations":["pr.open","pr.read"]`, 1),
-		// A present but empty map would read as no limit at all.
+		// A present but empty map would read as no limit at all, and so would
+		// null, which decodes to no map.
 		"empty per-pool ref prefixes":          refs(`{}`),
 		"empty per-pool pull request prefixes": heads(`{}`),
+		"null per-pool ref prefixes":           refs(`null`),
+		"null per-pool pull request prefixes":  heads(`null`),
+		"null prefixes for a pool":             refs(`{"pool-a":null}`),
 		// The shared lists apply to every pool, so they may not reach a pool's own.
 		"a shared prefix starts a pool's own":              strings.Replace(refs(`{"pool-a":["refs/heads/cursor/pool-a/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/cursor/"],`, 1),
 		"a pool's own starts a shared prefix":              strings.Replace(refs(`{"pool-a":["refs/heads/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1),
@@ -586,6 +590,27 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 		doc = strings.Replace(doc, `"pools":["pool-a","pool-b","pool-c"]`, `"pools":["pool-a","pool-ab","pool-b","pool-c"]`, 1)
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
 			t.Errorf("%s refused: %v", name, err)
+		}
+	}
+}
+
+// An explicit null for either per-pool field is refused by name at load, in
+// the strict and the tolerant load alike, rather than read as an absent field.
+func TestPoolPrefixesNullIsRefused(t *testing.T) {
+	git := strings.Replace(poolsGitEntry, `"poolRefPrefixes":{
+			"pool-a":["refs/heads/cursor/pool-a/"],
+			"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]}`, `"poolRefPrefixes":null`, 1)
+	api := strings.Replace(poolsAPIEntry, `"poolPullRequestPrefixes":{"pool-a":["review/"]}`, `"poolPullRequestPrefixes":null`, 1)
+	if git == poolsGitEntry || api == poolsAPIEntry {
+		t.Fatal("fixture replacement did not apply")
+	}
+	for name, entry := range map[string]string{"github": git, "github-api": api} {
+		if _, err := Parse([]byte(`{"entries":[` + entry + `]}`)); !errors.Is(err, errNullPoolPrefixes) {
+			t.Errorf("%s: %v", name, err)
+		}
+		c, dropped, err := ParseTolerant([]byte(`{"entries":[` + validEntry + `,` + entry + `]}`))
+		if err != nil || entryNames(c) != "serpapi" || droppedNames(dropped) != "entry:"+name {
+			t.Errorf("%s tolerant: kept %q dropped %q err %v", name, entryNames(c), droppedNames(dropped), err)
 		}
 	}
 }
@@ -619,5 +644,62 @@ func TestPoolPrefixOverlapKeepsTheAuthorsSpelling(t *testing.T) {
 	_, err := Parse([]byte(`{"entries":[` + doc + `]}`))
 	if err == nil || !strings.Contains(err.Error(), `"refs/heads/Cursor/Pool-A/x/" (pool "pool-b") overlaps "refs/heads/cursor/pool-a/" (pool "pool-a")`) {
 		t.Fatalf("overlap error: %v", err)
+	}
+}
+
+// A github-api repository's pull request prefixes may not reach another
+// pool's own push prefixes in the git entry a clone of the repository uses:
+// that pool's pull requests would be in reach of the other's comment, edit,
+// label and ready routes. The load refuses it whichever entry comes first, and
+// the tolerant load drops both entries.
+func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
+	heads := func(field, value string) string {
+		return strings.Replace(poolsAPIEntry, `"poolPullRequestPrefixes":{"pool-a":["review/"]}`, `"`+field+`":`+value, 1)
+	}
+	if heads("poolPullRequestPrefixes", `{}`) == poolsAPIEntry {
+		t.Fatal("fixture replacement did not apply")
+	}
+	for name, api := range map[string]string{
+		"inside another pool's push prefix":   heads("poolPullRequestPrefixes", `{"pool-b":["cursor/pool-a/x/"]}`),
+		"starting another pool's push prefix": heads("poolPullRequestPrefixes", `{"pool-b":["cursor/"]}`),
+		"equal to another pool's push prefix": heads("poolPullRequestPrefixes", `{"pool-a":["factory/"]}`),
+		"ignoring case":                       heads("poolPullRequestPrefixes", `{"pool-b":["Cursor/Pool-A/"]}`),
+		"a shared prefix on one pool's own":   heads("pullRequestPrefixes", `["cursor/pool-a/"]`),
+	} {
+		for order, doc := range []string{poolsGitEntry + `,` + api, api + `,` + poolsGitEntry} {
+			if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil || !strings.Contains(err.Error(), "overlaps push prefix") {
+				t.Errorf("%s (order %d): %v", name, order, err)
+			}
+		}
+	}
+	// A pool's own pull request prefixes under its own push prefixes, the git
+	// entry's shared push prefixes and a git entry on another host cross
+	// nothing.
+	sharedPush := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
+	otherHost := strings.NewReplacer(`"name":"github"`, `"name":"elsewhere"`, `"host":"github.com"`, `"host":"git.example.com"`).Replace(poolsGitEntry)
+	for name, doc := range map[string]string{
+		"its own push prefix":       poolsGitEntry + `,` + heads("poolPullRequestPrefixes", `{"pool-a":["cursor/pool-a/sub/"]}`),
+		"a shared push prefix":      sharedPush + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["shared/x/"]}`),
+		"a git entry on other host": otherHost + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["cursor/pool-a/"]}`),
+	} {
+		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
+			t.Errorf("%s refused: %v", name, err)
+		}
+	}
+	// A shared pull request prefix on a pool's own push prefix crosses nothing
+	// when the github-api entry grants only that pool.
+	onlyA := strings.Replace(heads("pullRequestPrefixes", `["cursor/pool-a/"]`), `"pools":["pool-a","pool-b","pool-c"]`, `"pools":["pool-a"]`, 1)
+	if _, err := Parse([]byte(`{"entries":[` + poolsGitEntry + `,` + onlyA + `]}`)); err != nil {
+		t.Errorf("shared prefix with one pool refused: %v", err)
+	}
+	crossing := heads("poolPullRequestPrefixes", `{"pool-b":["cursor/pool-a/"]}`)
+	c, dropped, err := ParseTolerant([]byte(`{"entries":[` + validEntry + `,` + poolsGitEntry + `,` + crossing + `]}`))
+	if err != nil || entryNames(c) != "serpapi" || droppedNames(dropped) != "entry:github,entry:github-api" {
+		t.Fatalf("tolerant: kept %q dropped %q err %v", entryNames(c), droppedNames(dropped), err)
+	}
+	for _, d := range dropped {
+		if !strings.Contains(d.Reason, `"cursor/pool-a/" (pool "pool-b") in entry "github-api" overlaps push prefix "refs/heads/cursor/pool-a/" (pool "pool-a") in entry "github"`) {
+			t.Errorf("%s reason: %s", d.Name, d.Reason)
+		}
 	}
 }
