@@ -89,6 +89,10 @@ catalog, and checks again on every request.
 | T1 | A verified person in every group the entry `requires`, from a person pool (a Claude session, a Cursor run or an agent-sandbox Pod that names the person); or an automation pool whose fixed groups include them all. Never a pool with no person behind it. |
 | T2 | As T1, from a person pool only, with the groups granted for a limited time |
 
+A Cursor Automation is decided differently: it may use the entries the
+catalog lists for it, up to its pool's ceiling, whoever's run it is. See
+[broker catalog](broker-catalog.md).
+
 `gcp` entries are always T1 or T2. Gatehouse looks up a person's groups in
 Microsoft Entra ID once a deployment turns that lookup on, and caches them for
 at most 5 minutes, so adding or removing someone takes effect within 5 minutes.

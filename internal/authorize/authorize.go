@@ -62,16 +62,17 @@ type Requester struct {
 	// how the run started, on any pool, for the audit row.
 	Source     string
 	Automation string
-	// AutomationName and AutomationOwner are the catalog's, for a listed
-	// Automation on a cursor-automation pool, and RunPerson is the person
-	// the verified run token names.
+	// AutomationName and AutomationOwner (the owning team) are the
+	// catalog's, for a listed Automation on a cursor-automation pool, and
+	// RunPerson is the person the verified run token names, or "" when it
+	// names none. Only the audit row reads them.
 	AutomationName  string
 	AutomationOwner string
 	RunPerson       string
 }
 
 // Audited is the verified identity an audit row names as the requester: the
-// person, the agent, or the person an Automation's run token names.
+// person, the agent, or the person an Automation's run token names, if any.
 func (r Requester) Audited() string {
 	switch r.Kind {
 	case "person", "agent":
@@ -114,11 +115,12 @@ func (r Requester) Audited() string {
 // A cursor-automation pool decides for the Automation that started each run,
 // so every request on it must come from one the catalog lists, T0 included: a
 // run any other way, such as a person's from the web or Slack
-// (not_automation), by an Automation the catalog does not list
-// (automation_unlisted), or whose run names no person (automation_no_person),
-// is refused. Whether that person is its owner is Decide's check. On every
-// Cursor pool the run's source and Automation are kept for the audit row,
-// refused or not.
+// (not_automation), or by an Automation the catalog does not list
+// (automation_unlisted), is refused. A listed Automation's run is its own
+// whoever the token names: a person outside the configured domains, or a
+// service account, is served the same, and a person the token does name is
+// kept for the audit row only. On every Cursor pool the run's source and
+// Automation are kept for the audit row, refused or not.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
 	pod, claimedRun := claims.Pod, claims.ClaimedRun
 	who := Requester{Kind: "none"}
@@ -201,13 +203,10 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 				if !ok {
 					return who, "automation_unlisted"
 				}
-				// TODO(probe): an Automation set to run as a service account
-				// is refused (automation_no_person) until we decide who is
-				// accountable for its runs.
-				if s.Kind != runnerid.KindPerson || s.Subject == "" {
-					return who, "automation_no_person"
+				who.Kind, who.Subject, who.AutomationName, who.AutomationOwner = "automation", a.ID, a.Name, a.Owner
+				if s.Kind == runnerid.KindPerson {
+					who.RunPerson = s.Subject
 				}
-				who.Kind, who.Subject, who.AutomationName, who.AutomationOwner, who.RunPerson = "automation", a.ID, a.Name, a.Owner, s.Subject
 				return who, ""
 			}
 			// Either sign of an Automation counts, so a token carrying only
@@ -248,36 +247,20 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 }
 
 // Decide applies the entitlement decision for one entry. On a
-// cursor-automation pool, at every tier, T0 included: the entry must be one
-// the catalog lists for the run's Automation (automation_not_granted); the
-// run's person must be its owner (automation_not_owner); and the entry is then
-// decided on the owner's account, which must be enabled. The owner's check is
-// charged to the Automation's own lookup budget, not the owner's.
-//
-// Only the owner's runs are served because the catalog takes no runner group
-// yet: whether Cursor ever names anyone but the owner as an Automation's run
-// person is unproven. A refusal at that check names no groups.
+// cursor-automation pool, at every tier, T0 included, the entry must be one
+// the catalog lists for the run's Automation (automation_not_granted). That
+// listing is the approval: the pool's ceiling still caps the tier, but no
+// person's groups or account are checked, so the directory is never asked.
 func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool, entry httpcatalog.Entry, who Requester) entitlement.Decision {
-	requester := entitlement.Requester{Kind: who.Kind, Subject: who.Subject}
-	if pool.Identity != httpcatalog.IdentityCursorAutomation {
-		return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
-			entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
+	if pool.Identity == httpcatalog.IdentityCursorAutomation {
+		if a, ok := pool.Automation(who.Subject); who.Kind != "automation" || !ok || !a.Uses(entry.Name) {
+			tier := entry.Tier
+			if tier == "" {
+				tier = "T0"
+			}
+			return entitlement.Decision{Tier: tier, Outcome: "automation_not_granted"}
+		}
 	}
-	tier := entry.Tier
-	if tier == "" {
-		tier = "T0"
-	}
-	refused := entitlement.Decision{Tier: tier, Groups: append([]string(nil), entry.Requires...)}
-	a, ok := pool.Automation(who.Subject)
-	if who.Kind != "automation" || !ok || !a.Uses(entry.Name) {
-		refused.Outcome = "automation_not_granted"
-		return refused
-	}
-	if who.RunPerson == "" || who.RunPerson != a.Owner {
-		refused.Outcome, refused.Groups = "automation_not_owner", nil
-		return refused
-	}
-	requester.Subject, requester.Budget = a.Owner, "automation:"+a.ID
 	return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
-		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
+		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, entitlement.Requester{Kind: who.Kind, Subject: who.Subject})
 }

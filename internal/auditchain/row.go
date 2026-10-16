@@ -48,10 +48,10 @@ type Row struct {
 	Outcome   string `json:"outcome,omitempty"`   // fixed code
 	Requester string `json:"requester,omitempty"` // developer identity, only from a verified source
 	// Authorization decision fields (see mitm authorize). On an automation
-	// row, requester is the person the run's token names; tier, decision,
-	// groups, cacheAgeSec, requesterOID and requesterDepartment come from the
-	// decision on automationOwner's account. A run that is not the owner's
-	// records only tier and decision automation_not_owner.
+	// row, requester is the person the run's token names, or empty when it
+	// names none, and decides nothing: the Automation is decided on its own
+	// catalog entries, so the row records tier and decision only, with no
+	// groups, cacheAgeSec, requesterOID or requesterDepartment.
 	RequesterKind string `json:"requesterKind,omitempty"` // person, agent, workload, automation or none
 	RequesterOID  string `json:"requesterOID,omitempty"`  // Entra object ID of the person named by requester
 	TokenSHA256   string `json:"tokenSHA256,omitempty"`   // runner session token hash; never the token
@@ -95,8 +95,8 @@ type Row struct {
 	RequesterDepartment string `json:"requesterDepartment,omitempty"`
 	// Source and Automation are what a verified Cursor run token said: how
 	// the run started (AUTOMATIONS for an Automation) and the Automation's
-	// id. AutomationName and AutomationOwner are the catalog's for that
-	// Automation, on a pool that decides per Automation.
+	// id. AutomationName and AutomationOwner (its owning team) are the
+	// catalog's for that Automation, on a pool that decides per Automation.
 	Source          string `json:"source,omitempty"`
 	Automation      string `json:"automation,omitempty"`
 	AutomationName  string `json:"automationName,omitempty"`
