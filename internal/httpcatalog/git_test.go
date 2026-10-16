@@ -92,7 +92,7 @@ func TestGitHubAPIEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e := c.Entries()[1]; e.MaxRequestBytes != 1<<20 || e.MaxResponseBytes != 8<<20 {
+	if e := c.Entries()[1]; e.MaxRequestBytes != 1<<20 || e.MaxResponseBytes != 4<<30 {
 		t.Fatalf("api limits: %d %d", e.MaxRequestBytes, e.MaxResponseBytes)
 	}
 	for name, doc := range map[string]string{
