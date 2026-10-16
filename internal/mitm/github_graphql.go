@@ -24,7 +24,10 @@ import (
 // contents. Below a mapped field GraphQL can reach a repository's files and
 // history, which only a git entry grants; without contents GitHub refuses
 // those fields. (REST's pull request token carries contents read for opening
-// pull requests, which GraphQL here never does.)
+// pull requests, which GraphQL here never does.) The one exception is the
+// ready mutation, which GitHub refuses without contents write: its token
+// carries it, and its payload may read back only the pull request's id,
+// number and draft state (httpcatalog GitHubGraphQL.ContentsWrite).
 var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
 
 // forwardGitHubGraphQL serves POST /graphql on a github-api host. The request
@@ -244,6 +247,9 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	}
 	if req.Actions && api.Repo.GrantsScope("actions") {
 		permissions.Actions = "read"
+	}
+	if req.ContentsWrite {
+		permissions.Contents = "write"
 	}
 	token, err := a.GitTokens.Token(r.Context(), app, api.Repo.Repo, permissions)
 	if err != nil {

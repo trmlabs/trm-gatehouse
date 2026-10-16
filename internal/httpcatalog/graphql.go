@@ -43,11 +43,15 @@ import (
 // and labels need the same operations there, and any other field with
 // arguments or a selection is refused. Lists of repositories are refused at
 // any depth (graphqlRepositoryList), and every list of pull requests needs
-// pr.list wherever it is read (graphqlPullRequestList). The token GitHub sees is minted for the
-// one repository with pull requests and no contents, so a nested field reaches
-// neither another private repository nor files and history (a git entry's
-// grant). Node IDs (a mutation's target, node's id) do not name their
-// repository; the broker resolves each one before sending (GraphQLTarget).
+// pr.list wherever it is read (graphqlPullRequestList). Below the root no
+// repository or owner is looked up by name (graphqlLookupField), so a nested
+// repository is one the root's is related to, and the fields that read files
+// and history are refused at any depth (graphqlContentFields). The token
+// GitHub sees is minted for the one repository with pull requests and no
+// contents, except the ready mutation's (GitHubGraphQL.ContentsWrite), so a
+// nested field reaches no other private repository either. Node IDs (a
+// mutation's target, node's id) do not name their repository; the broker
+// resolves each one before sending (GraphQLTarget).
 
 // Limits on one GraphQL request. gh's largest document (pr view) is about 3
 // KiB, 13 levels deep, with about 150 fields once fragments are expanded.
@@ -110,6 +114,12 @@ type GitHubGraphQL struct {
 	// token also carries actions read where the repository grants it
 	// (actions.read), as REST's workflow run routes.
 	Actions bool
+	// ContentsWrite marks markPullRequestReadyForReview, which GitHub refuses
+	// to a token without contents write: its token also carries contents
+	// write, as REST's pr.ready does, and its payload may read back only the
+	// pull request's id, number and draft state (readyPayload), so the wider
+	// token reaches nothing else.
+	ContentsWrite bool
 	// Code marks a request that reads which files a pull request changes
 	// (graphqlPathFields): as for REST's pull request files, it is served only
 	// to a pool whose git entry may clone the repository, for a requester that
@@ -171,6 +181,14 @@ var graphqlRepositoryFields = map[string]string{
 // a plain value with nothing below it to check.
 func graphqlRepositoryField(name string) bool {
 	return name == "repository" || strings.HasSuffix(name, "Repository")
+}
+
+// graphqlLookupField reports a field that, given arguments, looks a
+// repository or an owner up by name (an owner's repository(name:), a user's
+// organization(login:)). Below the root it is refused with any argument, so a
+// nested repository is only ever one the root's is related to; gh sends none.
+func graphqlLookupField(name string) bool {
+	return graphqlRepositoryField(name) || name == "organization" || name == "user" || name == "repositoryOwner"
 }
 
 // graphqlPullRequestList reports a field whose value is a list of pull
@@ -271,6 +289,9 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 	}
 	c := &graphqlCheck{vars: vars, defaults: defaults, ops: map[string]bool{}}
 	c.selections(op.SelectionSet)
+	// A fragment is spread only below the root (queryRoot and mutationRoot
+	// refuse one at the root), so its fields are checked as nested ones.
+	c.depth = 1
 	for _, f := range doc.Fragments {
 		if len(f.Directives) > 0 || graphqlContentTypes[f.TypeCondition] {
 			c.fail(ErrGraphQLUnmapped)
@@ -326,6 +347,11 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 	case ast.Mutation:
 		if err := mutationRoot(op.SelectionSet, vars, ops, &out.Targets, &out.Write); err != nil {
 			return GitHubGraphQL{}, err
+		}
+		// Its token carries contents write, so nothing but its fixed payload
+		// (readyPayload) may be in the document.
+		if out.ContentsWrite = out.Write == "pr.ready"; out.ContentsWrite && len(doc.Fragments) > 0 {
+			return GitHubGraphQL{}, ErrGraphQLUnmapped
 		}
 	default: // subscriptions
 		return GitHubGraphQL{}, ErrGraphQLUnmapped
@@ -447,14 +473,16 @@ func value(v *ast.Value, vars map[string]any, defaults func(string) *ast.Value) 
 }
 
 // graphqlContentFields and graphqlContentTypes are the main ways to a
-// repository's files, which only a git entry grants. The control is the
-// token: the broker's GraphQL token has no contents permission, so GitHub
-// refuses file reads anyway. These are refused here too, at any depth, as
-// defense in depth should the token's scope ever widen. gh reads none of them.
+// repository's files and history, which only a git entry grants. Every
+// GraphQL token but pr.ready's has no contents permission, so GitHub refuses
+// these reads anyway; they are refused here too, at any depth, so the parser
+// holds them whatever the token. gh reads none of them.
 var (
 	graphqlContentFields = map[string]bool{"object": true, "file": true, "entries": true, "tree": true, "readme": true,
 		"contributingGuidelines": true, "codeOfConduct": true, "pullRequestTemplates": true, "issueTemplates": true,
-		"diffHunk": true} // a review comment's code context, which REST serves only with a clone grant
+		"diffHunk": true, // a review comment's code context, which REST serves only with a clone grant
+		// A commit's history and blame, and a ref's compare (its commits and diff).
+		"history": true, "blame": true, "compare": true}
 	graphqlContentTypes = map[string]bool{"Blob": true, "Tree": true, "TreeEntry": true}
 )
 
@@ -481,6 +509,7 @@ type graphqlCheck struct {
 	vars     map[string]any
 	defaults func(string) *ast.Value
 	aliases  int
+	depth    int             // 0 for the root's fields
 	ops      map[string]bool // operations fields below the root need (repository, graphqlPullRequestList)
 	code     bool            // a field of graphqlPathFields appears
 	checks   bool            // a field of graphqlCheckFields appears
@@ -525,6 +554,9 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 			if graphqlRepositoryField(s.Name) {
 				c.repository(s.SelectionSet)
 			}
+			if c.depth > 0 && len(s.Arguments) > 0 && graphqlLookupField(s.Name) {
+				c.fail(ErrGraphQLUnmapped)
+			}
 			if s.Alias != "" && s.Alias != s.Name {
 				c.aliases++
 			}
@@ -544,7 +576,9 @@ func (c *graphqlCheck) selections(set ast.SelectionSet) {
 					c.fail(ErrGraphQLLimit)
 				}
 			}
+			c.depth++
 			c.selections(s.SelectionSet)
+			c.depth--
 		case *ast.InlineFragment:
 			if len(s.Directives) > 0 || graphqlContentTypes[s.TypeCondition] {
 				c.fail(ErrGraphQLUnmapped)
@@ -871,6 +905,9 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 			return ErrGraphQLUnmapped
 		}
 	}
+	if m.op == "pr.ready" && !readyPayload(f.SelectionSet) {
+		return ErrGraphQLUnmapped
+	}
 	ops[m.op] = true
 	*write = m.op
 	// A mutation's payload is a selection like any query's: from it a pull
@@ -896,6 +933,46 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 		}
 	}
 	return nil
+}
+
+// readyPayload reports whether a markPullRequestReadyForReview payload reads
+// back no more than gh pr ready does: __typename, clientMutationId, and the
+// pull request's __typename, id, number and isDraft, each a plain field with
+// no alias, argument, directive or fragment. Its token carries contents write
+// (GitHubGraphQL.ContentsWrite), so nothing else may be read with it.
+func readyPayload(set ast.SelectionSet) bool {
+	plain := func(sel ast.Selection, names ...string) (*ast.Field, bool) {
+		f, ok := sel.(*ast.Field)
+		if !ok || f.Alias != "" && f.Alias != f.Name || len(f.Arguments) > 0 || len(f.Directives) > 0 {
+			return nil, false
+		}
+		for _, n := range names {
+			if f.Name == n {
+				return f, true
+			}
+		}
+		return nil, false
+	}
+	for _, sel := range set {
+		f, ok := plain(sel, "__typename", "clientMutationId", "pullRequest")
+		switch {
+		case !ok:
+			return false
+		case f.Name != "pullRequest":
+			if len(f.SelectionSet) > 0 {
+				return false
+			}
+		case len(f.SelectionSet) == 0:
+			return false
+		default:
+			for _, sub := range f.SelectionSet {
+				if g, ok := plain(sub, "__typename", "id", "number", "isDraft"); !ok || len(g.SelectionSet) > 0 {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // String names a target for errors and tests.

@@ -1,6 +1,7 @@
 package mitm
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -81,7 +82,7 @@ type graphqlFixture struct {
 	repoReads    int      // the broker's GET /repos/{owner}/{repo} lookups
 	failNode     bool     // the node lookup answers 502
 	failRepo     string   // this repository's read answers 502 ("*": every one)
-	withContents []string // GraphQL requests made with a token holding contents
+	withContents []string // GraphQL requests made with a token holding contents: its contents permission, then the body
 	person       bool     // pool-agent is a claude-session pool; requests come as alice
 	mintedFor    []string // the repository of every token minted
 	proxy        *Proxy
@@ -222,7 +223,9 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 		repo, ok := f.minted[token]
 		failNode, failRepo := f.failNode, f.failRepo
 		if r.URL.Path == "/graphql" && f.contents[token] != "" {
-			f.withContents = append(f.withContents, repo)
+			data, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(data))
+			f.withContents = append(f.withContents, f.contents[token]+" "+string(data))
 		}
 		f.mu.Unlock()
 		if !ok {
@@ -464,13 +467,19 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 			t.Fatalf("relayed without X-Github-Next-Global-ID: %s", body)
 		}
 	}
-	// No GraphQL request carried a token with contents: nested fields can
-	// reach files and history, which only a git entry grants.
+	// Only gh pr ready's mutation carried a token with contents, and write,
+	// which GitHub requires for it. Nested fields can reach files and
+	// history, which only a git entry grants, so no other request may.
 	f.mu.Lock()
 	withContents := f.withContents
 	f.mu.Unlock()
-	if len(withContents) != 0 {
-		t.Errorf("GraphQL requests made with a contents token: %v", withContents)
+	for _, c := range withContents {
+		if !strings.HasPrefix(c, "write ") || !strings.Contains(c, "markPullRequestReadyForReview") {
+			t.Errorf("GraphQL request made with a contents token: %s", c)
+		}
+	}
+	if len(withContents) == 0 {
+		t.Error("gh pr ready's mutation was sent without contents write")
 	}
 	// gh pr edit --title is refused: pr.edit changes only the body.
 	if outcome := f.replay(t, "pr-edit-title"); outcome != "graphql_unmapped" {
