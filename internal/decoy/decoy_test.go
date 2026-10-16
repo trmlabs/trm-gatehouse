@@ -91,6 +91,21 @@ func TestBodyAndPasswordFindADecoy(t *testing.T) {
 	}
 }
 
+// A JSON control escape ends the text before a decoy: the escape's letter
+// would otherwise run into it, as "out:\n<decoy>" did.
+func TestJSONControlEscapeBeforeADecoy(t *testing.T) {
+	set := testSet(t)
+	for _, escape := range []string{`\n`, `\r`, `\t`, `\b`, `\f`} {
+		body := `{"text":"out:` + escape + decoyToken + `"}`
+		if m, ok := set.Body([]byte(body)); !ok || m.Label != "pool-a/github_token" {
+			t.Errorf("body %q: %+v %v", body, m, ok)
+		}
+	}
+	if m, ok := set.Body([]byte(`{"text":"out:\\n` + decoyToken + `"}`)); ok {
+		t.Errorf("an escaped backslash then n matched %+v", m)
+	}
+}
+
 // Only a whole decoy matches: not a part of one, not one inside a longer run
 // of the same characters, and not one character off.
 func TestOnlyAWholeDecoyMatches(t *testing.T) {

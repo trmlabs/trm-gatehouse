@@ -197,8 +197,8 @@ func (s *Set) header(v string) (string, bool) {
 	return "", false
 }
 
-// text checks data as sent and, when it holds percent-encoding or JSON
-// \u escapes, decoded: a vendor decodes either before reading a value.
+// text checks data as sent and, when it holds percent-encoding or a
+// backslash, decoded: a vendor decodes either before reading a value.
 func (s *Set) text(data []byte) (string, bool) {
 	if label, ok := s.find(data); ok {
 		return label, true
@@ -208,7 +208,7 @@ func (s *Set) text(data []byte) (string, bool) {
 			return label, true
 		}
 	}
-	if bytes.Contains(data, []byte(`\u`)) {
+	if bytes.IndexByte(data, '\\') >= 0 {
 		return s.find(jsonUnescape(data))
 	}
 	return "", false
@@ -265,13 +265,20 @@ func percentDecode(data []byte) []byte {
 	return out
 }
 
-// jsonUnescape undoes \uXXXX escapes. Any other escape is kept as sent, both
-// bytes together, so an escaped backslash never starts a \u escape.
+// jsonUnescape undoes \uXXXX escapes and JSON's control escapes (\n \r \t
+// \b \f), whose letter would otherwise run into a decoy that follows, as in
+// "out:\n<decoy>". Any other escape is kept as sent, both bytes together, so
+// an escaped backslash never starts an escape.
 func jsonUnescape(data []byte) []byte {
 	out := make([]byte, 0, len(data))
 	for i := 0; i < len(data); i++ {
 		if data[i] != '\\' || i+1 >= len(data) {
 			out = append(out, data[i])
+			continue
+		}
+		if c, ok := jsonControl[data[i+1]]; ok {
+			out = append(out, c)
+			i++
 			continue
 		}
 		if data[i+1] == 'u' && i+5 < len(data) {
@@ -293,6 +300,8 @@ func jsonUnescape(data []byte) []byte {
 	}
 	return out
 }
+
+var jsonControl = map[byte]byte{'n': '\n', 'r': '\r', 't': '\t', 'b': '\b', 'f': '\f'}
 
 func unhex(c byte) (byte, bool) {
 	switch {

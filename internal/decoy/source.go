@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,19 +43,20 @@ func (s *Source) Current() *Set {
 // Version is the version of the set in force, or 0 before the first load.
 func (s *Source) Version() int { return int(s.version.Load()) }
 
-// Loader returns every decoy by label and the version they belong to. Given
-// the version already in force, it may return no values and that version to
-// say nothing changed.
-type Loader func(ctx context.Context, known int) (values map[string]string, version int, err error)
+// Loader returns every decoy by label, the fields it skipped (by label, never
+// value), and the version they belong to. Given the version already in force,
+// it may return no values and that version to say nothing changed.
+type Loader func(ctx context.Context, known int) (values map[string]string, skipped []Rejected, version int, err error)
 
 // Load reads the newest decoys and puts them in force. force rereads them
-// even when the version is unchanged. It returns the decoys left out.
+// even when the version is unchanged. It returns the decoys left out: the
+// fields the loader skipped, then the values the set refused.
 func (s *Source) Load(ctx context.Context, load Loader, force bool) ([]Rejected, error) {
 	known := s.Version()
 	if force || s.Current() == nil {
 		known = -1
 	}
-	values, version, err := load(ctx, known)
+	values, skipped, version, err := load(ctx, known)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +66,7 @@ func (s *Source) Load(ctx context.Context, load Loader, force bool) ([]Rejected,
 	set, rejected := NewSet(values)
 	s.current.Store(set)
 	s.version.Store(int64(version))
-	return rejected, nil
+	return append(skipped, rejected...), nil
 }
 
 // Watch loads every interval, and in full every refresh, until ctx ends.
@@ -113,33 +115,34 @@ var (
 //     a string holding one. Other fields are ignored. Its KV version is the
 //     set's version, so a poll costs one read until the head changes.
 //   - pools/<name>: each string field is one decoy, labelled
-//     "<name>/<field>".
+//     "<name>/<field>". A field whose name is not lower-case letters, digits
+//     and _, or whose value is not a string, is skipped and reported by label.
 //
 // Terraform writes the owners' decoys, then the head. An owner whose secret is
 // deleted has no decoys. Any other read failure fails the load, and the last
 // good set stays in force.
 func VaultLoader(vault Logical, mount, prefix string) Loader {
-	return func(ctx context.Context, known int) (map[string]string, int, error) {
+	return func(ctx context.Context, known int) (map[string]string, []Rejected, int, error) {
 		if vault == nil || !validPath(mount) || !validPath(prefix) {
-			return nil, 0, errors.New("decoy location is not configured")
+			return nil, nil, 0, errors.New("decoy location is not configured")
 		}
 		base := mount + "/data/" + prefix + "/"
 		head, version, err := readKV(ctx, vault, base+"head")
 		if err != nil {
-			return nil, 0, fmt.Errorf("decoy head: %w", err)
+			return nil, nil, 0, fmt.Errorf("decoy head: %w", err)
 		}
 		if version == known {
-			return nil, version, nil
+			return nil, nil, version, nil
 		}
 		names, err := headNames(head["names"])
 		if err != nil {
-			return nil, version, err
+			return nil, nil, version, err
 		}
-		values, err := readOwners(ctx, vault, base+"pools/", names)
+		values, skipped, err := readOwners(ctx, vault, base+"pools/", names)
 		if err != nil {
-			return nil, version, err
+			return nil, nil, version, err
 		}
-		return values, version, nil
+		return values, skipped, version, nil
 	}
 }
 
@@ -182,9 +185,11 @@ func headNames(field interface{}) ([]string, error) {
 }
 
 // readOwners reads every owner's decoys, concurrently. A field that is not a
-// string or not a plain name is skipped; its value is never reported.
-func readOwners(ctx context.Context, vault Logical, base string, names []string) (map[string]string, error) {
+// string or not a plain name is skipped and returned by label, sorted; its
+// value is never reported.
+func readOwners(ctx context.Context, vault Logical, base string, names []string) (map[string]string, []Rejected, error) {
 	values := map[string]string{}
+	var skipped []Rejected
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var mu sync.Mutex
@@ -207,7 +212,13 @@ func readOwners(ctx context.Context, vault Logical, base string, names []string)
 				}
 				mu.Lock()
 				for field, v := range data {
-					if value, ok := v.(string); ok && fieldName.MatchString(field) {
+					value, ok := v.(string)
+					switch {
+					case !fieldName.MatchString(field):
+						skipped = append(skipped, Rejected{Label: name + "/" + field, Reason: "field name outside a-z, 0-9 and _"})
+					case !ok:
+						skipped = append(skipped, Rejected{Label: name + "/" + field, Reason: "value is not a string"})
+					default:
 						values[name+"/"+field] = value
 					}
 				}
@@ -224,9 +235,10 @@ func readOwners(ctx context.Context, vault Logical, base string, names []string)
 	close(next)
 	wg.Wait()
 	if failure != nil {
-		return nil, failure
+		return nil, nil, failure
 	}
-	return values, nil
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].Label < skipped[j].Label })
+	return values, skipped, nil
 }
 
 var errDeleted = errors.New("decoy secret deleted")
