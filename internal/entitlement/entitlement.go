@@ -56,6 +56,15 @@ const (
 	// directory is asked, so it cannot get the tenant throttled and fail every
 	// decision in the fleet.
 	DefaultLookupsPerMinute = 60
+	// DefaultMaxLookupsPerMinute is the highest per-person budget the broker
+	// accepts unless the operator raises it
+	// (AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX). Lookups of one person
+	// and group set in flight together share one directory call, so a
+	// person's lookups grow with the group sets they use and the directory's
+	// round trip, not with how many agents they run: 100 a second leaves room
+	// for a fleet of 10,000 to 100,000 concurrent agents. Every broker
+	// process keeps its own budget.
+	DefaultMaxLookupsPerMinute = 6000
 	// DefaultRecentAnswer is how old an answer a fresh lookup over budget
 	// still accepts instead of refusing.
 	DefaultRecentAnswer = 5 * time.Second

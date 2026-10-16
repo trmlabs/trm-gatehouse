@@ -73,8 +73,11 @@ func attachAuthorization(adapter *mitm.HeaderAdapter, getenv func(string) string
 //   - AGENT_VAULT_ENTITLEMENT_CACHE_SECONDS shortens the 5-minute cache;
 //   - AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE sets each person's directory
 //     lookup budget, per cache: the HTTP adapter and the PostgreSQL broker
-//     each load their own (default entitlement.DefaultLookupsPerMinute). Any
-//     positive count is accepted; the directory's own throttling is the limit.
+//     each load their own (default entitlement.DefaultLookupsPerMinute). It
+//     may not exceed AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX (default
+//     entitlement.DefaultMaxLookupsPerMinute), so a mistyped budget fails at
+//     start instead of removing the guard. Each broker replica keeps its own
+//     budget, so the directory sees up to replicas times two times this.
 //
 // Without a verifier or a source, entries above T0 are refused on the pools
 // that would need them.
@@ -116,6 +119,14 @@ func loadAuthorization(getenv func(string) string) (authorization, error) {
 		}
 		ttl = time.Duration(seconds) * time.Second
 	}
+	ceiling := entitlement.DefaultMaxLookupsPerMinute
+	if raw := getenv("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return a, fmt.Errorf("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX must be a positive whole number")
+		}
+		ceiling = n
+	}
 	lookups := entitlement.DefaultLookupsPerMinute
 	if raw := getenv("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -123,6 +134,9 @@ func loadAuthorization(getenv func(string) string) (authorization, error) {
 			return a, fmt.Errorf("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE must be a positive whole number")
 		}
 		lookups = n
+	}
+	if lookups > ceiling {
+		return a, fmt.Errorf("AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE (%d) is above AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX (%d)", lookups, ceiling)
 	}
 	switch source := getenv("AGENT_VAULT_ENTITLEMENTS"); {
 	case source == "":
