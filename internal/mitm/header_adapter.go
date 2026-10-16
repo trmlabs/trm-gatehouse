@@ -275,7 +275,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusForbidden, "request_field")
 		return
 	}
-	expectedCredential := entry.Credential(entry.Placeholder)
+	expectedCredential := entry.CallerCredential()
 	forwarded := http.Header{}
 	for name, values := range r.Header {
 		if name == entry.Header {
@@ -308,6 +308,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusServiceUnavailable, "key_unavailable")
 		return
 	}
+	password, pair := httpcatalog.PairPassword(secret.Value())
+	if entry.BasicPair && !pair {
+		deny(http.StatusServiceUnavailable, "key_unavailable")
+		return
+	}
 	outURL := &url.URL{Scheme: "https", Host: target, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(body))
 	if err != nil {
@@ -337,6 +342,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	if entry.BasicUser {
 		// The encoded user name alone, as a vendor might echo it.
 		values["basic"] = strings.TrimPrefix(credential, "Basic ")
+	}
+	if entry.BasicPair {
+		// The password alone; the encoded pair is already one of the key's
+		// screened encodings. The user half is usually a public key, so it is
+		// not screened.
+		values["password"] = password
 	}
 	needles := secretRepresentations(values)
 	p.relayScreened(w, out, needles, entry.MaxResponseBytes, finish, func(*http.Response) {
