@@ -11,11 +11,11 @@ import (
 const exampleCatalogYAML = `pools:
   - {name: cursor, namespace: cursor-agents, serviceAccount: cursor-worker}
 entries:
-  - name: b2bcore
+  - name: appdb
     kind: postgres
     host: p.abc.db.postgresbridge.com
     pools: [cursor]
-    postgres: {database: core, mount: database, role: staging.us.crunchy.core-readonly}
+    postgres: {database: core, mount: database, role: staging.us.pg1.app-readonly}
   - name: serpapi
     host: serpapi.com
     pathPrefixes: [/search]
@@ -66,7 +66,7 @@ func TestBrokerCatalogValidateUsesTheBrokerParser(t *testing.T) {
 	if err := catalogEnvironment(func(string) string { return "staging" }); err != nil {
 		t.Fatal(err)
 	}
-	prodRole := []byte(`{"entries":[{"name":"core","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["pool-a"],"postgres":{"database":"core","mount":"database","role":"prod.us.crunchy.core-readonly"}}]}`)
+	prodRole := []byte(`{"entries":[{"name":"core","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["pool-a"],"postgres":{"database":"core","mount":"database","role":"prod.us.pg1.app-readonly"}}]}`)
 	if err := validateBrokerCatalog(prodRole, nil, false, &out); err == nil {
 		t.Fatal("a prod role validated for staging")
 	}

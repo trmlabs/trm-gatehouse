@@ -64,7 +64,7 @@ func TestRealPostgres_ReadOnlyLoginRefusesTemporaryObjects(t *testing.T) {
 		lease := &Lease{ID: "lease-" + randomHex(4), Username: role, Password: pw, ExpiresAt: time.Now().Add(time.Hour)}
 		_, addr := startBroker(t, Options{
 			Auth:      &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-uuid-1", WorkloadID: "pod-1", Pool: "cursor"}},
-			Databases: &fakeResolver{svc: &DatabaseService{Name: "core", Addr: u.Host, Database: u.Path[1:], Mount: "database", Role: "staging.us.crunchy.core-readonly", SSLMode: "disable", ReadOnly: readOnly}},
+			Databases: &fakeResolver{svc: &DatabaseService{Name: "core", Addr: u.Host, Database: u.Path[1:], Mount: "database", Role: "staging.us.pg1.app-readonly", SSLMode: "disable", ReadOnly: readOnly}},
 			Leases:    &fakeMinter{lease: lease},
 			Pool:      pool,
 		})

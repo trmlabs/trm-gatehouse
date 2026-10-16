@@ -297,23 +297,23 @@ func TestCatalogDatabaseRolesAndAccess(t *testing.T) {
 		mount, role, access string
 		ok                  bool
 	}{
-		"readonly default read": {"database", "staging.us.crunchy.core-readonly", "", true},
-		"readwrite with write":  {"database", "staging.us.crunchy.core-readwrite", "write", true},
-		"readwrite as read":     {"database", "staging.us.crunchy.core-readwrite", "", false},
-		"readonly as write":     {"database", "staging.us.crunchy.core-readonly", "write", false},
-		"bad access":            {"database", "staging.us.crunchy.core-readonly", "admin", false},
-		"other environment":     {"database", "prod.us.crunchy.core-readonly", "", false},
-		"gatehouse readonly":    {"database", "gatehouse-staging.us.crunchy.core-readonly", "", true},
-		"gatehouse readwrite":   {"database", "gatehouse-staging.us.crunchy.core-readwrite", "write", true},
-		"gatehouse as write":    {"database", "gatehouse-staging.us.crunchy.core-readonly", "write", false},
-		"gatehouse other env":   {"database", "gatehouse-prod.us.crunchy.core-readonly", "", false},
-		"gatehouse env suffix":  {"database", "gatehouse-stagingx.us.crunchy.core-readonly", "", false},
-		"other prefix":          {"database", "agent-staging.us.crunchy.core-readonly", "", false},
-		"doubled prefix":        {"database", "gatehouse-gatehouse-staging.us.crunchy.core-readonly", "", false},
-		"no suffix":             {"database", "staging.us.crunchy.core", "", false},
+		"readonly default read": {"database", "staging.us.pg1.app-readonly", "", true},
+		"readwrite with write":  {"database", "staging.us.pg1.app-readwrite", "write", true},
+		"readwrite as read":     {"database", "staging.us.pg1.app-readwrite", "", false},
+		"readonly as write":     {"database", "staging.us.pg1.app-readonly", "write", false},
+		"bad access":            {"database", "staging.us.pg1.app-readonly", "admin", false},
+		"other environment":     {"database", "prod.us.pg1.app-readonly", "", false},
+		"gatehouse readonly":    {"database", "gatehouse-staging.us.pg1.app-readonly", "", true},
+		"gatehouse readwrite":   {"database", "gatehouse-staging.us.pg1.app-readwrite", "write", true},
+		"gatehouse as write":    {"database", "gatehouse-staging.us.pg1.app-readonly", "write", false},
+		"gatehouse other env":   {"database", "gatehouse-prod.us.pg1.app-readonly", "", false},
+		"gatehouse env suffix":  {"database", "gatehouse-stagingx.us.pg1.app-readonly", "", false},
+		"other prefix":          {"database", "agent-staging.us.pg1.app-readonly", "", false},
+		"doubled prefix":        {"database", "gatehouse-gatehouse-staging.us.pg1.app-readonly", "", false},
+		"no suffix":             {"database", "staging.us.pg1.app", "", false},
 		"bare role":             {"database", "readonly", "", false},
-		"plus mount":            {"data+base", "staging.us.crunchy.core-readonly", "", false},
-		"nested mount":          {"db/staging", "staging.us.crunchy.core-readonly", "", true},
+		"plus mount":            {"data+base", "staging.us.pg1.app-readonly", "", false},
+		"nested mount":          {"db/staging", "staging.us.pg1.app-readonly", "", true},
 	} {
 		c, err := Parse([]byte(doc(tc.mount, tc.role, tc.access)))
 		if (err == nil) != tc.ok {
@@ -331,7 +331,7 @@ func TestCatalogDatabaseRolesAndAccess(t *testing.T) {
 	Environment.Store("")
 	rolesWithoutEnvironment = false
 	t.Cleanup(func() { rolesWithoutEnvironment = true })
-	if _, err := Parse([]byte(doc("database", "staging.us.crunchy.core-readonly", ""))); err == nil || !strings.Contains(err.Error(), "AGENT_VAULT_CATALOG_ENVIRONMENT") {
+	if _, err := Parse([]byte(doc("database", "staging.us.pg1.app-readonly", ""))); err == nil || !strings.Contains(err.Error(), "AGENT_VAULT_CATALOG_ENVIRONMENT") {
 		t.Fatalf("database entry loaded with no environment set: %v", err)
 	}
 	if _, err := Parse([]byte(`{"entries":[` + validEntry + `]}`)); err != nil {

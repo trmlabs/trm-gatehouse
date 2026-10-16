@@ -94,15 +94,15 @@ func TestDatabaseServiceUpsertIsIdempotentByName(t *testing.T) {
 	ctx := context.Background()
 	ns, _ := s.CreateVault(ctx, "db-upsert")
 
-	first, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "crunchy"))
+	first, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "primary"))
 	if err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 
 	// Re-upsert the same name with changed coordinates: same row (id + created_at
 	// preserved), fields overwritten in place, not a duplicate.
-	changed := sampleService(ns.ID, "crunchy")
-	changed.Upstream = "crunchy.internal:5433"
+	changed := sampleService(ns.ID, "primary")
+	changed.Upstream = "primary.internal:5433"
 	changed.Role = "rw"
 	changed.MaxConns = 25
 	second, err := s.UpsertDatabaseService(ctx, changed)
@@ -115,7 +115,7 @@ func TestDatabaseServiceUpsertIsIdempotentByName(t *testing.T) {
 	if !second.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("expected created_at preserved, got %v vs %v", second.CreatedAt, first.CreatedAt)
 	}
-	if second.Upstream != "crunchy.internal:5433" || second.Role != "rw" || second.MaxConns != 25 {
+	if second.Upstream != "primary.internal:5433" || second.Role != "rw" || second.MaxConns != 25 {
 		t.Fatalf("expected fields overwritten, got %+v", second)
 	}
 
@@ -166,24 +166,24 @@ func TestDatabaseServiceDelete(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 	ns, _ := s.CreateVault(ctx, "db-delete")
-	if _, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "citus")); err != nil {
+	if _, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "analytics")); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
 	// Deleting an existing service reports true.
-	deleted, err := s.DeleteDatabaseService(ctx, ns.ID, "citus")
+	deleted, err := s.DeleteDatabaseService(ctx, ns.ID, "analytics")
 	if err != nil {
 		t.Fatalf("DeleteDatabaseService: %v", err)
 	}
 	if !deleted {
 		t.Fatal("expected delete to report true for an existing service")
 	}
-	if _, err := s.GetDatabaseService(ctx, ns.ID, "citus"); err != sql.ErrNoRows {
+	if _, err := s.GetDatabaseService(ctx, ns.ID, "analytics"); err != sql.ErrNoRows {
 		t.Fatalf("expected gone after delete, got %v", err)
 	}
 
 	// Deleting a missing service reports false, not an error.
-	deleted, err = s.DeleteDatabaseService(ctx, ns.ID, "citus")
+	deleted, err = s.DeleteDatabaseService(ctx, ns.ID, "analytics")
 	if err != nil {
 		t.Fatalf("second delete errored: %v", err)
 	}

@@ -60,11 +60,11 @@ pools:
     ceiling: T1
 
 entries:
-  - name: b2bcore                          # a database
+  - name: appdb                            # a database
     kind: postgres
     host: p.abc.db.postgresbridge.com
     pools: [cursor-agents]
-    postgres: {database: core, mount: database, role: staging.us.crunchy.core-readonly}
+    postgres: {database: app, mount: database, role: staging.us.pg1.app-readonly}
 
   - name: serpapi                          # an HTTP API; tier T0 by default
     host: serpapi.com

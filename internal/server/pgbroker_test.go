@@ -38,8 +38,8 @@ func TestLoadDatabaseServices_Inline(t *testing.T) {
 // the catalog's naming, so the broker refuses temporary objects on them.
 func TestLoadDatabaseServices_ReadOnlyFollowsTheRoleName(t *testing.T) {
 	env := map[string]string{
-		"AGENT_VAULT_DB_SERVICES": `{"default":[{"name":"core","upstream":"127.0.0.1:5433","mount":"database","role":"staging.us.crunchy.core-readonly"},
-			{"name":"rw","upstream":"127.0.0.1:5433","mount":"database","role":"staging.us.crunchy.core-readwrite"}]}`,
+		"AGENT_VAULT_DB_SERVICES": `{"default":[{"name":"core","upstream":"127.0.0.1:5433","mount":"database","role":"staging.us.pg1.app-readonly"},
+			{"name":"rw","upstream":"127.0.0.1:5433","mount":"database","role":"staging.us.pg1.app-readwrite"}]}`,
 	}
 	got, err := LoadDatabaseServices(getenvFrom(env))
 	if err != nil {
@@ -170,7 +170,7 @@ func TestStoreDatabaseResolver(t *testing.T) {
 	for _, svc := range []store.DatabaseService{
 		{VaultID: "vid-multi", Name: "reads", Upstream: "h:1", Database: "analytics", Mount: "database", Role: "ro", SSLMode: "require", MaxConns: 5},
 		{VaultID: "vid-multi", Name: "writes", Upstream: "h:2", Database: "ledger", Mount: "database", Role: "rw"},
-		{VaultID: "vid-solo", Name: "only", Upstream: "h:9", Mount: "database", Role: "staging.us.crunchy.only-readonly"},
+		{VaultID: "vid-solo", Name: "only", Upstream: "h:9", Mount: "database", Role: "staging.us.pg1.only-readonly"},
 	} {
 		if _, err := ms.UpsertDatabaseService(ctx, svc); err != nil {
 			t.Fatalf("seed %s: %v", svc.Name, err)

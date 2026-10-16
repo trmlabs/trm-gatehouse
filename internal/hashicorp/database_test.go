@@ -304,8 +304,8 @@ func TestDatabaseMintReportsVaultAnswer(t *testing.T) {
 	}{
 		{403, []string{"1 error occurred:\n\t* permission denied\n\n"}, "Vault answered 403: 1 error occurred: * permission denied", true},
 		{400, []string{"unknown role: reader"}, "Vault answered 400: unknown role: reader", true},
-		{500, []string{`failed to execute query: ERROR: role "citus_dynamic_role" does not exist (SQLSTATE 42704)`},
-			`Vault answered 500: failed to execute query: ERROR: role "citus_dynamic_role" does not exist (SQLSTATE 42704)`, false},
+		{500, []string{`failed to execute query: ERROR: role "app_dynamic_role" does not exist (SQLSTATE 42704)`},
+			`Vault answered 500: failed to execute query: ERROR: role "app_dynamic_role" does not exist (SQLSTATE 42704)`, false},
 		{503, nil, "Vault answered 503: no message", false},
 		{500, []string{"a", "b", "c", "d", "e", "f"}, "Vault answered 500: a; b; c; d; and 2 more", false},
 	} {
