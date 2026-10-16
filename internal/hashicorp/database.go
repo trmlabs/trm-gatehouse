@@ -2,11 +2,16 @@ package hashicorp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	vaultapi "github.com/hashicorp/vault/api"
 )
 
 // DatabaseCredential is a dynamic database login minted by Vault's database
@@ -69,10 +74,12 @@ func (c *Client) ReadDatabaseCredential(ctx context.Context, mount, role string)
 	mintAPI.SetMaxRetries(0)
 	secret, err := mintAPI.Logical().ReadWithContext(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("database credential read failed")
+		return nil, credentialReadFailure(err)
 	}
 	if secret == nil {
-		return nil, fmt.Errorf("no credential at %s (is the database role configured?)", path)
+		// The client returns no secret and no error only for a 404 without data.
+		return nil, &CredentialReadError{Status: http.StatusNotFound,
+			Detail: fmt.Sprintf("no credential at %s (is the database role configured?)", path)}
 	}
 	username := stringValue(secret.Data["username"])
 	password := stringValue(secret.Data["password"])
@@ -92,6 +99,88 @@ func (c *Client) ReadDatabaseCredential(ctx context.Context, mount, role string)
 		LeaseDuration: time.Duration(secret.LeaseDuration) * time.Second,
 		Renewable:     secret.Renewable,
 	}, nil
+}
+
+// ErrCredentialNotIssued marks a credential read that Vault refused before any
+// database user existed. Vault registers a lease only for a secret its database
+// engine returned, and every failure after registration (audit, response
+// handling) answers 5xx. So a 400, 403 or 404 is Vault's own evidence that the
+// request created no user and no lease, while a 5xx, a timeout or a lost
+// connection proves nothing either way.
+var ErrCredentialNotIssued = errors.New("vault issued no database credential")
+
+// CredentialReadError is a failed credential read as an operator's log shows
+// it: Vault's HTTP status and its own error messages, or only the failure
+// class when Vault did not answer. Vault never returned a credential, so none
+// can be in it, and quoted literals in the messages are masked in case a
+// database error echoes a statement.
+type CredentialReadError struct {
+	Status int    // Vault's HTTP status; 0 when Vault did not answer
+	Detail string // Vault's messages, or the failure class
+}
+
+func (e *CredentialReadError) Error() string {
+	if e.Status == 0 {
+		return "database credential read failed: no answer from Vault (" + e.Detail + ")"
+	}
+	return fmt.Sprintf("database credential read failed: Vault answered %d: %s", e.Status, e.Detail)
+}
+
+func (e *CredentialReadError) Is(target error) bool {
+	return target == ErrCredentialNotIssued &&
+		(e.Status == http.StatusBadRequest || e.Status == http.StatusForbidden || e.Status == http.StatusNotFound)
+}
+
+func credentialReadFailure(err error) *CredentialReadError {
+	var answered *vaultapi.ResponseError
+	switch {
+	case errors.As(err, &answered):
+		return &CredentialReadError{Status: answered.StatusCode, Detail: vaultMessages(answered.Errors)}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &CredentialReadError{Detail: "timeout"}
+	case errors.Is(err, context.Canceled):
+		return &CredentialReadError{Detail: "canceled"}
+	default:
+		return &CredentialReadError{Detail: "network"}
+	}
+}
+
+var (
+	quotedLiteral = regexp.MustCompile(`'[^']*'`)
+	nearToken     = regexp.MustCompile(`(?i)(at or near )"[^"]*"`)
+	urlUserinfo   = regexp.MustCompile(`://[^/@\s]*@`)
+	passwordValue = regexp.MustCompile(`(?i)(password\s*[=:]\s*)[^\s,;)]+`)
+)
+
+// vaultMessages renders at most four of Vault's error messages, each on one
+// line and cut to 300 characters. String literals, the token a syntax error
+// points at, URL user info and password= values are masked, so a database
+// error that echoes a CREATE ROLE statement or a connection string cannot
+// carry a password.
+func vaultMessages(messages []string) string {
+	const maxMessages, maxLen = 4, 300
+	var out []string
+	for _, message := range messages {
+		if len(out) == maxMessages {
+			out = append(out, fmt.Sprintf("and %d more", len(messages)-maxMessages))
+			break
+		}
+		message = strings.Join(strings.Fields(message), " ")
+		message = quotedLiteral.ReplaceAllString(message, "'***'")
+		message = nearToken.ReplaceAllString(message, `${1}"***"`)
+		message = urlUserinfo.ReplaceAllString(message, "://***@")
+		message = passwordValue.ReplaceAllString(message, "${1}***")
+		if utf8.RuneCountInString(message) > maxLen {
+			message = string([]rune(message)[:maxLen]) + "..."
+		}
+		if message != "" {
+			out = append(out, message)
+		}
+	}
+	if len(out) == 0 {
+		return "no message"
+	}
+	return strings.Join(out, "; ")
 }
 
 // RenewLease extends a lease by increment (a hint Vault may clamp to the role's

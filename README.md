@@ -237,6 +237,7 @@ Start with the [developer guide](docs/gatehouse/developer-guide.md), then the
 | [Google Cloud](docs/gatehouse/gcp-tokens.md) | Narrowed tokens for Cloud Storage and BigQuery |
 | [Browser sign-in](docs/gatehouse/browser-session.md) | Web apps signed in as a service account |
 | [Signed audit](docs/gatehouse/signed-audit.md) | The audit chain, checkpoints and verification |
+| [Decoy credentials](docs/gatehouse/decoy-credentials.md) | Planted keys that refuse and flag a session hunting for secrets |
 | [Task relay](examples/credential-proxy/task-relay/README.md) | Sandboxes that hold no identity token |
 | [Workload identity](examples/credential-proxy/kubernetes/README.md) | Kubernetes identity setup and fixtures |
 | [Running a fleet](docs/gatehouse/broker-fleet.md) and [database recovery](docs/gatehouse/database-recovery.md) | Several replicas, and recovery of interrupted database logins |

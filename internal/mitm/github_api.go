@@ -29,7 +29,11 @@ var githubDownloadHosts = []string{"actions.githubusercontent.com", "blob.core.w
 
 // readyMutation marks one pull request ready for review. GitHub has no REST
 // route for it, so the broker sends this mutation, and only this one, for
-// POST .../pulls/{n}/ready.
+// POST .../pulls/{n}/ready. GitHub refuses it to an App token without contents
+// write, so pr.ready mints pull requests and contents write. That wider token
+// cannot be put to other use: the broker builds the mutation itself, from
+// nothing the worker sent but the pull request number, and the worker never
+// sees the token.
 const readyMutation = `mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { number isDraft } } }`
 
 // forwardGitHubAPI serves the GitHub REST routes a github-api entry lists
@@ -82,6 +86,9 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	if err == nil && p.refuseDecoyBody(w, event, target, body) {
+		return
+	}
 	switch {
 	case err != nil:
 		deny(http.StatusBadRequest, "request_shape")
@@ -122,6 +129,11 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	}
 	if !ok {
 		deny(http.StatusBadRequest, "request_shape")
+		return
+	}
+	// The rebuilt body is what GitHub reads, with any escape in the worker's
+	// JSON decoded, so it is checked again.
+	if p.refuseDecoyBody(w, event, target, body) {
 		return
 	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
@@ -207,6 +219,10 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	rejected := func(*http.Response) { a.GitTokens.Invalidate(app, api.Repo.Repo, permissions) }
 	if api.Download {
 		p.relayDownload(w, out, needles, entry.MaxResponseBytes, finish, rejected)
+		return
+	}
+	if api.Route == "ready" {
+		p.relayReady(w, out, needles, entry.MaxResponseBytes, api.Target, event, finish, rejected)
 		return
 	}
 	p.relayScreened(w, out, needles, entry.MaxResponseBytes, finish, rejected, nil)

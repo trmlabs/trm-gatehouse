@@ -64,9 +64,13 @@ func TestV1InputIsUnchanged(t *testing.T) {
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v6\x00")) {
 		t.Fatal("a v6 row does not use the v6 input")
 	}
-	r.MACVersion = MACVersionCurrent
+	r.MACVersion = 7
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v7\x00")) {
-		t.Fatal("a current row does not use the v7 input")
+		t.Fatal("a v7 row does not use the v7 input")
+	}
+	r.MACVersion = MACVersionCurrent
+	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v8\x00")) {
+		t.Fatal("a current row does not use the v8 input")
 	}
 }
 
@@ -76,7 +80,8 @@ func authzFixture(t *testing.T) (*fixture, string) {
 	if err := f.chain.Record(Event{Event: EventDenied, Pool: "claude", Binding: "vault/core", Outcome: "not_entitled",
 		RequesterKind: "person", RequesterOID: "oid-1", TokenSHA256: "ab", Tier: "T1", Decision: "not_entitled", Groups: "11111111-2222-3333-4444-555555555555", CacheAgeSec: 3,
 		Kid: "invalid", KidSHA256: "0123456789ab", Peer: "10.0.0.5",
-		Operation: "pr.open", Database: "examplecore", RequesterDepartment: "Security & IT", Branch: "agent/pool-a/fix"}); err != nil {
+		Operation: "pr.open", Database: "examplecore", RequesterDepartment: "Security & IT", Branch: "agent/pool-a/fix",
+		Source: "AUTOMATIONS", Automation: "auto-1", AutomationName: "explorer", AutomationOwner: "owner@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
@@ -96,11 +101,15 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 		"kid":        {`"kid":"invalid"`, `"kid":"k1"`},
 		"kid hash":   {`"kidSHA256":"0123456789ab"`, `"kidSHA256":"ba9876543210"`},
 		"peer":       {`"peer":"10.0.0.5"`, `"peer":"10.0.0.6"`},
-		"version":    {`"macVersion":7`, `"macVersion":6`},
+		"version":    {`"macVersion":8`, `"macVersion":7`},
 		"operation":  {`"operation":"pr.open"`, `"operation":"pr.read"`},
 		"database":   {`"database":"examplecore"`, `"database":"exampletm2"`},
 		"department": {`"requesterDepartment":"Security \u0026 IT"`, `"requesterDepartment":"Engineering"`},
 		"branch":     {`"branch":"agent/pool-a/fix"`, `"branch":"main"`},
+		"source":     {`"source":"AUTOMATIONS"`, `"source":"WEBSITE"`},
+		"automation": {`"automation":"auto-1"`, `"automation":"auto-2"`},
+		"name":       {`"automationName":"explorer"`, `"automationName":"auditor"`},
+		"owner":      {`"automationOwner":"owner@example.com"`, `"automationOwner":"other@example.com"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, out := authzFixture(t)
@@ -124,18 +133,22 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 // chain never steps down from v2 to v1.
 func TestV1RowsCannotCarryAuthorizationOrDowngrade(t *testing.T) {
 	for name, forge := range map[string]func(*Row){
-		"v1 row with a decision":   func(r *Row) { r.Decision = "entitled" },
-		"v2 row with a peer":       func(r *Row) { r.MACVersion, r.Peer = 2, "10.0.0.5" },
-		"v2 row with a kid":        func(r *Row) { r.MACVersion, r.Kid = 2, "k1" },
-		"v3 row with a serial":     func(r *Row) { r.MACVersion, r.Serial = 3, "1a" },
-		"v3 row with a notAfter":   func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
-		"v4 row with a target":     func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
-		"v5 row with an operation": func(r *Row) { r.MACVersion, r.Operation = 5, "pr.open" },
-		"v5 row with a database":   func(r *Row) { r.MACVersion, r.Database = 5, "examplecore" },
-		"v5 row with a department": func(r *Row) { r.MACVersion, r.RequesterDepartment = 5, "Engineering" },
-		"v6 row with a branch":     func(r *Row) { r.MACVersion, r.Branch = 6, "main" },
-		"plain downgrade":          func(*Row) {},
-		"unknown version":          func(r *Row) { r.MACVersion = 9 },
+		"v1 row with a decision":    func(r *Row) { r.Decision = "entitled" },
+		"v2 row with a peer":        func(r *Row) { r.MACVersion, r.Peer = 2, "10.0.0.5" },
+		"v2 row with a kid":         func(r *Row) { r.MACVersion, r.Kid = 2, "k1" },
+		"v3 row with a serial":      func(r *Row) { r.MACVersion, r.Serial = 3, "1a" },
+		"v3 row with a notAfter":    func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
+		"v4 row with a target":      func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
+		"v5 row with an operation":  func(r *Row) { r.MACVersion, r.Operation = 5, "pr.open" },
+		"v5 row with a database":    func(r *Row) { r.MACVersion, r.Database = 5, "examplecore" },
+		"v5 row with a department":  func(r *Row) { r.MACVersion, r.RequesterDepartment = 5, "Engineering" },
+		"v6 row with a branch":      func(r *Row) { r.MACVersion, r.Branch = 6, "main" },
+		"v7 row with a source":      func(r *Row) { r.MACVersion, r.Source = 7, "AUTOMATIONS" },
+		"v7 row with an automation": func(r *Row) { r.MACVersion, r.Automation = 7, "auto-1" },
+		"v7 row with a name":        func(r *Row) { r.MACVersion, r.AutomationName = 7, "explorer" },
+		"v7 row with an owner":      func(r *Row) { r.MACVersion, r.AutomationOwner = 7, "owner@example.com" },
+		"plain downgrade":           func(*Row) {},
+		"unknown version":           func(r *Row) { r.MACVersion = 9 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, out := authzFixture(t)
@@ -163,7 +176,7 @@ func hasKind(r Report, kind string) bool {
 	return false
 }
 
-// A trail written by a v2 broker, then after upgrades by v3 to v7 ones,
+// A trail written by a v2 broker, then after upgrades by v3 to v8 ones,
 // verifies; an older row after a newer one is a step down and does not.
 func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	writeMACVersion = 2
@@ -195,9 +208,15 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
-	writeMACVersion = MACVersionCurrent
+	writeMACVersion = 7
 	f.restart(t)
 	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "run_target", Operation: "actions.rerun", Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	f.checkpoint(t)
+	writeMACVersion = MACVersionCurrent
+	f.restart(t)
+	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "automation_unlisted", Source: "AUTOMATIONS", Automation: "auto-9"}); err != nil {
 		t.Fatal(err)
 	}
 	f.session(t, 2)
@@ -207,8 +226,8 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	for _, r := range rows(t, out) {
 		versions[r.MACVersion]++
 	}
-	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[6] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 6 {
-		t.Fatalf("trail versions %v, want v2, v3, v4, v5, v6 then v7", versions)
+	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[6] == 0 || versions[7] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 7 {
+		t.Fatalf("trail versions %v, want v2, v3, v4, v5, v6, v7 then v8", versions)
 	}
 	if report := verify(t, f.verifier(), out); len(report.Findings) != 0 {
 		t.Fatalf("upgraded trail: %v", kinds(report))
@@ -216,13 +235,13 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	parsed := rows(t, out)
 	last := parsed[len(parsed)-1]
 	key, _ := f.keys.lookup(last.KeyVersion)
-	for _, older := range []int{2, 3, 4, 5, 6} {
+	for _, older := range []int{2, 3, 4, 5, 6, 7} {
 		forged := Row{Type: RowType, Replica: last.Replica, Boot: last.Boot, Seq: last.Seq + 1, Time: last.Time,
 			Event: EventSessionOpen, Pool: "claude", KeyVersion: last.KeyVersion, Prev: last.MAC, MACVersion: older}
 		forged.MAC = forged.computeMAC(key)
 		line, _ := json.Marshal(forged)
 		if report := verify(t, f.verifier(), out+string(line)+"\n"); !hasKind(report, FindingEdit) {
-			t.Fatalf("step down from v7 to v%d accepted: %v", older, kinds(report))
+			t.Fatalf("step down from v8 to v%d accepted: %v", older, kinds(report))
 		}
 	}
 }
@@ -406,5 +425,41 @@ func TestOperationIsAFixedVocabularyShape(t *testing.T) {
 		if (Event{Event: EventHTTPRequest, Operation: bad}).Validate() == nil {
 			t.Errorf("operation %q accepted", bad)
 		}
+	}
+}
+
+// A row written under an older MAC version that later gains a field only a
+// newer version covers still verifies its MAC, since the old input leaves the
+// field out; only the version's field check catches it. Each trail here is a
+// genuine one at that version, with nothing newer after it.
+func TestOlderRowsCannotGainNewerFields(t *testing.T) {
+	t.Cleanup(func() { writeMACVersion = MACVersionCurrent })
+	for version, field := range map[int]string{
+		0: `"decision":"entitled"`,
+		2: `"kid":"k1"`,
+		3: `"serial":"1a"`,
+		4: `"target":"example.com:443"`,
+		5: `"operation":"pr.open"`,
+		6: `"branch":"main"`,
+		7: `"source":"AUTOMATIONS"`,
+	} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			writeMACVersion = version
+			f := newFixture(t)
+			f.session(t, 1)
+			f.checkpoint(t)
+			out := f.out.String()
+			if report := verify(t, f.verifier(), out); len(report.Findings) != 0 {
+				t.Fatalf("untouched v%d trail: %v", version, kinds(report))
+			}
+			const open = `"event":"session_open"`
+			if !strings.Contains(out, open) {
+				t.Fatal("trail has no session_open row")
+			}
+			edited := strings.Replace(out, open, open+","+field, 1)
+			if report := verify(t, f.verifier(), edited); !hasKind(report, FindingEdit) {
+				t.Fatalf("v%d row gained %s unnoticed: %v", version, field, kinds(report))
+			}
+		})
 	}
 }

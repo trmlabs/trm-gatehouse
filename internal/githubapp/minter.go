@@ -61,7 +61,8 @@ var (
 	StatusesRead = Permissions{Statuses: "read"}
 	// ActionsWrite runs a workflow run again. UpdateBranch merges a pull
 	// request's base into its head: GitHub asks an App for contents write on
-	// the head repository besides pull requests write.
+	// the head repository besides pull requests write. It also marks a draft
+	// ready, which GitHub refuses an App without contents write.
 	ActionsWrite = Permissions{Actions: "write"}
 	UpdateBranch = Permissions{Contents: "write", PullRequests: "write"}
 )

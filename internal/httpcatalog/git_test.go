@@ -92,7 +92,7 @@ func TestGitHubAPIEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e := c.Entries()[1]; e.MaxRequestBytes != 1<<20 || e.MaxResponseBytes != 8<<20 {
+	if e := c.Entries()[1]; e.MaxRequestBytes != 1<<20 || e.MaxResponseBytes != 4<<30 {
 		t.Fatalf("api limits: %d %d", e.MaxRequestBytes, e.MaxResponseBytes)
 	}
 	for name, doc := range map[string]string{
@@ -192,7 +192,7 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/example-app/issues/12/comments", "per_page=100&page=2", "list-comments", "pull-requests", false, nil},
 		{"PATCH", "/repos/trmlabs/example-app/pulls/12", "", "edit-pull", "pull-requests", false, nil},
 		{"PATCH", "/repos/trmlabs/example-app/issues/comments/5", "", "edit-comment", "pull-requests", false, nil},
-		{"POST", "/repos/trmlabs/example-app/pulls/12/ready", "", "ready", "pull-requests", false, nil},
+		{"POST", "/repos/trmlabs/example-app/pulls/12/ready", "", "ready", "update-branch", false, nil},
 		{"POST", "/repos/trmlabs/example-app/issues/12/labels", "", "label", "pull-requests", false, nil},
 		{"POST", "/repos/trmlabs/example-app/dispatches", "", "dispatch", "contents-write", false, nil},
 		{"GET", "/repos/trmlabs/example-app/actions/runs", "head_sha=abc&per_page=5", "actions", "actions", false, nil},
