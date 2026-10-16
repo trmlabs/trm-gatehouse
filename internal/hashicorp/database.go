@@ -112,8 +112,8 @@ var ErrCredentialNotIssued = errors.New("vault issued no database credential")
 // CredentialReadError is a failed credential read as an operator's log shows
 // it: Vault's HTTP status and its own error messages, or only the failure
 // class when Vault did not answer. Vault never returned a credential, so none
-// can be in it, and quoted literals in the messages are masked in case a
-// database error echoes a statement.
+// can be in it, and vaultMessages masks what a database error or a proxy could
+// echo: a statement's literals, a connection string's password, a token.
 type CredentialReadError struct {
 	Status int    // Vault's HTTP status; 0 when Vault did not answer
 	Detail string // Vault's messages, or the failure class
@@ -134,6 +134,15 @@ func (e *CredentialReadError) Is(target error) bool {
 func credentialReadFailure(err error) *CredentialReadError {
 	var answered *vaultapi.ResponseError
 	switch {
+	case errors.As(err, &answered) && answered.RawError:
+		// The body is not Vault's error JSON, so something in between answered
+		// (a proxy or load balancer page), and such a body can echo the
+		// request's headers, the Vault token among them. Only its size is told.
+		size := 0
+		for _, body := range answered.Errors {
+			size += len(body)
+		}
+		return &CredentialReadError{Status: answered.StatusCode, Detail: fmt.Sprintf("a reply that is not Vault's error JSON (%d bytes)", size)}
 	case errors.As(err, &answered):
 		return &CredentialReadError{Status: answered.StatusCode, Detail: vaultMessages(answered.Errors)}
 	case errors.Is(err, context.DeadlineExceeded):
@@ -149,14 +158,18 @@ var (
 	quotedLiteral = regexp.MustCompile(`'[^']*'`)
 	nearToken     = regexp.MustCompile(`(?i)(at or near )"[^"]*"`)
 	urlUserinfo   = regexp.MustCompile(`://[^/@\s]*@`)
-	passwordValue = regexp.MustCompile(`(?i)(password\s*[=:]\s*)[^\s,;)]+`)
+	secretKey     = regexp.MustCompile(`(?i)password\w*|\bpwd\b|identified\s+by`)
+	dollarTag     = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$`)
+	vaultToken    = regexp.MustCompile(`\b(hv[sbr]\.)[A-Za-z0-9_-]+|\b([sbr]\.)[A-Za-z0-9]{24}\b`)
+	bearerToken   = regexp.MustCompile(`(?i)\b(bearer\s+)[^\s"',;)}\]]+`)
 )
 
 // vaultMessages renders at most four of Vault's error messages, each on one
 // line and cut to 300 characters. String literals, the token a syntax error
-// points at, URL user info and password= values are masked, so a database
-// error that echoes a CREATE ROLE statement or a connection string cannot
-// carry a password.
+// points at, URL user info, the value after a password key or IDENTIFIED BY,
+// Vault tokens and bearer tokens are masked, so a database error that echoes
+// a CREATE ROLE statement, a connection string or a request cannot carry a
+// password or a token.
 func vaultMessages(messages []string) string {
 	const maxMessages, maxLen = 4, 300
 	var out []string
@@ -166,10 +179,12 @@ func vaultMessages(messages []string) string {
 			break
 		}
 		message = strings.Join(strings.Fields(message), " ")
+		message = maskSecretValues(message)
 		message = quotedLiteral.ReplaceAllString(message, "'***'")
 		message = nearToken.ReplaceAllString(message, `${1}"***"`)
 		message = urlUserinfo.ReplaceAllString(message, "://***@")
-		message = passwordValue.ReplaceAllString(message, "${1}***")
+		message = vaultToken.ReplaceAllString(message, "${1}${2}***")
+		message = bearerToken.ReplaceAllString(message, "${1}***")
 		if utf8.RuneCountInString(message) > maxLen {
 			message = string([]rune(message)[:maxLen]) + "..."
 		}
@@ -181,6 +196,102 @@ func vaultMessages(messages []string) string {
 		return "no message"
 	}
 	return strings.Join(out, "; ")
+}
+
+// maskSecretValues masks the value after each password key (password,
+// password_hash, PWD) and after IDENTIFIED BY. A quoted value, in JSON
+// ("password":"x", or escaped inside another string as \"password\":\"x\"),
+// SQL ('x' or "x") or dollar quoting ($$x$$ or $tag$x$tag$), is masked to its
+// closing quote, or to the end of the message when it has none. After = or :
+// a bare value is masked up to the next space or delimiter. A key followed by
+// neither keeps the words after it, so "password authentication failed for
+// user" still reads.
+func maskSecretValues(message string) string {
+	var out strings.Builder
+	for {
+		loc := secretKey.FindStringIndex(message)
+		if loc == nil {
+			out.WriteString(message)
+			return out.String()
+		}
+		i := loc[1]
+		for _, quote := range []string{`\"`, `"`} { // a JSON key's closing quote
+			if strings.HasPrefix(message[i:], quote) {
+				i += len(quote)
+				break
+			}
+		}
+		for i < len(message) && message[i] == ' ' {
+			i++
+		}
+		assigned := i < len(message) && (message[i] == '=' || message[i] == ':')
+		if assigned {
+			for i++; i < len(message) && message[i] == ' '; i++ {
+			}
+		}
+		open, end, closing := quotedValue(message[i:])
+		if open == 0 && assigned {
+			end = strings.IndexAny(message[i:], " ,;)}]\"'")
+			if end < 0 {
+				end = len(message) - i
+			}
+		}
+		if end == 0 {
+			out.WriteString(message[:loc[1]])
+			message = message[loc[1]:]
+			continue
+		}
+		out.WriteString(message[:i+open])
+		out.WriteString("***")
+		out.WriteString(message[i+end : i+end+closing])
+		message = message[i+end+closing:]
+	}
+}
+
+// quotedValue reports the quoted string s starts with: the length of its
+// opening quote (0 when s starts with none), where its content ends, and the
+// length of its closing quote (0 when it runs to the end of s). Inside a
+// string escaped within another (\"x\"), a quote after three backslashes is
+// part of the value, not its end.
+func quotedValue(s string) (open, end, closing int) {
+	switch {
+	case strings.HasPrefix(s, `\"`):
+		for k := 2; k < len(s); k++ {
+			if s[k] == '"' && s[k-1] == '\\' && (k < 3 || s[k-2] != '\\') {
+				return 2, k - 1, 2
+			}
+		}
+		return 2, len(s), 0
+	case strings.HasPrefix(s, `"`):
+		for k := 1; k < len(s); k++ {
+			switch s[k] {
+			case '\\':
+				k++
+			case '"':
+				return 1, k, 1
+			}
+		}
+		return 1, len(s), 0
+	case strings.HasPrefix(s, `'`):
+		for k := 1; k < len(s); k++ {
+			if s[k] != '\'' {
+				continue
+			}
+			if k+1 < len(s) && s[k+1] == '\'' { // SQL's doubled quote
+				k++
+				continue
+			}
+			return 1, k, 1
+		}
+		return 1, len(s), 0
+	}
+	if tag := dollarTag.FindString(s); tag != "" {
+		if k := strings.Index(s[len(tag):], tag); k >= 0 {
+			return len(tag), len(tag) + k, len(tag)
+		}
+		return len(tag), len(s), 0
+	}
+	return 0, 0, 0
 }
 
 // RenewLease extends a lease by increment (a hint Vault may clamp to the role's
