@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
 var brokerCatalogCmd = &cobra.Command{
@@ -23,7 +24,9 @@ var brokerCatalogValidateCmd = &cobra.Command{
 schema, exact hosts with no wildcards or IP addresses, unique routes, methods,
 key locations and pool grants. --allowed-host-suffix holds every host inside
 the domains the broker's network policy allows, and --require-pools requires
-a pools section that every grant refers to. Run it in CI before Terraform
+a pools section that every grant refers to. --image-registry (default
+AGENT_VAULT_IMAGE_REGISTRY) is the registry every harness imagePrefix must lie
+under. Run it in CI before Terraform
 writes the catalog to Vault.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -31,6 +34,10 @@ writes the catalog to Vault.`,
 		requirePools, _ := cmd.Flags().GetBool("require-pools")
 		env, _ := cmd.Flags().GetString("environment")
 		if err := catalogEnvironment(func(string) string { return env }); err != nil {
+			return err
+		}
+		registry, _ := cmd.Flags().GetString("image-registry")
+		if err := imagerule.SetRegistry(registry); err != nil {
 			return err
 		}
 		data, err := os.ReadFile(args[0])
@@ -80,6 +87,7 @@ func init() {
 	brokerCatalogValidateCmd.Flags().StringSlice("allowed-host-suffix", nil, "domain every host must be in (repeatable), such as .example.com")
 	brokerCatalogValidateCmd.Flags().Bool("require-pools", false, "require a pools section that every grant refers to")
 	brokerCatalogValidateCmd.Flags().String("environment", "", "environment every database role must be named for, such as staging")
+	brokerCatalogValidateCmd.Flags().String("image-registry", os.Getenv(imagerule.RegistryEnv), "registry host and path every harness imagePrefix must lie under, such as us-docker.pkg.dev/example-project/")
 	brokerCatalogCmd.AddCommand(brokerCatalogValidateCmd)
 	rootCmd.AddCommand(brokerCatalogCmd)
 }

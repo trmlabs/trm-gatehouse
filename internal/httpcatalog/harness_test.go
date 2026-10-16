@@ -271,24 +271,24 @@ func TestCursorPersonProfile(t *testing.T) {
 // one with its own pool and grants.
 func TestCustomerAndDeveloperSandboxProfiles(t *testing.T) {
 	c := harnessCatalog()
-	research := map[string]any{}
+	teamA := map[string]any{}
 	b, _ := json.Marshal(harnessAt(c, 2))
-	_ = json.Unmarshal(b, &research)
-	research["name"] = "agent-sandbox-research"
-	research["identity"].(map[string]any)["namespaces"] = []any{"research-sandboxes"}
-	research["authorization"] = map[string]any{"mode": "pool", "poolName": "research"}
-	c["harnesses"] = append(c["harnesses"].([]any), research)
-	c["pools"] = append(c["pools"].([]any), map[string]any{"name": "research", "namespace": "research-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})
+	_ = json.Unmarshal(b, &teamA)
+	teamA["name"] = "agent-sandbox-team-a"
+	teamA["identity"].(map[string]any)["namespaces"] = []any{"team-a-sandboxes"}
+	teamA["authorization"] = map[string]any{"mode": "pool", "poolName": "team-a"}
+	c["harnesses"] = append(c["harnesses"].([]any), teamA)
+	c["pools"] = append(c["pools"].([]any), map[string]any{"name": "team-a", "namespace": "team-a-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})
 	catalog, err := parseCatalog(t, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool, _ := catalog.Pool("research")
-	if pool.Ceiling != CeilingExternal || pool.Profile().Name != "agent-sandbox-research" {
-		t.Fatalf("research: %+v", pool)
+	pool, _ := catalog.Pool("team-a")
+	if pool.Ceiling != CeilingExternal || pool.Profile().Name != "agent-sandbox-team-a" {
+		t.Fatalf("team-a: %+v", pool)
 	}
 	// Granting the customer pool anything refuses the catalog.
-	c["entries"] = []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["sandboxes","research"]`, 1) + `}`)}
+	c["entries"] = []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["sandboxes","team-a"]`, 1) + `}`)}
 	if _, err := parseCatalog(t, c); err == nil {
 		t.Fatal("an entry granted to the customer sandboxes' external pool was accepted")
 	}
@@ -297,23 +297,23 @@ func TestCustomerAndDeveloperSandboxProfiles(t *testing.T) {
 // A proxy-attested harness may admit images by an agent-sandbox repository
 // path instead of digests; two harnesses may never claim overlapping paths.
 func TestHarnessImagePrefixes(t *testing.T) {
-	const research = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/research/"
+	const teamA = "registry.example.com/example-project/example-images/team-a/"
 	c := harnessCatalog()
 	id := harnessAt(c, 2)["identity"].(map[string]any)
-	id["imagePrefix"] = research
+	id["imagePrefix"] = teamA
 	delete(id, "imageDigests")
 	if _, err := parseCatalog(t, c); err != nil {
 		t.Fatalf("prefix without digests refused: %v", err)
 	}
 	for name, mutate := range map[string]func(c map[string]any){
 		"prefix on a pod-token harness": func(c map[string]any) {
-			harnessAt(c, 0)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/cursor/"
+			harnessAt(c, 0)["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/example-project/cursor/"
 		},
 		"another project": func(c map[string]any) {
-			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/other/example-images/research/"
+			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/other/example-images/team-a/"
 		},
 		"the whole project": func(c map[string]any) {
-			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/"
+			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/example-project/"
 		},
 		"overlapping prefixes": func(c map[string]any) {
 			second := map[string]any{}
@@ -321,7 +321,7 @@ func TestHarnessImagePrefixes(t *testing.T) {
 			_ = json.Unmarshal(b, &second)
 			second["name"] = "agent-sandbox-2"
 			second["identity"].(map[string]any)["namespaces"] = []any{"other-sandboxes"}
-			second["identity"].(map[string]any)["imagePrefix"] = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/"
+			second["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/example-project/example-images/"
 			second["authorization"] = map[string]any{"mode": "pool", "poolName": "sandboxes-2"}
 			c["harnesses"] = append(c["harnesses"].([]any), second)
 			c["pools"] = append(c["pools"].([]any), map[string]any{"name": "sandboxes-2", "namespace": "other-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})
@@ -329,7 +329,7 @@ func TestHarnessImagePrefixes(t *testing.T) {
 	} {
 		cc := harnessCatalog()
 		ccid := harnessAt(cc, 2)["identity"].(map[string]any)
-		ccid["imagePrefix"] = research
+		ccid["imagePrefix"] = teamA
 		delete(ccid, "imageDigests")
 		mutate(cc)
 		if _, err := parseCatalog(t, cc); err == nil {

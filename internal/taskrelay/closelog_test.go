@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
 // syncBuffer is a log sink several goroutines write to.
@@ -161,6 +163,9 @@ func TestReadCause(t *testing.T) {
 // TestMain keeps relay logs out of test output; captureLog redirects them.
 func TestMain(m *testing.M) {
 	logOutput = io.Discard
+	if err := imagerule.SetRegistry("registry.example.com/example-project/"); err != nil {
+		panic(err)
+	}
 	m.Run()
 }
 

@@ -17,7 +17,7 @@ func TestAuthFailureKeyIsPerAttestedSandbox(t *testing.T) {
 	}
 	request := func(kinds []string, owner string) string {
 		r := httptest.NewRequest("CONNECT", "http://api.example.com:443", nil)
-		r.RemoteAddr = "10.65.0.50:40000"
+		r.RemoteAddr = "10.0.0.50:40000"
 		if owner != "" {
 			r.Header.Set(brokercore.AttestationHeader, attest(owner))
 		}
@@ -25,14 +25,14 @@ func TestAuthFailureKeyIsPerAttestedSandbox(t *testing.T) {
 	}
 	proxy := []string{brokercore.KindProxyAttested}
 	a, b := request(proxy, "sandbox-a"), request(proxy, "sandbox-b")
-	if a == b || a != "mitm:10.65.0.50/sandbox:sandbox-a" {
+	if a == b || a != "mitm:10.0.0.50/sandbox:sandbox-a" {
 		t.Fatalf("keys %q %q", a, b)
 	}
-	if got := request(proxy, ""); got != "mitm:10.65.0.50" {
+	if got := request(proxy, ""); got != "mitm:10.0.0.50" {
 		t.Fatalf("no attestation: %q", got)
 	}
 	direct := []string{brokercore.KindPodToken, brokercore.KindProxyAttested}
-	if got := request(direct, "sandbox-a"); got != "mitm:10.65.0.50" {
+	if got := request(direct, "sandbox-a"); got != "mitm:10.0.0.50" {
 		t.Fatalf("a header on a mixed listener changed the key: %q", got)
 	}
 }

@@ -169,12 +169,12 @@ func newBrowserFixtureWith(t *testing.T, automated bool, logger *slog.Logger) *b
 	}
 	login := `,"realm":"Username-Password-Authentication","tokenClient":{"mount":"gatehouse","path":"browser/client"}},`
 	if automated {
-		login = `,"login":"automated-auth"},"automatedAuth":{"url":"https://automated-auth.example.com","profile":"app-staging","orgID":"org_synthetic",
+		login = `,"login":"automated-auth"},"automatedAuth":{"url":"https://automated-auth.example.com","profile":"example-profile","orgID":"org_synthetic",
 			"key":{"mount":"gatehouse","path":"browser/automated-auth"}},`
 	}
 	catalog, err := httpcatalog.Parse([]byte(`{"entries":[{"name":"staging-app","kind":"browser-session","host":"api.example.com",
 		"placeholder":"` + browserPlaceholder + `","pools":["database-developers"],"pathPrefixes":["/v1","/organizations","/users","/users-organizations"],"readOnlyPaths":["/v1/reports"],
-		"deniedPaths":["/v1/parent-organizations/*/users","/v1/intel-vault"],
+		"deniedPaths":["/v1/accounts/*/users","/v1/archive"],
 		"browserSession":{"appHost":"app.example.com","auth0":{"domain":"auth.example.com","clientID":"spaClient1","audience":"https://api.example.com"` + login + `
 		"user":{"mount":"gatehouse","path":"browser/qa-user"}}}]}`))
 	if err != nil {
@@ -522,12 +522,12 @@ func TestBrowserPathGuard(t *testing.T) {
 		{"POST", "/users/mfa", 403, "denied_path"},
 		{"POST", "/users/change-password", 403, "denied_path"},
 		{"POST", "/v1/oauth/clients/x/rotate-secret", 403, "denied_path"},
-		{"GET", "/v1/parent-organizations/1/users/2/roles", 403, "denied_path"},
+		{"GET", "/v1/accounts/1/users/2/roles", 403, "denied_path"},
 		{"DELETE", "/v1/sessions/1", 403, "denied_path"},
-		{"GET", "/v1/parent-organizations/7/users", 403, "denied_path"},
-		{"GET", "/v1/parent-organizations/7/users/3/teams", 403, "denied_path"},
-		{"GET", "/v1/intel-vault/files/2", 403, "denied_path"},
-		{"GET", "/v1/parent-organizations/7/environments", 200, "completed"},
+		{"GET", "/v1/accounts/7/users", 403, "denied_path"},
+		{"GET", "/v1/accounts/7/users/3/teams", 403, "denied_path"},
+		{"GET", "/v1/archive/files/2", 403, "denied_path"},
+		{"GET", "/v1/accounts/7/workspaces", 200, "completed"},
 		{"POST", "/users-organizations", 403, "read_only_path"},
 		{"PATCH", "/v1/users-organizations/users/2", 403, "read_only_path"},
 		{"DELETE", "/v1/reports/7", 403, "read_only_path"},

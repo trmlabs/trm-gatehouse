@@ -50,7 +50,7 @@ type ProxyProfile struct {
 	Profile   string `json:"profile"`
 	Pool      string `json:"pool"`
 	// ImagePrefix, when set, admits any image pulled from under this
-	// agent-sandbox repository path (see imagerule.ValidPrefix).
+	// repository path in the agent image registry (see imagerule.ValidPrefix).
 	ImagePrefix string `json:"imagePrefix,omitempty"`
 }
 
@@ -161,7 +161,7 @@ func (p *ProxyBinding) validate(ceiling int64) error {
 			continue
 		}
 		if !imagerule.ValidPrefix(pp.ImagePrefix) {
-			return errors.New("proxy profile image prefix must be an agent-sandbox repository or tenant path")
+			return errors.New("proxy profile image prefix must be a repository or tenant path under AGENT_VAULT_IMAGE_REGISTRY")
 		}
 		for _, other := range p.Profiles[:i] {
 			if other.ImagePrefix != "" && imagerule.Overlap(other.ImagePrefix, pp.ImagePrefix) {

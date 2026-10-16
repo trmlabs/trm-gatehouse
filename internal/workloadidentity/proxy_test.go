@@ -12,7 +12,7 @@ import (
 )
 
 // The private link's source range, and an address inside it.
-var linkIP = netip.MustParseAddr("10.200.0.7")
+var linkIP = netip.MustParseAddr("192.0.2.7")
 
 type proxyFixture struct {
 	pool *poolFixture
@@ -32,8 +32,8 @@ func setupProxy(t *testing.T) *proxyFixture {
 		AgentID: "agent", VaultID: "vault", TrustDomain: "agent-sandbox",
 		Proxy: &ProxyBinding{Profiles: []ProxyProfile{
 			{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes"},
-			{Namespace: "research-sandboxes", Profile: "agent-sandbox-research", Pool: "research"}},
-			OwnerKind: "Sandbox", ImageDigests: []string{workerDigest}, SourceCIDRs: []string{"10.200.0.0/24"}, MaxSessionSeconds: 1800},
+			{Namespace: "team-a-sandboxes", Profile: "agent-sandbox-team-a", Pool: "team-a"}},
+			OwnerKind: "Sandbox", ImageDigests: []string{workerDigest}, SourceCIDRs: []string{"192.0.2.0/24"}, MaxSessionSeconds: 1800},
 	})
 	r, err := New(c, &fakeStore{status: "active", role: "proxy"})
 	if err != nil {
@@ -46,8 +46,8 @@ func setupProxy(t *testing.T) *proxyFixture {
 		switch pool {
 		case "sandboxes":
 			profile.Name, profile.Namespaces = "agent-sandbox-developers", []string{"agent-sandboxes"}
-		case "research":
-			profile.Name, profile.Namespaces = "agent-sandbox-research", []string{"research-sandboxes"}
+		case "team-a":
+			profile.Name, profile.Namespaces = "agent-sandbox-team-a", []string{"team-a-sandboxes"}
 		default:
 			return Profile{}, false
 		}
@@ -132,16 +132,16 @@ func TestNamespacePicksTheProfile(t *testing.T) {
 	if err != nil || developers.Pool != "sandboxes" {
 		t.Fatalf("developers: %v %+v", err, developers)
 	}
-	research := p.a
-	research.Namespace, research.Profile = "research-sandboxes", "agent-sandbox-research"
-	if scope, err := p.r.Attest(p.ctx(t, research), token, linkIP); err != nil || scope.Pool != "research" {
-		t.Fatalf("research: %v %+v", err, scope)
+	teamA := p.a
+	teamA.Namespace, teamA.Profile = "team-a-sandboxes", "agent-sandbox-team-a"
+	if scope, err := p.r.Attest(p.ctx(t, teamA), token, linkIP); err != nil || scope.Pool != "team-a" {
+		t.Fatalf("team-a: %v %+v", err, scope)
 	}
 	for name, mutate := range map[string]func(a *Attestation){
-		"unknown namespace":                  func(a *Attestation) { a.Namespace = "other-sandboxes" },
-		"another namespace's profile":        func(a *Attestation) { a.Profile = "agent-sandbox-research" },
-		"research namespace, developer pool": func(a *Attestation) { a.Namespace = "research-sandboxes" },
-		"no profile":                         func(a *Attestation) { a.Profile = "" },
+		"unknown namespace":                func(a *Attestation) { a.Namespace = "other-sandboxes" },
+		"another namespace's profile":      func(a *Attestation) { a.Profile = "agent-sandbox-team-a" },
+		"team-a namespace, developer pool": func(a *Attestation) { a.Namespace = "team-a-sandboxes" },
+		"no profile":                       func(a *Attestation) { a.Profile = "" },
 	} {
 		a := p.a
 		mutate(&a)
@@ -179,7 +179,7 @@ func TestProxyAttestedRefusals(t *testing.T) {
 			return input{brokercore.WithAttestation(context.Background(), "not-base64!"), p.rc.token(p.rc.claims()), linkIP}
 		},
 		"source outside the private link": func(t *testing.T, p *proxyFixture) input {
-			return input{p.ctx(t, p.a), p.rc.token(p.rc.claims()), netip.MustParseAddr("10.201.0.7")}
+			return input{p.ctx(t, p.a), p.rc.token(p.rc.claims()), netip.MustParseAddr("198.51.100.7")}
 		},
 		"wrong-issuer proxy token": func(t *testing.T, p *proxyFixture) input {
 			c := p.rc.claims()
@@ -322,7 +322,7 @@ func TestProxyBindingValidation(t *testing.T) {
 		"no image digests":         func(b *Binding) { b.Proxy.ImageDigests = nil },
 		"no source range":          func(b *Binding) { b.Proxy.SourceCIDRs = nil },
 		"any source":               func(b *Binding) { b.Proxy.SourceCIDRs = []string{"0.0.0.0/0"} },
-		"unmasked source":          func(b *Binding) { b.Proxy.SourceCIDRs = []string{"10.200.0.7/24"} },
+		"unmasked source":          func(b *Binding) { b.Proxy.SourceCIDRs = []string{"192.0.2.7/24"} },
 		"session under a minute":   func(b *Binding) { b.Proxy.MaxSessionSeconds = 59 },
 		"with owner UIDs":          func(b *Binding) { b.OwnerUIDs = []string{"x"} },
 		"with a Pod UID":           func(b *Binding) { b.PodUID = "x" },
@@ -399,8 +399,8 @@ func TestProxyRecheckLimits(t *testing.T) {
 }
 
 const (
-	researchPrefix  = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/research/"
-	developerPrefix = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/"
+	teamAPrefix     = "registry.example.com/example-project/example-images/team-a/"
+	developerPrefix = "registry.example.com/example-project/example-developers-profile/"
 )
 
 // With image prefixes, each namespace runs what its tenant path pulled, and
@@ -412,7 +412,7 @@ func TestProxyImagePrefixes(t *testing.T) {
 	proxy := *c.Bindings[1].Proxy
 	proxy.Profiles = []ProxyProfile{
 		{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes", ImagePrefix: developerPrefix},
-		{Namespace: "research-sandboxes", Profile: "agent-sandbox-research", Pool: "research", ImagePrefix: researchPrefix}}
+		{Namespace: "team-a-sandboxes", Profile: "agent-sandbox-team-a", Pool: "team-a", ImagePrefix: teamAPrefix}}
 	proxy.ImageDigests = []string{sidecarDigest} // a platform sidecar
 	c.Bindings[1].Proxy = &proxy
 	r, err := New(c, &fakeStore{status: "active", role: "proxy"})
@@ -425,28 +425,28 @@ func TestProxyImagePrefixes(t *testing.T) {
 		switch pool {
 		case "sandboxes":
 			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-developers", []string{"agent-sandboxes"}, developerPrefix
-		case "research":
-			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-research", []string{"research-sandboxes"}, researchPrefix
+		case "team-a":
+			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-team-a", []string{"team-a-sandboxes"}, teamAPrefix
 		default:
 			return Profile{}, false
 		}
 		return profile, true
 	})
 	token := p.rc.token(p.rc.claims())
-	research := p.a
-	research.Namespace, research.Profile = "research-sandboxes", "agent-sandbox-research"
+	teamA := p.a
+	teamA.Namespace, teamA.Profile = "team-a-sandboxes", "agent-sandbox-team-a"
 	for name, c := range map[string]struct {
 		a      Attestation
 		images []string
 		ok     bool
 	}{
-		"research agent with the platform sidecar": {research, []string{researchPrefix + "agent@" + workerDigest, "registry.example/gcsfuse@" + sidecarDigest}, true},
-		"developer agent":                          {p.a, []string{developerPrefix + "team/tool@" + otherDigest}, true},
-		"the proxy image as an agent":              {research, []string{"us-central1-docker.pkg.dev/trm-agent-sandbox/example-images/gatehouse/proxy@" + workerDigest}, false},
-		"a developer image in research":            {research, []string{developerPrefix + "tool@" + otherDigest}, false},
-		"an research image in developers":          {p.a, []string{researchPrefix + "agent@" + workerDigest}, false},
-		"an unlisted platform image":               {research, []string{researchPrefix + "agent@" + workerDigest, "registry.example/other@" + otherDigest}, false},
-		"a tag, not a pull":                        {research, []string{researchPrefix + "agent:latest"}, false},
+		"team-a agent with the platform sidecar": {teamA, []string{teamAPrefix + "agent@" + workerDigest, "registry.example/gcsfuse@" + sidecarDigest}, true},
+		"developer agent":                        {p.a, []string{developerPrefix + "team/tool@" + otherDigest}, true},
+		"the proxy image as an agent":            {teamA, []string{"registry.example.com/example-project/example-images/gatehouse/proxy@" + workerDigest}, false},
+		"a developer image in team-a":            {teamA, []string{developerPrefix + "tool@" + otherDigest}, false},
+		"an team-a image in developers":          {p.a, []string{teamAPrefix + "agent@" + workerDigest}, false},
+		"an unlisted platform image":             {teamA, []string{teamAPrefix + "agent@" + workerDigest, "registry.example/other@" + otherDigest}, false},
+		"a tag, not a pull":                      {teamA, []string{teamAPrefix + "agent:latest"}, false},
 	} {
 		a := c.a
 		a.Images = c.images
@@ -456,18 +456,18 @@ func TestProxyImagePrefixes(t *testing.T) {
 	}
 	// The catalog profile must name the binding's prefix.
 	r.SetProfiles(func(pool string) (Profile, bool) {
-		return Profile{Name: "agent-sandbox-research", Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested,
-			OwnerKind: "Sandbox", Namespaces: []string{"research-sandboxes"}, ImagePrefix: developerPrefix, ImageDigests: []string{sidecarDigest}}, true
+		return Profile{Name: "agent-sandbox-team-a", Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested,
+			OwnerKind: "Sandbox", Namespaces: []string{"team-a-sandboxes"}, ImagePrefix: developerPrefix, ImageDigests: []string{sidecarDigest}}, true
 	})
-	research.Images = []string{researchPrefix + "agent@" + workerDigest}
-	if _, err := r.Attest(p.ctx(t, research), token, linkIP); err == nil {
+	teamA.Images = []string{teamAPrefix + "agent@" + workerDigest}
+	if _, err := r.Attest(p.ctx(t, teamA), token, linkIP); err == nil {
 		t.Error("admitted under a catalog profile with another prefix")
 	}
 	for name, mutate := range map[string]func(b *ProxyBinding){
 		"overlapping prefixes": func(b *ProxyBinding) {
-			b.Profiles[1].ImagePrefix = "us-central1-docker.pkg.dev/trm-agent-sandbox/example-developers-profile/"
+			b.Profiles[1].ImagePrefix = "registry.example.com/example-project/example-developers-profile/"
 		},
-		"another project":       func(b *ProxyBinding) { b.Profiles[1].ImagePrefix = "us-central1-docker.pkg.dev/other/repo/research/" },
+		"another project":       func(b *ProxyBinding) { b.Profiles[1].ImagePrefix = "registry.example.com/other/repo/team-a/" },
 		"no prefix, no digests": func(b *ProxyBinding) { b.Profiles[1].ImagePrefix, b.ImageDigests = "", nil },
 	} {
 		cc := c
@@ -490,10 +490,10 @@ func TestRefusalsNameTheirCheck(t *testing.T) {
 	unknown := p.a
 	unknown.Namespace = "other-sandboxes"
 	wrongProfile := p.a
-	wrongProfile.Profile = "agent-sandbox-research"
+	wrongProfile.Profile = "agent-sandbox-team-a"
 	for want, call := range map[string]func() error{
 		"proxy_source": func() error {
-			_, err := p.r.Attest(p.ctx(t, p.a), token, netip.MustParseAddr("10.201.0.7"))
+			_, err := p.r.Attest(p.ctx(t, p.a), token, netip.MustParseAddr("198.51.100.7"))
 			return err
 		},
 		"attestation_namespace": func() error { _, err := p.r.Attest(p.ctx(t, unknown), token, linkIP); return err },
@@ -530,8 +530,8 @@ func setupProfiles(p *proxyFixture) {
 		switch pool {
 		case "sandboxes":
 			profile.Name, profile.Namespaces = "agent-sandbox-developers", []string{"agent-sandboxes"}
-		case "research":
-			profile.Name, profile.Namespaces = "agent-sandbox-research", []string{"research-sandboxes"}
+		case "team-a":
+			profile.Name, profile.Namespaces = "agent-sandbox-team-a", []string{"team-a-sandboxes"}
 		default:
 			return Profile{}, false
 		}

@@ -268,7 +268,7 @@ func TestHandlerIssuesOnlyToTheProxy(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := httptest.NewRequest(http.MethodPost, "/v1/proxy/certificate", body(tc.csr))
-		req.RemoteAddr = "10.200.0.7:51000"
+		req.RemoteAddr = "192.0.2.7:51000"
 		if tc.token != "" {
 			req.Header.Set("Authorization", "Bearer "+tc.token)
 		}
@@ -283,10 +283,10 @@ func TestHandlerIssuesOnlyToTheProxy(t *testing.T) {
 			if json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.Certificate != signer.issued || !strings.Contains(got.Chain, "CERTIFICATE") {
 				t.Errorf("%s: body %q", name, rec.Body.String())
 			}
-			if len(signer.names) != 2 || verifier.peer != netip.MustParseAddr("10.200.0.7") {
+			if len(signer.names) != 2 || verifier.peer != netip.MustParseAddr("192.0.2.7") {
 				t.Errorf("%s: signed %v for peer %v", name, signer.names, verifier.peer)
 			}
-			want := auditchain.Event{Event: auditchain.EventCertificate, Outcome: "issued", Peer: "10.200.0.7", Serial: "7f00aa01",
+			want := auditchain.Event{Event: auditchain.EventCertificate, Outcome: "issued", Peer: "192.0.2.7", Serial: "7f00aa01",
 				NotAfter: time.Now().Add(24 * time.Hour).Truncate(time.Second).UTC().Format(time.RFC3339)}
 			if len(audit.events) != 1 || audit.events[0].Serial != want.Serial || audit.events[0].Peer != want.Peer || audit.events[0].Event != want.Event {
 				t.Errorf("%s: audit %+v", name, audit.events)
@@ -350,7 +350,7 @@ func TestIssuedSerialsRecordWithoutLeadingZeros(t *testing.T) {
 		issuer := &Issuer{Mount: "pki-gatehouse-proxy", Role: "proxy", Names: proxyNames, TTL: 24 * time.Hour, Signer: signer, Verifier: &fakeVerifier{}, Audit: audit}
 		b, _ := json.Marshal(map[string]string{"csr": csr})
 		req := httptest.NewRequest(http.MethodPost, "/v1/proxy/certificate", bytes.NewReader(b))
-		req.RemoteAddr = "10.200.0.7:51000"
+		req.RemoteAddr = "192.0.2.7:51000"
 		req.Header.Set("Authorization", "Bearer proxy-token")
 		rec := httptest.NewRecorder()
 		issuer.Handler().ServeHTTP(rec, req)
@@ -369,7 +369,7 @@ func TestIssuanceIsRateLimitedPerBinding(t *testing.T) {
 	post := func() int {
 		b, _ := json.Marshal(map[string]string{"csr": csr})
 		req := httptest.NewRequest(http.MethodPost, "/v1/proxy/certificate", bytes.NewReader(b))
-		req.RemoteAddr = "10.200.0.7:51000"
+		req.RemoteAddr = "192.0.2.7:51000"
 		req.Header.Set("Authorization", "Bearer proxy-token")
 		rec := httptest.NewRecorder()
 		issuer.Handler().ServeHTTP(rec, req)

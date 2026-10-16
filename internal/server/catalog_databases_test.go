@@ -13,9 +13,9 @@ import (
 const databaseCatalog = `{"pools":[{"name":"cursor","namespace":"agents","serviceAccount":"cursor-worker"},{"name":"ci","namespace":"ci","serviceAccount":"runner"}],
 "entries":[
  {"name":"examplecore","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor"],
-  "postgres":{"database":"core","mount":"database","role":"staging.us.crunchy.core-readonly","maxConns":20}},
- {"name":"auditlog","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor","ci"],
-  "postgres":{"database":"auditlog","mount":"database","role":"staging.us.crunchy.auditlog-readonly","sslmode":"verify-full","maxConns":5,"serverName":"auditlog.example.com"}}]}`
+  "postgres":{"database":"app","mount":"database","role":"staging.us.example.app-readonly","maxConns":20}},
+ {"name":"reports","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor","ci"],
+  "postgres":{"database":"reports","mount":"database","role":"staging.us.example.reports-readonly","sslmode":"verify-full","maxConns":5,"serverName":"reports.example.com"}}]}`
 
 func TestCatalogDatabaseResolverFollowsTheLiveCatalog(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
@@ -27,10 +27,10 @@ func TestCatalogDatabaseResolverFollowsTheLiveCatalog(t *testing.T) {
 	source := httpcatalog.NewSource(first, 1)
 	r := NewCatalogDatabaseResolver(source, nil, nil, nil)
 	svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "examplecore")
-	if err != nil || svc.Addr != "p.abc.db.postgresbridge.com:5432" || svc.Database != "core" || svc.SSLMode != "verify-full" || svc.MaxConns != 5 || !svc.ReadOnly {
+	if err != nil || svc.Addr != "p.abc.db.postgresbridge.com:5432" || svc.Database != "app" || svc.SSLMode != "verify-full" || svc.MaxConns != 5 || !svc.ReadOnly {
 		t.Fatalf("resolved %+v %v", svc, err)
 	}
-	if svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-2", Pool: "ci"}, "auditlog"); err != nil || svc.ServerName != "auditlog.example.com" {
+	if svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-2", Pool: "ci"}, "reports"); err != nil || svc.ServerName != "reports.example.com" {
 		t.Fatalf("server name: %+v %v", svc, err)
 	}
 	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-2", Pool: "ci"}, "examplecore"); err == nil || !strings.Contains(err.Error(), "not granted") {
@@ -39,13 +39,13 @@ func TestCatalogDatabaseResolverFollowsTheLiveCatalog(t *testing.T) {
 	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1"}, "examplecore"); err == nil {
 		t.Fatal("a scope without a catalog pool resolved a database")
 	}
-	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "detect"); err == nil {
+	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "events"); err == nil {
 		t.Fatal("unknown database resolved")
 	}
 	// A reload that adds a database makes it reachable with no restart.
-	added := strings.Replace(databaseCatalog, `]}`, `,{"name":"detect","kind":"postgres","host":"p.def.db.postgresbridge.com","pools":["cursor"],
-  "postgres":{"database":"detect","mount":"database","role":"staging.us.crunchy.detect-readonly"}}]}`, 1)
-	if strings.Count(added, "detect") < 2 {
+	added := strings.Replace(databaseCatalog, `]}`, `,{"name":"events","kind":"postgres","host":"p.def.db.postgresbridge.com","pools":["cursor"],
+  "postgres":{"database":"events","mount":"database","role":"staging.us.example.events-readonly"}}]}`, 1)
+	if strings.Count(added, "events") < 2 {
 		t.Fatal("test catalog not extended")
 	}
 	if _, err := httpcatalog.Parse([]byte(added)); err != nil {
@@ -59,7 +59,7 @@ func TestCatalogDatabaseResolverFollowsTheLiveCatalog(t *testing.T) {
 			t.Fatal("catalog not reloaded")
 		}
 	}
-	if svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "detect"); err != nil || svc.Database != "detect" {
+	if svc, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "events"); err != nil || svc.Database != "events" {
 		t.Fatalf("reloaded database: %+v %v", svc, err)
 	}
 }
