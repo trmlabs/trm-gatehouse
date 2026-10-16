@@ -85,6 +85,7 @@ var refusals = map[string]refusalKind{
 	"head":                   {next: "this pull request's branch is outside the ones this pool may write; " + nextNotAllowed},
 	"comment_target":         {next: "GitHub did not confirm, or could not be asked, that this comment is one this pool's app wrote on a pull request it may change; report it."},
 	"pull_request_target":    {next: "GitHub did not confirm, or could not be asked, that this pull request is one this pool may change; report it."},
+	"run_target":             {next: "GitHub did not confirm, or could not be asked, that this workflow run is one this pool may rerun; report it."},
 	"pool_ceiling":           {next: "this destination's tier is above what this pool may reach; " + nextNotAllowed},
 	"pool_external":          {next: "this pool may reach no catalog entry; " + nextNotAllowed},
 	"no_identity":            {next: "this destination needs a pool that names who runs it; " + nextNotAllowed},
