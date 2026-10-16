@@ -648,16 +648,18 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
-	if code := call("channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 {
-		t.Fatalf("listed channel: %d, vendor calls %d", code, f.calls.Load())
+	// Each row names the method, so a read is told apart from a post.
+	if code := call("channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 || f.audit.last().Operation != "slack.conversations_history" {
+		t.Fatalf("listed channel: %d, vendor calls %d, operation %q", code, f.calls.Load(), f.audit.last().Operation)
 	}
 	for name, query := range map[string]string{
 		"leading space":                 "channel=C0123456789&%20channel=D0123456789",
 		"NUL":                           "channel=C0123456789&channel%00=D0123456789",
 		"not a parameter of the method": "channel=C0123456789&name=eyes",
 	} {
-		if code := call(query); code != http.StatusForbidden || f.calls.Load() != 1 || f.audit.last().Outcome != "request_field" {
-			t.Errorf("%s: %d outcome=%q, vendor calls %d", name, code, f.audit.last().Outcome, f.calls.Load())
+		code := call(query)
+		if row := f.audit.last(); code != http.StatusForbidden || f.calls.Load() != 1 || row.Outcome != "request_field" || row.Operation != "slack.conversations_history" {
+			t.Errorf("%s: %d outcome=%q operation=%q, vendor calls %d", name, code, row.Outcome, row.Operation, f.calls.Load())
 		}
 	}
 }

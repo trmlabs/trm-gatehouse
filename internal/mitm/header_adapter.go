@@ -230,7 +230,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	entry, err := catalog.Match(host, port, r.Method, r.URL.Path, scope.Pool)
 	if entry != nil {
-		event.Binding = entry.Name
+		event.Binding, event.Operation = entry.Name, entry.Operation(r.URL.Path)
 	}
 	if refused(entry, err) {
 		return

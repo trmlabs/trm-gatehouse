@@ -2,6 +2,7 @@ package httpcatalog
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,39 @@ func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 	sub := strings.Replace(slackEntry, `"host":"slack.com"`, `"host":"api.slack.com"`, 1)
 	if _, err := Parse([]byte(`{"entries":[` + sub + `]}`)); err != nil {
 		t.Errorf("subdomain with the rule and listed methods: %v", err)
+	}
+}
+
+// A Slack entry names each listed method as its audit operation, in the
+// audit trail's fixed vocabulary (lower-case words joined by dots, each at
+// most 32 characters); any other path or entry names none.
+func TestSlackOperationNamesTheMethod(t *testing.T) {
+	want := map[string]string{
+		"/api/chat.postMessage":      "slack.chat_post_message",
+		"/api/chat.update":           "slack.chat_update",
+		"/api/reactions.add":         "slack.reactions_add",
+		"/api/conversations.history": "slack.conversations_history",
+		"/api/conversations.replies": "slack.conversations_replies",
+	}
+	if len(want) != len(slackMethods) {
+		t.Fatalf("%d Slack methods, %d names checked", len(slackMethods), len(want))
+	}
+	vocabulary := regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,3}$`)
+	slack := &Entry{Host: "slack.com"}
+	for path := range slackMethods {
+		if got := slack.Operation(path); got != want[path] || !vocabulary.MatchString(got) {
+			t.Errorf("%s: %q, want %q", path, got, want[path])
+		}
+	}
+	for name, got := range map[string]string{
+		"unlisted method":  slack.Operation("/api/conversations.invite"),
+		"below a method":   slack.Operation("/api/chat.postMessage/x"),
+		"another host":     (&Entry{Host: "api.linear.app"}).Operation("/api/chat.postMessage"),
+		"no entry matched": (*Entry)(nil).Operation("/api/chat.postMessage"),
+	} {
+		if got != "" {
+			t.Errorf("%s: %q", name, got)
+		}
 	}
 }
 
