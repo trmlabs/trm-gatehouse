@@ -46,7 +46,8 @@ func (r catalogDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgpr
 	}
 	pool, _ := catalog.Pool(scope.Pool) // undefined pools: no identity, ceiling T0
 	who, refusal := authorize.Resolve(ctx, pool, pgproxy.Session(ctx), authorize.Claims{Pod: scope.WorkloadID, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester}, r.runner, r.sessions)
-	record := pgproxy.Requester{Kind: who.Kind, Subject: who.Subject, TokenSHA256: who.TokenSHA256}
+	record := pgproxy.Requester{Kind: who.Kind, Subject: who.Audited(), TokenSHA256: who.TokenSHA256,
+		Source: who.Source, Automation: who.Automation, AutomationName: who.AutomationName, AutomationOwner: who.AutomationOwner}
 	if refusal == "" {
 		decideCtx := ctx
 		if pgproxy.IsRecheck(ctx) {

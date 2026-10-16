@@ -114,6 +114,7 @@ Gatehouse documentation lives in [examples/credential-proxy](examples/credential
 | [Google Cloud tokens](examples/credential-proxy/gcp-tokens.md) | Narrowed tokens for Cloud Storage and BigQuery |
 | [Browser sessions](examples/credential-proxy/browser-session.md) | Staging web apps as a test user |
 | [Signed audit](examples/credential-proxy/signed-audit.md) | The audit chain, checkpoints and verification |
+| [Decoy credentials](examples/credential-proxy/decoy-credentials.md) | Planted keys that refuse and flag a session hunting for secrets |
 | [Task relay](examples/credential-proxy/task-relay/README.md) | How sandboxes reach the broker without an identity token |
 | [Workload identity](examples/credential-proxy/kubernetes/README.md) | Kubernetes identity setup and fixtures |
 | [Running a fleet](examples/credential-proxy/broker-fleet.md) and [database recovery](examples/credential-proxy/database-recovery.md) | Operating several replicas and recovering interrupted credential requests |

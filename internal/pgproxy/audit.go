@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/decoy"
 )
 
 // AuditTrail records one row per session event from verified identity only.
@@ -109,4 +110,12 @@ func newSessionID() string {
 		return ""
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// decoys is the decoy set in force, or nil.
+func (b *Broker) decoys() *decoy.Set {
+	if b.opts.Decoys == nil {
+		return nil
+	}
+	return b.opts.Decoys.Current()
 }

@@ -37,12 +37,11 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 	}
 	who, refusal := authorize.Resolve(ctx, pool, sessionToken(ctx), authorize.Claims{Pod: scope.WorkloadID, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester}, verifier, a.Sessions)
 	event.TokenSHA256, event.RequesterKind = who.TokenSHA256, who.Kind
+	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
 	if refusal != "" {
 		return refusal
 	}
-	if who.Kind == "person" || who.Kind == "agent" {
-		event.Requester = who.Subject
-	}
+	event.Requester = who.Audited()
 	d := authorize.Decide(ctx, a.Entitlements, pool, *entry, who)
 	event.Tier, event.Decision, event.RequesterOID = d.Tier, d.Outcome, d.ObjectID
 	event.RequesterDepartment = auditchain.DepartmentField(d.Department)

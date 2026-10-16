@@ -141,6 +141,9 @@ func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 	token, hint, err := brokercore.ParseProxyAuth(r)
 	if err != nil {
 		p.recordAuthFailure(r)
+		if p.refuseDecoyAtProxy(w, r, target, nil) {
+			return
+		}
 		if p.strictCredentialProxy {
 			p.strictUnauthenticatedDeny(w, r, http.StatusProxyAuthRequired)
 			return
@@ -149,9 +152,14 @@ func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peer, peerErr := peerFromContext(r.Context())
+	// An admitted request is checked for decoys with its identity, in the
+	// catalog adapter; a refused one is checked here.
 	scope, err := p.resolveScope(r.Context(), token, hint, peer, peerErr, false)
 	if err != nil {
 		p.recordAuthFailure(r)
+		if p.refuseDecoyAtProxy(w, r, target, nil) {
+			return
+		}
 		if p.strictCredentialProxy {
 			p.strictIdentityDeny(w, r, err)
 			return

@@ -166,6 +166,13 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 		return nil, err
 	}
 	adapter.Sessions = sessionBinder(srv.CleanupStore())
+	decoys, err := decoySource(ctx, client, getenv, srv.Logger())
+	if err != nil {
+		return nil, err
+	}
+	if decoys != nil {
+		adapter.Decoys = decoys
+	}
 	dial := netguard.SafeDialContext(netguard.AllowPrivateFromEnv())
 	browserTokens := &httpcatalog.Auth0Tokens{Keys: keys, Client: auth0Client(source, dial), AutomatedAuth: automatedAuthClient(source, dial),
 		Revoked: func(binding, outcome string, status int, took time.Duration) {

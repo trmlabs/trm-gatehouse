@@ -60,6 +60,11 @@ type Entry struct {
 	// RequestFields limit request parameters to listed values (see
 	// RequestField). Header entries only; a Slack entry must limit channel.
 	RequestFields []RequestField `json:"requestFields,omitempty"`
+	// Transcript marks a model API: its request bodies carry an agent's
+	// conversation, which quotes whatever the agent read, so a decoy
+	// credential found only in one is not treated as presented. Headers and
+	// the URL are still checked. Header entries only.
+	Transcript bool `json:"transcript,omitempty"`
 	// Kind "git" makes the entry a git smart-HTTP binding, and "github-api" a
 	// GitHub REST binding limited to pull request work and the reads and
 	// writes its repositories grant (GitHubAPIMatch). Paths, methods and the
@@ -165,7 +170,7 @@ var githubOperations = map[string]string{
 	"pr.comment":       "pull-requests",  // POST comments and review replies on a pull request in reach
 	"pr.edit":          "pull-requests",  // PATCH a body, or the App's own comment, in reach
 	"pr.label":         "pull-requests",  // POST /issues/{n}/labels, listed labels only, in reach
-	"pr.ready":         "pull-requests",  // mark a draft in reach ready (one GraphQL mutation)
+	"pr.ready":         "update-branch",  // mark a draft in reach ready: one GraphQL mutation, which GitHub refuses without contents write
 	"dispatch":         "contents-write", // POST /dispatches, listed event types only
 	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts; a commit's check runs and statuses
 	"deployments.read": "deployments",    // deployments and their statuses
@@ -234,9 +239,10 @@ type KeyRef struct {
 }
 
 type Catalog struct {
-	entries   []Entry
-	pools     []Pool
-	harnesses []Harness
+	entries     []Entry
+	pools       []Pool
+	harnesses   []Harness
+	automations map[string]Automation // by id
 }
 
 // Pool names a set of workers by their Kubernetes identity. When a catalog
@@ -249,8 +255,10 @@ type Pool struct {
 	// "claude-session" (a runner session token naming the person),
 	// "cursor-session" (a Cursor run's identity token naming the person),
 	// "attested-person" (a shared proxy's attestation naming the person who
-	// created the agent, from its Pod's requester annotation) or "workload"
-	// (CI and automation: Entitlements, never a person).
+	// created the agent, from its Pod's requester annotation),
+	// "cursor-automation" (a Cursor run's identity token naming the
+	// Automation that started it, decided per listed Automation) or
+	// "workload" (CI: Entitlements, never a person).
 	Identity string `json:"identity,omitempty"`
 	// Ceiling is the highest tier the pool may reach (default T0). "external"
 	// is below T0: the pool's workers may reach nothing, and no entry may
@@ -262,8 +270,16 @@ type Pool struct {
 	BaseGroup string `json:"baseGroup,omitempty"`
 	// Entitlements are a workload pool's fixed groups.
 	Entitlements []string `json:"entitlements,omitempty"`
+	// AutomationRunsAsPerson, cursor-session only, serves a run a Cursor
+	// Automation started as the person its run token names, with this pool's
+	// entries and that person's groups, as if they had started it. Off by
+	// default: such a run is refused (automation_on_person_pool), so an
+	// Automation gets a person's access only through what the catalog lists
+	// for it, on a cursor-automation pool.
+	AutomationRunsAsPerson bool `json:"automationRunsAsPerson,omitempty"`
 
-	harness *Harness // the declared profile naming this pool, if any
+	harness     *Harness              // the declared profile naming this pool, if any
+	automations map[string]Automation // the catalog's Automations, on a cursor-automation pool
 }
 
 // Pool returns the defined pool with this name.
@@ -371,6 +387,10 @@ var reservedHeaders = map[string]bool{
 	"Authorization": true, "X-Api-Key": true, "Accept-Encoding": true,
 }
 
+// maxCatalogFile bounds a catalog file only against a runaway read: a
+// 100,000-Automation catalog is about 12 MiB.
+const maxCatalogFile = 256 << 20
+
 // Load reads a catalog file, rejecting unknown fields and trailing data.
 func Load(path string) (Catalog, error) {
 	f, err := os.Open(path)
@@ -378,8 +398,8 @@ func Load(path string) (Catalog, error) {
 		return Catalog{}, errors.New("cannot open HTTP catalog")
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
-	if err != nil || len(data) > 1<<20 {
+	data, err := io.ReadAll(io.LimitReader(f, maxCatalogFile+1))
+	if err != nil || len(data) > maxCatalogFile {
 		return Catalog{}, errors.New("HTTP catalog exceeds size limit or cannot be read")
 	}
 	return Parse(data)
@@ -387,9 +407,10 @@ func Load(path string) (Catalog, error) {
 
 func Parse(data []byte) (Catalog, error) {
 	var file struct {
-		Harnesses []Harness `json:"harnesses,omitempty"`
-		Pools     []Pool    `json:"pools,omitempty"`
-		Entries   []Entry   `json:"entries"`
+		Harnesses   []Harness    `json:"harnesses,omitempty"`
+		Pools       []Pool       `json:"pools,omitempty"`
+		Entries     []Entry      `json:"entries"`
+		Automations []Automation `json:"automations,omitempty"`
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -488,7 +509,16 @@ func Parse(data []byte) (Catalog, error) {
 			return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q: %w", e.Name, crossings[0].git, crossings[0].err)
 		}
 	}
-	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses}, nil
+	automations, err := indexAutomations(file.Automations, names)
+	if err != nil {
+		return Catalog{}, err
+	}
+	for i := range file.Pools {
+		if file.Pools[i].Identity == IdentityCursorAutomation {
+			file.Pools[i].automations = automations
+		}
+	}
+	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses, automations: automations}, nil
 }
 
 func (e *Entry) normalize() error {
@@ -511,6 +541,9 @@ func (e *Entry) normalize() error {
 	}
 	if e.Kind != "" && len(e.RequestFields) > 0 {
 		return errors.New("requestFields apply to header entries only")
+	}
+	if e.Kind != "" && e.Transcript {
+		return errors.New("transcript applies to header entries only")
 	}
 	if e.Kind != "browser-session" && (len(e.DeniedPaths) > 0 || len(e.ReadOnlyPaths) > 0) {
 		return errors.New("deniedPaths and readOnlyPaths apply to browser-session entries only")
@@ -1010,8 +1043,8 @@ type GitRequest struct {
 	Query string
 	// Permissions is the token scope the route needs: "pull-requests",
 	// "contents-write" (a repository dispatch), "actions", "deployments",
-	// "checks", "statuses", "update-branch" (pull requests and contents write)
-	// or "actions-write".
+	// "checks", "statuses", "update-branch" (pull requests and contents write,
+	// for a branch update or marking a draft ready) or "actions-write".
 	Permissions string
 	// Download marks a route GitHub answers with a redirect to a signed
 	// download URL, which the broker follows itself without the token.
@@ -1704,6 +1737,11 @@ func (p Pool) validate() error {
 			return fmt.Errorf("groups must be Entra object IDs")
 		}
 	}
+	// Only a cursor-session pool serves a Cursor run as its person; any
+	// other pool names no person for one or decides it per Automation.
+	if p.AutomationRunsAsPerson && p.Identity != "cursor-session" {
+		return fmt.Errorf("automationRunsAsPerson is for cursor-session pools only")
+	}
 	switch p.Identity {
 	case "", "none":
 		if p.CCPoolID != "" || len(p.Entitlements) != 0 || p.BaseGroup != "" || tierRank[p.Ceiling] > 0 {
@@ -1724,6 +1762,12 @@ func (p Pool) validate() error {
 		// pool, and a base group would gate nothing.
 		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
 			return fmt.Errorf("an attested-person pool takes no ccpool_ ID, base group or fixed entitlements")
+		}
+	case IdentityCursorAutomation:
+		// Each run is decided for its Automation, so the pool carries no
+		// entitlements of its own.
+		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
+			return fmt.Errorf("a cursor-automation pool takes no ccpool_ ID, base group or fixed entitlements")
 		}
 	case "workload":
 		if p.CCPoolID != "" || p.BaseGroup != "" || tierRank[p.Ceiling] > 1 {
@@ -1772,7 +1816,7 @@ func grantable(e Entry, p Pool, defined bool) error {
 		return fmt.Errorf("%s exceeds the pool's ceiling", e.Tier)
 	}
 	switch p.Identity {
-	case "claude-session", "cursor-session", "attested-person":
+	case "claude-session", "cursor-session", "attested-person", IdentityCursorAutomation:
 		return nil
 	case "workload":
 		if rank >= 2 {

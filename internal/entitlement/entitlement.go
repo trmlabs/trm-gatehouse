@@ -15,7 +15,8 @@ import (
 
 // maxTrackedPeople bounds the answer cache and lookup budgets, which start
 // over when exceeded. It is sized for every person in a large organization
-// times a few group sets; an entry is a few hundred bytes.
+// times a few group sets; an entry is a few hundred bytes. A budget is a
+// person's, or an Automation's for the checks on its owner's account.
 const maxTrackedPeople = 200000
 
 // MaxCacheTTL bounds how long a person's groups are trusted. Offboarding takes
@@ -86,7 +87,7 @@ type Cache struct {
 	Source           Source
 	TTL              time.Duration
 	Now              func() time.Time
-	LookupsPerMinute int           // per person; default DefaultLookupsPerMinute
+	LookupsPerMinute int           // per budget (a person, or an Automation); default DefaultLookupsPerMinute
 	RecentAnswer     time.Duration // default DefaultRecentAnswer
 
 	mu      sync.Mutex
@@ -105,14 +106,14 @@ func (c *Cache) now() time.Time {
 
 // Lookup returns the person and how old the answer is. Errors are never cached.
 func (c *Cache) Lookup(ctx context.Context, subject string, groups []string) (Person, time.Duration, error) {
-	return c.lookup(ctx, subject, groups, false)
+	return c.lookup(ctx, subject, subject, groups, false)
 }
 
 // Fresh asks the source now, ignoring any cached answer, and caches the result.
 // It joins a lookup of the same question already in flight, and over the
 // person's budget it accepts an answer at most RecentAnswer old or refuses.
 func (c *Cache) Fresh(ctx context.Context, subject string, groups []string) (Person, time.Duration, error) {
-	return c.lookup(ctx, subject, groups, true)
+	return c.lookup(ctx, subject, subject, groups, true)
 }
 
 // Purge forgets every cached answer about subject, so its next lookup of any
@@ -138,9 +139,9 @@ func (c *Cache) Purge(subject string) {
 	}
 }
 
-// spend records one directory call for subject if its budget allows. The
-// caller holds c.mu.
-func (c *Cache) spend(subject string, now time.Time) bool {
+// spend records one directory call against budget if it allows. The caller
+// holds c.mu.
+func (c *Cache) spend(budget string, now time.Time) bool {
 	limit := c.LookupsPerMinute
 	if limit <= 0 {
 		limit = DefaultLookupsPerMinute
@@ -148,21 +149,23 @@ func (c *Cache) spend(subject string, now time.Time) bool {
 	if c.spent == nil || len(c.spent) > maxTrackedPeople {
 		c.spent = map[string][]time.Time{}
 	}
-	recent := c.spent[subject][:0]
-	for _, t := range c.spent[subject] {
+	recent := c.spent[budget][:0]
+	for _, t := range c.spent[budget] {
 		if now.Sub(t) < time.Minute {
 			recent = append(recent, t)
 		}
 	}
 	if len(recent) >= limit {
-		c.spent[subject] = recent
+		c.spent[budget] = recent
 		return false
 	}
-	c.spent[subject] = append(recent, now)
+	c.spent[budget] = append(recent, now)
 	return true
 }
 
-func (c *Cache) lookup(ctx context.Context, subject string, groups []string, fresh bool) (Person, time.Duration, error) {
+// lookup asks about subject, charging any directory call to budget: the
+// subject's own, or an Automation's for its owner's checks.
+func (c *Cache) lookup(ctx context.Context, subject, budget string, groups []string, fresh bool) (Person, time.Duration, error) {
 	if c == nil || c.Source == nil {
 		return Person{}, 0, errors.New("no entitlement source configured")
 	}
@@ -189,7 +192,7 @@ func (c *Cache) lookup(ctx context.Context, subject string, groups []string, fre
 			return Person{}, 0, ctx.Err()
 		}
 	}
-	if !c.spend(subject, now) {
+	if !c.spend(budget, now) {
 		recent := c.RecentAnswer
 		if recent <= 0 {
 			recent = DefaultRecentAnswer
@@ -257,8 +260,12 @@ type Entry struct {
 
 // Requester is the verified identity behind the request.
 type Requester struct {
-	Kind    string // "person", "agent", "workload" or "none"
-	Subject string
+	Kind    string // "person", "agent", "workload", "automation" or "none"
+	Subject string // the person's email; for an automation, its owner's
+	// Budget is the lookup budget a directory call is charged to, when it
+	// is not Subject's own: an Automation's, so its runs neither use up nor
+	// share its owner's budget.
+	Budget string
 }
 
 // Decision records why a request was allowed or refused, for the audit row.
@@ -282,8 +289,9 @@ func WithRecheck(ctx context.Context) context.Context {
 func isRecheck(ctx context.Context) bool { v, _ := ctx.Value(recheckKey{}).(bool); return v }
 
 // Decide applies the lesser of the pool ceiling and the requester's entitlements.
-// A T2 admission always asks the directory now, within the person's lookup
-// budget; T1 admissions and rechecks may use the cache. A refusal on a recheck
+// A T2 admission always asks the directory now, within the requester's lookup
+// budget (Budget, or the person's own); T1 admissions and rechecks may use the
+// cache. A refusal on a recheck
 // or a fresh answer forgets everything cached about the person, so none of
 // their other sessions or entries rides a stale answer.
 func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Requester) Decision {
@@ -307,7 +315,9 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Outcome = "pool_ceiling"
 		return d
 	}
-	if want == 0 {
+	// An Automation is checked on its owner's account at every tier, so an
+	// offboarded owner's Automation stops entirely.
+	if want == 0 && pool.Identity != "cursor-automation" {
 		d.Allowed, d.Outcome = true, "t0"
 		return d
 	}
@@ -320,26 +330,35 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Allowed, d.Outcome = true, "workload_entitled"
 		return d
 	case "claude-session", "cursor-session", "attested-person":
+		if who.Kind != "person" || who.Subject == "" {
+			d.Outcome = "no_person"
+			return d
+		}
+	case "cursor-automation":
+		// An Automation is decided on its owner's account, so it never
+		// reaches what its owner could not, and stops when that account
+		// does. Which entries it may use, and who may run it, are the
+		// caller's checks.
+		if who.Kind != "automation" || who.Subject == "" {
+			d.Outcome = "no_automation"
+			return d
+		}
 	default:
 		d.Outcome = "no_identity"
 		return d
 	}
-	if who.Kind != "person" || who.Subject == "" {
-		d.Outcome = "no_person"
-		return d
-	}
 	// No directory configured is an operator's to fix, never a passing
 	// outage: waiting does not make one appear.
-	if len(entry.Requires) == 0 || cache == nil || cache.Source == nil {
+	if (want > 0 && len(entry.Requires) == 0) || cache == nil || cache.Source == nil {
 		d.Outcome = "entitlement_config"
 		return d
 	}
-	lookup := cache.Lookup
 	fresh := want >= 2 && !isRecheck(ctx)
-	if fresh {
-		lookup = cache.Fresh
+	budget := who.Budget
+	if budget == "" {
+		budget = who.Subject
 	}
-	person, age, err := lookup(ctx, who.Subject, entry.Requires)
+	person, age, err := cache.lookup(ctx, who.Subject, budget, entry.Requires, fresh)
 	d.CacheAge = age
 	switch {
 	case errors.Is(err, ErrLookupLimited):
@@ -353,6 +372,9 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.ObjectID, d.Department, d.Outcome = person.ObjectID, person.Department, "account_disabled"
 	case !subset(entry.Requires, person.MemberOf):
 		d.ObjectID, d.Department, d.Outcome = person.ObjectID, person.Department, "not_entitled"
+	case want == 0:
+		d.ObjectID, d.Department, d.Allowed, d.Outcome = person.ObjectID, person.Department, true, "t0"
+		return d
 	default:
 		d.ObjectID, d.Department, d.Allowed, d.Outcome = person.ObjectID, person.Department, true, "entitled"
 		return d

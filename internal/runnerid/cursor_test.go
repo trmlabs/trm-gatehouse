@@ -153,3 +153,41 @@ func TestCursorJWKSRefusesWeakRSAKeys(t *testing.T) {
 		t.Fatal("accepted a 1024-bit key")
 	}
 }
+
+// An Automation's run carries its source and id; a person's run carries
+// neither, and the session says so.
+func TestCursorRunCarriesSourceAndAutomation(t *testing.T) {
+	v, key, now := cursorSetup(t)
+	s, err := v.Verify(context.Background(), signRS256(t, key, "c1", cursorClaimsFor(now)))
+	if err != nil || s.Source != "" || s.Automation != "" {
+		t.Fatalf("person run %+v err %v", s, err)
+	}
+	for _, source := range []string{"AUTOMATIONS", "automations"} {
+		c := cursorClaimsFor(now)
+		c["source"], c["automation_id"] = source, "auto-123"
+		s, err = v.Verify(context.Background(), signRS256(t, key, "c1", c))
+		if err != nil || s.Source != SourceAutomations || s.Automation != "auto-123" || s.Kind != KindPerson {
+			t.Fatalf("automation run (%s) %+v err %v", source, s, err)
+		}
+	}
+	c := cursorClaimsFor(now)
+	c["source"] = "SLACK"
+	if s, err = v.Verify(context.Background(), signRS256(t, key, "c1", c)); err != nil || s.Source != "SLACK" || s.Automation != "" {
+		t.Fatalf("slack run %+v err %v", s, err)
+	}
+}
+
+// A source or automation id that is not a plain value refuses the token, as
+// any other claim the broker keys on or logs does.
+func TestCursorRunRefusesAnUnsafeSourceOrAutomation(t *testing.T) {
+	v, key, now := cursorSetup(t)
+	for _, bad := range []map[string]any{{"source": "AUTO MATIONS"}, {"automation_id": "a\"b"}, {"automation_id": 1}} {
+		c := cursorClaimsFor(now)
+		for k, v := range bad {
+			c[k] = v
+		}
+		if _, err := v.Verify(context.Background(), signRS256(t, key, "c1", c)); err == nil {
+			t.Fatalf("%v accepted", bad)
+		}
+	}
+}
