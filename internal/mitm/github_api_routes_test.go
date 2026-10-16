@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +30,8 @@ type routesFixture struct {
 	*apiFixture
 	received     []string // "METHOD path?query body" for every request after the scope reads
 	downloadAuth string
+	readyScopes  []string // the token scope of each ready mutation GitHub received
+	logs         *lockedBuffer
 }
 
 func newRoutesFixture(t *testing.T) *routesFixture {
@@ -35,10 +39,10 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	saved := githubDownloadHosts
 	githubDownloadHosts = []string{"com"} // the fake serves every host as example.com
 	t.Cleanup(func() { githubDownloadHosts = saved })
-	f := &routesFixture{apiFixture: &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}}}
+	f := &routesFixture{apiFixture: &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}}, logs: &lockedBuffer{}}
 	const pr = `{"contents":"read","metadata":"read","pull_requests":"write"}`
 	need := map[string]string{
-		"pulls": pr, "issues": pr, "graphql": pr, "compare": pr,
+		"pulls": pr, "issues": pr, "graphql": readyScope, "compare": pr,
 		"dispatches":  `{"contents":"write","metadata":"read"}`,
 		"actions":     `{"actions":"read","metadata":"read"}`,
 		"deployments": `{"deployments":"read","metadata":"read"}`,
@@ -82,7 +86,11 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 		f.mu.Lock()
 		scope := f.minted[token]
 		f.mu.Unlock()
-		if want, ok := need[kind]; !ok || scope != want {
+		want, ok := need[kind]
+		if kind == "pulls" && r.Method == http.MethodGet && scope == readyScope {
+			want = readyScope // pr.ready reads its target with the token it marks it ready with
+		}
+		if !ok || scope != want {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -101,6 +109,15 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 			return
 		case "GET /repos/example-org/example-repo/pulls/13":
 			fmt.Fprint(w, `{"number":13,"node_id":"PR_thirteen","head":{"ref":"person/x","repo":{"full_name":"example-org/example-repo"}}}`)
+			return
+		case "GET /repos/example-org/example-repo/pulls/41":
+			fmt.Fprint(w, `{"number":41,"node_id":"PR_fortyone","head":{"ref":"factory/refused","repo":{"full_name":"example-org/example-repo"}}}`)
+			return
+		case "GET /repos/example-org/example-repo/pulls/42":
+			fmt.Fprint(w, `{"number":42,"node_id":"PR_fortytwo","head":{"ref":"factory/draft","repo":{"full_name":"example-org/example-repo"}}}`)
+			return
+		case "GET /repos/example-org/example-repo/pulls/43":
+			fmt.Fprint(w, `{"number":43,"node_id":"PR_fortythree","head":{"ref":"factory/unanswered","repo":{"full_name":"example-org/example-repo"}}}`)
 			return
 		case "GET /repos/example-org/example-repo/issues/comments/5":
 			fmt.Fprint(w, `{"id":5,"issue_url":"https://api.github.com/repos/example-org/example-repo/issues/30","performed_via_github_app":{"id":7}}`)
@@ -129,7 +146,24 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 		}
 		f.mu.Lock()
 		f.received = append(f.received, line)
+		if r.URL.Path == "/graphql" {
+			f.readyScopes = append(f.readyScopes, scope)
+		}
 		f.mu.Unlock()
+		if r.URL.Path == "/graphql" {
+			var mutation struct {
+				Variables struct {
+					ID string `json:"id"`
+				} `json:"variables"`
+			}
+			_ = json.Unmarshal(body, &mutation)
+			answer, ok := readyAnswers[mutation.Variables.ID]
+			if !ok {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+			fmt.Fprint(w, answer)
+			return
+		}
 		fmt.Fprint(w, `{"ok":true}`)
 	}))
 	t.Cleanup(github.Close)
@@ -155,6 +189,7 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	scope := &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1"}
 	proxyURL, roots, p := setupProxy(t, validTokenResolver("workload-token", scope), &fakeCredProvider{}, func(o *Options) {
 		o.StrictCredentialProxy = true
+		o.Logger = slog.New(slog.NewTextHandler(f.logs, nil))
 		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
@@ -178,6 +213,21 @@ func (f *routesFixture) last() string {
 }
 
 const routeRepo = "/repos/example-org/example-repo"
+
+// readyScope is the token scope GitHub asks for to mark a draft ready.
+const readyScope = `{"contents":"write","metadata":"read","pull_requests":"write"}`
+
+// readyAnswers are what the fake GitHub answers readyMutation for each pull
+// request, as GitHub answers it: 12 and 30 become ready, 41 is refused inside
+// an HTTP 200 (as for a token without contents write), and 42 stays a draft.
+// Any other pull request gets 401.
+var readyAnswers = map[string]string{
+	"PR_twelve": `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":12,"isDraft":false}}}}`,
+	"PR_thirty": `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":30,"isDraft":false}}}}`,
+	"PR_fortyone": `{"data":{"markPullRequestReadyForReview":null},"errors":[{"type":"FORBIDDEN","path":["markPullRequestReadyForReview"],` +
+		`"locations":[{"line":1,"column":26}],"message":"Resource not accessible by integration"}]}`,
+	"PR_fortytwo": `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":42,"isDraft":true}}}}`,
+}
 
 func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 	f := newRoutesFixture(t)
@@ -220,8 +270,88 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 		scopes[s] = true
 	}
 	f.mu.Unlock()
-	if len(scopes) != 6 {
-		t.Errorf("minted scopes %v, want six", scopes)
+	if len(scopes) != 7 {
+		t.Errorf("minted scopes %v, want seven", scopes)
+	}
+}
+
+// GitHub answers a ready mutation it refuses with HTTP 200 and an errors list.
+// The broker reads the whole answer: a pull request GitHub did not mark ready
+// is a 502 with a fixed body and a graphql_error row, so gh exits non-zero,
+// and the log names the pull request and the error types but never GitHub's
+// message. Every mutation carries contents write besides pull requests write.
+func TestGitHubAPIReadyChecksGitHubsAnswer(t *testing.T) {
+	f := newRoutesFixture(t)
+	code, body := f.post(t, "POST", routeRepo+"/pulls/30/ready", "", "")
+	if code != 200 || body != readyAnswers["PR_thirty"] || f.audit.last().Outcome != "completed" || f.audit.last().Status != 200 {
+		t.Fatalf("ready: %d %s, row %+v", code, body, f.audit.last())
+	}
+	for _, tc := range []struct {
+		path, reason, types string
+	}{
+		{"/pulls/41/ready", "errors", "[FORBIDDEN]"},
+		{"/pulls/42/ready", "still_draft", "[]"},
+	} {
+		code, body := f.post(t, "POST", routeRepo+tc.path, "", "")
+		row := f.audit.last()
+		if code != 502 || row.Outcome != "graphql_error" || row.Status != 502 || row.Operation != "pr.ready" {
+			t.Errorf("%s: %d %s, row %+v", tc.path, code, body, row)
+		}
+		var answer map[string]string
+		if err := json.Unmarshal([]byte(body), &answer); err != nil || answer["code"] != "graphql_error" || answer["reason"] != tc.reason {
+			t.Errorf("%s: body %q", tc.path, body)
+		}
+		if strings.Contains(body, "Resource not accessible") || strings.Contains(body, "FORBIDDEN") {
+			t.Errorf("%s: GitHub's error reached the worker: %s", tc.path, body)
+		}
+		number := strings.Split(tc.path, "/")[2]
+		if logs := f.logs.String(); !strings.Contains(logs, "session="+row.Session+" ") || !strings.Contains(logs, "pullRequest="+number+" reason="+tc.reason+" errorTypes="+tc.types) {
+			t.Errorf("%s: log %q", tc.path, logs)
+		}
+	}
+	if logs := f.logs.String(); strings.Contains(logs, "Resource not accessible") {
+		t.Errorf("GitHub's message reached the log: %s", logs)
+	}
+	// Any status but 200 is relayed as before.
+	if code, body := f.post(t, "POST", routeRepo+"/pulls/43/ready", "", ""); code != 401 || f.audit.last().Outcome != "completed" || f.audit.last().Status != 401 {
+		t.Errorf("401 from GitHub: %d %s, row %+v", code, body, f.audit.last())
+	}
+	f.mu.Lock()
+	scopes := f.readyScopes
+	f.mu.Unlock()
+	if len(scopes) != 4 {
+		t.Fatalf("ready mutations %v, want four", scopes)
+	}
+	for _, scope := range scopes {
+		if scope != readyScope {
+			t.Errorf("ready mutation sent with %s, want %s", scope, readyScope)
+		}
+	}
+}
+
+// readyRefused accepts only an answer that shows the pull request asked for
+// as no longer a draft.
+func TestReadyRefused(t *testing.T) {
+	for _, tc := range []struct {
+		answer, reason string
+		types          []string
+	}{
+		{`{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":7,"isDraft":false}}}}`, "", nil},
+		{`{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":7,"isDraft":true}}}}`, "still_draft", nil},
+		{`{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":8,"isDraft":false}}}}`, "unexpected", nil},
+		{`{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":7}}}}`, "unexpected", nil},
+		{`{"data":{"markPullRequestReadyForReview":null}}`, "unexpected", nil},
+		{`{"data":null}`, "unexpected", nil},
+		{`not json`, "unexpected", nil},
+		{`{"errors":[{"type":"NOT_FOUND","message":"x"},{"message":"y"},{"type":"FORBIDDEN"},{"type":"FORBIDDEN"},{"type":"ghs_x y"}]}`,
+			"errors", []string{"FORBIDDEN", "NOT_FOUND", "invalid", "none"}},
+		{`{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":7,"isDraft":false}}},"errors":[{"type":"FORBIDDEN"}]}`,
+			"errors", []string{"FORBIDDEN"}},
+	} {
+		reason, types := readyRefused([]byte(tc.answer), 7)
+		if reason != tc.reason || !slices.Equal(types, tc.types) {
+			t.Errorf("%s: %q %v, want %q %v", tc.answer, reason, types, tc.reason, tc.types)
+		}
 	}
 }
 

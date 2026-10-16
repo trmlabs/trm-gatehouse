@@ -192,7 +192,7 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 		{"GET", "/repos/trmlabs/trm-b2b/issues/12/comments", "per_page=100&page=2", "list-comments", "pull-requests", false, nil},
 		{"PATCH", "/repos/trmlabs/trm-b2b/pulls/12", "", "edit-pull", "pull-requests", false, nil},
 		{"PATCH", "/repos/trmlabs/trm-b2b/issues/comments/5", "", "edit-comment", "pull-requests", false, nil},
-		{"POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "ready", "pull-requests", false, nil},
+		{"POST", "/repos/trmlabs/trm-b2b/pulls/12/ready", "", "ready", "update-branch", false, nil},
 		{"POST", "/repos/trmlabs/trm-b2b/issues/12/labels", "", "label", "pull-requests", false, nil},
 		{"POST", "/repos/trmlabs/trm-b2b/dispatches", "", "dispatch", "contents-write", false, nil},
 		{"GET", "/repos/trmlabs/trm-b2b/actions/runs", "head_sha=abc&per_page=5", "actions", "actions", false, nil},
