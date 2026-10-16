@@ -125,6 +125,11 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	}
+	// The rebuilt body is what GitHub reads, with any escape in the worker's
+	// JSON decoded, so it is checked again.
+	if p.refuseDecoyBody(w, event, target, body) {
+		return
+	}
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
 	if !enf.Allowed {
 		deny(http.StatusTooManyRequests, "rate_limited")

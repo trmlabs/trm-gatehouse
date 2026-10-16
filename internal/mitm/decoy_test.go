@@ -212,11 +212,14 @@ func TestGitDecoyCredentialIsRefused(t *testing.T) {
 func TestGitHubAPIBodyDecoyIsRefused(t *testing.T) {
 	f := newAPIFixture(t)
 	plantDecoys(t, f.decoys)
-	code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/12/comments", "", `{"body":"found it: `+decoyGitHub+`"}`)
-	if code != http.StatusForbidden {
-		t.Fatalf("status %d", code)
+	// GitHub decodes JSON escapes, and the broker rebuilds the body decoded,
+	// so an escaped decoy is still one.
+	for _, body := range []string{`{"body":"found it: ` + decoyGitHub + `"}`, `{"body":"\u0073` + decoyGitHub[1:] + `"}`} {
+		if code, _ := f.post(t, "POST", "/repos/trmlabs/example-app/issues/12/comments", "", body); code != http.StatusForbidden {
+			t.Fatalf("%s: status %d", body, code)
+		}
+		checkDecoyRow(t, f.audit.last(), "pool-a/github_token", decoy.SurfaceBody, "pool-agent", "example.com:"+strconv.Itoa(f.port))
 	}
-	checkDecoyRow(t, f.audit.last(), "pool-a/github_token", decoy.SurfaceBody, "pool-agent", "example.com:"+strconv.Itoa(f.port))
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.created != 0 || len(f.minted) != 0 {

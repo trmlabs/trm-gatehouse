@@ -27,7 +27,8 @@ Set `AGENT_VAULT_HTTP_CATALOG_FILE` to a JSON file. One entry per binding:
   "placeholder": "__vault_LLM_KEY__",
   "key": {"mount": "gatehouse", "path": "vendors/litellm", "field": "key"},
   "pools": ["<pool agent ID>"],
-  "forwardHeaders": ["OpenAI-Beta"]
+  "forwardHeaders": ["OpenAI-Beta"],
+  "transcript": true
 }]}
 ```
 

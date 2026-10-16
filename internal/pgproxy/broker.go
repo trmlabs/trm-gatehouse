@@ -114,6 +114,9 @@ type Broker struct {
 	pooled               map[net.Conn]*pooledSession
 	closers              map[net.Conn]func(closeNotice) // unpooled sessions that can end with a notice
 	denied               deniedLimiter
+	// decoyDenied caps decoy refusal rows on their own budget, so a flood of
+	// failed logins cannot crowd out the row that pages.
+	decoyDenied deniedLimiter
 }
 
 // New builds a Broker bound to addr (host:port). It does not listen until Serve
@@ -674,7 +677,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	if errors.As(err, &presented) {
 		// The client sees the same refusal as any failed authentication.
 		b.logger.Warn("pgproxy: decoy credential presented; refusing session")
-		if b.denied.allow(time.Now(), b.logger) {
+		if b.decoyDenied.allow(time.Now(), b.logger) {
 			b.auditDenied(auditchain.Event{Binding: "decoy/" + presented.match.Label, Decision: presented.match.Surface,
 				Database: auditchain.DatabaseField(requestedDB)}, outcomeDecoy)
 		}

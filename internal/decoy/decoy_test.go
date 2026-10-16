@@ -79,6 +79,8 @@ func TestBodyAndPasswordFindADecoy(t *testing.T) {
 		`a=1&client_secret=%73` + decoyToken[1:],
 		"export GITHUB=" + decoyToken + "\n",
 		"here it is: " + decoyToken + ".",
+		`{"token":"\u0073` + decoyToken[1:] + `"}`,
+		`{"token":"\u0073\u0079` + decoyToken[2:] + `"}`,
 	} {
 		if m, ok := set.Body([]byte(body)); !ok || m.Label != "pool-a/github_token" || m.Surface != SurfaceBody {
 			t.Fatalf("body %q: %+v %v", body, m, ok)
@@ -103,6 +105,8 @@ func TestOnlyAWholeDecoyMatches(t *testing.T) {
 		string(near),
 		"__vault_GITHUB_TOKEN__",
 		strings.Repeat("a", 4096),
+		`\\u0073` + decoyToken[1:],
+		`\u00` + decoyToken,
 		"",
 	} {
 		if m, ok := set.Body([]byte(body)); ok {

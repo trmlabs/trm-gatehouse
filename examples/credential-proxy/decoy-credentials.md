@@ -15,11 +15,12 @@ The broker keeps only SHA-256 digests of the decoys. It hashes each value as it 
 | Request bodies | Wherever an entry already reads the body: HTTP header entries, GitHub API writes, Google Cloud and browser sessions. |
 | The PostgreSQL password | Before the token reaches the authenticator. The client sees an ordinary authentication failure. |
 
-A Basic credential is decoded and percent-encoding is undone before the check. Only a whole decoy matches: not part of one, and not one inside a longer run of the same characters.
+A Basic credential is decoded, and percent-encoding and JSON `\u` escapes are undone, before the check. A GitHub API write is checked again as rebuilt, since that is what GitHub reads. Only a whole decoy matches: not part of one, and not one inside a longer run of the same characters.
 
 Out of reach:
 - A git push's pack data, which is compressed and streamed.
 - Any host outside the pool's catalog. The broker refuses that CONNECT before TLS, so it never sees the request.
+- Behind the [task relay](task-relay/README.md), the CONNECT headers and the PostgreSQL password. The relay sends the broker its own CONNECT and proof, and refuses any sandbox password but the placeholder (recorded as `denied:placeholder`), so alert on the relay's refusals for relayed sandboxes. Requests inside a relayed tunnel are checked as above.
 
 Give decoys the shape of credentials for hosts the pool does reach through the broker.
 
@@ -38,6 +39,8 @@ The worker gets the same 403 (or PostgreSQL authentication failure) as any refus
 ## Model traffic
 
 A model API's request body is the agent's conversation, which quotes whatever the agent read. An agent that runs `env` while debugging would otherwise put every decoy into its next model call. Mark such an entry `"transcript": true`: its bodies are not checked, while its headers and URL still are. Only HTTP header entries take the field.
+
+Mark every model entry before loading decoys. An unmarked one refuses every call after the agent first reads a decoy, since each call resends the conversation, so the session stops and every retry pages.
 
 ## Storing decoys
 

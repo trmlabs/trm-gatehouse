@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // A decoy is one run of decoy characters (A-Z, a-z, 0-9, "_" and "-"),
@@ -196,13 +197,19 @@ func (s *Set) header(v string) (string, bool) {
 	return "", false
 }
 
-// text checks data as sent and, when it holds percent-encoding, decoded.
+// text checks data as sent and, when it holds percent-encoding or JSON
+// \u escapes, decoded: a vendor decodes either before reading a value.
 func (s *Set) text(data []byte) (string, bool) {
 	if label, ok := s.find(data); ok {
 		return label, true
 	}
 	if bytes.IndexByte(data, '%') >= 0 {
-		return s.find(percentDecode(data))
+		if label, ok := s.find(percentDecode(data)); ok {
+			return label, true
+		}
+	}
+	if bytes.Contains(data, []byte(`\u`)) {
+		return s.find(jsonUnescape(data))
 	}
 	return "", false
 }
@@ -254,6 +261,35 @@ func percentDecode(data []byte) []byte {
 			}
 		}
 		out = append(out, data[i])
+	}
+	return out
+}
+
+// jsonUnescape undoes \uXXXX escapes. Any other escape is kept as sent, both
+// bytes together, so an escaped backslash never starts a \u escape.
+func jsonUnescape(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		if data[i] != '\\' || i+1 >= len(data) {
+			out = append(out, data[i])
+			continue
+		}
+		if data[i+1] == 'u' && i+5 < len(data) {
+			var r rune
+			valid := true
+			for _, c := range data[i+2 : i+6] {
+				v, ok := unhex(c)
+				valid = valid && ok
+				r = r<<4 | rune(v)
+			}
+			if valid {
+				out = utf8.AppendRune(out, r)
+				i += 5
+				continue
+			}
+		}
+		out = append(out, data[i], data[i+1])
+		i++
 	}
 	return out
 }
