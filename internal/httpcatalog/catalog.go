@@ -878,9 +878,10 @@ type pullRequestCrossing struct {
 // that pool only, the shared ones every pool of the github-api entry. A pool's
 // own push prefixes are held by that pool alone, the git entry's shared ones
 // by each pool of the git entry, so a shared push prefix crosses only a pool
-// outside it. It returns one crossing per repository, each naming its git
-// entry. As in checkPoolPrefixes, sorting puts every prefix right before the
-// ones it starts, so each is compared only with those.
+// outside it. A write repository with no push prefixes counts as a shared
+// push prefix of refs/heads/. It returns one crossing per repository, each
+// naming its git entry. As in checkPoolPrefixes, sorting puts every prefix
+// right before the ones it starts, so each is compared only with those.
 func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	if api.Kind != "github-api" || api.Git == nil {
 		return nil
@@ -893,10 +894,15 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	var out []pullRequestCrossing
 	for _, r := range api.Git.Repos {
 		git, gr := pairedGit(entries, api.Host, r.Repo)
-		if gr == nil || (len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0) {
+		if gr == nil {
 			continue
 		}
 		var all []owned
+		// A write repository that lists no push prefixes lets each pool of
+		// the git entry push any branch: a shared push prefix of refs/heads/.
+		if gr.Access == "write" && len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0 {
+			all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
+		}
 		for _, prefix := range gr.RefPrefixes {
 			all = append(all, owned{strings.ToLower(prefix), prefix, true, ""})
 		}

@@ -735,6 +735,31 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 	if _, err := Parse([]byte(`{"entries":[` + sharedPush + `,` + outside("poolPullRequestPrefixes", `{"pool-d":["renovate/"]}`) + `]}`)); err != nil {
 		t.Errorf("a pool outside the git entry, off every push prefix, refused: %v", err)
 	}
+	// A write repository that lists no push prefixes lets each pool of its git
+	// entry push any branch, as a shared push prefix of refs/heads/ would, so
+	// no pull request prefix of a pool outside that entry may reach it. A
+	// read-only repository pushes nothing and crosses nothing.
+	unlimited := func(pools, access string) string {
+		return `{"name":"github","host":"github.com","kind":"git","pools":` + pools + `,"git":{"appID":7,"installationID":42,
+		"repos":[{"repo":"example-org/example-repo","access":"` + access + `"}]}}`
+	}
+	for name, doc := range map[string]string{
+		"a pool's own prefix, three git pools": unlimited(`["pool-a","pool-b","pool-c"]`, "write") + `,` + outside("poolPullRequestPrefixes", `{"pool-d":["feature/"]}`),
+		"a shared prefix, three git pools":     unlimited(`["pool-a","pool-b","pool-c"]`, "write") + `,` + outside("pullRequestPrefixes", `["feature/"]`),
+		"a shared prefix, one git pool":        unlimited(`["pool-a"]`, "write") + `,` + heads("pullRequestPrefixes", `["feature/"]`),
+	} {
+		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err == nil || !strings.Contains(err.Error(), `overlaps push prefix "refs/heads/" (shared by every pool)`) {
+			t.Errorf("unlimited push, %s: %v", name, err)
+		}
+	}
+	for name, doc := range map[string]string{
+		"every pool inside the git entry": unlimited(`["pool-a","pool-b","pool-c"]`, "write") + `,` + heads("pullRequestPrefixes", `["feature/"]`),
+		"a read-only repository":          unlimited(`["pool-a"]`, "read") + `,` + outside("pullRequestPrefixes", `["feature/"]`),
+	} {
+		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
+			t.Errorf("unlimited push, %s refused: %v", name, err)
+		}
+	}
 	c, dropped, err = ParseTolerant([]byte(`{"entries":[` + validEntry + `,` + sharedPush + `,` + outside("poolPullRequestPrefixes", `{"pool-d":["shared/x/"]}`) + `]}`))
 	if err != nil || entryNames(c) != "serpapi" || droppedNames(dropped) != "entry:github,entry:github-api" {
 		t.Fatalf("tolerant, shared push prefix: kept %q dropped %q err %v", entryNames(c), droppedNames(dropped), err)
