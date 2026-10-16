@@ -290,15 +290,16 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 					continue
 				}
 				node := map[string]any{"__typename": n.typ, "repository": map[string]string{"nameWithOwner": "example-org/" + n.repo}}
-				if n.typ == "Repository" {
+				switch n.typ {
+				case "Repository":
 					node = map[string]any{"__typename": n.typ, "nameWithOwner": "example-org/" + n.repo}
-				} else if n.typ == "PullRequest" {
+				case "PullRequest":
 					headOwner := "example-org/"
 					if strings.Contains(n.headRepo, "/") {
 						headOwner = ""
 					}
 					node["headRefName"], node["headRepository"] = n.headRef, map[string]string{"nameWithOwner": headOwner + n.headRepo}
-				} else {
+				default:
 					node["name"] = n.name
 				}
 				nodes = append(nodes, node)
