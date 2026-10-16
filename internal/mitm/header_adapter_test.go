@@ -622,11 +622,13 @@ func TestAdapterHoldsRequestFieldsToListedValues(t *testing.T) {
 func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 	f := newAdapterFixture(t, func(o *Options) {
 		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
-		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{
-			"name":"slack","host":"slack.com","port":%d,"pathPrefixes":["/api/conversations.history"],"methods":["GET"],
+		entry := `{"name":"%s","host":"slack.com","port":%d,"pathPrefixes":["%s"],"methods":["%s"],
 			"header":"Authorization","scheme":"Bearer","placeholder":"__vault_LLM_KEY__",
-			"key":{"mount":"gatehouse","path":"vendors/slack","field":"key"},"pools":["pool-agent"],
-			"requestFields":[{"name":"channel","values":["C0123456789"]}]}]}`, port)))
+			"key":{"mount":"gatehouse","path":"vendors/slack","field":"key"},"pools":["%s"],
+			"requestFields":[{"name":"channel","values":["C0123456789"]}]}`
+		catalog, err := httpcatalog.Parse([]byte(`{"entries":[` +
+			fmt.Sprintf(entry, "slack", port, "/api/conversations.history", "GET", "pool-agent") + `,` +
+			fmt.Sprintf(entry, "slack-post", port, "/api/chat.postMessage", "POST", "pool-other") + `]}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -634,9 +636,9 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 	})
 	// The test vendor's certificate names example.com, not slack.com.
 	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
-	call := func(query string) int {
+	call := func(method, path, query string) int {
 		t.Helper()
-		r, err := http.NewRequest("GET", "https://slack.com:"+strconv.Itoa(f.port)+"/api/conversations.history?"+query, nil)
+		r, err := http.NewRequest(method, "https://slack.com:"+strconv.Itoa(f.port)+path+"?"+query, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -648,17 +650,24 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
-	// Each row names the method, so a read is told apart from a post.
-	if code := call("channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 || f.audit.last().Operation != "slack.conversations_history" {
+	// Each row names the method, so a read is told apart from a post, the
+	// refused rows included.
+	if code := call("GET", "/api/conversations.history", "channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 ||
+		f.audit.last().Operation != "slack.conversations_history" {
 		t.Fatalf("listed channel: %d, vendor calls %d, operation %q", code, f.calls.Load(), f.audit.last().Operation)
 	}
-	for name, query := range map[string]string{
-		"leading space":                 "channel=C0123456789&%20channel=D0123456789",
-		"NUL":                           "channel=C0123456789&channel%00=D0123456789",
-		"not a parameter of the method": "channel=C0123456789&name=eyes",
+	for name, tc := range map[string]struct {
+		method, path, query, outcome, operation string
+		status                                  int
+	}{
+		"leading space":                 {"GET", "/api/conversations.history", "channel=C0123456789&%20channel=D0123456789", "request_field", "slack.conversations_history", http.StatusForbidden},
+		"NUL":                           {"GET", "/api/conversations.history", "channel=C0123456789&channel%00=D0123456789", "request_field", "slack.conversations_history", http.StatusForbidden},
+		"not a parameter of the method": {"GET", "/api/conversations.history", "channel=C0123456789&name=eyes", "request_field", "slack.conversations_history", http.StatusForbidden},
+		"unlisted verb":                 {"POST", "/api/conversations.history", "channel=C0123456789", "method", "slack.conversations_history", http.StatusMethodNotAllowed},
+		"another pool's method":         {"POST", "/api/chat.postMessage", "channel=C0123456789", "pool", "slack.chat_post_message", http.StatusForbidden},
 	} {
-		code := call(query)
-		if row := f.audit.last(); code != http.StatusForbidden || f.calls.Load() != 1 || row.Outcome != "request_field" || row.Operation != "slack.conversations_history" {
+		code := call(tc.method, tc.path, tc.query)
+		if row := f.audit.last(); code != tc.status || f.calls.Load() != 1 || row.Outcome != tc.outcome || row.Operation != tc.operation {
 			t.Errorf("%s: %d outcome=%q operation=%q, vendor calls %d", name, code, row.Outcome, row.Operation, f.calls.Load())
 		}
 	}

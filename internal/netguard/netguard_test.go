@@ -852,6 +852,7 @@ func TestEgressRangesFileNeverLogsItsEntries(t *testing.T) {
 		{"secret-host.example\n", "secret-host", "line 1: an entry is not an address"},
 		{"127.0.0.1\nfe80::1%eth0\n", "eth0", "line 2: an entry is not an address"},
 	} {
+		logs.Reset()
 		_, err := parseHostAddresses(tc.content)
 		if err == nil || !strings.Contains(err.Error(), tc.line) || strings.Contains(err.Error(), tc.entry) {
 			t.Errorf("%q: %v, want %q without the entry", tc.content, err, tc.line)

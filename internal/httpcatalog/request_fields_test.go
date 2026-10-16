@@ -2,9 +2,10 @@ package httpcatalog
 
 import (
 	"errors"
-	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Infisical/agent-vault/internal/auditchain"
 )
 
 const slackEntry = `{"name":"slack","host":"slack.com","pathPrefixes":["/api/chat.postMessage","/api/chat.update"],"methods":["POST"],
@@ -90,9 +91,9 @@ func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 	}
 }
 
-// A Slack entry names each listed method as its audit operation, in the
-// audit trail's fixed vocabulary (lower-case words joined by dots, each at
-// most 32 characters); any other path or entry names none.
+// A Slack entry names each listed method as its audit operation, one the
+// audit chain accepts (a name it refuses would fail every call to that method
+// as audit_unavailable); any other path or entry names none.
 func TestSlackOperationNamesTheMethod(t *testing.T) {
 	want := map[string]string{
 		"/api/chat.postMessage":      "slack.chat_post_message",
@@ -104,11 +105,11 @@ func TestSlackOperationNamesTheMethod(t *testing.T) {
 	if len(want) != len(slackMethods) {
 		t.Fatalf("%d Slack methods, %d names checked", len(slackMethods), len(want))
 	}
-	vocabulary := regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,3}$`)
 	slack := &Entry{Host: "slack.com"}
 	for path := range slackMethods {
-		if got := slack.Operation(path); got != want[path] || !vocabulary.MatchString(got) {
-			t.Errorf("%s: %q, want %q", path, got, want[path])
+		got := slack.Operation(path)
+		if err := (auditchain.Event{Event: auditchain.EventHTTPResponse, Operation: got}).Validate(); got != want[path] || err != nil {
+			t.Errorf("%s: %q (%v), want %q", path, got, err, want[path])
 		}
 	}
 	for name, got := range map[string]string{
