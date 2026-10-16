@@ -105,15 +105,22 @@ func Session(ctx context.Context) string {
 // database, as the resolver established it for the audit trail. It holds no
 // credential: the token is identified only by its hash.
 type Requester struct {
+	// Subject is the verified identity the audit row names: the person, the
+	// agent, or for an Automation the person its run token names.
 	Kind, Subject, ObjectID, TokenSHA256 string
 	Tier, Decision, Groups               string
 	Department                           string // directory department, audit only
 	CacheAgeSec                          int64
+	// A Cursor run's source and Automation, and the catalog's name and
+	// owner for a listed Automation; audit only.
+	Source, Automation, AutomationName, AutomationOwner string
 }
 
 type requesterKey struct{}
 
-func withRequesterRecord(ctx context.Context, r *Requester) context.Context {
+// WithRequesterRecord returns a context in which RecordRequester fills r, as
+// an admission does; a resolver's own tests use it to read what it records.
+func WithRequesterRecord(ctx context.Context, r *Requester) context.Context {
 	return context.WithValue(ctx, requesterKey{}, r)
 }
 

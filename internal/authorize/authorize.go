@@ -55,9 +55,31 @@ type Binder interface {
 // Requester is who stands behind a request. TokenSHA256 identifies the runner
 // session token without keeping it.
 type Requester struct {
-	Kind        string // person, agent, workload or none
-	Subject     string
+	Kind        string // person, agent, workload, automation or none
+	Subject     string // the person's email, the agent, or the Automation's id
 	TokenSHA256 string
+	// Source and Automation are what a verified Cursor run token says about
+	// how the run started, on any pool, for the audit row.
+	Source     string
+	Automation string
+	// AutomationName and AutomationOwner are the catalog's, for a listed
+	// Automation on a cursor-automation pool, and RunPerson is the person
+	// the verified run token names.
+	AutomationName  string
+	AutomationOwner string
+	RunPerson       string
+}
+
+// Audited is the verified identity an audit row names as the requester: the
+// person, the agent, or the person an Automation's run token names.
+func (r Requester) Audited() string {
+	switch r.Kind {
+	case "person", "agent":
+		return r.Subject
+	case "automation":
+		return r.RunPerson
+	}
+	return ""
 }
 
 // Resolve derives the requester for a pool from the session token the sidecar
@@ -85,6 +107,18 @@ type Requester struct {
 // account's or an owner outside the configured domains (no_person), is
 // refused, never served as the pool. The refusal is that one request's: other
 // Pods, and other requests on the same Pod, are decided on their own token.
+// A run an Automation started is refused there too (automation_on_person_pool)
+// unless the pool sets AutomationRunsAsPerson: served as its person, it would
+// get every entry the pool grants instead of the Automation's own list.
+//
+// A cursor-automation pool decides for the Automation that started each run,
+// so every request on it must come from one the catalog lists, T0 included: a
+// run any other way, such as a person's from the web or Slack
+// (not_automation), by an Automation the catalog does not list
+// (automation_unlisted), or whose run names no person (automation_no_person),
+// is refused. Whether that person is its owner is Decide's check. On every
+// Cursor pool the run's source and Automation are kept for the audit row,
+// refused or not.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
 	pod, claimedRun := claims.Pod, claims.ClaimedRun
 	who := Requester{Kind: "none"}
@@ -129,7 +163,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 		if err != nil {
 			return who, "session_token"
 		}
-		who.TokenSHA256 = s.TokenSHA256
+		who.TokenSHA256, who.Source, who.Automation = s.TokenSHA256, s.Source, s.Automation
 		// A Cursor token is bound to the broker's teams and audience instead,
 		// and to the run the controller started this Pod for.
 		if !cursor && !s.InPool(pool.CCPoolID) {
@@ -158,6 +192,30 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 			}
 			if owner != s.Owner {
 				return who, "session_pod_owner"
+			}
+			if pool.Profile().Authorization.Mode == httpcatalog.AuthorizeAutomation {
+				if s.Source != runnerid.SourceAutomations || s.Automation == "" {
+					return who, "not_automation"
+				}
+				a, ok := pool.Automation(s.Automation)
+				if !ok {
+					return who, "automation_unlisted"
+				}
+				// TODO(probe): an Automation set to run as a service account
+				// is refused (automation_no_person) until we decide who is
+				// accountable for its runs.
+				if s.Kind != runnerid.KindPerson || s.Subject == "" {
+					return who, "automation_no_person"
+				}
+				who.Kind, who.Subject, who.AutomationName, who.AutomationOwner, who.RunPerson = "automation", a.ID, a.Name, a.Owner, s.Subject
+				return who, ""
+			}
+			// Either sign of an Automation counts, so a token carrying only
+			// one of them is not served as a person by default. A new
+			// automated source that sets neither would still be served as
+			// its person.
+			if (s.Source == runnerid.SourceAutomations || s.Automation != "") && !pool.AutomationRunsAsPerson {
+				return who, "automation_on_person_pool"
 			}
 			if s.Kind != runnerid.KindPerson || s.Subject == "" {
 				return who, "no_person"
@@ -189,8 +247,37 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 	return who, ""
 }
 
-// Decide applies the entitlement decision for one entry.
+// Decide applies the entitlement decision for one entry. On a
+// cursor-automation pool, at every tier, T0 included: the entry must be one
+// the catalog lists for the run's Automation (automation_not_granted); the
+// run's person must be its owner (automation_not_owner); and the entry is then
+// decided on the owner's account, which must be enabled. The owner's check is
+// charged to the Automation's own lookup budget, not the owner's.
+//
+// Only the owner's runs are served because the catalog takes no runner group
+// yet: whether Cursor ever names anyone but the owner as an Automation's run
+// person is unproven. A refusal at that check names no groups.
 func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool, entry httpcatalog.Entry, who Requester) entitlement.Decision {
+	requester := entitlement.Requester{Kind: who.Kind, Subject: who.Subject}
+	if pool.Identity != httpcatalog.IdentityCursorAutomation {
+		return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
+			entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
+	}
+	tier := entry.Tier
+	if tier == "" {
+		tier = "T0"
+	}
+	refused := entitlement.Decision{Tier: tier, Groups: append([]string(nil), entry.Requires...)}
+	a, ok := pool.Automation(who.Subject)
+	if who.Kind != "automation" || !ok || !a.Uses(entry.Name) {
+		refused.Outcome = "automation_not_granted"
+		return refused
+	}
+	if who.RunPerson == "" || who.RunPerson != a.Owner {
+		refused.Outcome, refused.Groups = "automation_not_owner", nil
+		return refused
+	}
+	requester.Subject, requester.Budget = a.Owner, "automation:"+a.ID
 	return entitlement.Decide(ctx, cache, entitlement.Pool{Identity: pool.Identity, Ceiling: pool.Ceiling, Entitlements: pool.Entitlements},
-		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, entitlement.Requester{Kind: who.Kind, Subject: who.Subject})
+		entitlement.Entry{Tier: entry.Tier, Requires: entry.Requires}, requester)
 }

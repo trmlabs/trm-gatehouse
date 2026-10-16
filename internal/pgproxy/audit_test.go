@@ -251,6 +251,56 @@ func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	}
 }
 
+// automationResolver reports a listed Automation's run by someone other
+// than its owner, as the catalog resolver does, and refuses when refusal is
+// set.
+type automationResolver struct {
+	svc     *DatabaseService
+	refusal string
+}
+
+func (r automationResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _ string) (*DatabaseService, error) {
+	decision := "t0"
+	if r.refusal != "" {
+		decision = r.refusal
+	}
+	RecordRequester(ctx, Requester{Kind: "automation", Subject: "bob@example.com", ObjectID: "oid-bob", Tier: "T0", Decision: decision,
+		Source: "AUTOMATIONS", Automation: "auto-1", AutomationName: "explorer", AutomationOwner: "alice@example.com"})
+	if r.refusal != "" {
+		return nil, &RefusedError{Outcome: r.refusal}
+	}
+	return r.svc, nil
+}
+
+// A database row from an Automation's run names the person whose run it is
+// as the requester, with the run's source and Automation, admitted or
+// refused.
+func TestBrokerRowsNameAnAutomationsRun(t *testing.T) {
+	for _, refusal := range []string{"", "automation_not_granted"} {
+		lease := newLease()
+		svc := &DatabaseService{Name: "analytics", Addr: "unused:5432", Mount: "database", Role: "readonly"}
+		want, rows := auditchain.EventDenied, 1
+		if refusal == "" {
+			svc.Addr = startFakeUpstream(t, authTrust, lease.Password).addr()
+			want, rows = auditchain.EventSessionOpen, 2
+		}
+		audit := &recordingAudit{}
+		_, addr := startBroker(t, Options{
+			Auth:      &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-uuid-1", Pool: "automations", WorkloadID: "pod-uid-1"}},
+			Databases: automationResolver{svc: svc, refusal: refusal},
+			Leases:    &fakeMinter{lease: lease},
+			Audit:     audit,
+		})
+		_, _ = runAgentQuery(t, addr, "token", "appdb", "SELECT 1")
+		waitFor(t, 2*time.Second, func() bool { return len(audit.recorded()) == rows }, "audit rows")
+		row := audit.recorded()[0]
+		if row.Event != want || row.RequesterKind != "automation" || row.Requester != "bob@example.com" || row.RequesterOID != "oid-bob" ||
+			row.Source != "AUTOMATIONS" || row.Automation != "auto-1" || row.AutomationName != "explorer" || row.AutomationOwner != "alice@example.com" {
+			t.Fatalf("refusal %q: row %+v", refusal, row)
+		}
+	}
+}
+
 // A refusal before the catalog resolves a database names the database the
 // client asked for; a name that is not plain is recorded as "invalid".
 func TestBrokerRefusalNamesTheRequestedDatabase(t *testing.T) {

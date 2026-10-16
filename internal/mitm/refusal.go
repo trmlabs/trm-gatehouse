@@ -107,6 +107,13 @@ var refusals = map[string]refusalKind{
 	"requester_missing":      {next: nextReport},
 	"requester_unverifiable": {next: nextReport},
 	"refused":                {next: "the broker refused this request; " + nextReport},
+
+	// Lasting, on a Cursor Automation's run.
+	"not_automation":            {next: "this pool serves only runs a listed Cursor Automation started; " + nextNotAllowed},
+	"automation_unlisted":       {next: "the catalog lists no Automation with this run's id; " + nextNotAllowed},
+	"automation_no_person":      {next: "this Automation's run names no person, and only an Automation that runs as a person is served; " + nextNotAllowed},
+	"automation_on_person_pool": {next: "a run a Cursor Automation started is not served on a pool for people's own runs; " + nextNotAllowed},
+	"no_automation":             {next: "this destination needs an Automation behind the run, and this run names none; " + nextReport},
 }
 
 // refusalCode is the code an agent sees for an audit outcome: the outcome

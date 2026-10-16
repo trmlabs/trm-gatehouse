@@ -20,6 +20,7 @@ type prefixVault struct {
 	head        map[string]interface{}
 	headVersion int
 	entries     map[string]string
+	automations map[string]string
 	deleted     map[string]bool
 	reads       atomic.Int64
 }
@@ -40,6 +41,10 @@ func (v *prefixVault) ReadWithDataWithContext(_ context.Context, path string, _ 
 		if entry, ok := v.entries[strings.TrimPrefix(path, base+"entries/")]; ok {
 			data = map[string]interface{}{"entry": entry}
 		}
+	case strings.HasPrefix(path, base+"automations/"):
+		if automation, ok := v.automations[strings.TrimPrefix(path, base+"automations/")]; ok {
+			data = map[string]interface{}{"automations": automation}
+		}
 	}
 	if data == nil {
 		return nil, nil
@@ -50,6 +55,13 @@ func (v *prefixVault) ReadWithDataWithContext(_ context.Context, path string, _ 
 func (v *prefixVault) ListWithContext(_ context.Context, path string) (*vaultapi.Secret, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if path == "gatehouse/metadata/catalog/automations" {
+		keys := make([]interface{}, 0, len(v.automations))
+		for id := range v.automations {
+			keys = append(keys, id)
+		}
+		return &vaultapi.Secret{Data: map[string]interface{}{"keys": keys}}, nil
+	}
 	if path != "gatehouse/metadata/catalog/entries" {
 		return nil, nil
 	}
