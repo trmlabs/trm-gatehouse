@@ -62,8 +62,9 @@ const (
 	// and group set in flight together share one directory call, so a
 	// person's lookups grow with the group sets they use and the directory's
 	// round trip, not with how many agents they run: 100 a second leaves room
-	// for a fleet of 10,000 to 100,000 concurrent agents. Every broker
-	// process keeps its own budget.
+	// for a fleet of 10,000 to 100,000 concurrent agents. Each cache keeps
+	// its own budget, and a broker process has one for HTTP checks and one
+	// for PostgreSQL.
 	DefaultMaxLookupsPerMinute = 6000
 	// DefaultRecentAnswer is how old an answer a fresh lookup over budget
 	// still accepts instead of refusing.
