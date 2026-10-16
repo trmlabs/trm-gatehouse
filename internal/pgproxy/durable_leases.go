@@ -882,6 +882,17 @@ func (m *DurableLeaseMinter) issue(caller context.Context, scope AgentScope, svc
 		if session.Revoke(cleanupCtx) == nil {
 			_ = m.journal.MarkDatabaseCleanupTokenRevoked(cleanupCtx, m.owner, session.Accessor)
 		}
+		// Vault refused the read before creating anything, so no credential
+		// can remain: the record closes now, shared role or not. Its child
+		// token lived only in this process and is dropped here.
+		var refused *hashicorp.CredentialReadError
+		if errors.Is(err, hashicorp.ErrCredentialNotIssued) && errors.As(err, &refused) {
+			evidence, _ := json.Marshal(map[string]any{
+				"verification": "vault_refused_issuance", "checked_at": time.Now().UTC().Format(time.RFC3339Nano),
+				"vault_status": refused.Status,
+			})
+			_ = m.journal.ConfirmDatabaseCleanup(cleanupCtx, m.owner, session.Accessor, string(evidence))
+		}
 		_ = m.reconcile(cleanupCtx, binding)
 		return nil, err
 	}

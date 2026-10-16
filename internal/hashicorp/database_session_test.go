@@ -115,7 +115,18 @@ func TestDatabaseProviderErrorsDoNotExposeResponseBody(t *testing.T) {
 				}
 				// 503, not 403: a refused accessor revoke counts as done.
 				w.WriteHeader(503)
-				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []string{canary}})
+				errs := []string{canary}
+				if phase == "read" || phase == "child-read" {
+					// A credential read reports Vault's messages, so the canary
+					// stands where a database error could echo a password.
+					errs = []string{
+						`failed to execute query: ERROR: syntax error at or near "'` + canary + `'" (SQLSTATE 42601)`,
+						`CREATE ROLE "v-x" WITH LOGIN PASSWORD '` + canary + `' VALID UNTIL 'soon';`,
+						"cannot connect to postgres://vault_admin:" + canary + "@db:5432/postgres",
+						"dial failed: host=db password=" + canary + " user=vault_admin",
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"errors": errs})
 			}))
 			defer srv.Close()
 			c := newClientForServer(t, srv.URL)
@@ -139,7 +150,10 @@ func TestDatabaseProviderErrorsDoNotExposeResponseBody(t *testing.T) {
 				err = c.RevokeLease(ctx, "lease")
 			}
 			if err == nil || strings.Contains(err.Error(), canary) {
-				t.Fatalf("phase %s did not return a scrubbed failure", phase)
+				t.Fatalf("phase %s did not return a scrubbed failure: %v", phase, err)
+			}
+			if (phase == "read" || phase == "child-read") && !strings.Contains(err.Error(), "Vault answered 503: failed to execute query") {
+				t.Fatalf("phase %s dropped Vault's answer: %v", phase, err)
 			}
 		})
 	}
