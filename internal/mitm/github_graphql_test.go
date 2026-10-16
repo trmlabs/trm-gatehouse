@@ -387,6 +387,7 @@ var ghCommands = []struct {
 	{"pr-edit-body", []string{"pr.read", "pr.edit"}},
 	{"pr-edit-add-label", []string{"pr.read", "pr.label"}},
 	{"pr-ready", []string{"pr.read", "pr.ready"}},
+	{"pr-ready-undo", []string{"pr.read", "pr.ready"}},
 	{"pr-checks", []string{"pr.read"}},
 	{"pr-checks-json", []string{"pr.read"}},
 	{"pr-diff", []string{"pr.read"}},
@@ -513,6 +514,8 @@ func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 		{"a label ID as the pull request", comment(preview), "comment_target"},
 		{"a person's pull request ready", graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput",
 			map[string]any{"pullRequestId": personPR}), "pull_request_target"},
+		{"a person's pull request back to draft", graphqlMutation("convertPullRequestToDraft", "ConvertPullRequestToDraftInput",
+			map[string]any{"pullRequestId": personPR}), "pull_request_target"},
 		{"a person's pull request edited", graphqlMutation("updatePullRequest", "UpdatePullRequestInput",
 			map[string]any{"pullRequestId": personPR, "body": "x"}), "pull_request_target"},
 		{"an unlisted label", label(ownPR, deployProd), "request_shape"},
@@ -534,12 +537,13 @@ func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 	// The pool's own pull request, and one under the repository's prefix, go
 	// ahead; so does reading a pull request in a listed repository.
 	for _, body := range []string{comment(ownPR), comment(prefixPR), label(prefixPR, preview), read(readPR),
-		graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput", map[string]any{"pullRequestId": prefixPR})} {
+		graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput", map[string]any{"pullRequestId": prefixPR}),
+		graphqlMutation("convertPullRequestToDraft", "ConvertPullRequestToDraftInput", map[string]any{"pullRequestId": prefixPR})} {
 		if code, reply := f.send(t, http.MethodPost, "/graphql", nil, body); code != 200 {
 			t.Errorf("%s: %d %s %q", body, code, reply, f.audit.last().Outcome)
 		}
 	}
-	if got := f.relayed(); len(got) != 5 || !strings.HasPrefix(got[3], "read-repo ") {
+	if got := f.relayed(); len(got) != 6 || !strings.HasPrefix(got[3], "read-repo ") {
 		t.Fatalf("relayed %v", got)
 	}
 }

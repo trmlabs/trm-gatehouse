@@ -21,7 +21,7 @@ import (
 // GitHub receives the parsed document printed again with its variables
 // re-encoded, so GitHub executes exactly what was checked. The fields mapped
 // are the ones gh 2.x sends for pr view, list, status, checks, comment, edit
-// (body and labels) and ready:
+// (body and labels), ready and ready --undo:
 //
 //	repository(owner, name) { pullRequest }      pr.read
 //	repository(owner, name) { pullRequests }     pr.list
@@ -33,6 +33,7 @@ import (
 //	updatePullRequest(input: $input)             pr.edit (body only)
 //	addLabelsToLabelable(input: $input)          pr.label
 //	markPullRequestReadyForReview(input: $input) pr.ready
+//	convertPullRequestToDraft(input: $input)     pr.ready (back to draft)
 //
 // Every query also needs pr.read, as does a mutation whose payload selects
 // more than __typename or clientMutationId, since below those fields any
@@ -223,6 +224,9 @@ type graphqlMutation struct {
 	fields map[string]bool
 	target string // the field naming the pull request
 	labels bool   // labelIds lists labels to resolve
+	// contents marks a mutation GitHub refuses without contents write
+	// (GitHubGraphQL.ContentsWrite); its payload is held to readyPayload.
+	contents bool
 }
 
 var graphqlMutations = map[string]graphqlMutation{
@@ -231,7 +235,11 @@ var graphqlMutations = map[string]graphqlMutation{
 	"updatePullRequest": {op: "pr.edit", fields: map[string]bool{"pullRequestId": true, "body": true, "clientMutationId": false}, target: "pullRequestId"},
 	"addLabelsToLabelable": {op: "pr.label", fields: map[string]bool{"labelableId": true, "labelIds": true, "clientMutationId": false},
 		target: "labelableId", labels: true},
-	"markPullRequestReadyForReview": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId"},
+	"markPullRequestReadyForReview": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId",
+		contents: true},
+	// gh pr ready --undo: the same draft state, the other way, under the same
+	// operation and the same reach.
+	"convertPullRequestToDraft": {op: "pr.ready", fields: map[string]bool{"pullRequestId": true, "clientMutationId": false}, target: "pullRequestId"},
 }
 
 // ParseGitHubGraphQL checks one GraphQL request body against the mapping
@@ -345,12 +353,12 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 			return GitHubGraphQL{}, err
 		}
 	case ast.Mutation:
-		if err := mutationRoot(op.SelectionSet, vars, ops, &out.Targets, &out.Write); err != nil {
+		if err := mutationRoot(op.SelectionSet, vars, ops, &out.Targets, &out.Write, &out.ContentsWrite); err != nil {
 			return GitHubGraphQL{}, err
 		}
 		// Its token carries contents write, so nothing but its fixed payload
 		// (readyPayload) may be in the document.
-		if out.ContentsWrite = out.Write == "pr.ready"; out.ContentsWrite && len(doc.Fragments) > 0 {
+		if out.ContentsWrite && len(doc.Fragments) > 0 {
 			return GitHubGraphQL{}, ErrGraphQLUnmapped
 		}
 	default: // subscriptions
@@ -873,7 +881,7 @@ func searchArgs(args map[string]any) (string, bool) {
 // mutationRoot maps the one mutation to its operation and node IDs. Its input
 // must be a variable: GitHub then reads the very JSON value checked here, not
 // a literal its own lexer might read differently.
-func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool, targets *[]GraphQLTarget, write *string) error {
+func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool, targets *[]GraphQLTarget, write *string, contents *bool) error {
 	if len(set) != 1 {
 		return ErrGraphQLUnmapped
 	}
@@ -905,11 +913,11 @@ func mutationRoot(set ast.SelectionSet, vars map[string]any, ops map[string]bool
 			return ErrGraphQLUnmapped
 		}
 	}
-	if m.op == "pr.ready" && !readyPayload(f.SelectionSet) {
+	if m.contents && !readyPayload(f.SelectionSet) {
 		return ErrGraphQLUnmapped
 	}
 	ops[m.op] = true
-	*write = m.op
+	*write, *contents = m.op, m.contents
 	// A mutation's payload is a selection like any query's: from it a pull
 	// request, its comments or the repository's other pull requests can be
 	// read. Anything beyond __typename and clientMutationId needs pr.read.

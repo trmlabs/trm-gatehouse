@@ -67,6 +67,7 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-edit-add-label", [][]string{read, read, {"pr.label", "pr.read"}, {"pr.label"}},
 			[][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequestWrite}, {fixtureLabel, TargetLabel}}}},
 		{"pr-ready", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
+		{"pr-ready-undo", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
 		{"pr-checks-json", [][]string{read, read}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequest}}}},
 	} {
@@ -390,6 +391,7 @@ func TestGraphQLAuditOperation(t *testing.T) {
 		"pr-edit-body":      {"graphql", "graphql", "pr.edit"},
 		"pr-edit-add-label": {"graphql", "graphql", "graphql", "pr.label"},
 		"pr-ready":          {"graphql", "pr.ready"},
+		"pr-ready-undo":     {"graphql", "pr.ready"},
 		"pr-list":           {"graphql"},
 	} {
 		var got []string
