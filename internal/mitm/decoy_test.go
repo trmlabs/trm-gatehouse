@@ -25,7 +25,9 @@ const (
 func plantDecoys(t *testing.T, s *decoy.Source) {
 	t.Helper()
 	values := map[string]string{"pool-a/github_token": decoyGitHub, "pool-a/llm_master_key": decoyLLM}
-	load := func(context.Context, int) (map[string]string, int, error) { return values, 1, nil }
+	load := func(context.Context, int) (map[string]string, []decoy.Rejected, int, error) {
+		return values, nil, 1, nil
+	}
 	if rejected, err := s.Load(context.Background(), load, true); err != nil || len(rejected) > 0 || s.Current().Len() != 2 {
 		t.Fatalf("plant: %v %+v", err, rejected)
 	}

@@ -47,6 +47,7 @@ func TestRefusalNamesItsReason(t *testing.T) {
 		{"key read passes", "key_unavailable", "", 503, 0, "key_unavailable", 503, "5", false},
 		{"deleted key lasts", "key_deleted", "", 503, 0, "key_deleted", 503, "", false},
 		{"unsafe key lasts", "key_not_header_safe", "", 503, 0, "key_not_header_safe", 503, "", false},
+		{"a key that is not a Basic pair lasts", "key_not_basic_pair", "", 503, 0, "key_not_basic_pair", 503, "", false},
 		{"seed passes", "seed_unavailable", "", 503, 0, "seed_unavailable", 503, "5", false},
 		{"seed deadline lasts", "seed_deadline", "", 503, 0, "seed_deadline", 503, "", false},
 		{"a misconfigured broker lasts", "broker_misconfigured", "", 503, 0, "broker_misconfigured", 503, "", false},
@@ -257,12 +258,13 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			}
 		}
 	}
-	// The outcomes authorize.Resolve and entitlement.Decide return, other
-	// than the ones that allow the request, and the ones the GraphQL parser
-	// and target checks refuse with, which reach a deny as variables.
+	// The outcomes authorize.Resolve, authorize.Decide and entitlement.Decide
+	// return, other than the ones that allow the request, and the ones the
+	// GraphQL parser and target checks refuse with, which reach a deny as
+	// variables.
 	allows := map[string]bool{"t0": true, "entitled": true, "workload_entitled": true}
 	for file, pattern := range map[string]*regexp.Regexp{
-		"../authorize/authorize.go":     regexp.MustCompile(`return who, "([a-z_]+)"`),
+		"../authorize/authorize.go":     regexp.MustCompile(`(?:return who, |\.Outcome(?:, [\w.]+)* = )"([a-z_]+)"`),
 		"../entitlement/entitlement.go": regexp.MustCompile(`(?m)Outcome = .*"([a-z_]+)"$`),
 		"../httpcatalog/graphql.go":     regexp.MustCompile(`&GraphQLError\{"([a-z_]+)"`),
 		"github_graphql.go":             regexp.MustCompile(`return (?:"", )?"([a-z_]+)"`),

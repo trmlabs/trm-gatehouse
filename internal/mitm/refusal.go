@@ -67,6 +67,7 @@ var refusals = map[string]refusalKind{
 	"broker_misconfigured":   {status: http.StatusServiceUnavailable, next: "the broker is not set up to serve this destination; " + nextReport},
 	"key_deleted":            {status: http.StatusServiceUnavailable, next: "the destination key was deleted, emptied or revoked in Vault; " + nextReport},
 	"key_not_header_safe":    {status: http.StatusServiceUnavailable, next: "the stored destination key cannot be sent in a header; " + nextReport},
+	"key_not_basic_pair":     {status: http.StatusServiceUnavailable, next: "the stored destination key is not the user:password pair this destination sends; " + nextReport},
 	"seed_deadline":          {status: http.StatusServiceUnavailable, next: "this worker ends too soon for a browser session; start a new run."},
 	"authentication":         {next: "the broker could not identify this workload; check the proxy credentials, then report it."},
 	"identity":               {next: "the broker refused this workload's identity; " + nextReport},
@@ -119,6 +120,8 @@ var refusals = map[string]refusalKind{
 	"automation_unlisted":       {next: "the catalog lists no Automation with this run's id; " + nextNotAllowed},
 	"automation_no_person":      {next: "this Automation's run names no person, and only an Automation that runs as a person is served; " + nextNotAllowed},
 	"automation_on_person_pool": {next: "a run a Cursor Automation started is not served on a pool for people's own runs; " + nextNotAllowed},
+	"automation_not_granted":    {next: "the catalog does not list this destination for this run's Automation; " + nextNotAllowed},
+	"automation_not_owner":      {next: "this Automation is served only on runs that name its owner, and this run names someone else; " + nextNotAllowed},
 	"no_automation":             {next: "this destination needs an Automation behind the run, and this run names none; " + nextReport},
 }
 

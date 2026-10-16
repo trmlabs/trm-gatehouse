@@ -403,7 +403,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	password, pair := httpcatalog.PairPassword(secret.Value())
 	if entry.BasicPair && !pair {
-		deny(http.StatusServiceUnavailable, "key_unavailable")
+		// As for a key no header may carry, only rewriting the stored value
+		// clears this, so the refusal is lasting.
+		deny(http.StatusServiceUnavailable, "key_not_basic_pair")
 		return
 	}
 	outURL := &url.URL{Scheme: "https", Host: target, Path: r.URL.Path, RawQuery: r.URL.RawQuery}

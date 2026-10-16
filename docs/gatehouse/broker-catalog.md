@@ -96,7 +96,7 @@ The run token is verified exactly as on a `cursor-session` pool (run, Pod and ow
 | The run names a person (`sub` `user:` with an `owner_email` in a configured domain) | `automation_no_person` |
 | The entry is one the Automation lists, even when the pool is granted it | `automation_not_granted` |
 | The run's person is the `owner` | `automation_not_owner` |
-| The owner's account is enabled, at every tier, so an offboarded owner's Automation stops. T0 on this pool therefore needs the directory | `account_disabled`, or `entitlement_unavailable` once the account is deleted and the directory no longer answers for it |
+| The owner's account is enabled, at every tier, so an offboarded owner's Automation stops. T0 on this pool therefore needs the directory | `account_disabled`, or `not_in_directory` once the account is deleted and the directory has no account for it |
 
 Above T0 the entry is then decided on the owner's account, as a person's would be, so the Automation never reaches what its owner could not. A run whose token names anyone other than the owner is refused. The broker sees only the person the run token names, never who edited the Automation or set off its trigger: a run Cursor attributes to the owner is served on the owner's account, so whoever can edit or trigger an Automation that runs as its owner acts with the owner's access. Treat anyone who can edit or trigger an Automation as able to use its entries.
 
@@ -148,7 +148,7 @@ One bad input never stops the broker or freezes the catalog, and nothing fails o
 | Event | What the broker does |
 |---|---|
 | One entry fails validation (an unknown field from a newer format, a bad host, grant or tier) | Leaves that entry out and logs `broker catalog part left out` with the version, kind, name and reason. The rest of the version applies, so removals in it take effect. The left-out entry is unreachable. |
-| Entries conflict (a duplicate name, a shared route, host, test user or repository, or a `github-api` entry's pull request prefix on a push prefix another pool holds alone in the `git` entry) | Leaves every entry in the conflict out; it never picks a winner. |
+| Entries conflict (a duplicate name, a shared route, host, test user or repository, or a `github-api` entry's pull request prefix on a push prefix in the `git` entry that a pool it reaches cannot push to) | Leaves every entry in the conflict out; it never picks a winner. |
 | A pool or harness fails validation or conflicts | Leaves it out with every entry that grants that pool. When the catalog lists harnesses, a pool left without one is left out too, so the harness check is never switched off. |
 | The document cannot be decoded at all (truncated, or a new top-level section) | Logs `broker catalog version rejected` and keeps the last good catalog. |
 | Vault cannot serve the catalog at startup | Starts from the last version this store accepted (each accepted version is kept in the `broker_catalog` table) and reloads from Vault when it answers. With no stored copy, it starts with an empty catalog that refuses everything, reports `catalog` not ready on `GET /ready`, and loads the first version Vault serves. |

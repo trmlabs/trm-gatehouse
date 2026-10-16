@@ -66,7 +66,11 @@ func TestVaultLoaderLoadsEveryPoolAndPollsOnlyTheHead(t *testing.T) {
 	v := newFakeVault()
 	load := VaultLoader(v, "gatehouse", "decoys")
 	s := NewSource(nil)
-	if rejected, err := s.Load(context.Background(), load, false); err != nil || len(rejected) > 0 {
+	// The two fields that are not decoys are reported by label, never value.
+	rejected, err := s.Load(context.Background(), load, false)
+	if err != nil || len(rejected) != 2 ||
+		rejected[0] != (Rejected{Label: "pool-a/Bad-Field", Reason: "field name outside a-z, 0-9 and _"}) ||
+		rejected[1] != (Rejected{Label: "pool-a/count", Reason: "value is not a string"}) {
 		t.Fatalf("load: %v %+v", err, rejected)
 	}
 	set := s.Current()
@@ -143,7 +147,7 @@ func TestVaultLoaderFailureKeepsTheLastSet(t *testing.T) {
 		mount, prefix string
 	}{{v, "gatehouse", "../decoys"}, {v, "gatehouse", "decoys/."}, {v, "", "decoys"}, {nil, "gatehouse", "decoys"}} {
 		before := v.reads.Load()
-		if _, _, err := VaultLoader(tc.vault, tc.mount, tc.prefix)(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "not configured") || v.reads.Load() != before {
+		if _, _, _, err := VaultLoader(tc.vault, tc.mount, tc.prefix)(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "not configured") || v.reads.Load() != before {
 			t.Fatalf("%q %q: %v", tc.mount, tc.prefix, err)
 		}
 	}
@@ -160,6 +164,7 @@ func errorText(s *Source, load Loader) string {
 // Watch picks up a new head version without a restart.
 func TestWatchSwapsInNewVersions(t *testing.T) {
 	v := newFakeVault()
+	v.pools["pool-a"] = map[string]interface{}{"github_token": decoyToken} // nothing to report
 	load := VaultLoader(v, "gatehouse", "decoys")
 	s := NewSource(nil)
 	if _, err := s.Load(context.Background(), load, false); err != nil {

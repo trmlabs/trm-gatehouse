@@ -20,8 +20,11 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/authorize/authorizetest"
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/entitlement"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 // Synthetic vendor keys; never real credentials.
@@ -430,7 +433,8 @@ func TestAdapterSendsKeyAsBasicUser(t *testing.T) {
 // A vendor that takes a key pair as Basic credentials (a public and a secret
 // key) gets the stored "user:password" key that way. The worker sends the
 // placeholder as both halves, or nothing; any other value is refused, a key
-// that is not a pair is never sent, and an echo of the encoded pair or of the
+// that is not a pair is never sent and is refused as lasting, since only
+// rewriting it clears that, and an echo of the encoded pair or of the
 // password alone is cut off.
 func TestAdapterSendsKeyPairAsBasic(t *testing.T) {
 	f := newAdapterFixtureWith(t, "basicPair")
@@ -464,12 +468,23 @@ func TestAdapterSendsKeyPairAsBasic(t *testing.T) {
 			t.Fatalf("%s: %+v", path, got)
 		}
 	}
-	f.keys.mu.Lock()
-	f.keys.value = adapterKeyV1
-	f.keys.mu.Unlock()
-	calls := f.calls.Load()
-	if code, _, _ := f.do(t, "POST", "/v1/chat/completions", `{}`, placeholder); code != 503 || f.calls.Load() != calls || f.audit.last().Outcome != "key_unavailable" {
-		t.Fatalf("key that is not a pair: %d %+v", code, f.audit.last())
+	for name, stored := range map[string]string{"no colon": adapterKeyV1, "no password": "pk-synthetic-adapter:", "no user": ":" + adapterKeyV1} {
+		f.keys.mu.Lock()
+		f.keys.value = stored
+		f.keys.mu.Unlock()
+		calls := f.calls.Load()
+		r, _ := http.NewRequest("POST", f.url("/v1/chat/completions"), strings.NewReader(`{}`))
+		placeholder(r)
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != 503 || resp.Header.Get(RefusalHeader) != "key_not_basic_pair" || resp.Header.Get("Retry-After") != "" ||
+			!strings.HasPrefix(string(body), "key_not_basic_pair: ") || f.calls.Load() != calls || f.audit.last().Outcome != "key_not_basic_pair" {
+			t.Fatalf("%s: %d %q Retry-After %q, outcome %q", name, resp.StatusCode, resp.Header.Get(RefusalHeader), resp.Header.Get("Retry-After"), f.audit.last().Outcome)
+		}
 	}
 }
 
@@ -675,5 +690,52 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 		if row := f.audit.last(); code != tc.status || f.calls.Load() != 1 || row.Outcome != tc.outcome || row.Operation != tc.operation {
 			t.Errorf("%s: %d outcome=%q operation=%q, vendor calls %d", name, code, row.Outcome, row.Operation, f.calls.Load())
 		}
+	}
+}
+
+// Authorization refuses a call after its entry matched, which is where the
+// row for an unentitled requester is written. A Slack call refused there
+// names its method too, and the same call from a member goes through.
+func TestAdapterSlackAuthorizationRefusalNamesTheMethod(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"pools":[
+			{"name":"pool-agent","namespace":"n","serviceAccount":"claude","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}],
+			"entries":[{"name":"slack","host":"slack.com","port":%d,"pathPrefixes":["/api/conversations.history"],"methods":["GET"],
+			"header":"Authorization","scheme":"Bearer","placeholder":"__vault_LLM_KEY__",
+			"key":{"mount":"gatehouse","path":"vendors/slack","field":"key"},"pools":["pool-agent"],"tier":"T1","requires":["%s"],
+			"requestFields":[{"name":"channel","values":["C0123456789"]}]}]}`, port, authzGroup)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+		o.HeaderAdapter.Runner = fakeRunner{
+			"alice": {Kind: runnerid.KindPerson, Subject: "sso|alice", Pools: []string{"ccpool_abc"}, TokenSHA256: "aa"},
+			"bob":   {Kind: runnerid.KindPerson, Subject: "sso|bob", Pools: []string{"ccpool_abc"}, TokenSHA256: "bb"}}
+		o.HeaderAdapter.Sessions = &authorizetest.MemBinder{}
+		o.HeaderAdapter.Entitlements = &entitlement.Cache{Source: directory{"sso|alice": {authzGroup}, "sso|bob": {}}}
+	})
+	// The test vendor's certificate names example.com, not slack.com.
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	call := func(session string) int {
+		t.Helper()
+		client := newTrustingClient(f.proxyURL, url.User("workload-token"), f.roots)
+		defer client.CloseIdleConnections()
+		client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{SessionHeader: {session}}
+		r, _ := http.NewRequest("GET", "https://slack.com:"+strconv.Itoa(f.port)+"/api/conversations.history?channel=C0123456789", nil)
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		resp, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code, row := call("bob"), f.audit.last(); code != http.StatusForbidden || f.calls.Load() != 0 || row.Outcome != "not_entitled" ||
+		row.Binding != "slack" || row.Operation != "slack.conversations_history" {
+		t.Fatalf("non-member: %d outcome=%q binding=%q operation=%q, vendor calls %d", code, row.Outcome, row.Binding, row.Operation, f.calls.Load())
+	}
+	if code, row := call("alice"), f.audit.last(); code != http.StatusOK || f.calls.Load() != 1 || row.Operation != "slack.conversations_history" {
+		t.Fatalf("member: %d outcome=%q operation=%q, vendor calls %d", code, row.Outcome, row.Operation, f.calls.Load())
 	}
 }

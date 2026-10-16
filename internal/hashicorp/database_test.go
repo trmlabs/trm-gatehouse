@@ -304,8 +304,8 @@ func TestDatabaseMintReportsVaultAnswer(t *testing.T) {
 	}{
 		{403, []string{"1 error occurred:\n\t* permission denied\n\n"}, "Vault answered 403: 1 error occurred: * permission denied", true},
 		{400, []string{"unknown role: reader"}, "Vault answered 400: unknown role: reader", true},
-		{500, []string{`failed to execute query: ERROR: role "citus_dynamic_role" does not exist (SQLSTATE 42704)`},
-			`Vault answered 500: failed to execute query: ERROR: role "citus_dynamic_role" does not exist (SQLSTATE 42704)`, false},
+		{500, []string{`failed to execute query: ERROR: role "app_dynamic_role" does not exist (SQLSTATE 42704)`},
+			`Vault answered 500: failed to execute query: ERROR: role "app_dynamic_role" does not exist (SQLSTATE 42704)`, false},
 		{503, nil, "Vault answered 503: no message", false},
 		{500, []string{"a", "b", "c", "d", "e", "f"}, "Vault answered 500: a; b; c; d; and 2 more", false},
 	} {
@@ -343,5 +343,54 @@ func TestDatabaseMintMessageIsBounded(t *testing.T) {
 	got := vaultMessages([]string{long, "  ", "postgres://u:p@h password: hunter2, at or near \"tok\""})
 	if !strings.HasPrefix(got, strings.Repeat("x", 300)+"...; ") || strings.Contains(got, "hunter2") || strings.Contains(got, "u:p@") || strings.Contains(got, `"tok"`) {
 		t.Fatalf("unbounded or unmasked: %q", got)
+	}
+}
+
+// Each shape a database or a proxy can echo a password or a token in is
+// masked, and the words around it are kept.
+func TestDatabaseMintMasksSecretShapes(t *testing.T) {
+	// Token-shaped values are built at run time, so no literal here matches a
+	// secret scanner's pattern.
+	fill := strings.Repeat("x", 18)
+	for _, test := range []struct{ name, message, want string }{
+		{"JSON password field", `plugin config: {"username":"admin","password":"CANARY"}`, `plugin config: {"username":"admin","password":"***"}`},
+		{"JSON password field with an escaped quote", `{"password":"ab\"CANARY"}`, `{"password":"***"}`},
+		{"JSON password field escaped inside a string", `{\"password\":\"ab\\\"CANARY\"}`, `{\"password\":\"***\"}`},
+		{"JSON password-named field", `{"password_hash": "CANARY"}`, `{"password_hash": "***"}`},
+		{"PASSWORD with a double-quoted value", `CREATE ROLE "v-x" WITH LOGIN PASSWORD "CANARY" VALID UNTIL "soon"`, `CREATE ROLE "v-x" WITH LOGIN PASSWORD "***" VALID UNTIL "soon"`},
+		{"PASSWORD with a doubled single quote", `ALTER ROLE "v-x" PASSWORD 'ab''CANARY'`, `ALTER ROLE "v-x" PASSWORD '***'`},
+		{"PASSWORD with dollar quoting", `ALTER ROLE "v-x" PASSWORD $$CANARY$$;`, `ALTER ROLE "v-x" PASSWORD $$***$$;`},
+		{"PASSWORD with tagged dollar quoting", `ALTER ROLE "v-x" PASSWORD $pw$CANARY$pw$;`, `ALTER ROLE "v-x" PASSWORD $pw$***$pw$;`},
+		{"PASSWORD with an unterminated dollar quote", `ALTER ROLE "v-x" PASSWORD $$CANARY`, `ALTER ROLE "v-x" PASSWORD $$***`},
+		{"IDENTIFIED BY with a double-quoted value", `CREATE USER 'v-x'@'%' IDENTIFIED BY "CANARY"`, `CREATE USER '***'@'***' IDENTIFIED BY "***"`},
+		{"PWD in a connection string", `Server=db;Database=app;PWD=CANARY;`, `Server=db;Database=app;PWD=***;`},
+		{"Vault service token", "permission denied for token hvs.CANARY_" + fill, `permission denied for token hvs.***`},
+		{"Vault batch token", "token hvb.CANARY" + fill + " expired", `token hvb.*** expired`},
+		{"legacy Vault token", "invalid token s.CANARY" + fill, `invalid token s.***`},
+		{"Bearer token", "upstream echoed Authorization: Bearer CANARY." + fill, `upstream echoed Authorization: Bearer ***`},
+		{"password words without a value", `pq: password authentication failed for user "v-root-x"`, `pq: password authentication failed for user "v-root-x"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := vaultMessages([]string{test.message}); got != test.want || strings.Contains(got, "CANARY") {
+				t.Fatalf("got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// A reply that is not Vault's error JSON, such as a proxy's page that echoes
+// the request's headers, is reported by status and size only.
+func TestDatabaseMintReportsOnlyTheSizeOfAReplyThatIsNotVaults(t *testing.T) {
+	body := "<html>502 Bad Gateway. Request headers: X-Vault-Token: hvs.CANARY" + strings.Repeat("x", 18) + "</html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	_, err := newClientForServer(t, srv.URL).ReadDatabaseCredential(context.Background(), "database", "reader")
+	want := fmt.Sprintf("database credential read failed: Vault answered 502: a reply that is not Vault's error JSON (%d bytes)", len(body))
+	if err == nil || err.Error() != want || errors.Is(err, ErrCredentialNotIssued) {
+		t.Fatalf("got %v, want %q", err, want)
 	}
 }

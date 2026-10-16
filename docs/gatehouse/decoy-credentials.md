@@ -53,7 +53,7 @@ Set `AGENT_VAULT_DECOY_VAULT_PREFIX=<mount>/<prefix>`. The layout is in a KV ver
 
 Write the pools' decoys first and the head last. The head's KV version is the set's version: each 30-second poll reads only the head, and the broker reads every pool when that version changes. It also rereads everything every 10 minutes. A pool whose secret is deleted has no decoys.
 
-A decoy value is 20 to 256 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`, and never holds `__vault_`. Any other value is left out and logged as `decoy credential left out` with its label and reason, never its value. Generate values from that alphabet with a vendor-like prefix, and keep them out of anything that is logged or committed.
+A decoy value is 20 to 256 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`, and never holds `__vault_`. Any other value, a field whose name is not lower-case letters, digits and `_`, and a field whose value is not a string are left out and logged as `decoy credential left out` with the label and reason, never the value. Generate values from that alphabet with a vendor-like prefix, and keep them out of anything that is logged or committed.
 
 Decoys never stop the broker. A load that fails is logged as `decoy credentials unavailable; keeping the last set`, and the last good set stays in force, or none before the first load. Alert on both log lines.
 

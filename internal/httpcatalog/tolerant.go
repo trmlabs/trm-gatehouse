@@ -400,8 +400,9 @@ func dropClaims[T any](parts []T, claimsOf func(T) []claim, dropped func(T)) []T
 }
 
 // dropPullRequestCrossings drops every github-api entry whose pull request
-// prefixes reach another pool's push prefixes (pullRequestCrossings), and
-// each git entry it reaches into: as for any other conflict, both go.
+// prefixes reach push prefixes a pool they reach cannot push to
+// (pullRequestCrossings), and each git entry it reaches into: as for any
+// other conflict, both go.
 func dropPullRequestCrossings[T any](parts []T, entryOf func(T) Entry, dropped func(T, error)) []T {
 	all := make([]Entry, len(parts))
 	for i, p := range parts {
