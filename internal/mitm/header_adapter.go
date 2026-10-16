@@ -285,6 +285,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		}
 		return
 	}
+	if r.URL.Path == "/graphql" {
+		if granted, ok := catalog.GitHubAPIRepos(host, port, scope.Pool); ok {
+			p.forwardGitHubGraphQL(w, r, target, host, port, scope, event, catalog, granted)
+			return
+		}
+	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
 		event.Operation = githubAPIOperation(api, r.URL.Path)
 		// A code-returning route also needs the git entry it relies on to

@@ -66,6 +66,7 @@ type Proxy struct {
 	adapter               *HeaderAdapter
 	attestor              brokercore.Attestor
 	peerReader            PeerReader
+	graphql               graphqlLookups // what GitHub said about node IDs (github_graphql.go)
 
 	// Tunnel drain (opt-in): Shutdown lets each tunnel finish its current
 	// request instead of leaving tunnels to die with the process.

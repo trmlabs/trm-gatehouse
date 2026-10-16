@@ -188,6 +188,7 @@ Passing codes answered with 503 and `Retry-After`, whatever check refused them:
 | `entitlement_unavailable` | The directory did not answer the access check. |
 | `key_unavailable` | The destination key could not be read from Vault. |
 | `token_unavailable` | A short-lived token for the destination could not be minted. |
+| `target_lookup` | GitHub could not be asked what a GraphQL request's pull request or label is, so the broker could not check it. |
 | `seed_unavailable` | The browser session could not be prepared. |
 | `audit_unavailable` | The audit trail is not recording, so nothing is sent. |
 | `broker_unavailable` | This broker replica cannot take the request now, for example while it shuts down. |
