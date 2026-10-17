@@ -41,6 +41,10 @@ func TestDecide(t *testing.T) {
 	if d := Decide(context.Background(), &Cache{Source: member}, claude, t1, alice); !d.Allowed || d.Department != "Engineering" {
 		t.Fatalf("member decision %+v; want allowed with the directory department", d)
 	}
+	automations := Pool{Identity: "cursor-automation", Ceiling: "T2"}
+	granted := Requester{Kind: "automation", Subject: "auto-1", Granted: true}
+	t2 := Entry{Tier: "T2", Requires: []string{g1}}
+	errSource := &fakeSource{err: errors.New("down")}
 	cases := []struct {
 		name    string
 		source  Source
@@ -66,6 +70,14 @@ func TestDecide(t *testing.T) {
 		{"workload entitled", nil, Pool{Identity: "workload", Ceiling: "T1", Entitlements: []string{g1}}, t1, Requester{Kind: "workload"}, true, "workload_entitled"},
 		{"workload missing group", nil, Pool{Identity: "workload", Ceiling: "T1"}, t1, Requester{Kind: "workload"}, false, "workload_not_entitled"},
 		{"workload T2", nil, Pool{Identity: "workload", Ceiling: "T2", Entitlements: []string{g1}}, Entry{Tier: "T2", Requires: []string{g1}}, Requester{Kind: "workload"}, false, "workload_not_entitled"},
+		// An Automation is served only an entry the catalog lists for it, at
+		// every tier, and never asks the directory: a failing one is not read.
+		{"Automation granted T0", errSource, automations, Entry{}, granted, true, "t0"},
+		{"Automation granted T2", errSource, automations, t2, granted, true, "automation_granted"},
+		{"Automation not granted T0", errSource, automations, Entry{}, Requester{Kind: "automation", Subject: "auto-1"}, false, "automation_not_granted"},
+		{"Automation not granted T2", errSource, automations, t2, Requester{Kind: "automation", Subject: "auto-1"}, false, "automation_not_granted"},
+		{"person on an automation pool", errSource, automations, Entry{}, Requester{Kind: "person", Subject: "sso|alice", Granted: true}, false, "automation_not_granted"},
+		{"Automation over the ceiling", errSource, Pool{Identity: "cursor-automation", Ceiling: "T1"}, t2, granted, false, "pool_ceiling"},
 	}
 	for _, c := range cases {
 		cache := &Cache{Source: c.source}
@@ -73,6 +85,12 @@ func TestDecide(t *testing.T) {
 		if d.Allowed != c.allowed || d.Outcome != c.outcome {
 			t.Errorf("%s: got %v %q", c.name, d.Allowed, d.Outcome)
 		}
+		if c.pool.Identity == "cursor-automation" && len(d.Groups) != 0 {
+			t.Errorf("%s: an Automation's decision names groups %v", c.name, d.Groups)
+		}
+	}
+	if errSource.calls != 0 {
+		t.Errorf("an Automation's decision asked the directory %d times", errSource.calls)
 	}
 	// A broker started without a directory refuses as a configuration fault,
 	// which waiting never clears, not as a directory outage.

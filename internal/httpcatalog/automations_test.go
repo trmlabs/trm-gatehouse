@@ -15,7 +15,8 @@ import (
 )
 
 // automationCatalog is harnessCatalog with its Cursor pool deciding per
-// Automation, a second entry, and two Automations.
+// Automation, a second entry, and two Automations: one owned by a team named
+// by its name, one by a contact email as catalogs gave owners before.
 func automationCatalog() map[string]any {
 	c := harnessCatalog()
 	h := harnessAt(c, 0)
@@ -28,7 +29,7 @@ func automationCatalog() map[string]any {
 		Replace(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["cursor-workers"]`, 1) + `}`)
 	c["entries"] = append(c["entries"].([]any), json.RawMessage(second))
 	c["automations"] = []any{
-		map[string]any{"id": "auto-1", "name": "explorer", "owner": "owner@example.com", "entries": []any{"vendor", "tracker"}},
+		map[string]any{"id": "auto-1", "name": "explorer", "owner": "platform-team", "entries": []any{"vendor", "tracker"}},
 		map[string]any{"id": "auto-2", "name": "auditor", "owner": "owner@example.com", "entries": []any{"tracker"}},
 	}
 	return c
@@ -91,11 +92,11 @@ func TestAutomationsAreIndexedById(t *testing.T) {
 	}
 	pool, _ := catalog.Pool("cursor-workers")
 	a, ok := pool.Automation("auto-1")
-	if !ok || a.Name != "explorer" || a.Owner != "owner@example.com" || !a.Uses("vendor") || !a.Uses("tracker") {
+	if !ok || a.Name != "explorer" || a.Owner != "platform-team" || !a.Uses("vendor") || !a.Uses("tracker") {
 		t.Fatalf("auto-1: %+v %v", a, ok)
 	}
-	if a, _ := pool.Automation("auto-2"); a.Uses("vendor") || !a.Uses("tracker") {
-		t.Fatalf("auto-2 uses %v", a.Entries)
+	if a, _ := pool.Automation("auto-2"); a.Owner != "owner@example.com" || a.Uses("vendor") || !a.Uses("tracker") {
+		t.Fatalf("auto-2: %+v", a)
 	}
 	if _, ok := pool.Automation("auto-3"); ok {
 		t.Fatal("an unlisted automation was found")
@@ -114,6 +115,22 @@ func TestAutomationsAreIndexedById(t *testing.T) {
 	}
 }
 
+// An owner names a team, by a group's name or object id, or is a contact
+// email as catalogs gave it before owners named teams.
+func TestAutomationOwnerNamesATeam(t *testing.T) {
+	for _, owner := range []string{"platform-team", "Data.Platform_2", "11111111-2222-3333-4444-555555555555", "owner@example.com"} {
+		c := automationCatalog()
+		c["automations"].([]any)[0].(map[string]any)["owner"] = owner
+		catalog, err := parseCatalog(t, c)
+		if err != nil {
+			t.Fatalf("%s: %v", owner, err)
+		}
+		if a, _ := catalog.Automation("auto-1"); a.Owner != owner {
+			t.Fatalf("%s: %+v", owner, a)
+		}
+	}
+}
+
 func TestAutomationsRefusedAtLoad(t *testing.T) {
 	for name, a := range map[string]map[string]any{
 		"unknown entry":    {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"missing"}},
@@ -121,11 +138,13 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 		"repeated entry":   {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor", "vendor"}},
 		"duplicate id":     {"id": "auto-1", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}},
 		"unsafe id":        {"id": "auto 9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}},
-		"owner not email":  {"id": "auto-9", "name": "x", "owner": "user:42", "entries": []any{"vendor"}},
+		"no owner":         {"id": "auto-9", "name": "x", "entries": []any{"vendor"}},
+		"owner not a team": {"id": "auto-9", "name": "x", "owner": "user:42", "entries": []any{"vendor"}},
+		"owner with space": {"id": "auto-9", "name": "x", "owner": "Platform Team", "entries": []any{"vendor"}},
 		"upper-case owner": {"id": "auto-9", "name": "x", "owner": "Owner@example.com", "entries": []any{"vendor"}},
 		"unsafe name":      {"id": "auto-9", "name": "an \"x\"", "owner": "owner@example.com", "entries": []any{"vendor"}},
 		"unknown field":    {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "pools": []any{"p"}},
-		// Refused until a run shows Cursor names anyone but the owner.
+		// Who runs an Automation decides nothing, so a runner group is refused.
 		"runner group": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "runnerGroup": "11111111-2222-3333-4444-555555555555", "entries": []any{"vendor"}},
 	} {
 		c := automationCatalog()

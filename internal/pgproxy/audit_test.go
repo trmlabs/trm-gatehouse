@@ -217,17 +217,18 @@ func (m slowMinter) Mint(ctx context.Context, scope AgentScope, svc *DatabaseSer
 	return m.fakeMinter.Mint(ctx, scope, svc)
 }
 
-// departmentResolver admits and reports a person whose directory department
-// has stray white space.
+// departmentResolver admits and reports a person, with the object ID and a
+// directory department that has stray white space.
 type departmentResolver struct{ svc *DatabaseService }
 
 func (r departmentResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _ string) (*DatabaseService, error) {
-	RecordRequester(ctx, Requester{Kind: "person", Subject: "user_1", Tier: "T1", Decision: "entitled", Department: "  Data   Science "})
+	RecordRequester(ctx, Requester{Kind: "person", Subject: "user_1", ObjectID: "oid-1", Tier: "T1", Decision: "entitled", Department: "  Data   Science "})
 	return r.svc, nil
 }
 
 // session_open records how long admission took, the credential mint
-// included, and the person's department as the directory gave it.
+// included, and the person's object ID and department as the directory gave
+// them.
 func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)
@@ -243,29 +244,29 @@ func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, func() bool { return len(audit.recorded()) == 2 }, "session close row")
 	got := audit.recorded()
-	if got[0].Event != auditchain.EventSessionOpen || got[0].Duration < 120 || got[0].RequesterDepartment != "Data Science" {
-		t.Fatalf("session_open row: %+v; want durationMs of at least the mint and the canonical department", got[0])
+	if got[0].Event != auditchain.EventSessionOpen || got[0].Duration < 120 || got[0].RequesterDepartment != "Data Science" || got[0].RequesterOID != "oid-1" {
+		t.Fatalf("session_open row: %+v; want durationMs of at least the mint, the object ID and the canonical department", got[0])
 	}
 	if got[1].Duration != 0 {
 		t.Fatalf("session_close row carries a duration: %+v", got[1])
 	}
 }
 
-// automationResolver reports a listed Automation's run by someone other
-// than its owner, as the catalog resolver does, and refuses when refusal is
-// set.
+// automationResolver reports a listed Automation's run, as the catalog
+// resolver does: the person the run's token names, the owning team, and no
+// directory answer. It refuses when refusal is set.
 type automationResolver struct {
 	svc     *DatabaseService
 	refusal string
 }
 
 func (r automationResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _ string) (*DatabaseService, error) {
-	decision := "t0"
+	decision := "automation_granted"
 	if r.refusal != "" {
 		decision = r.refusal
 	}
-	RecordRequester(ctx, Requester{Kind: "automation", Subject: "bob@example.com", ObjectID: "oid-bob", Tier: "T0", Decision: decision,
-		Source: "AUTOMATIONS", Automation: "auto-1", AutomationName: "explorer", AutomationOwner: "alice@example.com"})
+	RecordRequester(ctx, Requester{Kind: "automation", Subject: "bob@example.com", Tier: "T1", Decision: decision,
+		Source: "AUTOMATIONS", Automation: "auto-1", AutomationName: "explorer", AutomationOwner: "platform-team"})
 	if r.refusal != "" {
 		return nil, &RefusedError{Outcome: r.refusal}
 	}
@@ -273,8 +274,8 @@ func (r automationResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _
 }
 
 // A database row from an Automation's run names the person whose run it is
-// as the requester, with the run's source and Automation, admitted or
-// refused.
+// as the requester, with the run's source, the Automation and its owning
+// team, admitted or refused.
 func TestBrokerRowsNameAnAutomationsRun(t *testing.T) {
 	for _, refusal := range []string{"", "automation_not_granted"} {
 		lease := newLease()
@@ -294,8 +295,8 @@ func TestBrokerRowsNameAnAutomationsRun(t *testing.T) {
 		_, _ = runAgentQuery(t, addr, "token", "appdb", "SELECT 1")
 		waitFor(t, 2*time.Second, func() bool { return len(audit.recorded()) == rows }, "audit rows")
 		row := audit.recorded()[0]
-		if row.Event != want || row.RequesterKind != "automation" || row.Requester != "bob@example.com" || row.RequesterOID != "oid-bob" ||
-			row.Source != "AUTOMATIONS" || row.Automation != "auto-1" || row.AutomationName != "explorer" || row.AutomationOwner != "alice@example.com" {
+		if row.Event != want || row.RequesterKind != "automation" || row.Requester != "bob@example.com" || row.RequesterOID != "" ||
+			row.Source != "AUTOMATIONS" || row.Automation != "auto-1" || row.AutomationName != "explorer" || row.AutomationOwner != "platform-team" {
 			t.Fatalf("refusal %q: row %+v", refusal, row)
 		}
 	}
