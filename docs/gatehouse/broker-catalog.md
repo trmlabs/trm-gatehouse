@@ -13,12 +13,12 @@ The broker catalog is the one list of everything workers may reach through the b
 
 ```yaml
 pools:
-  - {name: cursor-agents, namespace: cursor-agents, serviceAccount: cursor-worker}
+  - {name: example-agents, namespace: example-agents, serviceAccount: example-worker}
 entries:
   - name: appdb                       # the database name a worker connects to
     kind: postgres
     host: db.example.com
-    pools: [cursor-agents]
+    pools: [example-agents]
     postgres: {database: app, mount: database, role: staging.us.example.app-readonly}
   - name: search-api
     host: api.example.com
@@ -27,7 +27,7 @@ entries:
     header: X-Api-Key
     placeholder: __vault_SEARCH_KEY__
     key: {mount: gatehouse, path: vendors/search-api, field: key}
-    pools: [cursor-agents]
+    pools: [example-agents]
 ```
 
 Entry kinds: `postgres` (port 5432 by default; `sslmode` is `verify-full`, the only mode the catalog accepts; `access` is `read` by default and must be `write` exactly for a `-readwrite` role; the broker needs `AGENT_VAULT_CATALOG_ENVIRONMENT`, and `validate` needs `--environment`, such as `staging`, and every role must then be `staging.<region>.<cluster>.<name>-readonly` or `-readwrite`; with no environment set, a catalog with any `postgres` entry is refused), HTTP (no kind; see the HTTP header adapter guide), `git` and `github-api` (see the git adapter guide). When `pools` is defined, an entry can grant only defined pool names. Grants match the scope's pool, which the broker's attestation sets from the worker Pod's approved controller. The agent ID stays the broker's own identifier for revocation, Vault roles, cleanup and audit. A scope with no pool matches no grant. Audit rows carry both `pool` and `agent`.
@@ -44,9 +44,9 @@ A harness is one kind of agent runtime: Cursor workers, Claude sessions, agent-s
 harnesses:
   - name: cursor
     trustDomain: {issuer: https://container.googleapis.com/v1/projects/P/locations/L/clusters/C, keys: in-cluster, audience: gatehouse}
-    identity: {kind: pod-token, ownerKind: ReplicaSet, namespaces: [cursor-agents], imageDigests: [sha256:...]}
+    identity: {kind: pod-token, ownerKind: ReplicaSet, namespaces: [example-agents], imageDigests: [sha256:...]}
     path: {kind: sidecar}
-    authorization: {mode: pool, poolName: cursor-agents}
+    authorization: {mode: pool, poolName: example-agents}
     client: {proxyEnv: GATEHOUSE_HTTPS_PROXY, caFileEnv: GATEHOUSE_CA_FILE, caSpkiEnv: GATEHOUSE_CA_SPKI}
 ```
 
@@ -102,7 +102,7 @@ Above T0 the entry is then decided on the owner's account, as a person's would b
 
 `runnerGroup` is refused at load. It would limit who runs an Automation only if Cursor named the person who set off each run, and the run tokens seen so far name only the owner, so it could not be an access limit. It stays refused until a run set off by someone other than the owner shows which person Cursor names.
 
-An Automation's run on a `cursor-session` (person) pool is refused (`automation_on_person_pool`), so the `automations` list is the only way an Automation gets a person's access. A pool that names no person, such as `cursor-agents` above, cannot tell an Automation's run from anyone else's: it serves every run its T0 entries. A run counts as an Automation's when its token's `source` is `AUTOMATIONS` or it carries an `automation_id`; a new automated source that sets neither would be served as its person. A pool opts in to serving them with `automationRunsAsPerson: true` (`cursor-session` pools only; on any other pool the catalog refuses it): an Automation's run there is then served as the person its token names, with every entry that pool grants and that person's groups, not the Automation's list. A person's own run, from the web, Slack or the API, is unaffected.
+An Automation's run on a `cursor-session` (person) pool is refused (`automation_on_person_pool`), so the `automations` list is the only way an Automation gets a person's access. A pool that names no person, such as `example-agents` above, cannot tell an Automation's run from anyone else's: it serves every run its T0 entries. A run counts as an Automation's when its token's `source` is `AUTOMATIONS` or it carries an `automation_id`; a new automated source that sets neither would be served as its person. A pool opts in to serving them with `automationRunsAsPerson: true` (`cursor-session` pools only; on any other pool the catalog refuses it): an Automation's run there is then served as the person its token names, with every entry that pool grants and that person's groups, not the Automation's list. A person's own run, from the web, Slack or the API, is unaffected.
 
 Directory lookups are budgeted, 60 a minute each, as for a person. The owner's check is charged to the Automation's own budget, not the owner's, so busy runs use up neither the owner's own sessions' budget nor another Automation's. At T2 every request asks the directory about the owner now; at T0 and T1 the answer may come from the cache. A run that is not the owner's is refused before any lookup. Past a budget, an answer up to 5 seconds old is reused; otherwise the request is refused (`entitlement_rate_limited`).
 

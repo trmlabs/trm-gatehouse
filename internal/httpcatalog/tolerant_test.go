@@ -130,7 +130,7 @@ func TestTolerantHarnessesNeverFailOpen(t *testing.T) {
 	}
 	// The cursor pool loses its harness, so it goes, and so does the entry
 	// that grants it; the entry on the sandbox pool alone stays.
-	if entryNames(c) != "sandbox-only" || droppedNames(dropped) != "entry:vendor,harness:cursor,pool:cursor-workers" {
+	if entryNames(c) != "sandbox-only" || droppedNames(dropped) != "entry:vendor,harness:cursor,pool:example-workers" {
 		t.Fatalf("kept %q, dropped %q", entryNames(c), droppedNames(dropped))
 	}
 	if hs := c.Harnesses(); len(hs) != 2 || len(c.Pools()) != 2 {

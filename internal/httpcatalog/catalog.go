@@ -337,8 +337,8 @@ var (
 	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 	idPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	kvPattern           = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
-	// The same shapes the catalog's Terraform module accepts, since these
-	// strings end up in the broker's Vault policy.
+	// Shapes that are safe inside a Vault policy path, since these strings
+	// end up in the broker's Vault policy.
 	vendorKeyPath = regexp.MustCompile(`^vendors(/[a-z0-9][a-z0-9_-]*)+$`)
 	vaultMount    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$`)
 )
@@ -730,7 +730,7 @@ func (c Catalog) Database(name, pool string) (*Entry, error) {
 }
 
 // CheckHosts requires every host to end with one of suffixes (for example
-// ".crunchybridge.com"), so CI can hold the catalog inside the ranges the
+// ".example.com"), so CI can hold the catalog inside the ranges the
 // broker's network policy allows.
 func (c Catalog) CheckHosts(suffixes []string) error {
 	for _, e := range c.entries {

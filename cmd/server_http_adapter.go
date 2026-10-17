@@ -309,7 +309,7 @@ func githubAppSigner(client *hashicorp.Client, getenv func(string) string) (gith
 		if mount == "" {
 			mount = "transit"
 		}
-		// The same shapes the catalog's Terraform module accepts.
+		// Names that are safe inside a Vault policy path.
 		if !transitKeyName.MatchString(key) || !httpcatalog.ValidMount(mount) {
 			return nil, fmt.Errorf("AGENT_VAULT_GITHUB_APP_TRANSIT_KEY or _MOUNT has an invalid name")
 		}

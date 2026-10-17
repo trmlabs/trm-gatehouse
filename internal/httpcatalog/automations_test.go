@@ -25,7 +25,7 @@ func automationCatalog() map[string]any {
 	pool := c["pools"].([]any)[0].(map[string]any)
 	pool["identity"], pool["ceiling"] = "cursor-automation", "T1"
 	second := strings.NewReplacer(`"name":"vendor"`, `"name":"tracker"`, `api.vendor.example`, `api.tracker.example`).
-		Replace(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["cursor-workers"]`, 1) + `}`)
+		Replace(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["example-workers"]`, 1) + `}`)
 	c["entries"] = append(c["entries"].([]any), json.RawMessage(second))
 	c["automations"] = []any{
 		map[string]any{"id": "auto-1", "name": "explorer", "owner": "owner@example.com", "entries": []any{"vendor", "tracker"}},
@@ -40,7 +40,7 @@ func TestAutomationPoolProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _ := catalog.Pool("cursor-workers")
+	p, _ := catalog.Pool("example-workers")
 	if profile := p.Profile(); profile.Authorization.Mode != AuthorizeAutomation || profile.RequesterKind() != RequesterCursorOIDC {
 		t.Fatalf("%+v", profile)
 	}
@@ -49,7 +49,7 @@ func TestAutomationPoolProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := derived.Pool("cursor-workers"); p.Profile().Authorization.Mode != AuthorizeAutomation || p.Profile().RequesterKind() != RequesterCursorOIDC {
+	if p, _ := derived.Pool("example-workers"); p.Profile().Authorization.Mode != AuthorizeAutomation || p.Profile().RequesterKind() != RequesterCursorOIDC {
 		t.Fatalf("derived: %+v", p.Profile())
 	}
 	for name, mutate := range map[string]func(c map[string]any){
@@ -89,7 +89,7 @@ func TestAutomationsAreIndexedById(t *testing.T) {
 	if catalog.Automations() != 2 {
 		t.Fatalf("automations: %d", catalog.Automations())
 	}
-	pool, _ := catalog.Pool("cursor-workers")
+	pool, _ := catalog.Pool("example-workers")
 	a, ok := pool.Automation("auto-1")
 	if !ok || a.Name != "explorer" || a.Owner != "owner@example.com" || !a.Uses("vendor") || !a.Uses("tracker") {
 		t.Fatalf("auto-1: %+v %v", a, ok)
@@ -161,7 +161,7 @@ func TestAutomationRunsAsPersonIsForCursorSessionPools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := catalog.Pool("cursor-workers"); !p.AutomationRunsAsPerson {
+	if p, _ := catalog.Pool("example-workers"); !p.AutomationRunsAsPerson {
 		t.Fatal("the opt-in was not kept")
 	}
 	at := func(c map[string]any, i int, identity string) map[string]any {
@@ -259,7 +259,7 @@ func TestOneHundredThousandAutomationsLoad(t *testing.T) {
 	if retained > 128<<20 {
 		t.Fatalf("retained heap %d MiB", retained>>20)
 	}
-	pool, _ := catalog.Pool("cursor-workers")
+	pool, _ := catalog.Pool("example-workers")
 	start = time.Now()
 	for i := range n {
 		a, ok := pool.Automation(fmt.Sprintf("automation-%06d", i))

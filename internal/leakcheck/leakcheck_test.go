@@ -84,6 +84,8 @@ var deniedTokens = map[string]string{
 	"676fd47aaecf9b13801c1eb8297b7b2205df99c8397c48d1e8db382b97029e74": "database role",
 	"8ae4083d184acb1c77da2012450c0c023a8a8ca5c802b2232ee557f356f3bea2": "network range",
 	"047f8aa724cd188af08e4e5153247c4f8291f8e1b4af319cfef935317d8349db": "network range",
+	"f70a05d2ebbd570660ec89743299a0fccc282861e77e23fadef0dc8d916354b5": "Transit mount",
+	"997f620e3583787a97ff5327e8a9eb34f8d6a6e77e8eb623cdbb747281cc8e5a": "harness profile",
 }
 
 // Two denied names are also parts of the broker's own constants, so they are

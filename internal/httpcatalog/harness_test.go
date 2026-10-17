@@ -21,7 +21,7 @@ func harnessCatalog() map[string]any {
 			map[string]any{"name": "cursor", "trustDomain": inCluster,
 				"identity":      map[string]any{"kind": "pod-token", "ownerKind": "ReplicaSet", "namespaces": []any{"cursor"}, "imageDigests": []any{digestA, digestB}},
 				"path":          map[string]any{"kind": "sidecar"},
-				"authorization": map[string]any{"mode": "pool", "poolName": "cursor-workers"},
+				"authorization": map[string]any{"mode": "pool", "poolName": "example-workers"},
 				"client":        map[string]any{"proxyEnv": "GATEHOUSE_HTTPS_PROXY", "caFileEnv": "GATEHOUSE_CA_FILE", "caSpkiEnv": "GATEHOUSE_CA_SPKI"}},
 			map[string]any{"name": "claude", "trustDomain": inCluster,
 				"identity":      map[string]any{"kind": "session-jwt", "ownerKind": "Job", "namespaces": []any{"claude"}, "imageDigests": []any{digestA}, "requester": map[string]any{"kind": "session-jwt"}},
@@ -35,11 +35,11 @@ func harnessCatalog() map[string]any {
 				"client":        map[string]any{"proxyEnv": "HTTPS_PROXY", "caFileEnv": "SSL_CERT_FILE", "caSpkiEnv": "GATEHOUSE_CA_SPKI"}},
 		},
 		"pools": []any{
-			map[string]any{"name": "cursor-workers", "namespace": "cursor", "serviceAccount": "worker"},
+			map[string]any{"name": "example-workers", "namespace": "cursor", "serviceAccount": "worker"},
 			map[string]any{"name": "claude-sessions", "namespace": "claude", "serviceAccount": "session", "identity": "claude-session", "ccpoolID": "ccpool_abc", "ceiling": "T1"},
 			map[string]any{"name": "sandboxes", "namespace": "agent-sandboxes", "serviceAccount": "sandbox"},
 		},
-		"entries": []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["cursor-workers","claude-sessions","sandboxes"]`, 1) + `}`)},
+		"entries": []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["example-workers","claude-sessions","sandboxes"]`, 1) + `}`)},
 	}
 }
 
@@ -65,7 +65,7 @@ func TestHarnessProfilesLoad(t *testing.T) {
 		t.Fatalf("%d harnesses", n)
 	}
 	for pool, want := range map[string]struct{ kind, mode, requester string }{
-		"cursor-workers":  {IdentityPodToken, AuthorizePool, ""},
+		"example-workers": {IdentityPodToken, AuthorizePool, ""},
 		"claude-sessions": {IdentitySessionJWT, AuthorizePerson, RequesterSessionJWT},
 		"sandboxes":       {IdentityProxyAttested, AuthorizePool, ""},
 	} {
@@ -86,7 +86,7 @@ func TestPoolsWithoutHarnessesDeriveTheirProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cursor, _ := catalog.Pool("cursor-workers")
+	cursor, _ := catalog.Pool("example-workers")
 	claude, _ := catalog.Pool("claude-sessions")
 	if p := cursor.Profile(); p.Explicit || p.Identity.Kind != IdentityPodToken || p.Path.Kind != PathSidecar || p.Authorization.Mode != AuthorizePool || p.RequesterKind() != "" {
 		t.Errorf("cursor: %+v", p)
@@ -138,7 +138,7 @@ func TestIncompleteOrContradictoryHarnessIsRefused(t *testing.T) {
 		"no pool name":     func(c map[string]any) { delete(harnessAt(c, 0)["authorization"].(map[string]any), "poolName") },
 		"undefined pool":   func(c map[string]any) { harnessAt(c, 0)["authorization"].(map[string]any)["poolName"] = "nobody" },
 		"pool in two harnesses": func(c map[string]any) {
-			harnessAt(c, 2)["authorization"].(map[string]any)["poolName"] = "cursor-workers"
+			harnessAt(c, 2)["authorization"].(map[string]any)["poolName"] = "example-workers"
 		},
 		"pool without a harness": func(c map[string]any) { c["harnesses"] = c["harnesses"].([]any)[:2] },
 		"namespace not listed":   func(c map[string]any) { harnessAt(c, 0)["identity"].(map[string]any)["namespaces"] = []any{"other"} },
@@ -225,7 +225,7 @@ func TestCursorPersonProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _ := catalog.Pool("cursor-workers")
+	p, _ := catalog.Pool("example-workers")
 	if profile := p.Profile(); profile.Identity.Kind != IdentitySessionJWT || profile.Authorization.Mode != AuthorizePerson || profile.RequesterKind() != RequesterCursorOIDC {
 		t.Fatalf("%+v", profile)
 	}
@@ -234,7 +234,7 @@ func TestCursorPersonProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := derived.Pool("cursor-workers"); p.Profile().RequesterKind() != RequesterCursorOIDC || p.Profile().Authorization.Mode != AuthorizePerson {
+	if p, _ := derived.Pool("example-workers"); p.Profile().RequesterKind() != RequesterCursorOIDC || p.Profile().Authorization.Mode != AuthorizePerson {
 		t.Fatalf("derived: %+v", p.Profile())
 	}
 	for name, mutate := range map[string]func(c map[string]any){

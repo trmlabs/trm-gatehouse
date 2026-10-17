@@ -36,7 +36,7 @@ once the `REPLACE` value and the group ID are real:
 
 ```yaml
 pools:
-  - {name: cursor-agents, namespace: cursor-agents, serviceAccount: cursor-worker}
+  - {name: example-agents, namespace: example-agents, serviceAccount: example-worker}
   - name: claude-developers                # sessions that name a person
     namespace: claude-developers
     serviceAccount: worker
@@ -48,7 +48,7 @@ entries:
   - name: appdb                            # a database
     kind: postgres
     host: db.example.com
-    pools: [cursor-agents]
+    pools: [example-agents]
     postgres: {database: app, mount: database, role: staging.us.example.app-readonly}
 
   - name: search-api                       # an HTTP API; tier T0 by default
@@ -58,12 +58,12 @@ entries:
     header: X-Api-Key
     placeholder: __vault_SEARCH_KEY__
     key: {mount: gatehouse, path: vendors/search-api, field: key}
-    pools: [cursor-agents]
+    pools: [example-agents]
 
   - name: example-repo                     # a repository; pushes only under cursor/
     kind: git
     host: github.com
-    pools: [cursor-agents]
+    pools: [example-agents]
     # appID and installationID come from the GitHub App installation
     git: {appID: 123456, installationID: 7890123, repos: [{repo: example-org/example-repo, access: write, refPrefixes: [refs/heads/cursor/]}]}
 

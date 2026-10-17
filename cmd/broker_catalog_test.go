@@ -9,7 +9,7 @@ import (
 )
 
 const exampleCatalogYAML = `pools:
-  - {name: cursor, namespace: cursor-agents, serviceAccount: cursor-worker}
+  - {name: cursor, namespace: example-agents, serviceAccount: example-worker}
 entries:
   - name: examplecore
     kind: postgres
@@ -44,7 +44,7 @@ func TestBrokerCatalogValidate(t *testing.T) {
 		"wildcard host":   {strings.Replace(exampleCatalogYAML, "host: serpapi.com", "host: '*.serpapi.com'", 1), nil, false},
 		"undefined pool":  {strings.Replace(exampleCatalogYAML, "pools: [cursor]\n    postgres", "pools: [ci]\n    postgres", 1), nil, false},
 		"outside domains": {exampleCatalogYAML, []string{".postgresbridge.com"}, false},
-		"pools required":  {strings.Replace(exampleCatalogYAML, "pools:\n  - {name: cursor, namespace: cursor-agents, serviceAccount: cursor-worker}\n", "", 1), nil, true},
+		"pools required":  {strings.Replace(exampleCatalogYAML, "pools:\n  - {name: cursor, namespace: example-agents, serviceAccount: example-worker}\n", "", 1), nil, true},
 		"unknown field":   {exampleCatalogYAML + "    insecure: true\n", nil, false},
 		"not yaml":        {"entries: [", nil, false},
 	} {
