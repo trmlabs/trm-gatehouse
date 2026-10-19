@@ -78,7 +78,8 @@ type Row struct {
 	// vocabulary: a github-api repository operation such as "pr.open",
 	// "git.fetch" or "git.push", "graphql" for a GitHub GraphQL request no
 	// route admits, or the Slack Web API method a Slack entry's listed path
-	// names, such as "slack.conversations_history". Never a path or body.
+	// names, such as "slack.conversations_history". On a graph database
+	// row, "bolt.session" or "bolt.query". Never a path, body or query text.
 	Operation string `json:"operation,omitempty"`
 	// Branch is the head branch of what a CI restart (pr.update_branch,
 	// actions.rerun, actions.rerun_failed) acted on or was refused for, as

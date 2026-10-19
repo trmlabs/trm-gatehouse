@@ -47,6 +47,9 @@ type FixedConfig struct {
 	// runaway rendered list.
 	MaxPostgresListeners int            `json:"maxPostgresListeners,omitempty"`
 	Browser              *BrowserConfig `json:"browser,omitempty"`
+	// BoltListeners, in self mode only, are the sidecar's Bolt ports; see
+	// BoltListenerConfig.
+	BoltListeners []BoltListenerConfig `json:"boltListeners,omitempty"`
 	// Self runs the relay as a sidecar in the worker's own Pod: loopback,
 	// plaintext listeners only, and no Kubernetes pairing, because the broker
 	// verifies this Pod's token and address on every connection.
@@ -224,6 +227,9 @@ func (c FixedConfig) Validate(now time.Time) error {
 		c.MaxPostgresListeners < 0 || c.MaxPostgresListeners > maxLoopbackPorts {
 		return errConfig
 	}
+	if len(c.BoltListeners) != 0 && (!c.Self || c.Shared != nil) {
+		return errConfig
+	}
 	// Activity reaches the broker over the CONNECT upstream.
 	if d := c.DurableActivity; d != nil && (c.AdminListen == "" || c.Connect == nil || d.PushSeconds < 0 || d.PushSeconds > 3600) {
 		return errConfig
@@ -356,6 +362,9 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 			return errConfig
 		}
 	}
+	if c.validBolt(check) != nil {
+		return errConfig
+	}
 	if len(used) == 0 {
 		return errConfig
 	}
@@ -380,17 +389,7 @@ func (c FixedConfig) postgresListenerLimit() int {
 // validRoutes reports whether a routed listener names exactly one routing:
 // routes "broker", or a list of distinct database names.
 func (l PostgresListenerConfig) validRoutes() bool {
-	if (l.Routes != "" && l.Routes != routesBroker) || (l.Routes == routesBroker) == (len(l.Databases) != 0) {
-		return false
-	}
-	seen := make(map[string]bool, len(l.Databases))
-	for _, name := range l.Databases {
-		if !safeName.MatchString(name) || seen[name] {
-			return false
-		}
-		seen[name] = true
-	}
-	return true
+	return validRouteNames(l.Routes, l.Databases)
 }
 
 // postgresBindings preserves the legacy single binding without mixing authority.

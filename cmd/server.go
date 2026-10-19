@@ -653,6 +653,12 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 			return fmt.Errorf("postgres broker authorization: %w", err)
 		}
 		opts.Databases = server.NewCatalogDatabaseResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore()))
+		// Graph databases (Bolt) arrive on this listener too.
+		opts.Graphs = server.NewCatalogGraphResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore()))
+		opts.GraphLogins = server.NewVaultGraphLogins(&httpcatalog.Keys{Vault: client.Logical()})
+	}
+	if v := intEnvValue("AGENT_VAULT_BOLT_MAX_MESSAGE_BYTES"); v > 0 {
+		opts.MaxBoltMessageBytes = v
 	}
 	if chain, err := sharedAuditChain(context.Background(), client, srv.CleanupStore(), os.Getenv, logger); err != nil {
 		return fmt.Errorf("postgres broker audit: %w", err)

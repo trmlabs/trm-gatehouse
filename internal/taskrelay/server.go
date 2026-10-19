@@ -176,7 +176,7 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 		}
 		return bind(address)
 	}
-	failures := make(chan error, 4+len(c.postgresBindings())+len(c.PostgresListeners))
+	failures := make(chan error, 4+len(c.postgresBindings())+len(c.PostgresListeners)+len(c.BoltListeners))
 	var start []func()
 	startHTTP := func(l net.Listener, h http.Handler) {
 		tracked := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -273,16 +273,18 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 		if e != nil {
 			return errConfig
 		}
-		route := brokerRouteDatabase
-		if pl.Routes != routesBroker {
-			catalog := make(map[string]bool, len(pl.Databases))
-			for _, name := range pl.Databases {
-				catalog[name] = true
-			}
-			route = func(name string) bool { return catalog[name] }
-		}
+		route := routeNames(pl.Routes, pl.Databases, brokerRouteDatabase)
 		binding := pl.route("")
 		servePostgres(l, func(conn net.Conn) { r.postgres(conn, binding, route) })
+	}
+	for i := range c.BoltListeners {
+		bl := &c.BoltListeners[i]
+		l, e := bind(bl.Listen)
+		if e != nil {
+			return errConfig
+		}
+		route := routeNames(bl.Routes, bl.Entries, brokerRouteDatabase)
+		servePostgres(l, func(conn net.Conn) { r.bolt(conn, bl, route) })
 	}
 	if c.Browser != nil {
 		bc := c.Browser

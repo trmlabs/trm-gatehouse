@@ -44,6 +44,28 @@ func (r catalogDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgpr
 	case err != nil:
 		return nil, fmt.Errorf("no database %q in the catalog", requestedDatabase)
 	}
+	if err := r.authorize(ctx, catalog, entry, scope); err != nil {
+		return nil, err
+	}
+	p := entry.Postgres
+	svc := &pgproxy.DatabaseService{Name: entry.Name, Addr: net.JoinHostPort(entry.Host, strconv.Itoa(entry.Port)),
+		Database: p.Database, Mount: p.Mount, Role: p.Role, SSLMode: p.SSLMode, MaxConns: p.MaxConns, ReadOnly: p.Access != "write",
+		CA: p.CA, ServerName: p.ServerName}
+	// Entries on one endpoint share its strictest explicit budget, as the
+	// store resolver does.
+	for _, other := range catalog.Entries() {
+		if other.Kind == "postgres" && other.Host == entry.Host && other.Port == entry.Port && other.Postgres.MaxConns > 0 &&
+			(svc.MaxConns == 0 || other.Postgres.MaxConns < svc.MaxConns) {
+			svc.MaxConns = other.Postgres.MaxConns
+		}
+	}
+	return svc, nil
+}
+
+// authorize applies the tier and entitlement decision for entry to the
+// connection's requester, records who it was for the audit trail, and returns
+// a *pgproxy.RefusedError when the decision refuses.
+func (r catalogDatabaseResolver) authorize(ctx context.Context, catalog httpcatalog.Catalog, entry *httpcatalog.Entry, scope pgproxy.AgentScope) error {
 	pool, _ := catalog.Pool(scope.Pool) // undefined pools: no identity, ceiling T0
 	who, refusal := authorize.Resolve(ctx, pool, pgproxy.Session(ctx), authorize.Claims{Pod: scope.WorkloadID, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester}, r.runner, r.sessions)
 	record := pgproxy.Requester{Kind: who.Kind, Subject: who.Audited(), TokenSHA256: who.TokenSHA256,
@@ -62,19 +84,7 @@ func (r catalogDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgpr
 	}
 	pgproxy.RecordRequester(ctx, record)
 	if refusal != "" {
-		return nil, &pgproxy.RefusedError{Outcome: refusal}
+		return &pgproxy.RefusedError{Outcome: refusal}
 	}
-	p := entry.Postgres
-	svc := &pgproxy.DatabaseService{Name: entry.Name, Addr: net.JoinHostPort(entry.Host, strconv.Itoa(entry.Port)),
-		Database: p.Database, Mount: p.Mount, Role: p.Role, SSLMode: p.SSLMode, MaxConns: p.MaxConns, ReadOnly: p.Access != "write",
-		CA: p.CA, ServerName: p.ServerName}
-	// Entries on one endpoint share its strictest explicit budget, as the
-	// store resolver does.
-	for _, other := range catalog.Entries() {
-		if other.Kind == "postgres" && other.Host == entry.Host && other.Port == entry.Port && other.Postgres.MaxConns > 0 &&
-			(svc.MaxConns == 0 || other.Postgres.MaxConns < svc.MaxConns) {
-			svc.MaxConns = other.Postgres.MaxConns
-		}
-	}
-	return svc, nil
+	return nil
 }

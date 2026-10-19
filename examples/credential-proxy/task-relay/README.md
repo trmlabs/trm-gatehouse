@@ -111,6 +111,38 @@ pairing, deadline, journal and connection limits. If any listener cannot start,
 the relay closes the others and exits. It starts accepting requests only after
 all listeners and browser policy are ready.
 
+### Graph databases over Bolt
+
+A sidecar (self mode only) can serve Memgraph and other Neo4j-compatible
+databases on one loopback Bolt port per broker, with `boltListeners`:
+
+```json
+"boltListeners": [{"listen": "127.0.0.1:17687", "upstream": {"address": "broker.example.internal:15443", "serverName": "broker.example.internal",
+  "caFile": "/etc/gatehouse/trust/ca.crt", "proofFile": "/var/run/gatehouse/proof/token", "audience": "gatehouse"},
+  "routes": "broker", "placeholder": "gatehouse-relay-placeholder"}]
+```
+
+Clients use a stock driver with `bolt://127.0.0.1:17687` (or `neo4j://`),
+basic auth, the catalog entry's name as the user and the placeholder as the
+password. The user name picks the route: `"routes": "broker"` forwards any
+name of 1 to 63 printable ASCII bytes with no space and leaves the decision to
+the broker's catalog, so a new entry needs no change to the worker; `entries`,
+in its place, is a fixed route table. The relay answers the version handshake
+itself (Bolt 5.2 or 4.3, the versions the broker speaks), reads HELLO and, from Bolt 5.1, LOGON,
+and refuses a wrong placeholder or an unrouted name with
+`Gatehouse.ClientError.Security.Unauthorized` before the broker is dialed, audited as
+`denied:placeholder` or `denied:no-entry`. A HELLO that carries a login from
+Bolt 5.1, or anything that is not a well-formed opening, is refused as
+`denied:bad-opening`. From Bolt 5.1 the relay answers HELLO itself, as the
+broker does, so a client may wait for that answer before sending LOGON; the
+broker's answer to the forwarded HELLO is dropped. Once admitted, the relay sends the session line,
+the client's own handshake bytes, the HELLO, and the login with exactly the
+scheme, the user name and its proof as the password. The broker must answer
+the version the relay agreed, and the relay holds the broker's answers to the
+opening until every one succeeds; a broker refusal is passed on and audited as
+`refused:<reason>`. After that the relay copies bytes both ways until the
+proof's expiry or the deadline. The broker refuses a second HELLO or LOGON.
+
 ### Shared proxy for many agents
 
 For a runtime whose agent Pods hold no token of their own (agent-sandbox), one relay Deployment serves every agent in the listed namespaces. Set `shared` instead of `sandbox` and `self`; `deadline` may be omitted:
@@ -160,6 +192,7 @@ The relay writes a structured JSON log to stderr, apart from its audit trail. Ev
 |---|---|---|
 | HTTP | CONNECT to an exact approved host:port, without proxy credentials | Injects fresh proof into the fixed broker connection; returns no broker headers. The inner HTTPS request still follows the broker's approved placeholder and read-only policy. |
 | PostgreSQL | Fixed database/user and the configured public placeholder password | Replaces the password with proof; keeps actual database credentials at the broker. Preserves optional `client_encoding=UTF8`, a printable ASCII `application_name` of at most 63 bytes, and a positive decimal `statement_timeout` in milliseconds (at most 2147483647). Other startup fields are denied. The broker applies these three bounds too, plus a control-character and length bound on the other client settings it forwards, and drops a value that fails, so a caller reaching the broker directly cannot use the startup packet to clear or extend a role-level limit such as `statement_timeout` either. In-session `SET` remains governed by the role's SQL permissions. |
+| Bolt | Basic auth with a routed catalog entry name as the user and the configured public placeholder password | Replaces the password with proof in HELLO (below Bolt 5.1) or LOGON; drops any other credential keys; forwards the rest of the opening unchanged. |
 | Browser | POST `{}` with `Content-Type: application/json` to the fixed relay route | Uses one fixed task and a private broker session handle; returns only readiness, a boolean check or closure. |
 
 All relay listeners use native TLS so the actual peer address survives. A
