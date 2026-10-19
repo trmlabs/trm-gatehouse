@@ -174,7 +174,7 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 					err = fmt.Errorf("grants undefined or dropped pool %q", pool)
 					break
 				}
-				if err = grantable(e, p, definesPools); err != nil {
+				if err = grantable(e, pool, p, definesPools); err != nil {
 					err = fmt.Errorf("to pool %q: %w", pool, err)
 					break
 				}

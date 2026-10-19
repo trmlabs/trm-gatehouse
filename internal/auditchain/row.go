@@ -80,10 +80,14 @@ type Row struct {
 	// route admits, or the Slack Web API method a Slack entry's listed path
 	// names, such as "slack.conversations_history". Never a path or body.
 	Operation string `json:"operation,omitempty"`
-	// Branch is the head branch of what a CI restart (pr.update_branch,
-	// actions.rerun, actions.rerun_failed) acted on or was refused for, as
-	// GitHub named it, or "invalid" when it is not a plain name (see
-	// BranchField). Empty when the lookup failed before GitHub named one.
+	// Branch is, on a git push row, the refs the push changes (comma-separated,
+	// "+N" for any that do not fit) or the one a refused push was refused
+	// for; on a pull request write (opening one, a comment, edit, label or
+	// ready, over REST or GraphQL) or a CI restart (pr.update_branch,
+	// actions.rerun, actions.rerun_failed), the head branch the request named
+	// or GitHub reported for the pull request or run. "invalid" when it is not
+	// a plain name (see BranchField); empty when the lookup failed before
+	// GitHub named one.
 	Branch string `json:"branch,omitempty"`
 	// Database is the database name a refused PostgreSQL session asked for,
 	// before any catalog entry matched it, or "invalid" when it is not a plain

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,7 +23,10 @@ import (
 // no credential; the broker adds a token minted for this one repository with
 // contents read, or write only for a push to a write binding. GitHub's own
 // branch protection still governs every push, and the pool's ref prefixes
-// (httpcatalog GitRepo.PushPrefixes) narrow it.
+// (httpcatalog GitRepo.PushPrefixes), narrowed to the requester's own where
+// the pool gives each requester theirs (GitRequest.ForRequester), narrow it.
+// Every ref a push names is checked, so a force push or a branch delete is
+// held to the same prefixes as any other update.
 func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, git httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if git.Entry != nil {
@@ -41,6 +45,12 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 		return
 	case matchErr != nil:
 		deny(http.StatusForbidden, "pool")
+		return
+	case git.Write && git.Limited && len(git.RefPrefixes) == 0:
+		// Every prefix was a {requester} one, and this request names no
+		// requester with a branch segment (a runner agent, no session): it
+		// may clone and fetch only.
+		deny(http.StatusForbidden, "no_branch_prefix")
 		return
 	}
 	entry := git.Entry
@@ -70,16 +80,22 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	}
 	body := &limitedBody{reader: r.Body, remaining: entry.MaxRequestBytes}
 	var outBody io.Reader = body
-	if git.Write && r.Method == http.MethodPost && len(git.RefPrefixes) > 0 {
-		consumed, refs, err := readReceivePackCommands(body)
+	if git.Write && r.Method == http.MethodPost {
+		// Every push names its refs in the audit row, and a limited one may
+		// change only refs under its prefixes.
+		consumed, refs, capabilities, err := readReceivePackCommands(body)
 		if err != nil {
 			deny(http.StatusBadRequest, "push_shape")
 			return
 		}
-		for _, ref := range refs {
-			if !hasAnyPrefix(ref, git.RefPrefixes) {
-				deny(http.StatusForbidden, "ref_outside_binding")
-				return
+		event.Branch = refsField(refs)
+		if git.Limited {
+			for _, ref := range refs {
+				if !hasAnyPrefix(ref, git.RefPrefixes) {
+					event.Branch = auditchain.BranchField(ref)
+					p.refusePush(w, event, target, body, capabilities, refs, git.RefPrefixes)
+					return
+				}
 			}
 		}
 		outBody = io.MultiReader(bytes.NewReader(consumed), body)
@@ -169,49 +185,53 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 }
 
 // readReceivePackCommands reads a push's command list (pkt-lines up to the
-// flush) and returns the bytes read and every ref the push would change.
-// Push certificates are refused, since their refs cannot be checked here.
-func readReceivePackCommands(r io.Reader) ([]byte, []string, error) {
+// flush) and returns the bytes read, every ref the push would change and the
+// capabilities git asked for on its first command. Push certificates are
+// refused, since their refs cannot be checked here.
+func readReceivePackCommands(r io.Reader) ([]byte, []string, []string, error) {
 	var consumed []byte
-	var refs []string
+	var refs, capabilities []string
 	for len(consumed) < 1<<20 {
 		head := make([]byte, 4)
 		if _, err := io.ReadFull(r, head); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		consumed = append(consumed, head...)
 		n, err := strconv.ParseUint(string(head), 16, 16)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if n == 0 {
 			if len(refs) == 0 {
-				return nil, nil, errors.New("push without commands")
+				return nil, nil, nil, errors.New("push without commands")
 			}
-			return consumed, refs, nil
+			return consumed, refs, capabilities, nil
 		}
 		if n < 5 {
-			return nil, nil, errors.New("invalid pkt-line")
+			return nil, nil, nil, errors.New("invalid pkt-line")
 		}
 		payload := make([]byte, n-4)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		consumed = append(consumed, payload...)
-		line, _, _ := strings.Cut(strings.TrimSuffix(string(payload), "\n"), "\x00")
+		line, asked, hasCapabilities := strings.Cut(strings.TrimSuffix(string(payload), "\n"), "\x00")
 		switch {
 		case strings.HasPrefix(line, "shallow "):
 			continue
 		case strings.HasPrefix(line, "push-cert"):
-			return nil, nil, errors.New("push certificates are not supported")
+			return nil, nil, nil, errors.New("push certificates are not supported")
 		}
 		fields := strings.Fields(line)
 		if len(fields) != 3 || !objectID(fields[0]) || !objectID(fields[1]) || !strings.HasPrefix(fields[2], "refs/") {
-			return nil, nil, errors.New("invalid push command")
+			return nil, nil, nil, errors.New("invalid push command")
+		}
+		if hasCapabilities && len(refs) == 0 {
+			capabilities = strings.Fields(asked)
 		}
 		refs = append(refs, fields[2])
 	}
-	return nil, nil, errors.New("push command list too long")
+	return nil, nil, nil, errors.New("push command list too long")
 }
 
 func objectID(s string) bool {
@@ -226,11 +246,127 @@ func objectID(s string) bool {
 	return true
 }
 
-func hasAnyPrefix(s string, prefixes []string) bool {
+// hasAnyPrefix reports whether ref is under one of prefixes. A {requester}
+// prefix that ForRequester has not narrowed matches nothing.
+func hasAnyPrefix(ref string, prefixes []string) bool {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(s, prefix) {
+		if !httpcatalog.IsRequesterTemplate(prefix) && strings.HasPrefix(ref, prefix) {
 			return true
 		}
 	}
 	return false
 }
+
+// refsField is a push's refs for its audit row's branch field: the refs,
+// comma-separated, as many whole ones as fit the field with room left to
+// count the rest as "+N". A first ref the field cannot carry reads "invalid".
+func refsField(refs []string) string {
+	var field string
+	for i, ref := range refs {
+		next, rest := ref, ""
+		if i > 0 {
+			next = field + "," + ref
+		}
+		if i+1 < len(refs) {
+			rest = ",+" + strconv.Itoa(len(refs)-i-1)
+		}
+		if auditchain.BranchField(ref) != ref || len(next)+len(rest) > maxBranchField {
+			if i == 0 {
+				return "invalid" + rest
+			}
+			return field + ",+" + strconv.Itoa(len(refs)-i)
+		}
+		field = next
+	}
+	return field
+}
+
+// maxBranchField is auditchain's limit on a branch field.
+const maxBranchField = 255
+
+// refusePush refuses a push that would change a ref outside the branches this
+// run may write. The refusal is git's own when git asked for a report (every
+// git does): GitHub never sees the push, each ref is rejected with the
+// reason, so git prints "! [remote rejected] ... (reason)", and on a side
+// band the branches the run may push to, as "remote:" lines. An agent learns
+// where to push from the refusal alone, whatever named its branch. The rest
+// of the push is read and dropped first, as a git server does, so git reads
+// the report rather than a broken connection. A push that asked for no
+// report, or whose rest is over the entry's limit, gets the plain refusal.
+func (p *Proxy) refusePush(w http.ResponseWriter, event auditchain.Event, target string, body *limitedBody, capabilities, refs, prefixes []string) {
+	reporting := containsString(capabilities, "report-status") || containsString(capabilities, "report-status-v2")
+	if _, err := io.Copy(io.Discard, body); err != nil || !reporting {
+		p.adapterDeny(w, event, target, http.StatusForbidden, "ref_outside_binding")
+		return
+	}
+	event.Event, event.Outcome, event.Status = auditchain.EventDenied, "ref_outside_binding", http.StatusOK
+	event.Target = auditchain.TargetField(target)
+	if p.adapter.Audit.Record(event) != nil {
+		refuse(w, "audit_unavailable")
+		return
+	}
+	w.Header().Set(RefusalHeader, "ref_outside_binding")
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(receivePackRefusal(capabilities, refs, prefixes))
+}
+
+// receivePackRefusal is a receive-pack report rejecting every ref of a push
+// (GitHub receives none of a refused push): each ref outside prefixes with
+// the branches the run may push to, and any other as not pushed, on the side
+// band git asked for, if any.
+func receivePackRefusal(capabilities, refs, prefixes []string) []byte {
+	var branches []string
+	for _, prefix := range prefixes {
+		if branch, ok := strings.CutPrefix(prefix, "refs/heads/"); ok && branch != "" {
+			branches = append(branches, branch)
+		}
+	}
+	reason := "outside the branches this run may push to"
+	switch {
+	case len(branches) > 3:
+		reason += "; push to a branch under " + strings.Join(branches[:3], ", ") + " or another of yours"
+	case len(branches) > 0:
+		reason += "; push to a branch under " + strings.Join(branches, " or ")
+	}
+	report := pktLine("unpack ok\n")
+	for _, ref := range refs {
+		if hasAnyPrefix(ref, prefixes) {
+			report += pktLine("ng " + ref + " not pushed: another ref in this push is outside the branches this run may push to\n")
+			continue
+		}
+		report += pktLine("ng " + ref + " " + reason + "\n")
+	}
+	report += "0000"
+	band := 0
+	switch {
+	case containsString(capabilities, "side-band-64k"):
+		band = 65520 - 5
+	case containsString(capabilities, "side-band"):
+		band = 1000 - 5
+	}
+	if band == 0 {
+		return []byte(report)
+	}
+	message := "Gatehouse refused this push: it changes a ref outside the branches this run may push to.\n"
+	if len(branches) > 0 {
+		message += "Push to a branch under " + branches[0] + ", for example: git switch -c " + branches[0] + "<topic> && git push -u origin HEAD\n"
+	}
+	var out strings.Builder
+	for _, part := range []struct {
+		channel byte
+		data    string
+	}{{2, message}, {1, report}} {
+		for data := part.data; data != ""; {
+			n := min(len(data), band)
+			out.WriteString(pktLine(string(part.channel) + data[:n]))
+			data = data[n:]
+		}
+	}
+	out.WriteString("0000")
+	return []byte(out.String())
+}
+
+// pktLine frames one git pkt-line.
+func pktLine(payload string) string { return fmt.Sprintf("%04x%s", len(payload)+4, payload) }

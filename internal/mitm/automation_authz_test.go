@@ -54,7 +54,7 @@ func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 	} {
 		event := auditchain.Event{Event: auditchain.EventHTTPRequest}
 		run := runner[token].Run
-		got := p.authorize(withSessionToken(context.Background(), token), &brokercore.ProxyScope{Pool: "automations", AgentID: "a", WorkloadID: "pod-" + token, ClaimedRun: run}, open, &event)
+		_, got := p.authorize(withSessionToken(context.Background(), token), &brokercore.ProxyScope{Pool: "automations", AgentID: "a", WorkloadID: "pod-" + token, ClaimedRun: run}, open, &event)
 		if got != want.refusal || event.Source != "AUTOMATIONS" || event.Automation != runner[token].Automation ||
 			event.AutomationName != want.name || event.AutomationOwner != want.owner || event.Requester != want.requester || event.TokenSHA256 != "sha-"+token ||
 			event.RequesterOID != want.oid {

@@ -100,6 +100,10 @@ type GitBinding struct {
 // (see PushPrefixes): once a repository lists either, a pool may push only
 // under the shared prefixes and its own, and a pool with none pushes nothing,
 // so one entry serves many pools without any pushing to another's branches.
+// A prefix ending in {requester}/ (RequesterToken) goes further: each person
+// or Automation on the pool pushes only under their own branch segment there,
+// so requesters sharing a pool never write to each other's branches or pull
+// requests.
 type GitRepo struct {
 	Repo            string       `json:"repo"` // owner/name
 	Access          string       `json:"access"`
@@ -464,7 +468,7 @@ func Parse(data []byte) (Catalog, error) {
 			if len(poolNames) > 0 && !poolNames[pool] {
 				return Catalog{}, fmt.Errorf("HTTP catalog entry %q grants undefined pool %q", e.Name, pool)
 			}
-			if err := grantable(*e, pools[pool], len(poolNames) > 0); err != nil {
+			if err := grantable(*e, pool, pools[pool], len(poolNames) > 0); err != nil {
 				return Catalog{}, fmt.Errorf("HTTP catalog entry %q to pool %q: %w", e.Name, pool, err)
 			}
 		}
@@ -808,7 +812,16 @@ func (e *Entry) normalizeGit() error {
 	return nil
 }
 
+// validRefPrefix is a push prefix: a ref prefix, or a branch prefix ending in
+// {requester}/ (validRequesterTemplate).
 func validRefPrefix(prefix string) bool {
+	if IsRequesterTemplate(prefix) {
+		return validRequesterTemplate(prefix)
+	}
+	return validPlainRefPrefix(prefix)
+}
+
+func validPlainRefPrefix(prefix string) bool {
 	return refPattern.MatchString(prefix) && !strings.Contains(prefix, "..") && !strings.Contains(prefix, "//")
 }
 
@@ -819,21 +832,13 @@ func validPullRequestPrefix(prefix string) bool {
 // checkPoolPrefixes checks a repository's per-pool prefixes: a map that is
 // present names at least one pool (an empty one would read as no limit), each
 // pool is one the entry grants and lists distinct, valid prefixes, and no
-// pool's prefix starts another pool's or a shared one, nor is started by one
-// (ignoring case), so each pool's branches are its own. Sorting puts every
-// prefix right before the ones it starts, so each is compared only with
-// those, never with every other prefix.
+// prefix overlaps another holder's (overlappingPrefixes).
 func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]string, pools []string, valid func(string) bool) error {
 	if byPool == nil {
-		return nil
+		return overlappingPrefixes(repo, what, shared, nil)
 	}
 	if len(byPool) == 0 {
 		return fmt.Errorf("repository %s: list a pool with its %ses, or leave the per-pool field out", repo, what)
-	}
-	type owned struct{ pool, prefix, spelled string } // prefix lowercased; spelled as written
-	var all []owned
-	for _, prefix := range shared {
-		all = append(all, owned{"", strings.ToLower(prefix), prefix}) // "" is no pool: every pool of the entry
 	}
 	for pool, prefixes := range byPool {
 		if !contains(pools, pool) {
@@ -848,24 +853,65 @@ func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]s
 				return fmt.Errorf("repository %s: invalid or duplicate %s %q for pool %q", repo, what, prefix, pool)
 			}
 			seen[strings.ToLower(prefix)] = true
-			all = append(all, owned{pool, strings.ToLower(prefix), prefix})
+		}
+	}
+	return overlappingPrefixes(repo, what, shared, byPool)
+}
+
+// overlappingPrefixes refuses a prefix that starts, or is started by, one
+// another holder holds (ignoring case): no pool's prefix may overlap another
+// pool's or a shared one, so each pool's branches are its own. A {requester}
+// prefix is compared by the part before the token and held apart from every
+// other prefix, its own pool's and the shared ones included: each requester's
+// branches are theirs alone, so no prefix anyone else holds may reach into
+// them. Sorting puts every prefix right before the ones it starts, so each is
+// compared only with those, never with every other prefix.
+func overlappingPrefixes(repo, what string, shared []string, byPool map[string][]string) error {
+	type owned struct{ holder, prefix, spelled string } // prefix lowercased; spelled as written
+	var all []owned
+	// own keys a prefix by what it reaches: a {requester} prefix by the part
+	// before the token, under a holder of its own (see holder).
+	own := func(pool, prefix string) owned {
+		if static, ok := requesterTemplate(prefix); ok {
+			return owned{pool + requesterHolder + strings.ToLower(static), strings.ToLower(static), prefix}
+		}
+		return owned{pool, strings.ToLower(prefix), prefix}
+	}
+	for _, prefix := range shared {
+		all = append(all, own("", prefix)) // "" is no pool: every pool of the entry
+	}
+	for pool, prefixes := range byPool {
+		for _, prefix := range prefixes {
+			all = append(all, own(pool, prefix))
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
 	for i := range all {
 		for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
-			if all[j].pool != all[i].pool {
-				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].spelled, holder(all[j].pool), all[i].spelled, holder(all[i].pool))
+			if all[j].holder != all[i].holder {
+				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].spelled, holder(all[j].holder), all[i].spelled, holder(all[i].holder))
 			}
 		}
 	}
 	return nil
 }
 
-// holder names who holds a checked prefix: a pool, or "" for the shared list.
-func holder(pool string) string {
-	if pool == "" {
+// requesterHolder separates a pool from the part before the token of one of
+// its {requester} prefixes, in the holder overlappingPrefixes gives that
+// prefix.
+const requesterHolder = "\x00"
+
+// holder names who holds a checked prefix: a pool, or "" for the shared list,
+// followed for a {requester} prefix by requesterHolder.
+func holder(key string) string {
+	pool, _, perRequester := strings.Cut(key, requesterHolder)
+	switch {
+	case pool == "" && perRequester:
+		return "each requester's own, in every pool"
+	case pool == "":
 		return "shared by every pool"
+	case perRequester:
+		return "each requester's own, in pool " + strconv.Quote(pool)
 	}
 	return "pool " + strconv.Quote(pool)
 }
@@ -888,10 +934,14 @@ type pullRequestCrossing struct {
 // that pool only, the shared ones every pool of the github-api entry. A pool's
 // own push prefixes are held by that pool alone, the git entry's shared ones
 // by each pool of the git entry, so a shared push prefix crosses only a pool
-// outside it. A write repository with no push prefixes counts as a shared
-// push prefix of refs/heads/. It returns one crossing per repository, each
-// naming its git entry. As in checkPoolPrefixes, sorting puts every prefix
-// right before the ones it starts, so each is compared only with those.
+// outside it. A {requester} push prefix is held by each requester alone, so
+// no pool holds it whole: any pull request prefix that starts, or is started
+// by, the part before its token crosses, since it would let one requester act
+// on another's pull requests. A write repository with no push prefixes counts
+// as a shared push prefix of refs/heads/. It returns one crossing per
+// repository, each naming its git entry. As in overlappingPrefixes, sorting
+// puts every prefix right before the ones it starts, so each is compared only
+// with those.
 func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	if api.Kind != "github-api" || api.Git == nil {
 		return nil
@@ -899,7 +949,14 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	type owned struct {
 		prefix, spelled string // prefix: the ref, lowercased; spelled: as written
 		push            bool
-		pool            string // "": shared by every pool of its entry
+		pool            string // "": shared by every pool of its entry; for a {requester} prefix, followed by requesterHolder
+	}
+	// pushed keys a push prefix by what it reaches, as overlappingPrefixes does.
+	pushed := func(pool, prefix string) owned {
+		if static, ok := requesterTemplate(prefix); ok {
+			return owned{strings.ToLower(static), prefix, true, pool + requesterHolder}
+		}
+		return owned{strings.ToLower(prefix), prefix, true, pool}
 	}
 	var out []pullRequestCrossing
 	for _, r := range api.Git.Repos {
@@ -914,11 +971,11 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 			all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
 		}
 		for _, prefix := range gr.RefPrefixes {
-			all = append(all, owned{strings.ToLower(prefix), prefix, true, ""})
+			all = append(all, pushed("", prefix))
 		}
 		for pool, prefixes := range gr.PoolRefPrefixes {
 			for _, prefix := range prefixes {
-				all = append(all, owned{strings.ToLower(prefix), prefix, true, pool})
+				all = append(all, pushed(pool, prefix))
 			}
 		}
 		for _, prefix := range r.PullRequestPrefixes {
@@ -939,6 +996,9 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 				push, head = b, a
 			}
 			holds := func(pool string) bool {
+				if strings.Contains(push.pool, requesterHolder) {
+					return false // each requester's own: never a whole pool's
+				}
 				if push.pool == "" {
 					return contains(git.Pools, pool)
 				}
@@ -1027,8 +1087,13 @@ type GitRequest struct {
 	Write bool // receive-pack: the push service; for github-api, a POST
 	// RefPrefixes are, for a push, the refs it may create, update or delete:
 	// the repository's shared prefixes and the pool's own (PushPrefixes);
-	// none when the repository limits no ref.
+	// none when the repository limits no ref. A {requester} prefix among them
+	// matches nothing until ForRequester narrows it to one requester's.
 	RefPrefixes []string
+	// Limited marks a push to a repository that limits which refs a push may
+	// change: only refs under RefPrefixes, and none when ForRequester left no
+	// prefix (a requester with no branch segment of their own).
+	Limited bool
 	// OpensPullRequest marks a github-api request that opens a pull request;
 	// its head must start with one of HeadPrefixes, the pool's own push
 	// prefixes (none: no pull request may be opened).
@@ -1122,8 +1187,7 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 				return matched, true, ErrReadOnly
 			}
 			if write {
-				var limited bool
-				if matched.RefPrefixes, limited = r.PushPrefixes(pool); limited && len(matched.RefPrefixes) == 0 {
+				if matched.RefPrefixes, matched.Limited = r.PushPrefixes(pool); matched.Limited && len(matched.RefPrefixes) == 0 {
 					// The repository holds every pool to its own prefixes, and
 					// this pool has none: it may clone and fetch only.
 					return matched, true, ErrReadOnly
@@ -1816,10 +1880,15 @@ func (e *Entry) validateTier() error {
 }
 
 // grantable is the CI rule: an entry above T0 is never granted to a pool that
-// cannot carry it. Without defined pools only T0 entries may be granted.
-func grantable(e Entry, p Pool, defined bool) error {
+// cannot carry it. Without defined pools only T0 entries may be granted. At
+// any tier, a git entry's {requester} push prefix goes only to a pool that
+// names who runs each request (requesterGrantable).
+func grantable(e Entry, name string, p Pool, defined bool) error {
 	if p.Ceiling == CeilingExternal {
 		return fmt.Errorf("a pool at the external ceiling holds no entries")
+	}
+	if err := requesterGrantable(e, name, p, defined); err != nil {
+		return err
 	}
 	rank := tierRank[e.Tier]
 	if rank == 0 {
