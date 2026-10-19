@@ -49,7 +49,7 @@ func realMemgraph(t *testing.T, write bool) (broker string, nodes func() int64, 
 	svc := &GraphService{Name: "app-graph", Addr: addr, ServerName: os.Getenv("AV_TEST_MEMGRAPH_SERVER_NAME"), CA: string(ca),
 		Procedures: []string{"schema.node_type_properties"}, Functions: []string{"date.add"}, Write: write}
 	audit = &recordingAudit{}
-	auth = &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "cursor-agents"}}
+	auth = &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "example-agents"}}
 	_, broker = startBroker(t, Options{
 		Auth:        auth,
 		Databases:   &fakeResolver{},

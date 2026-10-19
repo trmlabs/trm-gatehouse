@@ -278,8 +278,8 @@ func TestCatalogEditStopsAnAutomationsOpenSession(t *testing.T) {
 		t.Helper()
 		c, err := httpcatalog.Parse([]byte(`{"pools":[{"name":"automations","namespace":"n","serviceAccount":"worker","identity":"cursor-automation","ceiling":"T1"}],
 		 "entries":[
-		  {"name":"open","kind":"postgres","host":"db.example","pools":["automations"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
-		  {"name":"t1db","kind":"postgres","host":"db.example","pools":["automations"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}}],
+		  {"name":"open","kind":"postgres","host":"db.example","pools":["automations"],"postgres":{"database":"open","mount":"database","role":"staging.us.example.open-readonly"}},
+		  {"name":"t1db","kind":"postgres","host":"db.example","pools":["automations"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.example.t1-readonly"}}],
 		 "automations":[` + automations + `]}`))
 		if err != nil {
 			t.Fatal(err)

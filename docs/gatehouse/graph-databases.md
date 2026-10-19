@@ -53,7 +53,7 @@ entries:
   - name: app-graph                     # the user name workers sign in with
     kind: memgraph
     host: memgraph.graphs.svc.cluster.local
-    pools: [cursor-agents]
+    pools: [example-agents]
     memgraph:
       login: {mount: gatehouse, path: vendors/memgraph-app}
       serverName: graph.example.com     # the name on the server's certificate, when it is not the host

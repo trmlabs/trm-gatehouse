@@ -38,7 +38,7 @@ func startBoltFixture(t *testing.T, change func(*Options)) *boltFixture {
 	f := &boltFixture{
 		upstream: startFakeMemgraph(t, "gatehouse_reader", "broker-held-secret", testPlans),
 		audit:    &recordingAudit{},
-		auth:     &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "cursor-agents"}},
+		auth:     &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "example-agents"}},
 	}
 	f.graphs = &fakeGraphs{svc: &GraphService{Name: "app-graph", Addr: f.upstream.addr(), Plaintext: true,
 		Procedures: []string{"schema.node_type_properties"}, Functions: []string{"date.add"}}}
@@ -285,7 +285,7 @@ func TestBolt_SessionRulesAfterSignIn(t *testing.T) {
 			switch e.Event {
 			case auditchain.EventSessionOpen:
 				opened++
-				if e.Binding != "vault-1/app-graph" || e.Pool != "cursor-agents" || e.PodUID != "pod-1" {
+				if e.Binding != "vault-1/app-graph" || e.Pool != "example-agents" || e.PodUID != "pod-1" {
 					t.Fatalf("session row: %+v", e)
 				}
 			case auditchain.EventSessionClose:

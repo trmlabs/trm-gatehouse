@@ -350,7 +350,7 @@ func TestHarnessSidecarAcrossClusters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cross-cluster sidecar harnesses refused: %v", err)
 	}
-	if p, _ := catalog.Pool("cursor-workers"); p.Profile().TrustDomain.Keys != KeysRemote {
+	if p, _ := catalog.Pool("example-workers"); p.Profile().TrustDomain.Keys != KeysRemote {
 		t.Fatalf("profile %+v", p.Profile())
 	}
 }
