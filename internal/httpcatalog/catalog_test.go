@@ -174,6 +174,7 @@ func TestPairUserHeaderNeedsABasicPairEntry(t *testing.T) {
 		"reserved":          authorization(entryWith(`,"basicPair":true,"pairUserHeader":"Cookie"`)),
 		"the key header":    authorization(entryWith(`,"basicPair":true,"pairUserHeader":"Authorization"`)),
 		"forwarded too":     authorization(entryWith(`,"basicPair":true,"pairUserHeader":"X-Langfuse-Public-Key","forwardHeaders":["x-langfuse-public-key"]`)),
+		"forwarded anyway":  authorization(entryWith(`,"basicPair":true,"pairUserHeader":"user-agent"`)),
 		"not a token":       authorization(entryWith(`,"basicPair":true,"pairUserHeader":"X Langfuse"`)),
 		"postgres entry":    `{"entries":[{"name":"db","kind":"postgres","host":"db.example.com","pools":["pool-a"],"pairUserHeader":"X-User","postgres":{"database":"core","mount":"database","role":"readonly"}}]}`,
 		"browser session":   `{"entries":[` + browserEntryJSON(`,"pairUserHeader":"X-User"`) + `]}`,

@@ -644,8 +644,8 @@ func (e *Entry) normalize() error {
 	if e.PairUserHeader != "" {
 		h := e.PairUserHeader
 		e.PairUserHeader = http.CanonicalHeaderKey(h)
-		if !e.BasicPair || !tokenPattern.MatchString(h) || reservedHeaders[e.PairUserHeader] || contains(e.ForwardHeaders, e.PairUserHeader) {
-			return errors.New("pairUserHeader needs basicPair and a plain header name that is neither reserved nor forwarded")
+		if !e.BasicPair || !tokenPattern.MatchString(h) || reservedHeaders[e.PairUserHeader] || e.ForwardsHeader(e.PairUserHeader) {
+			return errors.New("pairUserHeader needs basicPair and a plain header name that is neither reserved nor otherwise forwarded")
 		}
 	}
 	if e.MaxRequestBytes == 0 {
