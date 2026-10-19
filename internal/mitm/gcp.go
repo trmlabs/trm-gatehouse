@@ -34,8 +34,8 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 		return
 	}
 	if a.GCPTokens == nil {
-		// Waiting does not help: only an operator (a restart, for a minter
-		// wired at startup) can give the broker one.
+		// An adapter built without a minter never gets one; the broker wires
+		// a GCPMinter, which refuses through the token path below instead.
 		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
