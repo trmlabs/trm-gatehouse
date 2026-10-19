@@ -132,7 +132,7 @@ func moduleCalls(query string) (calls []string, ok bool) {
 	for i := 0; i < len(rs); {
 		r := rs[i]
 		switch {
-		case unicode.IsSpace(r):
+		case cypherSpace(r):
 			i++
 		case r == '/' && i+1 < len(rs) && rs[i+1] == '/':
 			for i < len(rs) && rs[i] != '\n' && rs[i] != '\r' {
@@ -183,10 +183,12 @@ func moduleCalls(query string) (calls []string, ok bool) {
 			tokens = append(tokens, token{'q', string(name)})
 			i = j + 1
 		case unicode.IsDigit(r):
-			// A number, including 1.5 and 1e3, is never part of a name.
-			j := i
-			for j < len(rs) && (unicode.IsLetter(rs[j]) || unicode.IsDigit(rs[j]) || rs[j] == '.' || rs[j] == '_') {
-				j++
+			// A number is never part of a name and never takes what follows
+			// it: in [1..f(x)] a range runs straight into a call. A number
+			// run straight into a letter is not Cypher, so it is refused.
+			j := numberEnd(rs, i)
+			if j < len(rs) && (unicode.IsLetter(rs[j]) || unicode.IsDigit(rs[j]) || rs[j] == '_') {
+				return nil, false
 			}
 			tokens = append(tokens, token{'o', ""})
 			i = j
@@ -224,6 +226,49 @@ func moduleCalls(query string) (calls []string, ok bool) {
 		}
 	}
 	return calls, true
+}
+
+// cypherSpace is a character Memgraph's lexer skips between tokens: Go's
+// white space, and the separators U+001C to U+001F and U+180E, which Memgraph
+// 3.11 also skips (measured against a real Memgraph) and Go does not.
+func cypherSpace(r rune) bool {
+	return unicode.IsSpace(r) || r >= 0x1c && r <= 0x1f || r == 0x180e
+}
+
+// numberEnd returns the end of the number starting at rs[i]: 0x hex or 0o
+// octal digits, or digits with an optional fraction (a dot followed by a
+// digit) and exponent. Two dots are a range, never a fraction.
+func numberEnd(rs []rune, i int) int {
+	digits := func(j int, is func(rune) bool) int {
+		for j < len(rs) && is(rs[j]) {
+			j++
+		}
+		return j
+	}
+	hex := func(r rune) bool { return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' }
+	octal := func(r rune) bool { return r >= '0' && r <= '7' }
+	if rs[i] == '0' && i+2 < len(rs) {
+		switch {
+		case (rs[i+1] == 'x' || rs[i+1] == 'X') && hex(rs[i+2]):
+			return digits(i+2, hex)
+		case (rs[i+1] == 'o' || rs[i+1] == 'O') && octal(rs[i+2]):
+			return digits(i+2, octal)
+		}
+	}
+	j := digits(i, unicode.IsDigit)
+	if j+1 < len(rs) && rs[j] == '.' && unicode.IsDigit(rs[j+1]) {
+		j = digits(j+1, unicode.IsDigit)
+	}
+	if j < len(rs) && (rs[j] == 'e' || rs[j] == 'E') {
+		k := j + 1
+		if k < len(rs) && (rs[k] == '+' || rs[k] == '-') {
+			k++
+		}
+		if k < len(rs) && unicode.IsDigit(rs[k]) {
+			j = digits(k, unicode.IsDigit)
+		}
+	}
+	return j
 }
 
 // refusedFunction is the first module function query calls that the entry

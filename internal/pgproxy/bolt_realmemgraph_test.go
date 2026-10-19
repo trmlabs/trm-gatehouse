@@ -130,6 +130,14 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 			"LOAD JSONL FROM '/etc/passwd' AS row RETURN row":                                                                                    "LoadJsonl",
 			"UNWIND range(1, 3) AS x CALL { WITH x CREATE (:Escape {x: x}) } IN TRANSACTIONS OF 1 ROWS":                                          "PeriodicSubquery",
 			"RETURN llm.complete('hello') AS answer":                                                                                             "function llm.complete",
+			// Spellings Memgraph's lexer reads as a call to an unlisted function.
+			"RETURN collections.max\x1c([1, 2]) AS m":           "function collections.max",
+			"RETURN collections\u180e.max([1, 2]) AS m":         "function collections.max",
+			"RETURN [1, 2, 3][0..collections.max([1, 2])] AS s": "function collections.max",
+			"RETURN collections/* c */.\u3000max([1, 2]) AS m":  "function collections.max",
+			// A procedure is named by Memgraph's own plan, however it is spelled.
+			"CALL `export_util`.`json`('/var/lib/memgraph/escape.json') YIELD path RETURN path":        "CALL export_util.json",
+			"CALL export_util\x1c./* c */json('/var/lib/memgraph/escape.json') YIELD path RETURN path": "CALL export_util.json",
 		}
 		for query, step := range refused {
 			res := c.query(query, nil, nil)
@@ -139,7 +147,8 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 			c.reset()
 		}
 		// Statements Memgraph will not plan never run: its own error comes back.
-		for _, query := range []string{"CREATE INDEX ON :Person(name)", "CREATE USER intruder IDENTIFIED BY 'x'", "SHOW USERS", "DROP GRAPH", "STORAGE MODE IN_MEMORY_ANALYTICAL"} {
+		for _, query := range []string{"CREATE INDEX ON :Person(name)", "CREATE USER intruder IDENTIFIED BY 'x'", "SHOW USERS", "DROP GRAPH", "STORAGE MODE IN_MEMORY_ANALYTICAL",
+			"CALL EXPORT_UTIL.JSON('/var/lib/memgraph/escape.json') YIELD path RETURN path"} {
 			if res := c.query(query, nil, nil); res.code == "" {
 				t.Fatalf("%q ran: %+v", query, res)
 			}

@@ -91,6 +91,25 @@ func TestModuleCalls(t *testing.T) {
 		"MATCH (n) RETURN date.add(n.d, 1, 'day'), json_util.to_json(n)": {"date.add", "json_util.to_json"},
 		"MATCH (`CALL`) RETURN `CALL` llm.complete('x')":                 {"llm.complete"},
 	}
+	// Every separator Memgraph 3.11's lexer skips, measured against a real
+	// Memgraph: it runs date.add with each of these between the name's parts
+	// and before the parenthesis. Go's unicode.IsSpace misses U+001C to
+	// U+001F and U+180E.
+	for _, sep := range []string{"\t", "\n", "\v", "\f", "\r", "\x1c", "\x1d", "\x1e", "\x1f", "\u00a0", "\u1680", "\u180e",
+		"\u2000", "\u2005", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000"} {
+		for _, q := range []string{"RETURN llm" + sep + ".complete('x')", "RETURN llm." + sep + "complete('x')", "RETURN llm.complete" + sep + "('x')"} {
+			cases[q] = []string{"llm.complete"}
+		}
+	}
+	// A number never swallows what follows it: a list slice's range runs
+	// straight into a call.
+	cases["RETURN [1,2,3][1..llm.complete('x')]"] = []string{"llm.complete"}
+	cases["RETURN [1,2,3][0..1.5e3+llm.complete('x')]"] = []string{"llm.complete"}
+	cases["RETURN 0x1F + llm.complete('x'), 1.5e-3, 0o17"] = []string{"llm.complete"}
+	// Another case or a lookalike letter is another name, refused unless
+	// listed under that exact name.
+	cases["RETURN LLM.Complete('x')"] = []string{"LLM.Complete"}
+	cases["RETURN ll\u043c.complete('x')"] = []string{"ll\u043c.complete"}
 	for query, want := range cases {
 		got, ok := moduleCalls(query)
 		if !ok {
@@ -101,7 +120,7 @@ func TestModuleCalls(t *testing.T) {
 			t.Errorf("%q: calls %v, want %v", query, got, want)
 		}
 	}
-	for _, query := range []string{"RETURN 'open", "RETURN /* open", "RETURN `open"} {
+	for _, query := range []string{"RETURN 'open", "RETURN /* open", "RETURN `open", "RETURN 1llm.complete('x')", "RETURN 0xZZ"} {
 		if refusedFunction(query, nil) != "unreadable query text" {
 			t.Errorf("%q: not refused as unreadable", query)
 		}
