@@ -839,7 +839,11 @@ func (s *boltSession) run(msg *bolt.Structure) error {
 		return s.client.send(failure)
 	}
 	if verdict != "" {
-		return s.refuse(boltReadOnly(verdict), "step:"+auditToken(verdict))
+		decision := "step:" + auditToken(strings.ReplaceAll(verdict, " ", "_"))
+		if name, ok := strings.CutPrefix(verdict, "CALL "); ok {
+			decision = "procedure:" + auditToken(name)
+		}
+		return s.refuse(boltReadOnly(verdict), decision)
 	}
 	if !s.explicit {
 		// An auto-commit query runs in a read transaction the broker opens

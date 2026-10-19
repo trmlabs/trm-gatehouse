@@ -113,14 +113,16 @@ func TestBolt_RefusesWritesBeforeTheyReachTheDatabase(t *testing.T) {
 			t.Fatalf("a refused query reached the database: %q", entry)
 		}
 	}
-	var refusals int
+	// Each refusal is audited with what was refused, never the query.
+	var decisions []string
 	for _, e := range f.audit.recorded() {
 		if e.Event == auditchain.EventDenied && e.Outcome == "read_only" && e.Operation == "bolt.query" && e.Agent == "agent-1" {
-			refusals++
+			decisions = append(decisions, e.Decision)
 		}
 	}
-	if refusals != 5 {
-		t.Fatalf("audited %d read-only refusals, want 5", refusals)
+	slices.Sort(decisions)
+	if want := []string{"function:llm.complete", "procedure:periodic.iterate", "step:CreateNode", "step:LoadCsv", "step:SetProperty"}; !slices.Equal(decisions, want) {
+		t.Fatalf("audited refusals %q, want %q", decisions, want)
 	}
 }
 
