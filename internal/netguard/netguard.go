@@ -274,7 +274,7 @@ func hostName(s string) bool {
 		return false
 	}
 	labels := strings.Split(s, ".")
-	if last := labels[len(labels)-1]; last == "" || !(last[0] >= 'a' && last[0] <= 'z' || last[0] >= 'A' && last[0] <= 'Z') {
+	if last := labels[len(labels)-1]; last == "" || !asciiLetter(last[0]) {
 		return false
 	}
 	for _, label := range labels {
@@ -282,13 +282,15 @@ func hostName(s string) bool {
 			return false
 		}
 		for i := 0; i < len(label); i++ {
-			if c := label[i]; !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			if c := label[i]; !asciiLetter(c) && (c < '0' || c > '9') && c != '-' {
 				return false
 			}
 		}
 	}
 	return true
 }
+
+func asciiLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
 // withPrivateHosts sends a dial whose target is a listed private host
 // through internal, which allows private ranges, and every other dial through
