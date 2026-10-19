@@ -244,3 +244,9 @@ func startBoltSidecar(t *testing.T, broker string) string {
 		}
 	}
 }
+
+func (f *fakeAuth) token() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gotToken
+}

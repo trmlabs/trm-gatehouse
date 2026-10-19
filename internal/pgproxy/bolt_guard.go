@@ -67,7 +67,7 @@ func planStep(line string, procedures []string) string {
 		return "unrecognized plan line"
 	}
 	rest = rest[2:]
-	end := strings.IndexFunc(rest, func(r rune) bool { return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') })
+	end := strings.IndexFunc(rest, func(r rune) bool { return (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') })
 	step := rest
 	if end >= 0 {
 		step = rest[:end]

@@ -349,9 +349,3 @@ func (f fakeLogins) GraphLogin(context.Context, *GraphService) (*GraphLogin, err
 	copy := *f.login
 	return &copy, nil
 }
-
-func (f *fakeAuth) token() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.gotToken
-}
