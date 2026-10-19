@@ -50,6 +50,13 @@ type Entry struct {
 	// SDKs that insist on a key still work. The worker may also omit Header.
 	Placeholder string `json:"placeholder"`
 	Key         KeyRef `json:"key"`
+	// ClientCertificate, header entries only, is a certificate and key in
+	// Vault the broker presents to the upstream in the TLS handshake, for a
+	// service that accepts only client certificates (mutual TLS). An entry
+	// with one may leave out header, placeholder and key, so the worker sends
+	// no credential at all. Neither the certificate nor the key reaches the
+	// worker. See ClientCertificateRef.
+	ClientCertificate *ClientCertificateRef `json:"clientCertificate,omitempty"`
 	// Pools are the broker agent IDs of the worker pools granted this entry.
 	Pools []string `json:"pools"`
 	// ForwardHeaders are extra request headers the vendor needs, such as an
@@ -567,6 +574,10 @@ func (e *Entry) normalize() error {
 	if e.HTTP2 && e.Kind != "" && e.Kind != "gcp" {
 		return errors.New("http2 applies to header and gcp entries only")
 	}
+	if e.ClientCertificate != nil && (e.Kind != "" || !e.ClientCertificate.valid()) {
+		prefix, _ := keyPath()
+		return fmt.Errorf("clientCertificate applies to header entries only and needs a KV mount and a path under %s/", prefix)
+	}
 	switch e.Kind {
 	case "postgres":
 		return e.normalizePostgres()
@@ -623,24 +634,14 @@ func (e *Entry) normalize() error {
 			return fmt.Errorf("method %q not supported", m)
 		}
 	}
-	e.Header = http.CanonicalHeaderKey(e.Header)
-	if !tokenPattern.MatchString(e.Header) || (reservedHeaders[e.Header] && e.Header != "Authorization" && e.Header != "X-Api-Key") {
-		return errors.New("header must be a plain header name that does not affect routing")
-	}
-	if e.Scheme != "" && !tokenPattern.MatchString(e.Scheme) {
-		return errors.New("scheme must be a single token such as Bearer")
-	}
-	if e.BasicUser && (e.Header != "Authorization" || e.Scheme != "") {
-		return errors.New("basicUser needs header Authorization and no scheme")
-	}
-	if e.BasicPair && (e.Header != "Authorization" || e.Scheme != "" || e.BasicUser) {
-		return errors.New("basicPair needs header Authorization, no scheme and no basicUser")
-	}
-	if !placeholder.MatchString(e.Placeholder) {
-		return errors.New("placeholder must look like __vault_NAME__")
-	}
-	if prefix, path := keyPath(); !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !path.MatchString(e.Key.Path) || e.Key.Field == "" {
-		return fmt.Errorf("key needs a KV mount, a path under %s/ and a field", prefix)
+	if e.HeaderCredential() {
+		if err := e.normalizeHeaderCredential(); err != nil {
+			return err
+		}
+	} else if e.ClientCertificate == nil || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) {
+		// Only a client certificate stands in for the header credential, and
+		// then the credential's settings go with the header.
+		return errors.New("a header entry needs a header, placeholder and key, unless it has a clientCertificate and none of them")
 	}
 	if len(e.Pools) == 0 {
 		return errors.New("at least one pool is required")
@@ -669,6 +670,33 @@ func (e *Entry) normalize() error {
 		return err
 	}
 	sort.Strings(e.Methods)
+	return nil
+}
+
+// HeaderCredential reports whether the entry injects a key into a header.
+// Only a header entry with a client certificate may go without one.
+func (e *Entry) HeaderCredential() bool { return e.Header != "" }
+
+func (e *Entry) normalizeHeaderCredential() error {
+	e.Header = http.CanonicalHeaderKey(e.Header)
+	if !tokenPattern.MatchString(e.Header) || (reservedHeaders[e.Header] && e.Header != "Authorization" && e.Header != "X-Api-Key") {
+		return errors.New("header must be a plain header name that does not affect routing")
+	}
+	if e.Scheme != "" && !tokenPattern.MatchString(e.Scheme) {
+		return errors.New("scheme must be a single token such as Bearer")
+	}
+	if e.BasicUser && (e.Header != "Authorization" || e.Scheme != "") {
+		return errors.New("basicUser needs header Authorization and no scheme")
+	}
+	if e.BasicPair && (e.Header != "Authorization" || e.Scheme != "" || e.BasicUser) {
+		return errors.New("basicPair needs header Authorization, no scheme and no basicUser")
+	}
+	if !placeholder.MatchString(e.Placeholder) {
+		return errors.New("placeholder must look like __vault_NAME__")
+	}
+	if prefix, path := keyPath(); !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !path.MatchString(e.Key.Path) || e.Key.Field == "" {
+		return fmt.Errorf("key needs a KV mount, a path under %s/ and a field", prefix)
+	}
 	return nil
 }
 

@@ -161,7 +161,8 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 		return nil, fmt.Errorf("requires AGENT_VAULT_AUDIT_CHAIN")
 	}
 	keys := &httpcatalog.Keys{Vault: client.Logical()}
-	adapter := &mitm.HeaderAdapter{Catalog: source, Keys: keys, Audit: chain}
+	certs := &httpcatalog.ClientCertificates{Vault: client.Logical()}
+	adapter := &mitm.HeaderAdapter{Catalog: source, Keys: keys, Audit: chain, ClientCertificates: certs}
 	if err := attachAuthorization(adapter, getenv); err != nil {
 		return nil, err
 	}

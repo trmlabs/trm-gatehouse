@@ -74,6 +74,13 @@ type HeaderAdapter struct {
 	// Decoys are the decoy credentials planted in worker sessions (see
 	// package decoy), read per request. Without them, none is recognized.
 	Decoys interface{ Current() *decoy.Set }
+	// ClientCertificates reads the client certificates entries present to
+	// their upstreams (see clientcert.go). Without it, those entries are
+	// refused.
+	ClientCertificates interface {
+		Get(context.Context, httpcatalog.ClientCertificateRef) (*httpcatalog.ClientCertificate, error)
+		Invalidate(httpcatalog.ClientCertificateRef)
+	}
 }
 
 func (a *HeaderAdapter) valid() bool {
@@ -351,7 +358,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
-	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
+	if r.URL.IsAbs() || !authorityMatches(r, target) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
 		unsafePath(r.URL.Path) || strings.Contains(r.URL.RawQuery, placeholderMarker) || r.Header.Get("Upgrade") != "" ||
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") || r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 ||
 		(isGRPC(r) && grpcCompressedRequest(r)) {
@@ -359,6 +366,14 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	if err == nil && int64(len(body)) <= entry.MaxRequestBytes && isGRPC(r) {
+		// Checked and forwarded as uncompressed messages.
+		var outcome string
+		if body, outcome = grpcPlainMessages(body, r.Header.Get("Grpc-Encoding"), entry.MaxRequestBytes); outcome != "" {
+			deny(grpcBodyStatus(outcome), outcome)
+			return
+		}
+	}
 	// A model API's body quotes whatever the agent read, so only its headers
 	// and URL count as presenting a decoy.
 	if err == nil && !entry.Transcript && p.refuseDecoyBody(w, event, target, body) {
@@ -413,10 +428,14 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	defer enf.Release()
-	secret, err := a.Keys.Get(r.Context(), entry.Key)
-	if err != nil {
-		deny(http.StatusServiceUnavailable, keyOutcome(err))
-		return
+	// An entry with a client certificate may carry no header key.
+	var secret httpcatalog.Secret
+	if entry.HeaderCredential() {
+		secret, err = a.Keys.Get(r.Context(), entry.Key)
+		if err != nil {
+			deny(http.StatusServiceUnavailable, keyOutcome(err))
+			return
+		}
 	}
 	password, pair := httpcatalog.PairPassword(secret.Value())
 	if entry.BasicPair && !pair {
@@ -425,16 +444,28 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusServiceUnavailable, "key_not_basic_pair")
 		return
 	}
+	ctx := r.Context()
+	if entry.ClientCertificate != nil {
+		cert, outcome := p.clientCertificate(ctx, entry)
+		if outcome != "" {
+			deny(http.StatusServiceUnavailable, outcome)
+			return
+		}
+		ctx = withClientCertificate(ctx, *entry.ClientCertificate, cert)
+	}
 	outURL := &url.URL{Scheme: "https", Host: target, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
-	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(body))
+	out, err := http.NewRequestWithContext(ctx, r.Method, outURL.String(), bytes.NewReader(body))
 	if err != nil {
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	}
 	out.Host = expected
 	out.Header = forwarded
-	credential := entry.Credential(secret.Value())
-	out.Header.Set(entry.Header, credential)
+	credential := ""
+	if entry.HeaderCredential() {
+		credential = entry.Credential(secret.Value())
+		out.Header.Set(entry.Header, credential)
+	}
 	out.Header.Set("Accept-Encoding", "identity")
 	if isGRPC(r) {
 		prepareGRPC(out)
@@ -453,7 +484,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		done.Duration = time.Since(admittedAt).Milliseconds()
 		_ = a.Audit.Record(done)
 	}
-	values := map[string]string{"key": secret.Value(), "credential": credential}
+	// A client certificate's key signs the handshake inside the broker and is
+	// sent nowhere, so no response can echo it; only a header key is screened.
+	values := map[string]string{}
+	if entry.HeaderCredential() {
+		values["key"], values["credential"] = secret.Value(), credential
+	}
 	if entry.BasicUser {
 		// The encoded user name alone, as a vendor might echo it.
 		values["basic"] = strings.TrimPrefix(credential, "Basic ")
@@ -466,8 +502,14 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	needles := secretRepresentations(values)
 	p.relayScreened(w, out, needles, entry.MaxResponseBytes, finish, func(*http.Response) {
-		// The vendor may have rotated or revoked the key; read the newest next.
-		a.Keys.Invalidate(entry.Key)
+		// The vendor may have rotated or revoked the key or certificate; read
+		// the newest next.
+		if entry.HeaderCredential() {
+			a.Keys.Invalidate(entry.Key)
+		}
+		if entry.ClientCertificate != nil {
+			a.ClientCertificates.Invalidate(*entry.ClientCertificate)
+		}
 	}, nil)
 }
 
@@ -481,6 +523,11 @@ func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles 
 		if tooLarge != nil && tooLarge() {
 			finish(http.StatusRequestEntityTooLarge, "request_too_large")
 			refuseWith(w, http.StatusRequestEntityTooLarge, "request_too_large")
+			return
+		}
+		if p.certificateRejected(out, err) {
+			finish(http.StatusServiceUnavailable, "client_cert_rejected")
+			refuse(w, "client_cert_rejected")
 			return
 		}
 		finish(http.StatusBadGateway, "upstream_error")

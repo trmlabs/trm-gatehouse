@@ -1,8 +1,12 @@
 package mitm
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/binary"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,11 +51,81 @@ func isGRPC(r *http.Request) bool {
 }
 
 // grpcCompressedRequest reports a gRPC call whose messages the client
-// compressed. The broker could not check them for decoys or placeholders,
-// so the call is refused.
+// compressed with anything but gzip. The broker could not check them for
+// decoys or placeholders, so the call is refused. gzip, which some clients
+// send unasked (Temporal's Rust-based SDKs, Python's among them), is
+// decompressed and forwarded uncompressed (grpcPlainMessages).
 func grpcCompressedRequest(r *http.Request) bool {
 	enc := r.Header.Get("Grpc-Encoding")
-	return enc != "" && enc != "identity"
+	return enc != "" && enc != "identity" && enc != "gzip"
+}
+
+// grpcPlainMessages rewrites a gRPC request body as the same messages, each
+// uncompressed, so every byte the broker checks is a byte the upstream reads;
+// the broker never forwards grpc-encoding. A message flagged compressed is
+// gunzipped, and only when the call names gzip. A body that does not split
+// into whole messages, or a message that does not decompress, is refused as
+// request_shape, and messages past limit once decompressed as
+// request_too_large.
+func grpcPlainMessages(body []byte, encoding string, limit int64) ([]byte, string) {
+	out := make([]byte, 0, len(body))
+	for len(body) > 0 {
+		if len(body) < 5 {
+			return nil, "request_shape"
+		}
+		flag, size := body[0], binary.BigEndian.Uint32(body[1:5])
+		if uint64(len(body)-5) < uint64(size) {
+			return nil, "request_shape"
+		}
+		message := body[5 : 5+size]
+		body = body[5+size:]
+		switch {
+		case flag == 1 && encoding == "gzip":
+			zr, err := gzip.NewReader(bytes.NewReader(message))
+			if err != nil {
+				return nil, "request_shape"
+			}
+			room := limit - int64(len(out)) - 5
+			if room < 0 {
+				return nil, "request_too_large"
+			}
+			message, err = io.ReadAll(io.LimitReader(zr, room+1))
+			if err != nil {
+				return nil, "request_shape"
+			}
+		case flag != 0:
+			return nil, "request_shape"
+		}
+		if int64(len(out))+5+int64(len(message)) > limit {
+			return nil, "request_too_large"
+		}
+		out = append(out, 0, 0, 0, 0, 0)
+		binary.BigEndian.PutUint32(out[len(out)-4:], uint32(len(message))) // #nosec G115 -- bounded by limit, at most 1 GiB
+		out = append(out, message...)
+	}
+	return out, ""
+}
+
+// grpcBodyStatus is the HTTP status of a grpcPlainMessages refusal.
+func grpcBodyStatus(outcome string) int {
+	if outcome == "request_too_large" {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
+// authorityMatches reports whether a request inside a tunnel names the
+// tunnel's host: target itself, the host alone when the port is the scheme's
+// default, or, over HTTP/2, the host alone on any port. gRPC clients often
+// send the bare host as the authority: grpc-go when the client sets a TLS
+// server name, and Temporal's Rust-based SDKs their TLS domain. The request
+// still goes to the tunnel's own port.
+func authorityMatches(r *http.Request, target string) bool {
+	if r.Host == target || r.Host == hostHeaderForScheme("https", target) {
+		return true
+	}
+	host, _, err := net.SplitHostPort(target)
+	return err == nil && viaHTTP2(r.Context()) && r.Host == host
 }
 
 // prepareGRPC sets the gRPC protocol headers the broker owns on an upstream
@@ -269,14 +343,33 @@ func framesSafe(needles [][]byte) bool {
 // worker's request arrived over HTTP/2, which a gRPC server needs, else the
 // HTTP/1.1 transport. The HTTP/2 one is built from the HTTP/1.1 one on first
 // use, with its dialer, egress checks and TLS verification.
+// A request that presents a client certificate takes that certificate's
+// transport instead (clientcert.go).
 func (p *Proxy) upstreamFor(out *http.Request) http.RoundTripper {
-	if !viaHTTP2(out.Context()) {
+	h2 := viaHTTP2(out.Context())
+	if presented, ok := clientCertificateFrom(out.Context()); ok {
+		return p.certificateUpstream(presented, h2)
+	}
+	if !h2 {
 		return p.upstream
 	}
 	if t := p.h2Upstream.Load(); t != nil {
 		return t
 	}
+	t := p.newUpstream(true)
+	if p.h2Upstream.CompareAndSwap(nil, t) {
+		return t
+	}
+	return p.h2Upstream.Load()
+}
+
+// newUpstream builds a transport from the HTTP/1.1 one, with its dialer,
+// egress checks and TLS verification; for HTTP/2, HTTP/2 only.
+func (p *Proxy) newUpstream(h2 bool) *http.Transport {
 	t := p.upstream.Clone()
+	if !h2 {
+		return t
+	}
 	t.Protocols = new(http.Protocols)
 	t.Protocols.SetHTTP2(true)
 	// Calls share connections, as HTTP/2 intends. Strict mode turns off
@@ -286,10 +379,7 @@ func (p *Proxy) upstreamFor(out *http.Request) http.RoundTripper {
 	// REFUSED_STREAM). Without HTTP/1.1 here, an upstream that does not
 	// offer HTTP/2 fails the call rather than reusing HTTP/1.1 connections.
 	t.DisableKeepAlives = false
-	if p.h2Upstream.CompareAndSwap(nil, t) {
-		return t
-	}
-	return p.h2Upstream.Load()
+	return t
 }
 
 // grpcCompressedResponse reports a gRPC response that compresses its

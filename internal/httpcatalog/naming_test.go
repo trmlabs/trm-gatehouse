@@ -48,6 +48,30 @@ func TestKeyPrefixSetting(t *testing.T) {
 	}
 }
 
+// A client certificate's path follows the same key prefix as an entry's key,
+// so the broker's read grant on the prefix covers both.
+func TestKeyPrefixAppliesToClientCertificates(t *testing.T) {
+	t.Cleanup(func() { _ = SetKeyPrefix("") })
+	doc := func(path string) []byte {
+		return []byte(`{"entries":[{"name":"reads","host":"rpc.example.com","http2":true,"pathPrefixes":["/example.v1.Reads/Get"],"methods":["POST"],` +
+			`"clientCertificate":{"mount":"gatehouse","path":"` + path + `"},"pools":["pool-agent"]}]}`)
+	}
+	if _, err := Parse(doc("vendors/example-mtls")); err != nil {
+		t.Fatalf("default prefix: %v", err)
+	}
+	if err := SetKeyPrefix("agents/keys"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(doc("agents/keys/example-mtls")); err != nil {
+		t.Fatalf("certificate under the set prefix: %v", err)
+	}
+	for _, path := range []string{"vendors/example-mtls", "agents/keys", "agents/keysx/example-mtls", "agents/keys/../example-mtls"} {
+		if _, err := Parse(doc(path)); err == nil || !strings.Contains(err.Error(), "a path under agents/keys/") {
+			t.Errorf("%s: err=%v, want refused naming the prefix", path, err)
+		}
+	}
+}
+
 // An operator with its own role naming sets the pattern. Roles are still
 // named for the catalog's environment, keep the -readonly or -readwrite
 // suffix that decides access, and stay plain Vault names.

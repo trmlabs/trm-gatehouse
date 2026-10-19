@@ -187,6 +187,7 @@ Passing codes answered with 503 and `Retry-After`, whatever check refused them:
 | `session_missing` | The connection reached the broker without the runner session token its pool requires. The broker closes the connection, so the retry opens a new one, which carries a session that has arrived since. |
 | `entitlement_unavailable` | The directory did not answer the access check. |
 | `key_unavailable` | The destination key could not be read from Vault. |
+| `client_cert_unavailable` | The client certificate the broker presents to the destination could not be read from Vault. |
 | `token_unavailable` | A short-lived token for the destination could not be minted. |
 | `target_lookup` | GitHub could not be asked what a GraphQL request's pull request or label is, so the broker could not check it. |
 | `seed_unavailable` | The browser session could not be prepared. |
@@ -202,6 +203,10 @@ Lasting codes answered with 503 and no `Retry-After`, which waiting does not cle
 | `key_deleted` | The destination key was deleted, destroyed or emptied in Vault, which revokes it. |
 | `key_not_header_safe` | The key stored for the destination holds a byte outside printable ASCII (0x21 to 0x7e), such as a trailing newline, or is longer than 8192 bytes. The operator must rewrite it. |
 | `key_not_basic_pair` | The destination takes its key as HTTP Basic credentials, and the key stored for it is not a `user:password` pair with both halves set. The operator must rewrite it. |
+| `client_cert_deleted` | The client certificate the broker presents to the destination, or its key, was deleted or emptied in Vault. |
+| `client_cert_invalid` | The stored client certificate is not an end-entity certificate with its matching key. The operator must replace it. |
+| `client_cert_expired` | The destination's client certificate has expired or is not yet valid. The operator must reissue it. |
+| `client_cert_rejected` | The destination refused the broker's client certificate. The operator must fix the certificate or the destination's trust. |
 | `broker_misconfigured` | The broker is not set up to serve this kind of destination, for example it has no token minter for it. |
 | `seed_deadline` | The worker ends too soon for a browser session. Start a new run. |
 
