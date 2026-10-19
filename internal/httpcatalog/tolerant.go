@@ -340,7 +340,8 @@ type claim struct {
 }
 
 // entryClaims mirrors Parse's cross-entry checks: hosts, browser app hosts,
-// test users, git repository routes and path prefix routes.
+// test users, git repository routes, repositories with {requester} push
+// prefixes (errRequesterRepo) and path prefix routes.
 func entryClaims(e Entry) []claim {
 	hostKey := fmt.Sprintf("%s:%d", e.Host, e.Port)
 	claims := []claim{{key: "host " + hostKey, kind: e.Kind, shareable: e.Kind != "browser-session"}}
@@ -352,6 +353,9 @@ func entryClaims(e Entry) []claim {
 	if e.Git != nil {
 		for _, repo := range e.Git.Repos {
 			claims = append(claims, claim{key: "route " + hostKey + " " + e.Kind + " " + repo.Repo})
+			if e.Kind == "git" {
+				claims = append(claims, claim{key: "git repository " + repo.Repo, kind: e.Kind, shareable: !repo.perRequester()})
+			}
 		}
 	}
 	for _, prefix := range e.PathPrefixes {

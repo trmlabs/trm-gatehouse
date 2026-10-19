@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -157,13 +159,34 @@ func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 	} {
 		out, err := f.as(t, "bob", bob, "push", "origin", refspec)
 		row := f.audit.last()
-		if err == nil || row.Outcome != "ref_outside_binding" || row.Requester != "bob@example.com" || row.Branch == "" || !strings.Contains(refspec, row.Branch) {
+		if err == nil || row.Outcome != "ref_outside_binding" || row.Status != http.StatusOK || row.Requester != "bob@example.com" || row.Branch == "" || !strings.Contains(refspec, row.Branch) {
 			t.Fatalf("%s: %s %+v", name, out, row)
 		}
 		// git's own report says why, and where bob may push instead.
 		if !strings.Contains(out, "[remote rejected]") || !strings.Contains(out, "cursor/pool-agent/bob@example.com/") {
 			t.Errorf("%s: git showed no reason or prefix:\n%s", name, out)
 		}
+	}
+	// A push that asks for no report gets the plain refusal.
+	ca, err := os.ReadFile(f.caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(ca)
+	proxy, err := url.Parse(sessionShim(t, f.proxyURL, "bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy), TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	deleteAlices := pktLine(pushed+" "+strings.Repeat("0", 40)+" "+alices+"fix\x00agent=raw\n") + "0000"
+	resp, err := client.Post(f.remote("example-org/example-app")+"/git-receive-pack", "application/x-git-receive-pack-request", strings.NewReader(deleteAlices))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if row := f.audit.last(); resp.StatusCode != http.StatusForbidden || row.Outcome != "ref_outside_binding" || row.Status != http.StatusForbidden || row.Branch != alices+"fix" {
+		t.Fatalf("a push asking for no report: %d %+v", resp.StatusCode, row)
 	}
 	f.mu.Lock()
 	reached := f.receivePacks - packsBefore

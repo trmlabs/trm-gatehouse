@@ -452,6 +452,8 @@ func Parse(data []byte) (Catalog, error) {
 	users := map[KVRef]string{}
 	routes := map[string]string{}
 	kinds := map[string]string{}
+	gitRepos := map[string]string{}   // repository: the first git entry listing it
+	perRequester := map[string]bool{} // repository: a git entry listing it has {requester} push prefixes
 	for i := range file.Entries {
 		e := &file.Entries[i]
 		if err := e.normalize(); err != nil {
@@ -498,6 +500,17 @@ func Parse(data []byte) (Catalog, error) {
 					return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q share repository %s", other, e.Name, repo.Repo)
 				}
 				routes[route] = e.Name
+				if e.Kind != "git" {
+					continue
+				}
+				other, listed := gitRepos[repo.Repo]
+				perRequester[repo.Repo] = perRequester[repo.Repo] || repo.perRequester()
+				if listed && perRequester[repo.Repo] {
+					return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q share repository %s: %w", other, e.Name, repo.Repo, errRequesterRepo)
+				}
+				if !listed {
+					gitRepos[repo.Repo] = e.Name
+				}
 			}
 		}
 		for _, prefix := range e.PathPrefixes {

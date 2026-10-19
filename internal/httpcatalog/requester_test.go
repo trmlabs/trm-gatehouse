@@ -185,3 +185,58 @@ func TestPullRequestPrefixesStayOutOfRequesterBranches(t *testing.T) {
 		}
 	}
 }
+
+// A repository with {requester} push prefixes is listed by one git entry
+// only: a pool's pull request reach joins every git entry's push prefixes for
+// the repository, so a prefix in a second entry, on another port, could reach
+// into each requester's branches.
+func TestRequesterRepositoryInOneGitEntry(t *testing.T) {
+	catalog := func(first, second string) string {
+		return `{"pools":[{"name":"people","namespace":"n","serviceAccount":"people","identity":"cursor-session"}],"entries":[
+		{"name":"github","host":"github.com","kind":"git","pools":["people"],"git":{"appID":7,"installationID":42,"repos":[
+		  {"repo":"example-org/example-repo","access":"write",` + first + `}]}},
+		{"name":"github-alt","host":"github.com","port":8443,"kind":"git","pools":["people"],"git":{"appID":7,"installationID":42,"repos":[
+		  {"repo":"Example-Org/example-repo","access":"write",` + second + `}]}}]}`
+	}
+	requester := `"poolRefPrefixes":{"people":["refs/heads/cursor/people/{requester}/"]}`
+	for name, tc := range map[string]struct {
+		first, second string
+		ok            bool
+	}{
+		"neither per requester": {`"refPrefixes":["refs/heads/factory/"]`, `"refPrefixes":["refs/heads/cursor/"]`, true},
+		"the first":             {requester, `"refPrefixes":["refs/heads/cursor/"]`, false},
+		"the second":            {`"refPrefixes":["refs/heads/factory/"]`, requester, false},
+		"both":                  {requester, requester, false},
+	} {
+		_, err := Parse([]byte(catalog(tc.first, tc.second)))
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: %v", name, err)
+		}
+		if !tc.ok {
+			if c, dropped, err := ParseTolerant([]byte(catalog(tc.first, tc.second))); err != nil || len(dropped) != 2 || len(c.entries) != 0 {
+				t.Errorf("tolerant %s: %v %+v", name, err, dropped)
+			}
+		}
+	}
+}
+
+// Only a pool that names who runs each request takes a {requester} prefix.
+func TestRequesterPoolIdentities(t *testing.T) {
+	e := Entry{Kind: "git", Git: &GitBinding{Repos: []GitRepo{{Repo: "example-org/example-repo", Access: "write",
+		PoolRefPrefixes: map[string][]string{"p": {"refs/heads/cursor/p/{requester}/"}}}}}}
+	for identity, ok := range map[string]bool{
+		"claude-session": true, "cursor-session": true, "attested-person": true, IdentityCursorAutomation: true,
+		"workload": false, "none": false, "": false,
+	} {
+		if err := requesterGrantable(e, "p", Pool{Identity: identity}, true); (err == nil) != ok {
+			t.Errorf("%q: %v", identity, err)
+		}
+	}
+	if err := requesterGrantable(e, "p", Pool{Identity: "cursor-session"}, false); err == nil {
+		t.Error("an undefined pool took a {requester} prefix")
+	}
+	// Another pool's {requester} prefix asks nothing of this one.
+	if err := requesterGrantable(e, "q", Pool{Identity: "workload"}, true); err != nil {
+		t.Error(err)
+	}
+}

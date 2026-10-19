@@ -115,6 +115,28 @@ func (r GitRepo) pushTemplates(pool string) bool {
 	return false
 }
 
+// perRequester reports whether any push prefix of the repository, shared or
+// any pool's own, holds RequesterToken.
+func (r GitRepo) perRequester() bool {
+	prefixes := append([]string(nil), r.RefPrefixes...)
+	for _, own := range r.PoolRefPrefixes {
+		prefixes = append(prefixes, own...)
+	}
+	for _, prefix := range prefixes {
+		if _, ok := requesterTemplate(prefix); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// errRequesterRepo refuses a second git entry listing a repository with
+// {requester} push prefixes. A pool's pull request reach joins the push
+// prefixes of every git entry listing the repository (pushBranchPrefixes),
+// while overlappingPrefixes keeps prefixes apart within one entry only, so
+// another entry's prefix could reach into each requester's own branches.
+var errRequesterRepo = errors.New("a repository with {requester} push prefixes is listed by one git entry only")
+
 // requesterIdentities are the pool identities that name who runs each
 // request, so a {requester} prefix can name them.
 var requesterIdentities = map[string]bool{"claude-session": true, "cursor-session": true, "attested-person": true, IdentityCursorAutomation: true}
