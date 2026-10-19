@@ -116,7 +116,7 @@ end-to-end test harness's.
 | Git | `git clone https://github.com/<org>/<repo>` through the proxy | Nothing. Any `Authorization` header is refused. |
 | Google | The same proxy, with `CLOUDSDK_AUTH_ACCESS_TOKEN=__vault_GCP__` | `Authorization: Bearer` and the entry's placeholder |
 | PostgreSQL | `host=127.0.0.1`, one port per database (15000 for the harness's first, 15001 for the next), with that binding's `dbname` and `user` (`workload` in the harness) | The binding's placeholder password (`gatehouse-relay-placeholder` in the harness) |
-| PostgreSQL, routed | `host=127.0.0.1` and the pool's routed port, with `dbname` set to the catalog entry's name, so one port serves every database the pool is granted and a new catalog database needs no change to the worker. A sidecar that reaches more than one broker has one routed port per broker. | The listener's placeholder password |
+| PostgreSQL, routed | `host=127.0.0.1` and the pool's routed port, with `dbname` set to the catalog entry's name, so one port serves every database the pool is granted and a new catalog database needs no change to the worker. A sidecar that reaches more than one broker has one routed port per broker. The port declines the client's TLS request, so libpq's default `sslmode=prefer` connects in plaintext on loopback. | The listener's placeholder password |
 | Web app | A Playwright storage state from `https://<api host>/.gatehouse/browser-seed` | Nothing |
 
 - **Trust:** the worker must trust Gatehouse's interception certificate authority, at `/public/mitm-ca.crt` in the harness. Point `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` at it.

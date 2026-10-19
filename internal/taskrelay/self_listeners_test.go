@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -61,13 +62,9 @@ func TestSelfModeRoutedListenersValidation(t *testing.T) {
 		"malformed user":           func(c *FixedConfig) { c.PostgresListeners[0].User = "a b" },
 		"malformed placeholder":    func(c *FixedConfig) { c.PostgresListeners[0].Placeholder = "" },
 		"single shared-mode field": func(c *FixedConfig) { c.PostgresListener = &c.PostgresListeners[0] },
-		"more than four": func(c *FixedConfig) {
-			for port := 15434; len(c.PostgresListeners) < 5; port++ {
-				l := c.PostgresListeners[0]
-				l.Listen = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-				c.PostgresListeners = append(c.PostgresListeners, l)
-			}
-		},
+		"negative bound":           func(c *FixedConfig) { c.MaxPostgresListeners = -1 },
+		"bound past the ports":     func(c *FixedConfig) { c.MaxPostgresListeners = maxLoopbackPorts + 1 },
+		"more ports than a bound":  func(c *FixedConfig) { c.MaxPostgresListeners = 1 },
 	} {
 		c := selfListenerConfig()
 		mutate(&c)
@@ -83,6 +80,11 @@ func TestSelfModeRoutedListenersValidation(t *testing.T) {
 	if paired.Validate(time.Now()) == nil {
 		t.Error("routed ports on a paired relay accepted")
 	}
+	bounded := f.c
+	bounded.MaxPostgresListeners = 100
+	if bounded.Validate(time.Now()) == nil {
+		t.Error("a routed port bound on a paired relay accepted")
+	}
 	shared := f.c
 	shared.Sandbox, shared.Shared = SandboxConfig{}, sharedConfig()
 	shared.Connect = &ConnectConfig{Listen: "0.0.0.0:3128", Upstream: f.upstream(t, "broker.internal:443"), Routes: routesBroker}
@@ -92,6 +94,48 @@ func TestSelfModeRoutedListenersValidation(t *testing.T) {
 	shared.PostgresListeners = paired.PostgresListeners
 	if shared.Validate(time.Now()) == nil {
 		t.Error("sidecar routed ports on a shared proxy accepted")
+	}
+	shared.PostgresListeners, shared.MaxPostgresListeners = nil, 100
+	if shared.Validate(time.Now()) == nil {
+		t.Error("a routed port bound on a shared proxy accepted")
+	}
+}
+
+// manyListeners is a sidecar config with n routed ports, one per loopback
+// port from 20000 up.
+func manyListeners(n int) FixedConfig {
+	c := selfListenerConfig()
+	c.PostgresBindings = nil
+	c.PostgresListeners = make([]PostgresListenerConfig, n)
+	for i := range c.PostgresListeners {
+		l := selfListenerConfig().PostgresListeners[0]
+		l.Listen = net.JoinHostPort("127.0.0.1", strconv.Itoa(20000+i))
+		c.PostgresListeners[i] = l
+	}
+	return c
+}
+
+// The number of routed ports is a setting. Unset it allows ten thousand, far
+// beyond any worker; set, it is the bound, up to the loopback port space.
+func TestSelfModeRoutedListenerBound(t *testing.T) {
+	for name, tc := range map[string]struct {
+		listeners, bound int
+		ok               bool
+	}{
+		"a handful by default":          {listeners: 5, ok: true},
+		"two hundred by default":        {listeners: 200, ok: true},
+		"the default's last port":       {listeners: defaultMaxPostgresListeners, ok: true},
+		"one past the default":          {listeners: defaultMaxPostgresListeners + 1},
+		"the set bound":                 {listeners: 3, bound: 3, ok: true},
+		"one past the set bound":        {listeners: 4, bound: 3},
+		"a bound raised past a default": {listeners: defaultMaxPostgresListeners + 1, bound: 20000, ok: true},
+		"the largest bound":             {listeners: 3, bound: maxLoopbackPorts, ok: true},
+	} {
+		c := manyListeners(tc.listeners)
+		c.MaxPostgresListeners = tc.bound
+		if got := c.Validate(time.Now()) == nil; got != tc.ok {
+			t.Errorf("%s: accepted %v, want %v", name, got, tc.ok)
+		}
 	}
 }
 
@@ -158,7 +202,9 @@ func newLaneBroker(t *testing.T, cert tls.Certificate) *laneBroker {
 // Each routed port forwards the worker's database name to its own broker,
 // with that broker's proof and that lane's session token; the other broker
 // hears nothing of it. A name outside a listed port's databases is refused
-// before any broker is dialed.
+// before any broker is dialed. A client's SSLRequest, which libpq sends first
+// by default (sslmode=prefer), is declined with N on every sidecar port, a
+// fixed binding's included, and the session goes on in plaintext.
 func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 	f := newRelayFixture(t)
 	lanes := map[string]*laneBroker{"lane": newLaneBroker(t, f.cert), "other-lane": newLaneBroker(t, f.cert)}
@@ -175,12 +221,15 @@ func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 		PostgresListeners: []PostgresListenerConfig{
 			{Listen: freeAddress(t), Upstream: upstream("lane"), Routes: routesBroker, User: "workload", Placeholder: "gatehouse-relay-placeholder"},
 			{Listen: freeAddress(t), Upstream: upstream("other-lane"), Databases: []string{"reports"}, User: "workload", Placeholder: "gatehouse-relay-placeholder"},
+		},
+		PostgresBindings: []PostgresConfig{
+			{Listen: freeAddress(t), Upstream: upstream("lane"), Database: "orders", User: "workload", Placeholder: "gatehouse-relay-placeholder"},
 		}}
 	if e := c.Validate(time.Now()); e != nil {
 		t.Fatalf("config refused: %v", e)
 	}
 	go func() { _ = Run(t.Context(), c) }()
-	startup := func(listen, database string) (byte, []byte) {
+	startup := func(listen, database string, sslFirst bool) (byte, []byte) {
 		var conn net.Conn
 		var e error
 		for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
@@ -193,6 +242,13 @@ func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 		}
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if sslFirst {
+			_, _ = conn.Write(binary.BigEndian.AppendUint32([]byte{0, 0, 0, 8}, sslRequestCode))
+			answer := make([]byte, 1)
+			if _, e := io.ReadFull(conn, answer); e != nil || answer[0] != 'N' {
+				t.Fatalf("%s: SSLRequest answered %q %v, want N", database, answer, e)
+			}
+		}
 		b, _ := (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber, Parameters: map[string]string{"user": "workload", "database": database}}).Encode(nil)
 		_, _ = conn.Write(b)
 		typ, body, e := readPGFrame(conn, 8192)
@@ -225,14 +281,21 @@ func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	startup(c.PostgresListeners[0].Listen, "any-catalog-name")
+	startup(c.PostgresListeners[0].Listen, "any-catalog-name", false)
 	expect("lane", "any-catalog-name")
 	quiet("other-lane")
-	startup(c.PostgresListeners[1].Listen, "reports")
+	startup(c.PostgresListeners[0].Listen, "any-catalog-name", true)
+	expect("lane", "any-catalog-name")
+	startup(c.PostgresListeners[1].Listen, "reports", true)
 	expect("other-lane", "reports")
 	quiet("lane")
-	if typ, body := startup(c.PostgresListeners[1].Listen, "not-listed"); typ != 'E' || sqlState(body) != "3D000" {
-		t.Fatalf("an unlisted name: %c %s", typ, sqlState(body))
+	startup(c.PostgresBindings[0].Listen, "orders", true)
+	expect("lane", "orders")
+	quiet("other-lane")
+	for _, sslFirst := range []bool{false, true} {
+		if typ, body := startup(c.PostgresListeners[1].Listen, "not-listed", sslFirst); typ != 'E' || sqlState(body) != "3D000" {
+			t.Fatalf("an unlisted name: %c %s", typ, sqlState(body))
+		}
 	}
 	quiet("lane")
 	quiet("other-lane")

@@ -41,7 +41,12 @@ type FixedConfig struct {
 	// to the worker. Each names its own upstream, so a sidecar can reach more
 	// than one broker, one port each. See PostgresListenerConfig.
 	PostgresListeners []PostgresListenerConfig `json:"postgresListeners,omitempty"`
-	Browser           *BrowserConfig           `json:"browser,omitempty"`
+	// MaxPostgresListeners bounds PostgresListeners (self mode only; default
+	// 10000, up to 65535). Each routed port needs its own loopback port, so
+	// the port space is the only real ceiling; the bound only catches a
+	// runaway rendered list.
+	MaxPostgresListeners int            `json:"maxPostgresListeners,omitempty"`
+	Browser              *BrowserConfig `json:"browser,omitempty"`
 	// Self runs the relay as a sidecar in the worker's own Pod: loopback,
 	// plaintext listeners only, and no Kubernetes pairing, because the broker
 	// verifies this Pod's token and address on every connection.
@@ -213,8 +218,10 @@ func (c FixedConfig) Validate(now time.Time) error {
 	if (c.AdminListen != "" || c.PostgresListener != nil || c.TLS != nil) && c.Shared == nil {
 		return errConfig
 	}
-	// Routed ports in a worker's own Pod are a sidecar's alone.
-	if len(c.PostgresListeners) != 0 && (!c.Self || c.Shared != nil) {
+	// Routed ports in a worker's own Pod are a sidecar's alone, and so is the
+	// bound on them.
+	if ((len(c.PostgresListeners) != 0 || c.MaxPostgresListeners != 0) && (!c.Self || c.Shared != nil)) ||
+		c.MaxPostgresListeners < 0 || c.MaxPostgresListeners > maxLoopbackPorts {
 		return errConfig
 	}
 	// Activity reaches the broker over the CONNECT upstream.
@@ -340,7 +347,7 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 			return errConfig
 		}
 	}
-	if len(c.PostgresListeners) > maxSelfPostgresListeners {
+	if len(c.PostgresListeners) > c.postgresListenerLimit() {
 		return errConfig
 	}
 	for _, l := range c.PostgresListeners {
@@ -355,9 +362,20 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 	return nil
 }
 
-// maxSelfPostgresListeners bounds a sidecar's routed ports: one per broker it
-// reaches, and a worker reaches very few.
-const maxSelfPostgresListeners = 4
+// Defaults for a sidecar's routed ports. The ceiling is the loopback port
+// space: every listener needs a port of its own.
+const (
+	defaultMaxPostgresListeners = 10000
+	maxLoopbackPorts            = 65535
+)
+
+// postgresListenerLimit is how many routed ports a sidecar may serve.
+func (c FixedConfig) postgresListenerLimit() int {
+	if c.MaxPostgresListeners == 0 {
+		return defaultMaxPostgresListeners
+	}
+	return c.MaxPostgresListeners
+}
 
 // validRoutes reports whether a routed listener names exactly one routing:
 // routes "broker", or a list of distinct database names.

@@ -105,10 +105,12 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 			return
 		}
 	}
-	// A shared proxy's plaintext listener declines TLS and GSS encryption, so
-	// a client set to sslmode=prefer goes on in plaintext; one that requires
-	// TLS stops. The next packet must be the startup.
-	if code := binary.BigEndian.Uint32(packet[4:8]); r.pgTLS == nil && r.config.Shared != nil && r.config.TLSCertFile == "" && len(packet) == 8 && (code == sslRequestCode || code == gssRequestCode) {
+	// A shared proxy's plaintext listener, and a sidecar's loopback one,
+	// declines TLS and GSS encryption, so a client set to sslmode=prefer (the
+	// libpq default) goes on in plaintext; one that requires TLS stops. The
+	// next packet must be the startup.
+	plaintext := r.config.Self || (r.config.Shared != nil && r.config.TLSCertFile == "")
+	if code := binary.BigEndian.Uint32(packet[4:8]); r.pgTLS == nil && plaintext && len(packet) == 8 && (code == sslRequestCode || code == gssRequestCode) {
 		if _, e = conn.Write([]byte{'N'}); e != nil {
 			return
 		}
