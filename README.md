@@ -44,14 +44,6 @@ allow is refused.
 Gatehouse release, and no version is supported for security fixes yet
 ([SECURITY.md](SECURITY.md)).
 
-| Part | State |
-|---|---|
-| HTTP API keys, PostgreSQL logins and GitHub | Running at TRM for two agent platforms. The [local demo](#try-it-in-5-minutes) also tests PostgreSQL logins, and HTTP keys in the strict profile, against a real secrets manager and database |
-| Google Cloud and browser sign-in | Built and tested on `main` |
-| Limiting an entry to people in named groups | Built. Off until a deployment turns on the directory lookup, which supports Microsoft Entra ID only |
-| Upstream Agent Vault features (vaults, web UI, proposals, TypeScript SDK) | Inherited unchanged. Gatehouse's strict profile does not use them |
-| Production | Not live |
-
 ## Try it in 5 minutes
 
 One container brings a test secrets manager and a test PostgreSQL database,

@@ -199,8 +199,8 @@ func trackedFiles(t *testing.T) (string, []string) {
 func TestProblems(t *testing.T) {
 	for line, want := range map[string]bool{
 		`"host": "api.staging.example.com"`:                  false,
-		`"host": "api.corp.trmlabs.com"`:                     true,
-		`"https://api.corp.trmlabs.com/v1/x"`:                true,
+		`"host": "api.example.trmlabs.com"`:                  true,
+		`"https://api.example.trmlabs.com/v1/x"`:             true,
 		`annotation gatehouse.trmlabs.com/requester`:         false,
 		`"https://trmlabs.com/email"`:                        false,
 		`alice@example.com`:                                  false,
