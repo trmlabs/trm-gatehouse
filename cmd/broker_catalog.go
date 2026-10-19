@@ -32,8 +32,7 @@ writes the catalog to Vault.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		suffixes, _ := cmd.Flags().GetStringSlice("allowed-host-suffix")
 		requirePools, _ := cmd.Flags().GetBool("require-pools")
-		env, _ := cmd.Flags().GetString("environment")
-		if err := catalogEnvironment(func(string) string { return env }); err != nil {
+		if err := catalogSettings(validateSettings(cmd)); err != nil {
 			return err
 		}
 		registry, _ := cmd.Flags().GetString("image-registry")

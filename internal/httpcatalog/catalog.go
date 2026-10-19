@@ -349,10 +349,11 @@ var (
 func ValidMount(mount string) bool { return len(mount) <= 127 && vaultMount.MatchString(mount) }
 
 // Environment, when set (AGENT_VAULT_CATALOG_ENVIRONMENT, such as staging),
-// requires every database role to be that environment's named role:
+// requires every database role to be that environment's named role, by the
+// role naming rule (SetRolePattern; by default
 // <env>.<region>.<cluster>.<name>-readonly or -readwrite, or the
 // Gatehouse-only role for the same connection, the same name prefixed with
-// "gatehouse-".
+// "gatehouse-").
 var Environment atomic.Value // string
 
 func environment() string {
@@ -371,8 +372,7 @@ func validRole(role string) bool {
 	if env == "" {
 		return rolesWithoutEnvironment && vaultSegment.MatchString(role)
 	}
-	pattern := `^(gatehouse-)?` + regexp.QuoteMeta(env) + `\.[a-z]+\.[a-z0-9]+\.[a-z0-9-]+-(readonly|readwrite)$`
-	return regexp.MustCompile(pattern).MatchString(role)
+	return vaultSegment.MatchString(role) && environmentRole(env).MatchString(role)
 }
 
 var allowedMethods = map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
@@ -618,8 +618,8 @@ func (e *Entry) normalize() error {
 	if !placeholder.MatchString(e.Placeholder) {
 		return errors.New("placeholder must look like __vault_NAME__")
 	}
-	if !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !vendorKeyPath.MatchString(e.Key.Path) || e.Key.Field == "" {
-		return errors.New("key needs a KV mount, a path under vendors/ and a field")
+	if prefix, path := keyPath(); !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !path.MatchString(e.Key.Path) || e.Key.Field == "" {
+		return fmt.Errorf("key needs a KV mount, a path under %s/ and a field", prefix)
 	}
 	if len(e.Pools) == 0 {
 		return errors.New("at least one pool is required")

@@ -145,8 +145,12 @@ func runAuditVerify(r io.Reader, w io.Writer, verifier auditchain.Verifier) erro
 
 func init() {
 	f := auditVerifyCmd.Flags()
+	hmacMount := os.Getenv(kvMountEnv)
+	if hmacMount == "" {
+		hmacMount = defaultKVMount
+	}
 	f.String("input", "-", "file of exported rows, or - for stdin")
-	f.String("hmac-mount", "gatehouse", "KV version 2 mount holding the HMAC key")
+	f.String("hmac-mount", hmacMount, "KV version 2 mount holding the HMAC key; "+kvMountEnv+" sets the default")
 	f.String("hmac-path", "", "KV path of the HMAC key")
 	f.String("hmac-field", "key", "field holding the base64 HMAC key")
 	f.String("transit-mount", "transit", "Transit mount of the checkpoint key")
