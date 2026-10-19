@@ -599,7 +599,7 @@ func fakeDNSAnswer(query []byte, records map[string][]netip.Addr) ([]byte, error
 		return nil, err
 	}
 
-	addrs, ok := records[q.Name.String()]
+	addrs, ok := records[strings.ToLower(q.Name.String())]
 	rcode := dnsmessage.RCodeSuccess
 	if !ok {
 		rcode = dnsmessage.RCodeNameError
@@ -944,5 +944,162 @@ func TestEgressRangesFileNeverOpensBlockedAddresses(t *testing.T) {
 				t.Fatalf("refused for another reason: %v", err)
 			}
 		})
+	}
+}
+
+func TestParsePrivateHosts(t *testing.T) {
+	h := ParsePrivateHosts(" Vault.Example.Internal. ,*.db.example.internal, localhost,"+
+		"10.0.0.1,10.0.0.0/8,::1,https://vault.example.internal,*,*.internal,*.*.example.internal,db.*.example.internal,-bad.example,a..b,"+
+		"1.2.3.4.5,0x7f.1,1.0x7f,127.1,"+strings.Repeat("a", 64)+".example", "test")
+	for host, want := range map[string]bool{
+		"vault.example.internal":        true,
+		"VAULT.example.internal.":       true,
+		"localhost":                     true,
+		"orders.db.example.internal":    true,
+		"a.b.db.example.internal":       true,
+		"db.example.internal":           false, // the suffix itself is not under it
+		"xdb.example.internal":          false,
+		"orders.db.example.internal.io": false,
+		"other.example.internal":        false,
+		"vault.example.internal.evil":   false,
+		"10.0.0.1":                      false,
+		"::1":                           false,
+		"fe80::1%eth0":                  false,
+		"anything.internal":             false,
+		"1.2.3.4.5":                     false,
+		"0x7f.1":                        false,
+		"127.1":                         false,
+		"":                              false,
+	} {
+		if got := h.Match(host); got != want {
+			t.Errorf("Match(%q) = %v, want %v", host, got, want)
+		}
+	}
+	if len(h.exact) != 2 || len(h.suffixes) != 1 {
+		t.Fatalf("parsed %v exact and %v suffixes; every other entry must be skipped", h.exact, h.suffixes)
+	}
+	if !ParsePrivateHosts("", "test").empty() || !ParsePrivateHosts(" , ,", "test").empty() {
+		t.Fatal("an empty list names a host")
+	}
+}
+
+// A listed private host reaches the private address DNS gives it. An IP
+// literal, an unlisted name that resolves to the same address, and a listed
+// name that resolves to a metadata address are all refused, and none of them
+// is connected to.
+func TestPrivateHostsAllowOnlyListedNames(t *testing.T) {
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+	accepted := make(chan struct{}, 8)
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- struct{}{}
+			_ = c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	resolver := fakeResolver(t, map[string][]netip.Addr{
+		"vault.example.internal.":     {netip.MustParseAddr("127.0.0.1")},
+		"orders.db.example.internal.": {netip.MustParseAddr("127.0.0.1")},
+		"vendor.example.com.":         {netip.MustParseAddr("127.0.0.1")},
+		"imds.db.example.internal.":   {netip.MustParseAddr("169.254.169.254")},
+	})
+	public, internal := newSafeDialer(false, nil), newSafeDialer(true, nil)
+	public.Resolver, internal.Resolver = resolver, resolver
+	dial := withPrivateHosts(public, internal, ParsePrivateHosts("vault.example.internal,*.db.example.internal", "test"))
+	for _, host := range []string{"vault.example.internal", "orders.db.example.internal", "ORDERS.db.example.internal."} {
+		conn, err := dial(context.Background(), "tcp", net.JoinHostPort(host, port))
+		if err != nil {
+			t.Fatalf("%s: listed private host refused: %v", host, err)
+		}
+		_ = conn.Close()
+		<-accepted
+	}
+	for _, host := range []string{"127.0.0.1", "vendor.example.com", "imds.db.example.internal", "db.example.internal"} {
+		conn, err := dial(context.Background(), "tcp", net.JoinHostPort(host, port))
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("%s: dialed", host)
+		}
+	}
+	select {
+	case <-accepted:
+		t.Fatal("a refused dial was connected")
+	case <-time.After(50 * time.Millisecond):
+	}
+	// With no host listed the private block is unchanged.
+	if conn, err := withPrivateHosts(public, internal, PrivateHosts{})(context.Background(), "tcp", net.JoinHostPort("vault.example.internal", port)); err == nil {
+		_ = conn.Close()
+		t.Fatal("private address dialed with no private hosts listed")
+	}
+}
+
+// The egress ranges still confine a listed private host, and a private
+// address in the egress file opens nothing for a name that is not listed.
+func TestPrivateHostsStayInsideEgressRanges(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", "")
+	listener := acceptAndClose(t)
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	dial := func(hosts, ranges, target string) error {
+		t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", hosts)
+		t.Setenv("AGENT_VAULT_EGRESS_RANGES", ranges)
+		conn, err := SafeDialContext(false)(context.Background(), "tcp", net.JoinHostPort(target, port))
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	if err := dial("", "127.0.0.0/8,::1/128", "localhost"); err == nil {
+		t.Fatal("private address dialed with no private hosts listed")
+	}
+	if err := dial("localhost", "127.0.0.0/8,::1/128", "localhost"); err != nil {
+		t.Fatalf("listed private host inside the egress ranges refused: %v", err)
+	}
+	if err := dial("localhost", "", "localhost"); err != nil {
+		t.Fatalf("listed private host with no egress ranges refused: %v", err)
+	}
+	if err := dial("localhost", "203.0.113.0/24", "localhost"); err == nil {
+		t.Fatal("listed private host outside the egress ranges dialed")
+	}
+	if err := dial("localhost", "127.0.0.0/8,::1/128", "127.0.0.1"); err == nil {
+		t.Fatal("an address literal dialed because a private host is listed")
+	}
+	// Globally allowed private ranges are unchanged by the list.
+	t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("allowPrivate dial refused: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// A private address the egress file lists is reachable only by a listed
+// private host's name: a stolen writer of the file cannot open an internal
+// address to any other name.
+func TestEgressFilePrivateAddressServesOnlyListedHosts(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	listener := acceptAndClose(t)
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	file := filepath.Join(t.TempDir(), "addresses")
+	if err := os.WriteFile(file, []byte("127.0.0.1\n::1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", file)
+	t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", "localhost")
+	dial := SafeDialContext(false)
+	conn, err := dial(context.Background(), "tcp", net.JoinHostPort("localhost", port))
+	if err != nil {
+		t.Fatalf("listed private host refused: %v", err)
+	}
+	_ = conn.Close()
+	if conn, err := dial(context.Background(), "tcp", listener.Addr().String()); err == nil {
+		_ = conn.Close()
+		t.Fatal("the file's private address dialed by literal")
 	}
 }
