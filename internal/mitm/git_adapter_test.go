@@ -397,7 +397,7 @@ func TestReceivePackCommandParsing(t *testing.T) {
 	zero, one := strings.Repeat("0", 40), strings.Repeat("a", 40)
 	pkt := func(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 	body := pkt("shallow "+one+"\n") + pkt(zero+" "+one+" refs/heads/cursor/a\x00report-status side-band-64k\n") + pkt(one+" "+zero+" refs/heads/cursor/b\n") + "0000PACK..."
-	consumed, refs, capabilities, err := readReceivePackCommands(strings.NewReader(body))
+	consumed, refs, capabilities, err := readReceivePackCommands(strings.NewReader(body), httpcatalog.DefaultMaxPushCommandBytes)
 	if err != nil || strings.Join(refs, ",") != "refs/heads/cursor/a,refs/heads/cursor/b" || string(consumed)+"PACK..." != body ||
 		strings.Join(capabilities, " ") != "report-status side-band-64k" {
 		t.Fatalf("parse: %v %v %v", refs, capabilities, err)
@@ -409,8 +409,21 @@ func TestReceivePackCommandParsing(t *testing.T) {
 		"bad length":       "00zz",
 		"truncated":        pkt(zero + " " + one + " refs/heads/x\n")[:10],
 	} {
-		if _, _, _, err := readReceivePackCommands(strings.NewReader(bad)); err == nil {
+		if _, _, _, err := readReceivePackCommands(strings.NewReader(bad), httpcatalog.DefaultMaxPushCommandBytes); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+	// The default clears 10,000 refs in one push; a list past the entry's
+	// limit is refused.
+	var many strings.Builder
+	for i := range 10000 {
+		many.WriteString(pkt(zero + " " + one + " refs/heads/cursor/pool-a/alice@example.com/branch-" + strconv.Itoa(i) + "\n"))
+	}
+	many.WriteString("0000")
+	if _, refs, _, err := readReceivePackCommands(strings.NewReader(many.String()), httpcatalog.DefaultMaxPushCommandBytes); err != nil || len(refs) != 10000 {
+		t.Errorf("10,000 refs: %d %v", len(refs), err)
+	}
+	if _, _, _, err := readReceivePackCommands(strings.NewReader(many.String()), 1<<20); err == nil {
+		t.Error("a command list over the limit was accepted")
 	}
 }

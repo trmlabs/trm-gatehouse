@@ -678,15 +678,18 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 			}
 		}
 	}
-	// A pool's own pull request prefixes under its own push prefixes, the git
-	// entry's shared push prefixes and a git entry on another host cross
-	// nothing.
-	sharedPush := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
+	// A git entry on another host crosses too: a pool's pull request reach
+	// draws on every git entry listing the repository.
 	otherHost := strings.NewReplacer(`"name":"github"`, `"name":"elsewhere"`, `"host":"github.com"`, `"host":"git.example.com"`).Replace(poolsGitEntry)
+	if _, err := Parse([]byte(`{"entries":[` + otherHost + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["cursor/pool-a/"]}`) + `]}`)); err == nil || !strings.Contains(err.Error(), "overlaps push prefix") {
+		t.Errorf("a git entry on other host: %v", err)
+	}
+	// A pool's own pull request prefixes under its own push prefixes and the
+	// git entry's shared push prefixes cross nothing.
+	sharedPush := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
 	for name, doc := range map[string]string{
-		"its own push prefix":       poolsGitEntry + `,` + heads("poolPullRequestPrefixes", `{"pool-a":["cursor/pool-a/sub/"]}`),
-		"a shared push prefix":      sharedPush + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["shared/x/"]}`),
-		"a git entry on other host": otherHost + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["cursor/pool-a/"]}`),
+		"its own push prefix":  poolsGitEntry + `,` + heads("poolPullRequestPrefixes", `{"pool-a":["cursor/pool-a/sub/"]}`),
+		"a shared push prefix": sharedPush + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["shared/x/"]}`),
 	} {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
 			t.Errorf("%s refused: %v", name, err)
@@ -883,5 +886,37 @@ func TestGitHubCIRestartsUseThePoolsOwnPrefixes(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A git entry bounds each push's command list: 16 MiB by default, never more
+// than the entry's request limit, and only git entries take the setting.
+func TestMaxPushCommandBytes(t *testing.T) {
+	entry := func(kind, host, extra string) string {
+		return `{"entries":[{"name":"e","host":"` + host + `","kind":"` + kind + `","pools":["p"],` + extra +
+			`"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write"}]` + `%s}}]}`
+	}
+	for name, tc := range map[string]struct {
+		doc  string
+		want int64 // -1: refused
+	}{
+		"default":                {fmt.Sprintf(entry("git", "github.com", ""), ""), DefaultMaxPushCommandBytes},
+		"set":                    {fmt.Sprintf(entry("git", "github.com", ""), `,"maxPushCommandBytes":67108864`), 64 << 20},
+		"under a small request":  {fmt.Sprintf(entry("git", "github.com", `"maxRequestBytes":1048576,`), ""), 1 << 20},
+		"over the request limit": {fmt.Sprintf(entry("git", "github.com", `"maxRequestBytes":1048576,`), `,"maxPushCommandBytes":2097152`), -1},
+		"negative":               {fmt.Sprintf(entry("git", "github.com", ""), `,"maxPushCommandBytes":-1`), -1},
+	} {
+		c, err := Parse([]byte(tc.doc))
+		switch {
+		case tc.want < 0 && err == nil:
+			t.Errorf("%s accepted", name)
+		case tc.want >= 0 && (err != nil || c.entries[0].Git.MaxPushCommandBytes != tc.want):
+			t.Errorf("%s: %v %+v", name, err, c.entries)
+		}
+	}
+	api := `{"entries":[{"name":"api","host":"api.github.com","kind":"github-api","pools":["p"],"git":{"appID":7,"installationID":42,"maxPushCommandBytes":1048576,
+	  "repos":[{"repo":"example-org/example-repo","access":"write","operations":["pr.read"]}]}}]}`
+	if _, err := Parse([]byte(api)); err == nil || !strings.Contains(err.Error(), "maxPushCommandBytes") {
+		t.Errorf("github-api: %v", err)
 	}
 }

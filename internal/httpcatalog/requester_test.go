@@ -184,6 +184,19 @@ func TestPullRequestPrefixesStayOutOfRequesterBranches(t *testing.T) {
 			}
 		}
 	}
+	// So does a git entry on any other host listing the repository: a pool's
+	// pull request reach draws on every git entry listing it.
+	elsewhere := `{"pools":[{"name":"people","namespace":"n","serviceAccount":"people","identity":"cursor-session"}],"entries":[
+	{"name":"git","host":"git.example.com","kind":"git","pools":["people"],"git":{"appID":7,"installationID":42,"repos":[
+	  {"repo":"example-org/example-repo","access":"write","poolRefPrefixes":{"people":["refs/heads/cursor/people/{requester}/"]}}]}},
+	{"name":"github-api","host":"api.example.com","kind":"github-api","pools":["people"],"git":{"appID":7,"installationID":42,"repos":[
+	  {"repo":"example-org/example-repo","access":"write","operations":["pr.read","pr.comment"],"pullRequestPrefixes":["cursor/"]}]}}]}`
+	if _, err := Parse([]byte(elsewhere)); err == nil || !strings.Contains(err.Error(), "overlaps push prefix") {
+		t.Errorf("a git entry on another host: %v", err)
+	}
+	if c, dropped, err := ParseTolerant([]byte(elsewhere)); err != nil || len(dropped) != 2 || len(c.entries) != 0 {
+		t.Errorf("tolerant, a git entry on another host: %v %+v", err, dropped)
+	}
 }
 
 // A repository with {requester} push prefixes is listed by one git entry

@@ -92,7 +92,17 @@ type GitBinding struct {
 	AppID          int64     `json:"appID"`
 	InstallationID int64     `json:"installationID"`
 	Repos          []GitRepo `json:"repos"`
+	// MaxPushCommandBytes, git entries only, bounds the command list the
+	// broker reads from each push to check and audit its refs (default
+	// DefaultMaxPushCommandBytes, at most the entry's maxRequestBytes); a push
+	// with a longer list is refused.
+	MaxPushCommandBytes int64 `json:"maxPushCommandBytes,omitempty"`
 }
+
+// DefaultMaxPushCommandBytes is the command list a push may send by default:
+// 16 MiB, about 75,000 refs or more at once (a command is two object IDs and a
+// ref name, under 220 bytes for most refs).
+const DefaultMaxPushCommandBytes = 16 << 20
 
 // GitRepo is one repository. RefPrefixes, when set, restrict which refs a
 // push may create, update or delete (for example refs/heads/cursor/), for
@@ -571,6 +581,9 @@ func (e *Entry) normalize() error {
 	case "git":
 		return e.normalizeGit()
 	case "github-api":
+		if e.Git != nil && e.Git.MaxPushCommandBytes != 0 {
+			return errors.New("maxPushCommandBytes is for git entries only")
+		}
 		// A write body is small JSON. A response keeps the git default, since
 		// a log or artifact download streams hundreds of MiB.
 		if e.MaxRequestBytes == 0 {
@@ -822,6 +835,12 @@ func (e *Entry) normalizeGit() error {
 	if e.MaxRequestBytes < 1 || e.MaxRequestBytes > 2<<30 || e.MaxResponseBytes < 1 || e.MaxResponseBytes > 8<<30 {
 		return errors.New("size limits out of range")
 	}
+	if e.Kind == "git" && g.MaxPushCommandBytes == 0 {
+		g.MaxPushCommandBytes = min(DefaultMaxPushCommandBytes, e.MaxRequestBytes)
+	}
+	if g.MaxPushCommandBytes < 0 || g.MaxPushCommandBytes > e.MaxRequestBytes {
+		return errors.New("maxPushCommandBytes is out of range: at most maxRequestBytes")
+	}
 	return nil
 }
 
@@ -938,9 +957,10 @@ type pullRequestCrossing struct {
 }
 
 // pullRequestCrossings checks each repository of a github-api entry against
-// the git entry a clone of it would use, the same pairing the code-reading
-// routes use: no pull request prefix may start, or be started by, a push
-// prefix there that a pool it reaches does not hold (compared as refs,
+// every git entry listing it, on any host or port, since a pool's pull
+// request reach draws on each of them (pushBranchPrefixes): no pull request
+// prefix may start, or be started by, a push prefix there that a pool it
+// reaches does not hold (compared as refs,
 // ignoring case, as checkPoolPrefixes compares). Otherwise that pool's
 // comment, edit, label and ready routes would act on pull requests from
 // branches only other pools push to. A pool's own pull request prefixes reach
@@ -952,7 +972,7 @@ type pullRequestCrossing struct {
 // by, the part before its token crosses, since it would let one requester act
 // on another's pull requests. A write repository with no push prefixes counts
 // as a shared push prefix of refs/heads/. It returns one crossing per
-// repository, each naming its git entry. As in overlappingPrefixes, sorting
+// repository and git entry, each naming that entry. As in overlappingPrefixes, sorting
 // puts every prefix right before the ones it starts, so each is compared only
 // with those.
 func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
@@ -973,72 +993,95 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	}
 	var out []pullRequestCrossing
 	for _, r := range api.Git.Repos {
-		git, gr := pairedGit(entries, api.Host, r.Repo)
-		if gr == nil {
+		for _, listing := range gitListings(entries, r.Repo) {
+			git, gr := listing.entry, listing.repo
+			var all []owned
+			// A write repository that lists no push prefixes lets each pool of
+			// the git entry push any branch: a shared push prefix of refs/heads/.
+			if gr.Access == "write" && len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0 {
+				all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
+			}
+			for _, prefix := range gr.RefPrefixes {
+				all = append(all, pushed("", prefix))
+			}
+			for pool, prefixes := range gr.PoolRefPrefixes {
+				for _, prefix := range prefixes {
+					all = append(all, pushed(pool, prefix))
+				}
+			}
+			for _, prefix := range r.PullRequestPrefixes {
+				all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, ""})
+			}
+			for pool, prefixes := range r.PoolPullRequestPrefixes {
+				for _, prefix := range prefixes {
+					all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, pool})
+				}
+			}
+			sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
+			crosses := func(a, b owned) bool {
+				if a.push == b.push {
+					return false // each field's own overlaps are checkPoolPrefixes'
+				}
+				push, head := a, b
+				if b.push {
+					push, head = b, a
+				}
+				holds := func(pool string) bool {
+					if strings.Contains(push.pool, requesterHolder) {
+						return false // each requester's own: never a whole pool's
+					}
+					if push.pool == "" {
+						return contains(git.Pools, pool)
+					}
+					return pool == push.pool
+				}
+				if head.pool != "" {
+					return !holds(head.pool)
+				}
+				for _, pool := range api.Pools {
+					if !holds(pool) {
+						return true
+					}
+				}
+				return false
+			}
+		scan:
+			for i := range all {
+				for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
+					if crosses(all[i], all[j]) {
+						push, head := all[i], all[j]
+						if all[j].push {
+							push, head = all[j], all[i]
+						}
+						out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (%s) in entry %q",
+							r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, holder(push.pool), git.Name)})
+						break scan
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// gitListing is one git entry listing a repository, and its binding there.
+type gitListing struct {
+	entry *Entry
+	repo  *GitRepo
+}
+
+// gitListings are the git entries listing repo, on any host or port: each one
+// whose pools a pool's pull request reach draws on (pushBranchPrefixes).
+func gitListings(entries []Entry, repo string) []gitListing {
+	var out []gitListing
+	for i := range entries {
+		e := &entries[i]
+		if e.Kind != "git" || e.Git == nil {
 			continue
 		}
-		var all []owned
-		// A write repository that lists no push prefixes lets each pool of
-		// the git entry push any branch: a shared push prefix of refs/heads/.
-		if gr.Access == "write" && len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0 {
-			all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
-		}
-		for _, prefix := range gr.RefPrefixes {
-			all = append(all, pushed("", prefix))
-		}
-		for pool, prefixes := range gr.PoolRefPrefixes {
-			for _, prefix := range prefixes {
-				all = append(all, pushed(pool, prefix))
-			}
-		}
-		for _, prefix := range r.PullRequestPrefixes {
-			all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, ""})
-		}
-		for pool, prefixes := range r.PoolPullRequestPrefixes {
-			for _, prefix := range prefixes {
-				all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, pool})
-			}
-		}
-		sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
-		crosses := func(a, b owned) bool {
-			if a.push == b.push {
-				return false // each field's own overlaps are checkPoolPrefixes'
-			}
-			push, head := a, b
-			if b.push {
-				push, head = b, a
-			}
-			holds := func(pool string) bool {
-				if strings.Contains(push.pool, requesterHolder) {
-					return false // each requester's own: never a whole pool's
-				}
-				if push.pool == "" {
-					return contains(git.Pools, pool)
-				}
-				return pool == push.pool
-			}
-			if head.pool != "" {
-				return !holds(head.pool)
-			}
-			for _, pool := range api.Pools {
-				if !holds(pool) {
-					return true
-				}
-			}
-			return false
-		}
-	scan:
-		for i := range all {
-			for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
-				if crosses(all[i], all[j]) {
-					push, head := all[i], all[j]
-					if all[j].push {
-						push, head = all[j], all[i]
-					}
-					out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (%s) in entry %q",
-						r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, holder(push.pool), git.Name)})
-					break scan
-				}
+		for j := range e.Git.Repos {
+			if e.Git.Repos[j].Repo == repo {
+				out = append(out, gitListing{e, &e.Git.Repos[j]})
 			}
 		}
 	}

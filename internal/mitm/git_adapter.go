@@ -83,7 +83,7 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	if git.Write && r.Method == http.MethodPost {
 		// Every push names its refs in the audit row, and a limited one may
 		// change only refs under its prefixes.
-		consumed, refs, capabilities, err := readReceivePackCommands(body)
+		consumed, refs, capabilities, err := readReceivePackCommands(body, entry.Git.MaxPushCommandBytes)
 		if err != nil {
 			deny(http.StatusBadRequest, "push_shape")
 			return
@@ -185,13 +185,14 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 }
 
 // readReceivePackCommands reads a push's command list (pkt-lines up to the
-// flush) and returns the bytes read, every ref the push would change and the
-// capabilities git asked for on its first command. Push certificates are
-// refused, since their refs cannot be checked here.
-func readReceivePackCommands(r io.Reader) ([]byte, []string, []string, error) {
+// flush, at most limit bytes: the entry's maxPushCommandBytes) and returns the
+// bytes read, every ref the push would change and the capabilities git asked
+// for on its first command. Push certificates are refused, since their refs
+// cannot be checked here.
+func readReceivePackCommands(r io.Reader, limit int64) ([]byte, []string, []string, error) {
 	var consumed []byte
 	var refs, capabilities []string
-	for len(consumed) < 1<<20 {
+	for int64(len(consumed)) < limit {
 		head := make([]byte, 4)
 		if _, err := io.ReadFull(r, head); err != nil {
 			return nil, nil, nil, err
