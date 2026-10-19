@@ -47,9 +47,11 @@ var (
 )
 
 // gcpForwardHeaders are the request headers Google clients need, besides an
-// entry's ForwardHeaders. X-Goog-User-Project, which bills another project,
-// passes only when the entry names it in forwardHeaders.
-var gcpForwardHeaders = []string{"Accept", "Content-Type", "User-Agent", "X-Goog-Api-Client",
+// entry's ForwardHeaders. X-Goog-Request-Params routes a gRPC call to the
+// resource it names, such as a BigQuery read stream. X-Goog-User-Project,
+// which bills another project, passes only when the entry names it in
+// forwardHeaders.
+var gcpForwardHeaders = []string{"Accept", "Content-Type", "User-Agent", "X-Goog-Api-Client", "X-Goog-Request-Params",
 	"X-Upload-Content-Type", "X-Upload-Content-Length", "Content-Range", "Range", "If-Match", "If-None-Match"}
 
 func (e *Entry) normalizeGCP() error {
@@ -175,5 +177,5 @@ func (c Catalog) GCPMatch(host string, port int, method, path, pool string) (*En
 // GCPForwardsHeader reports whether a caller header passes to Google.
 func (e *Entry) GCPForwardsHeader(name string) bool {
 	name = http.CanonicalHeaderKey(name)
-	return contains(gcpForwardHeaders, name) || contains(e.ForwardHeaders, name)
+	return contains(gcpForwardHeaders, name) || e.forwardsGRPCHeader(name) || contains(e.ForwardHeaders, name)
 }

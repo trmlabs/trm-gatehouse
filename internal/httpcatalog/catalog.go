@@ -81,6 +81,11 @@ type Entry struct {
 	BrowserSession *BrowserSessionBinding `json:"browserSession,omitempty"`
 	// Kind "gcp" mints a short-lived Google token per entry; see GCPBinding.
 	GCP *GCPBinding `json:"gcp,omitempty"`
+	// HTTP2 lets workers speak HTTP/2 to the entry's host, which gRPC needs:
+	// the broker offers h2 on the tunnel and forwards over HTTP/2. Header and
+	// gcp entries only, and every entry on one host and port agrees, since
+	// the protocol is chosen before the first request names a path.
+	HTTP2 bool `json:"http2,omitempty"`
 	// Tier is T0 (data every worker allowed on the pool may read; the default),
 	// T1 (a verified person in every Requires group) or T2 (T1 with
 	// time-boxed groups granted through an access-request tool). Requires
@@ -451,6 +456,7 @@ func Parse(data []byte) (Catalog, error) {
 	users := map[KVRef]string{}
 	routes := map[string]string{}
 	kinds := map[string]string{}
+	http2Hosts := map[string]bool{}
 	for i := range file.Entries {
 		e := &file.Entries[i]
 		if err := e.normalize(); err != nil {
@@ -476,6 +482,10 @@ func Parse(data []byte) (Catalog, error) {
 			return Catalog{}, fmt.Errorf("host %s mixes entry kinds or repeats a browser-session host", hostKey)
 		}
 		kinds[hostKey] = e.Kind
+		if h2, ok := http2Hosts[hostKey]; ok && h2 != e.HTTP2 {
+			return Catalog{}, fmt.Errorf("entries on host %s disagree on http2", hostKey)
+		}
+		http2Hosts[hostKey] = e.HTTP2
 		if e.BrowserSession != nil {
 			// A test user signs in for one entry only, so its session and
 			// audit trail belong to that entry's pool.
@@ -553,6 +563,9 @@ func (e *Entry) normalize() error {
 	}
 	if e.Kind != "browser-session" && (len(e.DeniedPaths) > 0 || len(e.ReadOnlyPaths) > 0) {
 		return errors.New("deniedPaths and readOnlyPaths apply to browser-session entries only")
+	}
+	if e.HTTP2 && e.Kind != "" && e.Kind != "gcp" {
+		return errors.New("http2 applies to header and gcp entries only")
 	}
 	switch e.Kind {
 	case "postgres":
@@ -1544,6 +1557,18 @@ func (c Catalog) HasHostForPool(host string, port int, pool string) bool {
 	return false
 }
 
+// HTTP2Host reports whether the entries on host and port take HTTP/2, so a
+// tunnel to it offers h2 and every other host keeps HTTP/1.1.
+func (c Catalog) HTTP2Host(host string, port int) bool {
+	host = strings.ToLower(host)
+	for _, e := range c.entries {
+		if e.HTTP2 && e.Host == host && e.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
 // HasAuth0Domain reports whether host is the Auth0 domain of a
 // browser-session entry: the only hosts the broker's own logins may reach.
 func (c Catalog) HasAuth0Domain(host string) bool {
@@ -1735,7 +1760,17 @@ func (e *Entry) ForwardsHeader(name string) bool {
 	case "Accept", "Accept-Language", "Content-Type", "User-Agent":
 		return true
 	}
-	return contains(e.ForwardHeaders, name)
+	return e.forwardsGRPCHeader(name) || contains(e.ForwardHeaders, name)
+}
+
+// grpcForwardHeaders are the gRPC protocol headers a client sets and its
+// server reads: the call's deadline. The broker sets te and
+// grpc-accept-encoding itself and refuses a compressed request, so every
+// message it forwards or returns can be checked.
+var grpcForwardHeaders = []string{"Grpc-Timeout"}
+
+func (e *Entry) forwardsGRPCHeader(name string) bool {
+	return e.HTTP2 && contains(grpcForwardHeaders, name)
 }
 
 var (

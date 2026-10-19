@@ -42,7 +42,7 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 	expected := hostHeaderForScheme("https", target)
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" ||
 		unsafePath(r.URL.Path) || containsPlaceholder(r.URL.RawQuery) || r.Header.Get("Upgrade") != "" ||
-		r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 {
+		r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 || (isGRPC(r) && grpcCompressedRequest(r)) {
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	}
@@ -92,6 +92,9 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 	credential := "Bearer " + token.Value()
 	out.Header.Set("Authorization", credential)
 	out.Header.Set("Accept-Encoding", "identity")
+	if isGRPC(r) {
+		prepareGRPC(out)
+	}
 
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
