@@ -45,7 +45,7 @@ On a read entry, as a second guard, every query runs inside a read transaction t
 ## Add a graph database
 
 1. Create a login on the database for Gatehouse. Memgraph's Community edition has no read-only role, so Gatehouse does not rely on the login's privileges; give it the least the edition allows.
-2. Write the login to a Vault key-value version 2 secret, fields `username` and `password`, and grant the broker read on it in the same change as the entry. The password must be printable ASCII.
+2. Write the login to a Vault key-value version 2 secret, fields `username` and `password`, and grant the broker read on it in the same change as the entry. The username and password must be printable ASCII with no spaces.
 3. Add the catalog entry:
 
 ```yaml
@@ -68,7 +68,7 @@ entries:
 | `memgraph.access` | `read`, the default, or `write`. The broker sets each transaction's mode from the entry and ignores the driver's, so a client cannot turn a read entry into a write one. |
 | `memgraph.sslmode` | `verify-full`, the default. `disable` is accepted only in a test deployment that allows plaintext databases, and only for a cluster-local host. |
 | `memgraph.ca`, `memgraph.serverName` | As for a `postgres` entry: the only trust for the server's certificate, and the name it must carry |
-| `memgraph.maxConns` | This database's connection budget on each broker replica, 1 to 100000; unset uses the broker's default |
+| `memgraph.maxConns` | The connection budget for this entry's host and port on each broker replica, 1 to 100000; unset uses the broker's default. Entries that share a host and port share one count. |
 | `memgraph.procedures`, `memgraph.functions` | The procedures and module functions a query may use, as `module.name` |
 
 `tier`, `requires` and pool grants work as for every other entry.
@@ -88,7 +88,7 @@ The pool's worker template needs nothing new for it. Its sidecar has one routed 
 
 ## How a session is checked
 
-The sidecar checks everything the worker controls first: that the connection comes from the worker, a Bolt version both sides speak, the placeholder, and that the user name is a well-formed entry name (or, with `entries`, a listed one). Only then does it read the worker's identity proof and sign in to the broker with it, naming the catalog entry. The broker refuses a name its catalog does not grant the pool. The broker admits the session exactly as it admits a PostgreSQL session: the worker's identity, its pool's grant, the entry's tier and groups, the per-worker and per-database budgets, and a recheck while the session is open that ends it when access is withdrawn or the worker's deadline passes. Then it reads the login from Vault and signs in to the database. Any failure refuses the session; nothing falls back to a weaker path.
+The sidecar checks everything the worker controls first: that the connection comes from the worker, a Bolt version both sides speak, the placeholder, and that the user name is a well-formed entry name (or, with `entries`, a listed one). Only then does it read the worker's identity proof and sign in to the broker with it, naming the catalog entry. The broker refuses a name its catalog does not grant the pool. The broker admits the session as it admits a PostgreSQL session: the worker's identity, the broker's capacity, the per-worker cap and session accounting, its pool's grant, the entry's tier and groups, then the database's budget, and a recheck while the session is open that ends it when access is withdrawn or the worker's deadline passes. Then it reads the login through the catalog's key cache, which re-reads Vault about once a minute and serves the last login for a few minutes when Vault is unreachable, and signs in to the database. Any other failure refuses the session; nothing falls back to a weaker path.
 
 A driver that tries to sign in again on an open connection (`LOGON` after `LOGOFF`) is refused and the connection closes; drivers open a new connection instead.
 
@@ -125,7 +125,7 @@ Errors from the database itself, such as a syntax error, pass through unchanged.
 
 ## Audit
 
-Each session writes a `bolt.session` row when it opens and when it closes, with the pool, the worker, the entry and how many queries were refused. Each refused query writes a `bolt.query` row naming the plan step, function or procedure that was refused. Query text and results are never recorded.
+Each session writes a `bolt.session` row when it opens and when it closes, with the pool, the worker, the entry and how many queries were refused. Each refused query writes a `bolt.query` row naming the plan step, function or procedure that was refused, or the request (another database, impersonation). Query text and results are never recorded.
 
 ## Limits
 
