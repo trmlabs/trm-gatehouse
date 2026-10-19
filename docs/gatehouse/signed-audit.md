@@ -33,7 +33,7 @@ The PostgreSQL broker can record every session in a tamper-evident trail. Each r
    ```
 
    The broker gets no `transit/keys`, `export` or `rotate` access. Grant the verifier `read` on `gatehouse/data/example-audit-hmac` (including versions) and on `transit/keys/example-audit-signing`.
-4. Set `AGENT_VAULT_AUDIT_CHAIN=1`, `AGENT_VAULT_AUDIT_HMAC_PATH=example-audit-hmac`, `AGENT_VAULT_AUDIT_TRANSIT_KEY=example-audit-signing` and `AGENT_VAULT_AUDIT_REPLICA` to the Pod name (from the downward API). The HMAC mount defaults to `gatehouse`.
+4. Set `AGENT_VAULT_AUDIT_CHAIN=1`, `AGENT_VAULT_AUDIT_HMAC_PATH=example-audit-hmac`, `AGENT_VAULT_AUDIT_TRANSIT_KEY=example-audit-signing` and `AGENT_VAULT_AUDIT_REPLICA` to the Pod name (from the downward API). The HMAC mount is `AGENT_VAULT_AUDIT_HMAC_MOUNT`, else `AGENT_VAULT_KV_MOUNT`, else `gatehouse`.
 5. Route rows with the Cloud Logging filter `jsonPayload.type="gatehouse.audit.v1"` to a bucket with locked retention.
 
 ## Verify

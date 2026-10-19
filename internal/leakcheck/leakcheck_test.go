@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,58 +14,73 @@ import (
 	"testing"
 )
 
-// Names that must not appear, by the SHA-256 of the lowercase token, so this
-// file does not publish them itself. A token is a run of letters, digits, "_"
-// and "-", so a dotted host is checked one label at a time. Every run of a
-// token's consecutive "-" or "_" separated parts is checked too, so a name
-// with a prefix or suffix attached is still caught. An IPv4 range in CIDR form
-// is checked whole. The hashes are unsalted and the names short, so
-// anyone can confirm a guess: this keeps names out of the tree, it does not
-// hide them.
-var deniedTokens = map[string]string{
-	"ca67af247429a62b379e673e63927761de1dbbff441abc4805a0a060d4d33ff6": "internal domain",
-	"e14b2129a1f577184e79a136d011d4a904319500b7cbc952a6d6e03da7fb7eee": "cloud project",
-	"a5a8fc7454bdd02eeb587646d619058976b9fccaf3c9aa56789945982318b3d2": "cluster name",
-	"d6da43666eba5f72fb8c94ce207ca26d99ba0c1c660a29ce662ff7126dfb107a": "cloud project",
-	"c1b6f329020c381ed2c45886e7d0a65157c5a0f401aa28c120cc6bf198ca31d7": "cloud project",
-	"20c2f2ca25d854774a621dd06194a34d56cc181343bdce1fa59eb4d9bccb888b": "cloud project",
-	"5c0a45da8c29b9287b06ab5feb512e46ec57f45d5d70bcaaedb31aa01762d812": "storage bucket",
-	"4fe221c0146513fb74b5221101fd68c6ceb344fa5ff20d3e08466e2c4acb4a60": "cloud folder or profile",
-	"7a25af561965d253eff5c923926827a9c2eb6f9143399b8339f28d7ba64fae53": "cloud folder or profile",
-	"3f2a67eb77e5c4cc0844a333e83c6fb22ca99cc8cb2d8cdbda0e36fd0c9a76f7": "cloud folder",
-	"990b28759b479807a2eecaed2889608fc57b544873e3c218c0ab0eeda5a12400": "cloud folder",
-	"8fc9fc91d827821d3370a922c662f5f1054192edd751c5a7d6500f68c8b6e6c3": "Vault login mount",
-	"d471b2c4834d7787014c8b163377b03726d05e0dfc2d8e77c86ecf141d3785c2": "identity client ID",
-	"6c8c06f39af92c31cff20e3514897d0668ef6dd1e4d9154db8b172b6ea96820e": "identity organization ID",
-	"146299597a5acd470406558c4a50f109243c41061193ff34a064f9de87cfe25c": "internal repository",
-	"bb605219226a8c52f42316811b09914f6879a125832754bc31d47c1555624d1e": "cluster name",
-	"97746ee30cae484c081177f12324cd6f54537969b15120fd0bf41199ab334232": "internal repository",
-	"9ae3dc92e9137517495dc1c656a048f7f763a6057235d38d1b4d867c102eb723": "internal repository",
-	"264cc08778738997d728a1cecd8fa8b04c3d7a126324935415e29e50adc54d10": "internal repository",
-	"c4e2ac731a84381767ee0a18af86d2b90cea120a1555d1ebe170dc6e83218845": "internal repository",
-	"5a942b56ec3b77561facb25a2fde6812fc7c79df61c6a76842eaaab0374da783": "database name",
-	"66b21d0fc0ed0d31c17b602e8949519e492eeca2c817abd8698399c4b58315bb": "Terraform module",
-	"23e2d8e3ea0806799a7048cc65f86fd36f9476edffdc87a32057ae7c9a655550": "Vault login mount",
-	"59cb8ef0cbd82e937750dca3f1be6b7288ea1890060b76fa08f2c580bc0077d4": "Vault login mount",
-	"b89e09a93cb2570fdbe167d4c2ddd40b83b1008053de8692f161462d6f694edf": "Vault path",
-	"d897cc5356b8aa87160de3573b756069b708b15f64f13824176c8d22b3843923": "Vault signing name",
-	"5634bab52c3bf5c18feefbea5c969c17e0f38c851f4bf1df9f8fd4f9ebb17049": "Vault path",
-	"4d23f28f1cfbca6596ecd33143e4f990d0781a26a4c9c39f321c7ed9d8496097": "Kubernetes namespace",
-	"daa2445ec56aa583042f054770e54a49968017781a2f70858404751f0d93d9ba": "Kubernetes namespace",
-	"c835c4c852650903560865dab425a5aaa1bc10c60d8db63680cddd240e281105": "Kubernetes namespace",
-	"964ee147cd75f9cdf4a2f5795cb83c0f70a25f9f0c21d4e4981537859fda463b": "harness profile",
-	"6b96e09376668e07db22c2123f36bd9df0df1a3fa45c0d79611f978357a3f791": "harness profile",
-	"cfa8abfd49ebf537d1e8d294f4cbc3790ffeace0861094ed1026bd9e3458c753": "image repository",
-	"b092e7144150b49ea4acf5949946896a35a96d6fe8c147c54d6f45f60a5b1c9f": "Terraform resource",
-	"b1b40dcb8dfab37fbc24c70e867c80c9bb9fb04a5d0ea6ec9e3ef8672d8ec396": "network vendor",
-	"1df409158dbb0528d87b5fd13e5aa1f88aed66c54078b5b5afb223959eec48bd": "network range",
+// Names that must not appear, by the SHA-256 of the lowercase token. The list
+// is the operator's, so it lives outside this repository: CI reads it from a
+// repository secret into LEAKCHECK_DENIED_TOKENS. A token is a run of
+// letters, digits, "_" and "-", so a dotted host is checked one label at a
+// time. Every run of a token's consecutive "-" or "_" separated parts is
+// checked too, so a name with a prefix or suffix attached is still caught. An
+// IPv4 range in CIDR form is checked whole.
+//
+// The setting holds entries separated by ";" or new lines, each the hex
+// SHA-256, then "whole" for a name that is also part of the broker's own
+// constants and so is matched as a whole token only, then what the name is,
+// such as "cloud project". The hashes are unsalted and the names short, so
+// anyone holding the list can confirm a guess.
+const (
+	deniedEnv = "LEAKCHECK_DENIED_TOKENS"
+	// requiredEnv is "true" wherever CI has the secret (pushes, and pull
+	// requests from this repository), so the check never passes there with an
+	// empty list. A fork's pull request gets no secrets and checks the
+	// patterns below only; the push to main checks the list.
+	requiredEnv = "LEAKCHECK_REQUIRED"
+)
+
+var (
+	deniedTokens   = map[string]string{}
+	wholeTokenOnly = map[string]bool{}
+	sha256Hex      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// parseDenied reads the LEAKCHECK_DENIED_TOKENS format. An error names the
+// entry by number only, so a log never shows the list.
+func parseDenied(list string) (map[string]string, map[string]bool, error) {
+	denied, whole := map[string]string{}, map[string]bool{}
+	for i, entry := range strings.FieldsFunc(list, func(r rune) bool { return r == ';' || r == '\n' }) {
+		fields := strings.Fields(entry)
+		if len(fields) == 0 {
+			continue
+		}
+		if !sha256Hex.MatchString(fields[0]) {
+			return nil, nil, fmt.Errorf("entry %d does not start with a lower-case hex SHA-256", i+1)
+		}
+		kind := fields[1:]
+		if len(kind) > 0 && kind[0] == "whole" {
+			whole[fields[0]], kind = true, kind[1:]
+		}
+		denied[fields[0]] = "internal name"
+		if len(kind) > 0 {
+			denied[fields[0]] = strings.Join(kind, " ")
+		}
+	}
+	return denied, whole, nil
 }
 
-// Two denied names are also parts of the broker's own constants, so they are
-// matched as whole tokens only.
-var wholeTokenOnly = map[string]bool{
-	"d897cc5356b8aa87160de3573b756069b708b15f64f13824176c8d22b3843923": true,
-	"b89e09a93cb2570fdbe167d4c2ddd40b83b1008053de8692f161462d6f694edf": true,
+func loadDenied(t *testing.T) {
+	t.Helper()
+	list := os.Getenv(deniedEnv)
+	if strings.TrimSpace(list) == "" {
+		if os.Getenv(requiredEnv) == "true" {
+			t.Fatalf("%s is empty: set the repository secret of that name", deniedEnv)
+		}
+		t.Logf("%s is unset: checking hostnames, addresses and IDs only", deniedEnv)
+		return
+	}
+	denied, whole, err := parseDenied(list)
+	if err != nil {
+		t.Fatalf("%s: %v", deniedEnv, err)
+	}
+	deniedTokens, wholeTokenOnly = denied, whole
 }
 
 var (
@@ -86,6 +102,7 @@ var (
 const securityContact = "security@trmlabs.com"
 
 func TestNoInternalNames(t *testing.T) {
+	loadDenied(t)
 	root, files := trackedFiles(t)
 	for _, name := range files {
 		if name == "internal/leakcheck/leakcheck_test.go" || skipped(name) {
@@ -250,5 +267,21 @@ func TestProblems(t *testing.T) {
 	delete(wholeTokenOnly, hex.EncodeToString(name[:]))
 	if got := runs("a-b_c"); strings.Join(got, " ") != "a a-b a-b_c b b_c c" {
 		t.Errorf("runs(a-b_c) = %q", got)
+	}
+}
+
+func TestParseDenied(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	denied, whole, err := parseDenied(a + " cloud project;\n" + b + " whole Vault path\n\n;")
+	if err != nil || len(denied) != 2 || denied[a] != "cloud project" || denied[b] != "Vault path" || whole[a] || !whole[b] {
+		t.Fatalf("parseDenied = %v, %v, %v", denied, whole, err)
+	}
+	if denied, _, err := parseDenied(a); err != nil || denied[a] != "internal name" {
+		t.Errorf("an entry with no kind = %v, %v", denied, err)
+	}
+	for _, bad := range []string{"secret-name cloud project", strings.ToUpper(a) + " cloud project", a[:63]} {
+		if _, _, err := parseDenied(a + ";" + bad); err == nil || !strings.Contains(err.Error(), "entry 2") || strings.Contains(err.Error(), bad) {
+			t.Errorf("%q: err = %v, want entry 2 named without its value", bad, err)
+		}
 	}
 }

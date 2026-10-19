@@ -48,7 +48,7 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready 
 	if sharedCatalog.started {
 		return sharedCatalog.source, nil
 	}
-	if err := catalogEnvironment(getenv); err != nil {
+	if err := catalogSettings(getenv); err != nil {
 		return nil, err
 	}
 	testPlaintextDatabases(getenv, logger)
@@ -302,7 +302,8 @@ func catalogEnvironment(getenv func(string) string) error {
 
 // githubAppSigner signs App JWTs with the App key imported into Transit, so
 // the key never leaves Vault. AGENT_VAULT_GITHUB_APP_KV_PATH selects the
-// fallback, a PEM on the gatehouse KV mount read into the broker per signature.
+// fallback, a PEM on the broker's KV mount (AGENT_VAULT_KV_MOUNT) read into
+// the broker per signature.
 func githubAppSigner(client *hashicorp.Client, getenv func(string) string) (githubapp.JWTSigner, error) {
 	if key := getenv("AGENT_VAULT_GITHUB_APP_TRANSIT_KEY"); key != "" {
 		mount := getenv("AGENT_VAULT_GITHUB_APP_TRANSIT_MOUNT")
@@ -316,7 +317,11 @@ func githubAppSigner(client *hashicorp.Client, getenv func(string) string) (gith
 		return githubapp.TransitSigner{Vault: client.Logical(), Mount: mount, Key: key}, nil
 	}
 	if path := getenv("AGENT_VAULT_GITHUB_APP_KV_PATH"); path != "" {
-		return githubapp.KVSigner{Vault: client.Logical(), Mount: "gatehouse", Path: path, Field: "private_key"}, nil
+		mount, err := kvMount(getenv)
+		if err != nil {
+			return nil, err
+		}
+		return githubapp.KVSigner{Vault: client.Logical(), Mount: mount, Path: path, Field: "private_key"}, nil
 	}
 	return nil, fmt.Errorf("git catalog entries require AGENT_VAULT_GITHUB_APP_TRANSIT_KEY or AGENT_VAULT_GITHUB_APP_KV_PATH")
 }

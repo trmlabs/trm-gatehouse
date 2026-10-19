@@ -68,7 +68,11 @@ func brokerAuditChain(ctx context.Context, client *hashicorp.Client, db any, get
 	if getenv("AGENT_VAULT_REPLICA") == "" && getenv("AGENT_VAULT_AUDIT_REPLICA") == "" {
 		return nil, fmt.Errorf("audit chain requires AGENT_VAULT_REPLICA or AGENT_VAULT_AUDIT_REPLICA, a stable replica name such as the Pod name")
 	}
-	keys := auditchain.KVKeys{Mount: setting("AGENT_VAULT_AUDIT_HMAC_MOUNT", "gatehouse"), Path: getenv("AGENT_VAULT_AUDIT_HMAC_PATH"), Field: setting("AGENT_VAULT_AUDIT_HMAC_FIELD", "key")}
+	mount, err := kvMount(getenv)
+	if err != nil {
+		return nil, err
+	}
+	keys := auditchain.KVKeys{Mount: setting("AGENT_VAULT_AUDIT_HMAC_MOUNT", mount), Path: getenv("AGENT_VAULT_AUDIT_HMAC_PATH"), Field: setting("AGENT_VAULT_AUDIT_HMAC_FIELD", "key")}
 	signer := auditchain.TransitSigner{Mount: setting("AGENT_VAULT_AUDIT_TRANSIT_MOUNT", "transit"), Key: getenv("AGENT_VAULT_AUDIT_TRANSIT_KEY")}
 	boots, ok := db.(auditchain.BootStore)
 	if client == nil || !ok || keys.Path == "" || signer.Key == "" {
