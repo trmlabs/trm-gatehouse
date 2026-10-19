@@ -128,7 +128,8 @@ const outcomeDecoy = "decoy_credential"
 // as the decision. It never forwards, and the row never holds the value. The
 // caller sees the same 403 as any refusal.
 func (p *Proxy) refuseDecoy(w http.ResponseWriter, event auditchain.Event, target string, m decoy.Match) {
-	event.Binding, event.Decision = "decoy/"+m.Label, m.Surface
+	// The decoy may be in the path.
+	event.Binding, event.Decision, event.Path = "decoy/"+m.Label, m.Surface, ""
 	p.adapterDeny(w, event, target, http.StatusForbidden, outcomeDecoy)
 }
 
@@ -173,7 +174,7 @@ func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Reques
 // it, as a fixed code in the row's decision field ("" when none applies), and
 // for a signing-key refusal the token's kid and the connection's peer.
 func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial, wait time.Duration) {
-	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Decision: reason}
+	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Path: auditPath(r), Decision: reason}
 	if key != nil {
 		event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 	}
@@ -224,6 +225,15 @@ func githubAPIOperation(api httpcatalog.GitRequest, path string) string {
 	return ""
 }
 
+// auditPath is the path a row records for r, as sent and without its query;
+// empty for a CONNECT.
+func auditPath(r *http.Request) string {
+	if r.Method == http.MethodConnect || r.URL == nil {
+		return ""
+	}
+	return auditchain.PathField(r.URL.EscapedPath())
+}
+
 func auditMethod(m string) string {
 	switch m {
 	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE":
@@ -240,7 +250,7 @@ func newRequestID() string {
 
 func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, host string, port int, useTLS bool, scope *brokercore.ProxyScope) {
 	a := p.adapter
-	event := auditchain.Event{Session: newRequestID(), Method: auditMethod(r.Method)}
+	event := auditchain.Event{Session: newRequestID(), Method: auditMethod(r.Method), Path: auditPath(r)}
 	if scope != nil {
 		event.Pool, event.Agent, event.PodUID = scope.Pool, scope.AgentID, scope.WorkloadID
 	}
@@ -305,6 +315,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	if browser, ok, err := catalog.BrowserMatch(host, port, r.Method, r.URL.Path, scope.Pool); ok {
+		// A web app's paths can carry what its links hand out, such as a
+		// one-time sign-in link; its rows name no path.
+		event.Path = ""
 		if !refused(browser.Entry, err) {
 			p.forwardBrowser(w, r, target, scope, event, browser, err)
 		}
@@ -337,7 +350,8 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	expected := hostHeaderForScheme("https", target)
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
 		unsafePath(r.URL.Path) || strings.Contains(r.URL.RawQuery, placeholderMarker) || r.Header.Get("Upgrade") != "" ||
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") || r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 {
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") || r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 ||
+		(isGRPC(r) && grpcCompressedRequest(r)) {
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	}
@@ -419,6 +433,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	credential := entry.Credential(secret.Value())
 	out.Header.Set(entry.Header, credential)
 	out.Header.Set("Accept-Encoding", "identity")
+	if isGRPC(r) {
+		prepareGRPC(out)
+	}
 
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"
@@ -456,7 +473,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 // on a 401 or 403 and may look at the response to decide what it means. tooLarge, when set, reports that the request body was cut
 // off at its limit.
 func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles [][]byte, limit int64, finish func(int, string), rejected func(*http.Response), tooLarge func() bool) {
-	resp, err := p.upstream.RoundTrip(out)
+	resp, err := p.upstreamFor(out).RoundTrip(out)
 	if err != nil {
 		if tooLarge != nil && tooLarge() {
 			finish(http.StatusRequestEntityTooLarge, "request_too_large")
@@ -472,14 +489,18 @@ func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles 
 }
 
 // relayResponse streams an upstream response back as relayScreened does, and
-// closes it.
+// closes it. Over HTTP/2 it also screens and relays the response trailers,
+// where a gRPC call's status arrives.
 func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needles [][]byte, limit int64, finish func(int, string), rejected func(*http.Response)) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		rejected(resp)
 	}
+	h2 := resp.Request != nil && viaHTTP2(resp.Request.Context())
+	grpc, _ := w.(*grpcWriter)
 	encoding := resp.Header.Get("Content-Encoding")
-	if resp.Header.Get("Upgrade") != "" || (encoding != "" && encoding != "identity") || headersContain(resp.Header, needles) {
+	if resp.Header.Get("Upgrade") != "" || (encoding != "" && encoding != "identity") || headersContain(resp.Header, needles) ||
+		(grpc != nil && grpcCompressedResponse(resp.Header)) {
 		finish(http.StatusBadGateway, "response_refused")
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return
@@ -492,13 +513,45 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 		w.Header()[name] = append([]string(nil), values...)
 	}
 	w.WriteHeader(resp.StatusCode)
-	outcome := screenedCopy(w, resp.Body, needles, limit)
+	var frames *grpcFrames
+	if grpc != nil && framesSafe(needles) {
+		frames = &grpcFrames{}
+	}
+	outcome := screenedCopy(w, resp.Body, needles, limit, frames)
+	if outcome == "completed" && h2 {
+		outcome = relayTrailers(w, resp.Trailer, needles)
+	}
+	if code := grpcCallStatus(resp); grpc != nil && (code == grpcUnauthenticated || code == grpcPermissionDenied) {
+		// A gRPC server refuses a token in its status, not the HTTP status.
+		rejected(resp)
+	}
 	finish(resp.StatusCode, outcome)
-	if outcome != "completed" {
-		// The status line is already sent; abort the connection so the worker
-		// sees a truncated response rather than a clean end.
+	switch {
+	case outcome == "completed":
+	case grpc != nil && outcome != "client_gone":
+		// The status is already sent; end the call with an error status so
+		// the client drops what it read rather than seeing a clean end.
+		grpc.fail(grpcStreamStatus(outcome), "gatehouse: response "+outcome)
+	default:
+		// The status line is already sent; abort the connection (over HTTP/2,
+		// the stream) so the worker sees a truncated response rather than a
+		// clean end.
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// relayTrailers screens an HTTP/2 response's trailers, where a gRPC call's
+// status and message arrive, and sends them unless one carries a needle.
+func relayTrailers(w http.ResponseWriter, trailer http.Header, needles [][]byte) string {
+	if headersContain(trailer, needles) {
+		return "secret_echo"
+	}
+	for name, values := range trailer {
+		if !brokercore.ShouldStripResponseHeader(name) {
+			w.Header()[http.TrailerPrefix+name] = append([]string(nil), values...)
+		}
+	}
+	return "completed"
 }
 
 func unsafePath(path string) bool {
@@ -532,8 +585,11 @@ func headersContain(h http.Header, needles [][]byte) bool {
 // screenedCopy streams the body, flushing each chunk for server-sent events.
 // It holds back only a tail that could be the start of the key, so a key
 // split across reads is still seen before any part of it reaches the worker,
-// while ordinary events pass through at once.
-func screenedCopy(w http.ResponseWriter, body io.Reader, needles [][]byte, limit int64) string {
+// while ordinary events pass through at once. With frames, a gRPC body, it
+// releases that tail whenever the bytes so far end a message, which no key
+// can straddle (framesSafe), so a streamed message is never held for the
+// next one; a compressed message, which it could not screen, ends the copy.
+func screenedCopy(w http.ResponseWriter, body io.Reader, needles [][]byte, limit int64, frames *grpcFrames) string {
 	flusher, _ := w.(http.Flusher)
 	var pending []byte
 	var total int64
@@ -549,7 +605,16 @@ func screenedCopy(w http.ResponseWriter, body io.Reader, needles [][]byte, limit
 			if containsSecret(pending, needles) {
 				return "secret_echo"
 			}
-			if release := len(pending) - partialSuffix(pending, needles); release > 0 {
+			hold := partialSuffix(pending, needles)
+			if frames != nil {
+				if frames.advance(buf[:n]) {
+					hold = 0
+				}
+				if frames.compressed {
+					return "response_refused"
+				}
+			}
+			if release := len(pending) - hold; release > 0 {
 				if _, werr := w.Write(pending[:release]); werr != nil {
 					return "client_gone"
 				}

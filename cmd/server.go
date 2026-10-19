@@ -298,6 +298,8 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 			DrainTunnels:          drainSeconds > 0,
 			// Pending or active credential-proxy tunnels per replica.
 			MaxCredentialProxyTunnels: intEnvValue("AGENT_VAULT_MITM_MAX_TUNNELS"),
+			// Concurrent requests on one HTTP/2 tunnel (gRPC destinations).
+			HTTP2MaxStreams: intEnvValue("AGENT_VAULT_MITM_HTTP2_MAX_STREAMS"),
 		},
 	))
 	return nil

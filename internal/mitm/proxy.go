@@ -21,9 +21,10 @@
 // trust the CA that signs the per-host MITM leaves for upstream
 // certificate verification.
 //
-// v1 scope: HTTP/1.1 only (ALPN pinned). HTTPS upstreams must use
-// CONNECT — the forward-proxy path rejects https:// URLs to avoid
-// silently TLS-stripping.
+// HTTP/1.1 only (ALPN pinned), except that with the catalog adapter a tunnel
+// to a host whose entries set http2 also offers HTTP/2, for gRPC (grpc.go).
+// HTTPS upstreams must use CONNECT: the forward-proxy path rejects https://
+// URLs to avoid silently TLS-stripping.
 package mitm
 
 import (
@@ -67,12 +68,14 @@ type Proxy struct {
 	attestor              brokercore.Attestor
 	peerReader            PeerReader
 	graphql               graphqlLookups // what GitHub said about node IDs (github_graphql.go)
+	http2MaxStreams       int
+	h2Upstream            atomic.Pointer[http.Transport] // built from upstream on first HTTP/2 request (grpc.go)
 
 	// Tunnel drain (opt-in): Shutdown lets each tunnel finish its current
 	// request instead of leaving tunnels to die with the process.
 	drainTunnels bool
 	tunnelsMu    sync.Mutex
-	tunnels      map[*http.Server]struct{}
+	tunnels      map[*http.Server]bool // true for an HTTP/2 tunnel
 	tunnelWG     sync.WaitGroup
 	draining     bool
 }
@@ -90,6 +93,7 @@ const DefaultMaxTunnels = 10000
 // nil disables rate limiting on the MITM path.
 type Options struct {
 	MaxCredentialProxyTunnels int                // <=0 defaults to DefaultMaxTunnels pending or active CONNECT tunnels
+	HTTP2MaxStreams           int                // <=0 defaults to DefaultHTTP2MaxStreams concurrent requests per HTTP/2 tunnel
 	StrictCredentialProxy     bool               // bounded header-placeholder release path
 	DurableAudit              requestlog.Durable // mandatory when strict mode is enabled, unless HeaderAdapter is set
 	HeaderAdapter             *HeaderAdapter     // strict mode only: catalog destinations with signed audit
@@ -141,6 +145,10 @@ func New(addr string, opts Options) *Proxy {
 	if tunnelLimit <= 0 {
 		tunnelLimit = DefaultMaxTunnels
 	}
+	streams := opts.HTTP2MaxStreams
+	if streams <= 0 {
+		streams = DefaultHTTP2MaxStreams
+	}
 	p := &Proxy{
 		ca:                    opts.CA,
 		strictCredentialProxy: opts.StrictCredentialProxy,
@@ -149,7 +157,7 @@ func New(addr string, opts Options) *Proxy {
 		attestor:              opts.Attestor,
 		peerReader:            opts.PeerReader,
 		drainTunnels:          opts.DrainTunnels,
-		tunnels:               make(map[*http.Server]struct{}),
+		tunnels:               make(map[*http.Server]bool),
 		strictTunnels:         make(chan struct{}, tunnelLimit),
 		sessions:              opts.Sessions,
 		creds:                 opts.Credentials,
@@ -160,6 +168,7 @@ func New(addr string, opts Options) *Proxy {
 		logSink:               sink,
 		maxResponseBytes:      opts.MaxResponseBytes, // 0 = unlimited
 		maxRequestBytes:       maxReq,
+		http2MaxStreams:       streams,
 	}
 
 	p.httpServer = &http.Server{
@@ -228,6 +237,9 @@ func (p *Proxy) Serve(l net.Listener) error {
 // remains when ctx ends.
 func (p *Proxy) Shutdown(ctx context.Context) error {
 	p.upstream.CloseIdleConnections()
+	if h2 := p.h2Upstream.Load(); h2 != nil {
+		h2.CloseIdleConnections()
+	}
 	// Cached GitHub installation tokens are revoked however the stop goes.
 	defer p.revokeGitTokens()
 	if !p.drainTunnels {
@@ -235,8 +247,8 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	}
 	p.tunnelsMu.Lock()
 	p.draining = true
-	for srv := range p.tunnels {
-		srv.SetKeepAlivesEnabled(false)
+	for srv, h2 := range p.tunnels {
+		stopTunnel(srv, h2)
 	}
 	p.tunnelsMu.Unlock()
 	outer := make(chan error, 1)
@@ -272,20 +284,34 @@ func (p *Proxy) reserveTunnel() (release func(), ok bool) {
 
 // trackTunnel registers a tunnel's request server. One registered after
 // Shutdown began serves its current request and then closes.
-func (p *Proxy) trackTunnel(srv *http.Server) (untrack func()) {
+func (p *Proxy) trackTunnel(srv *http.Server, h2 bool) (untrack func()) {
 	if !p.drainTunnels {
 		return func() {}
 	}
 	p.tunnelsMu.Lock()
 	defer p.tunnelsMu.Unlock()
-	p.tunnels[srv] = struct{}{}
+	p.tunnels[srv] = h2
 	if p.draining {
-		srv.SetKeepAlivesEnabled(false)
+		stopTunnel(srv, h2)
 	}
 	return func() {
 		p.tunnelsMu.Lock()
 		delete(p.tunnels, srv)
 		p.tunnelsMu.Unlock()
+	}
+}
+
+// stopTunnel lets a draining tunnel finish what it is serving, then close. An
+// HTTP/1.1 tunnel closes after its current request. An HTTP/2 tunnel also
+// sends GOAWAY, so the client starts new calls on another replica while the
+// calls in flight finish, and closes when the last one does; keep-alives
+// alone would leave an idle HTTP/2 tunnel open until the drain deadline.
+func stopTunnel(srv *http.Server, h2 bool) {
+	srv.SetKeepAlivesEnabled(false)
+	if h2 {
+		// Shutdown returns once the tunnel's connection closes, by itself
+		// or when the drain deadline closes it.
+		go func() { _ = srv.Shutdown(context.Background()) }()
 	}
 }
 
