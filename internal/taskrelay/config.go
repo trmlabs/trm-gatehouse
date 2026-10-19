@@ -35,7 +35,18 @@ type FixedConfig struct {
 	// PostgresListener, in shared mode only, is one port for every catalog
 	// database; see PostgresListenerConfig.
 	PostgresListener *PostgresListenerConfig `json:"postgresListener,omitempty"`
-	Browser          *BrowserConfig          `json:"browser,omitempty"`
+	// PostgresListeners, in self mode only, are the sidecar's routed
+	// PostgreSQL ports: each is one loopback port for every catalog database
+	// one broker serves, so a database added to the catalog needs no change
+	// to the worker. Each names its own upstream, so a sidecar can reach more
+	// than one broker, one port each. See PostgresListenerConfig.
+	PostgresListeners []PostgresListenerConfig `json:"postgresListeners,omitempty"`
+	// MaxPostgresListeners bounds PostgresListeners (self mode only; default
+	// 10000, up to 65535). Each routed port needs its own loopback port, so
+	// the port space is the only real ceiling; the bound only catches a
+	// runaway rendered list.
+	MaxPostgresListeners int            `json:"maxPostgresListeners,omitempty"`
+	Browser              *BrowserConfig `json:"browser,omitempty"`
 	// Self runs the relay as a sidecar in the worker's own Pod: loopback,
 	// plaintext listeners only, and no Kubernetes pairing, because the broker
 	// verifies this Pod's token and address on every connection.
@@ -207,6 +218,12 @@ func (c FixedConfig) Validate(now time.Time) error {
 	if (c.AdminListen != "" || c.PostgresListener != nil || c.TLS != nil) && c.Shared == nil {
 		return errConfig
 	}
+	// Routed ports in a worker's own Pod are a sidecar's alone, and so is the
+	// bound on them.
+	if ((len(c.PostgresListeners) != 0 || c.MaxPostgresListeners != 0) && (!c.Self || c.Shared != nil)) ||
+		c.MaxPostgresListeners < 0 || c.MaxPostgresListeners > maxLoopbackPorts {
+		return errConfig
+	}
 	// Activity reaches the broker over the CONNECT upstream.
 	if d := c.DurableActivity; d != nil && (c.AdminListen == "" || c.Connect == nil || d.PushSeconds < 0 || d.PushSeconds > 3600) {
 		return errConfig
@@ -330,10 +347,50 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 			return errConfig
 		}
 	}
+	if len(c.PostgresListeners) > c.postgresListenerLimit() {
+		return errConfig
+	}
+	for _, l := range c.PostgresListeners {
+		if !l.Upstream.validSession() || check(l.Listen, l.Upstream) != nil || !l.validRoutes() ||
+			!safeName.MatchString(l.User) || !safeName.MatchString(l.Placeholder) {
+			return errConfig
+		}
+	}
 	if len(used) == 0 {
 		return errConfig
 	}
 	return nil
+}
+
+// Defaults for a sidecar's routed ports. The ceiling is the loopback port
+// space: every listener needs a port of its own.
+const (
+	defaultMaxPostgresListeners = 10000
+	maxLoopbackPorts            = 65535
+)
+
+// postgresListenerLimit is how many routed ports a sidecar may serve.
+func (c FixedConfig) postgresListenerLimit() int {
+	if c.MaxPostgresListeners == 0 {
+		return defaultMaxPostgresListeners
+	}
+	return c.MaxPostgresListeners
+}
+
+// validRoutes reports whether a routed listener names exactly one routing:
+// routes "broker", or a list of distinct database names.
+func (l PostgresListenerConfig) validRoutes() bool {
+	if (l.Routes != "" && l.Routes != routesBroker) || (l.Routes == routesBroker) == (len(l.Databases) != 0) {
+		return false
+	}
+	seen := make(map[string]bool, len(l.Databases))
+	for _, name := range l.Databases {
+		if !safeName.MatchString(name) || seen[name] {
+			return false
+		}
+		seen[name] = true
+	}
+	return true
 }
 
 // postgresBindings preserves the legacy single binding without mixing authority.
