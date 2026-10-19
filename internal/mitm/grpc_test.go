@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -435,6 +436,48 @@ func TestHTTP2OnlyForHTTP2Hosts(t *testing.T) {
 	req, out := []byte("x"), []byte(nil)
 	if err := cc.Invoke(ctx, "/v1/x", &req, &out); err == nil {
 		t.Fatal("a gRPC call reached a host without http2")
+	}
+}
+
+// An http2 entry whose vendor does not offer HTTP/2 fails the call: the
+// broker never falls back to HTTP/1.1 on connections it would reuse.
+func TestHTTP2EntryNeverFallsBackToHTTP1(t *testing.T) {
+	cert, vendorRoots := grpcTestCert(t, "old.example.com")
+	var reached atomic.Int32
+	vendor := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	vendor.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	vendor.StartTLS() // HTTP/1.1 only
+	t.Cleanup(vendor.Close)
+	catalog, err := httpcatalog.Parse([]byte(`{"entries":[
+	  {"name":"old","host":"old.example.com","http2":true,"pathPrefixes":["/example.v1.Reads/"],"methods":["POST"],
+	   "header":"Authorization","scheme":"Bearer","placeholder":"__vault_RPC_KEY__",
+	   "key":{"mount":"gatehouse","path":"vendors/rpc","field":"key"},"pools":["pool-agent"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &scopeResolver{scope: &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1", VaultRole: "proxy"}}
+	audit := &adapterAudit{}
+	proxyURL, roots, p := setupProxy(t, sessions, &fakeCredProvider{}, func(o *Options) {
+		o.StrictCredentialProxy = true
+		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{value: grpcKey}, Audit: audit}
+	})
+	p.upstream.TLSClientConfig.RootCAs = vendorRoots
+	p.upstream.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, vendor.Listener.Addr().String())
+	}
+	f := &grpcFixture{proxyURL: proxyURL, roots: roots, proxy: p}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, out := []byte("x"), []byte(nil)
+	err = f.client(t, "old.example.com").Invoke(ctx, "/example.v1.Reads/Get", &req, &out)
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("call to an HTTP/1.1-only vendor: %v, want UNAVAILABLE", err)
+	}
+	if n := reached.Load(); n != 0 {
+		t.Fatalf("the vendor received %d HTTP/1.1 requests", n)
 	}
 }
 

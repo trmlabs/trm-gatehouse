@@ -265,7 +265,7 @@ func framesSafe(needles [][]byte) bool {
 	return true
 }
 
-// upstreamFor is the transport for an upstream request: HTTP/2 when the
+// upstreamFor is the transport for an upstream request: HTTP/2 only when the
 // worker's request arrived over HTTP/2, which a gRPC server needs, else the
 // HTTP/1.1 transport. The HTTP/2 one is built from the HTTP/1.1 one on first
 // use, with its dialer, egress checks and TLS verification.
@@ -278,13 +278,13 @@ func (p *Proxy) upstreamFor(out *http.Request) http.RoundTripper {
 	}
 	t := p.upstream.Clone()
 	t.Protocols = new(http.Protocols)
-	t.Protocols.SetHTTP1(true)
 	t.Protocols.SetHTTP2(true)
 	// Calls share connections, as HTTP/2 intends. Strict mode turns off
 	// HTTP/1.1 keep-alives so the transport never resends a request on a
 	// reused connection that may have reached the server; HTTP/2 resends
 	// only one the server refused unprocessed (GOAWAY past it, or
-	// REFUSED_STREAM).
+	// REFUSED_STREAM). Without HTTP/1.1 here, an upstream that does not
+	// offer HTTP/2 fails the call rather than reusing HTTP/1.1 connections.
 	t.DisableKeepAlives = false
 	if p.h2Upstream.CompareAndSwap(nil, t) {
 		return t

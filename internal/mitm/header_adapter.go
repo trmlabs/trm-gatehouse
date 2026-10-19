@@ -174,7 +174,7 @@ func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Reques
 // it, as a fixed code in the row's decision field ("" when none applies), and
 // for a signing-key refusal the token's kid and the connection's peer.
 func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial, wait time.Duration) {
-	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Path: auditPath(r), Decision: reason}
+	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Decision: reason}
 	if key != nil {
 		event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 	}
@@ -226,7 +226,8 @@ func githubAPIOperation(api httpcatalog.GitRequest, path string) string {
 }
 
 // auditPath is the path a row records for r, as sent and without its query;
-// empty for a CONNECT.
+// empty for a CONNECT. Rows record it once the caller is authenticated, and
+// never for a browser-session host (see forwardCatalog).
 func auditPath(r *http.Request) string {
 	if r.Method == http.MethodConnect || r.URL == nil {
 		return ""
@@ -250,7 +251,7 @@ func newRequestID() string {
 
 func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, host string, port int, useTLS bool, scope *brokercore.ProxyScope) {
 	a := p.adapter
-	event := auditchain.Event{Session: newRequestID(), Method: auditMethod(r.Method), Path: auditPath(r)}
+	event := auditchain.Event{Session: newRequestID(), Method: auditMethod(r.Method)}
 	if scope != nil {
 		event.Pool, event.Agent, event.PodUID = scope.Pool, scope.AgentID, scope.WorkloadID
 	}
@@ -259,6 +260,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	if scope == nil || scope.AgentID == "" || scope.UserID != "" {
 		deny(http.StatusForbidden, "authentication")
 		return
+	}
+	catalog := a.Catalog.Current()
+	// A web app's paths can carry what its links hand out, such as a
+	// one-time sign-in link, so rows for a browser-session host name no path.
+	if !catalog.BrowserHost(host, port) {
+		event.Path = auditPath(r)
 	}
 	// A decoy anywhere in the URL or headers is refused before routing, so
 	// every entry kind, and a host or path no entry lists, is covered.
@@ -274,7 +281,6 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusBadRequest, "plain_http")
 		return
 	}
-	catalog := a.Catalog.Current()
 	// Every matched entry passes the authorization model before any credential
 	// is fetched: pool ceiling, then the verified requester's entitlements.
 	refused := func(entry *httpcatalog.Entry, err error) bool {
@@ -315,9 +321,6 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	if browser, ok, err := catalog.BrowserMatch(host, port, r.Method, r.URL.Path, scope.Pool); ok {
-		// A web app's paths can carry what its links hand out, such as a
-		// one-time sign-in link; its rows name no path.
-		event.Path = ""
 		if !refused(browser.Entry, err) {
 			p.forwardBrowser(w, r, target, scope, event, browser, err)
 		}

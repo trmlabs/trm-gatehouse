@@ -354,6 +354,19 @@ func TestBrowserRefusals(t *testing.T) {
 	if resp, _ := f.do(t, "GET", "https://api.example.com"+httpcatalog.BrowserSeedPath, nil); resp == nil || resp.StatusCode != 403 || f.audit.last().Outcome != "pool" {
 		t.Fatalf("ungranted pool got a seed: %v", resp)
 	}
+	// A refusal before routing names no path on a browser host either: an
+	// app's path can be a one-time sign-in link.
+	f.audit.mu.Lock()
+	f.audit.admitErr = errors.New("audit down")
+	f.audit.mu.Unlock()
+	if resp, _ := f.do(t, "GET", "https://app.example.com/sign-in/one-time-link", nil); resp == nil || resp.StatusCode != 503 || f.audit.last().Outcome != "audit_unavailable" {
+		t.Fatalf("refusal with the audit down: %v %q", resp, f.audit.last().Outcome)
+	}
+	for _, e := range f.audit.all() {
+		if e.Path != "" {
+			t.Errorf("a browser-session row (%s) records the path %q", e.Outcome, e.Path)
+		}
+	}
 }
 
 // The app loads with no credential and none of its cookies; a token the API
