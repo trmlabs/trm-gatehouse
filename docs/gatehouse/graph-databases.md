@@ -1,6 +1,6 @@
 # Graph databases
 
-A worker can read a Memgraph graph database with any stock Neo4j or Memgraph driver. It connects to its sidecar at a `bolt://` (or `neo4j://`) address on its own loopback, signs in with the catalog entry's name and a fixed placeholder, and runs Cypher as usual. The worker never holds the database's login: the broker signs in to the database for it, and lets only queries that read the graph through. One sidecar port serves every graph database the pool is granted, so adding one is a catalog entry and a login in Vault, with no change to the worker.
+A worker can use a Memgraph graph database with any stock Neo4j or Memgraph driver. It connects to its sidecar at a `bolt://` (or `neo4j://`) address on its own loopback, signs in with the catalog entry's name and a fixed placeholder, and runs Cypher as usual. The worker never holds the database's login: the broker signs in to the database for it, and lets through only what the entry allows: queries that read the graph, and for an entry with write access, queries that change it. One sidecar port serves every graph database the pool is granted, so adding one is a catalog entry and a login in Vault, with no change to the worker.
 
 ## Connect from a worker
 
@@ -18,7 +18,7 @@ with GraphDatabase.driver("neo4j://127.0.0.1:17687", auth=("app-graph", "gatehou
     records, _, _ = driver.execute_query("MATCH (n:Person) RETURN n.name AS name", routing_="r")
 ```
 
-`execute_query`, `execute_read`, auto-commit `session.run` and explicit read transactions all work. `neo4j://` works because the broker answers the driver's routing request with the sidecar's own address for every role. Gatehouse speaks Bolt 5.2 and 4.3, the versions Memgraph 3 accepts that current drivers offer.
+`execute_query`, `execute_read`, auto-commit `session.run` and explicit transactions all work, as does pymgclient with or without autocommit. `neo4j://` works because the broker answers the driver's routing request with the sidecar's own address for every role. Gatehouse speaks Bolt 5.2 and 4.3, the versions Memgraph 3 accepts that current drivers offer.
 
 ## What runs
 
@@ -27,7 +27,8 @@ A query runs only when everything it does reads the graph. Before each query the
 | Kind of query | What happens |
 |---|---|
 | `MATCH`, `RETURN`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, path searches | Runs |
-| `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `LOAD CSV` | Refused; the session stays open |
+| `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `FOREACH` | Refused on a read entry, and the session stays open. Runs and commits on a write entry. |
+| `LOAD CSV`, `LOAD PARQUET`, `LOAD JSONL`, `USING PERIODIC COMMIT`, `CALL { } IN TRANSACTIONS` | Refused on every entry: they read server files or commit on their own |
 | A procedure (`CALL module.name`) | Refused unless the entry's `procedures` lists it |
 | A module function (`module.name(...)`) | Refused unless the entry's `functions` lists it. Built-in functions such as `count`, `toUpper` or `date` run. |
 | Index, constraint, user, trigger, snapshot and other administrative queries | Not run: the database cannot plan them, so its own error comes back |
@@ -35,7 +36,11 @@ A query runs only when everything it does reads the graph. Before each query the
 
 Procedures and functions are refused by default because a module can write, read files on the database server or reach the network, and none of that shows in a plan. List one only when you know it only reads, for example `schema.node_type_properties`.
 
-As a second guard, every query runs inside a read transaction that the broker rolls back: an auto-commit query runs in one opened for it, and an explicit transaction's `COMMIT` is answered as a success and rolled back. A write that slipped past the plan check would still not be kept, apart from the few Memgraph operations that commit on their own, which the plan check refuses.
+An entry with `access: write` runs graph writes and commits them, in transactions the broker opens in write mode. Everything else in the table above stays as it is: no file loads, no queries that commit on their own, only the listed procedures and functions, and no administrative queries.
+
+On a read entry, as a second guard, every query runs inside a read transaction that the broker rolls back: an auto-commit query runs in one opened for it, and an explicit transaction's `COMMIT` is answered as a success and rolled back. A write that slipped past the plan check would still not be kept, apart from the few Memgraph operations that commit on their own, which the plan check refuses.
+
+`BEGIN`, `COMMIT` and `ROLLBACK` sent as queries, as pymgclient does without autocommit, are carried out as the Bolt messages they stand for, so they follow the same rules: on a read entry, `COMMIT` rolls back. Anything more than the bare word, even with a comment, is planned like any other query.
 
 ## Add a graph database
 
@@ -60,10 +65,10 @@ entries:
 |---|---|
 | `port` | 7687 by default |
 | `memgraph.login` | The Vault secret holding the broker's login. Never sent to a worker. |
-| `memgraph.access` | `read`, the default and the only value accepted |
+| `memgraph.access` | `read`, the default, or `write`. The broker sets each transaction's mode from the entry and ignores the driver's, so a client cannot turn a read entry into a write one. |
 | `memgraph.sslmode` | `verify-full`, the default. `disable` is accepted only in a test deployment that allows plaintext databases, and only for a cluster-local host. |
 | `memgraph.ca`, `memgraph.serverName` | As for a `postgres` entry: the only trust for the server's certificate, and the name it must carry |
-| `memgraph.maxConns` | This database's connection budget across the broker, 1 to 100000; unset uses the broker's default |
+| `memgraph.maxConns` | This database's connection budget on each broker replica, 1 to 100000; unset uses the broker's default |
 | `memgraph.procedures`, `memgraph.functions` | The procedures and module functions a query may use, as `module.name` |
 
 `tier`, `requires` and pool grants work as for every other entry.
@@ -94,6 +99,7 @@ Gatehouse's refusals arrive as Bolt failures with a code starting `Gatehouse.`. 
 | Code | Message | Fix |
 |---|---|---|
 | `Gatehouse.ClientError.Statement.AccessMode` | this database is read-only; only queries that read the graph run here (refused: ...) | Read instead; ask for a procedure or function to be listed if it only reads |
+| `Gatehouse.ClientError.Statement.AccessMode` | only queries that read or change the graph run here (refused: ...) | On a write entry: load data with `CREATE` or `MERGE` and parameters rather than a file, and commit in your own transaction rather than in batches |
 | `Gatehouse.ClientError.Security.Unauthorized` | wrong placeholder password for this port | Use the port's placeholder |
 | `Gatehouse.ClientError.Security.Unauthorized` | this user name is not a Gatehouse catalog entry for your pool | Use the entry's name as the user |
 | `Gatehouse.ClientError.Security.Unauthorized` | Gatehouse could not verify this worker | Retry; tell the Gatehouse operators if it persists |
@@ -108,6 +114,12 @@ Gatehouse's refusals arrive as Bolt failures with a code starting `Gatehouse.`. 
 | `Gatehouse.TransientError.General.Unavailable` | cannot reach Gatehouse | Retry; tell the Gatehouse operators if it persists |
 | `Gatehouse.TransientError.General.SessionEnded` | Gatehouse ended the session (deadline or revocation) | Reconnect; a worker past its deadline is not admitted again |
 | `Gatehouse.ClientError.Request.Invalid` | Gatehouse could not follow this request | Use a stock driver; tell the Gatehouse operators the pool and time |
+| `Gatehouse.ClientError.Request.Invalid` | the previous result is still open; pull or discard it first | Read or discard a result before the next query outside a transaction |
+| `Gatehouse.ClientError.Request.Invalid` | use a bolt:// URI, or neo4j:// with the sidecar's address | Use `bolt://`, or a `neo4j://` URI with the sidecar's host and port |
+| `Gatehouse.ClientError.Transaction.Invalid` | a transaction is already open, or no transaction is open | Commit or roll back before beginning another; begin before committing |
+| `Gatehouse.ClientError.Security.Unauthorized` | Gatehouse does not support signing in again on an open connection; open a new one | Open a new connection to change sign-in |
+| `Gatehouse.TransientError.General.Unavailable` | Gatehouse session accounting is unavailable; retry shortly | Retry; drivers do this themselves |
+| `Gatehouse.TransientError.General.AuditUnavailable` | Gatehouse's audit trail is unavailable; retry shortly | Retry; Gatehouse runs nothing it cannot audit |
 
 Errors from the database itself, such as a syntax error, pass through unchanged.
 

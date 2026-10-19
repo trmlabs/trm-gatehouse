@@ -24,7 +24,7 @@ agent-vault broker-catalog validate --require-pools --environment staging catalo
 | To reach | `kind` | You also need |
 |---|---|---|
 | A PostgreSQL database | `postgres` | A Vault database role for it, ending `-readonly` or `-readwrite` |
-| A Memgraph graph database, read-only | `memgraph` | A login for the broker in a Vault key-value secret. See [graph databases](graph-databases.md). |
+| A Memgraph graph database, read-only or with writes | `memgraph` | A login for the broker in a Vault key-value secret. See [graph databases](graph-databases.md). |
 | An HTTP API with a key | (leave unset) | The key, written by an operator to a Vault key-value mount the broker can read |
 | A GitHub repository (clone, push) | `git` | A GitHub App, installed on the repository |
 | Opening and commenting on GitHub pull requests | `github-api` | The same App |
