@@ -113,13 +113,6 @@ Those five methods are every call the Temporal Python SDK and the Temporal CLI m
 
 Under TLS 1.3 a host refuses a certificate just after the handshake. When the connection closes before the broker reads that refusal, the call fails as `upstream_error` (502) instead, and the cached certificate is read again within a minute as usual.
 
-**Expiry metric.** Every minute the broker checks each certificate the catalog names, logs `upstream client certificate in use` (with the binding, KV version and expiry) when one is first read or rotated, and `upstream client certificate cannot be presented` (with the reason) when one cannot be. With `AGENT_VAULT_METRICS_PORT` set, it also serves `GET /metrics` on that port, and nothing else, in the Prometheus text format:
-
-- `gatehouse_upstream_client_certificate_expiry_timestamp_seconds{binding}`: when the certificate expires, in Unix seconds.
-- `gatehouse_upstream_client_certificate_valid{binding}`: 1 when the certificate was read and is inside its validity window at the last check, else 0.
-
-Alert when `gatehouse_upstream_client_certificate_expiry_timestamp_seconds - time()` falls below the time a reissue takes, and when `gatehouse_upstream_client_certificate_valid` is 0. The page holds entry names and times, never a credential; the port listens on every interface, so admit only the metrics scraper to it.
-
 Grant the broker read on each certificate path, as for keys. A broker older than this field leaves out any entry that lists it, so deploy the broker before the catalog change.
 
 ## Guarantees

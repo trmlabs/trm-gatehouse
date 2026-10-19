@@ -8,10 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -96,7 +93,7 @@ const (
 // TTL, or sooner after Invalidate; a deleted or invalid one is refused from
 // the first read that sees it; and only an unreachable or failing Vault keeps
 // a cached certificate in use, for up to MaxStale (default 5 minutes) past its
-// TTL. It also keeps what the last Check found, for the expiry metrics.
+// TTL.
 type ClientCertificates struct {
 	Vault    Logical
 	TTL      time.Duration
@@ -107,7 +104,6 @@ type ClientCertificates struct {
 	cache       map[ClientCertificateRef]cachedCertificate
 	flight      map[ClientCertificateRef]*sync.Mutex
 	invalidated map[ClientCertificateRef]time.Time
-	status      map[string]CertificateStatus // by binding, from the last Check
 }
 
 type cachedCertificate struct {
@@ -244,75 +240,4 @@ func ParseClientCertificate(certPEM, keyPEM string) (*ClientCertificate, error) 
 	}
 	pair.Leaf = leaf
 	return &ClientCertificate{certificate: pair, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter, Fingerprint: sha256.Sum256(leaf.Raw)}, nil
-}
-
-// CertificateStatus is what a Check found for one entry's client certificate.
-type CertificateStatus struct {
-	Binding  string
-	Version  int
-	NotAfter time.Time // zero when no certificate could be read
-	// Problem is nil when the certificate can be presented now, else
-	// ErrClientCertificateExpired or a Get error.
-	Problem error
-}
-
-// Check reads every client certificate the catalog's entries name, through
-// the cache, and keeps what it found for WriteMetrics. It returns one status
-// per entry with a certificate, in catalog order.
-func (c *ClientCertificates) Check(ctx context.Context, catalog Catalog) []CertificateStatus {
-	_, _, now := c.settings()
-	var out []CertificateStatus
-	for _, e := range catalog.Entries() {
-		if e.ClientCertificate == nil {
-			continue
-		}
-		status := CertificateStatus{Binding: e.Name}
-		cert, err := c.Get(ctx, *e.ClientCertificate)
-		if err == nil {
-			status.Version, status.NotAfter, err = cert.Version, cert.NotAfter, cert.Usable(now)
-		}
-		status.Problem = err
-		out = append(out, status)
-	}
-	byBinding := make(map[string]CertificateStatus, len(out))
-	for _, s := range out {
-		byBinding[s.Binding] = s
-	}
-	c.mu.Lock()
-	c.status = byBinding
-	c.mu.Unlock()
-	return out
-}
-
-// WriteMetrics writes the last Check's results in the Prometheus text format:
-// per binding, the certificate's expiry in Unix seconds (when one was read)
-// and whether it can be presented now. An alert on the expiry fires before
-// the certificate lapses; one on the second, when it cannot be presented.
-func (c *ClientCertificates) WriteMetrics(w io.Writer) error {
-	c.mu.Lock()
-	statuses := make([]CertificateStatus, 0, len(c.status))
-	for _, s := range c.status {
-		statuses = append(statuses, s)
-	}
-	c.mu.Unlock()
-	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Binding < statuses[j].Binding })
-	var b strings.Builder
-	b.WriteString("# HELP gatehouse_upstream_client_certificate_expiry_timestamp_seconds When the client certificate a catalog entry presents upstream expires, in Unix seconds.\n")
-	b.WriteString("# TYPE gatehouse_upstream_client_certificate_expiry_timestamp_seconds gauge\n")
-	for _, s := range statuses {
-		if !s.NotAfter.IsZero() {
-			fmt.Fprintf(&b, "gatehouse_upstream_client_certificate_expiry_timestamp_seconds{binding=%q} %d\n", s.Binding, s.NotAfter.Unix())
-		}
-	}
-	b.WriteString("# HELP gatehouse_upstream_client_certificate_valid 1 when the entry's client certificate was read from Vault and is inside its validity window at the last check, else 0.\n")
-	b.WriteString("# TYPE gatehouse_upstream_client_certificate_valid gauge\n")
-	for _, s := range statuses {
-		valid := 0
-		if s.Problem == nil {
-			valid = 1
-		}
-		fmt.Fprintf(&b, "gatehouse_upstream_client_certificate_valid{binding=%q} %d\n", s.Binding, valid)
-	}
-	_, err := io.WriteString(w, b.String())
-	return err
 }

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,10 +163,6 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 	keys := &httpcatalog.Keys{Vault: client.Logical()}
 	certs := &httpcatalog.ClientCertificates{Vault: client.Logical()}
 	adapter := &mitm.HeaderAdapter{Catalog: source, Keys: keys, Audit: chain, ClientCertificates: certs}
-	go watchClientCertificates(ctx, certs, source, time.Minute, srv.Logger())
-	if err := serveMetrics(getenv("AGENT_VAULT_METRICS_PORT"), certs, srv.Logger()); err != nil {
-		return nil, err
-	}
 	if err := attachAuthorization(adapter, getenv); err != nil {
 		return nil, err
 	}
@@ -325,68 +320,4 @@ func githubAppSigner(client *hashicorp.Client, getenv func(string) string) (gith
 		return githubapp.KVSigner{Vault: client.Logical(), Mount: "gatehouse", Path: path, Field: "private_key"}, nil
 	}
 	return nil, fmt.Errorf("git catalog entries require AGENT_VAULT_GITHUB_APP_TRANSIT_KEY or AGENT_VAULT_GITHUB_APP_KV_PATH")
-}
-
-// watchClientCertificates checks, every interval until ctx ends, each client
-// certificate the catalog's entries present upstream, so the expiry metrics
-// stay current without a request, and logs each change: a certificate in use
-// for the first time or after a rotation, and one that cannot be presented.
-func watchClientCertificates(ctx context.Context, certs *httpcatalog.ClientCertificates, catalog interface{ Current() httpcatalog.Catalog }, interval time.Duration, logger *slog.Logger) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	last := map[string]httpcatalog.CertificateStatus{}
-	for {
-		next := map[string]httpcatalog.CertificateStatus{}
-		for _, s := range certs.Check(ctx, catalog.Current()) {
-			prev, seen := last[s.Binding]
-			next[s.Binding] = s
-			switch {
-			case s.Problem != nil && (!seen || prev.Problem == nil || prev.Problem.Error() != s.Problem.Error()):
-				// The errors are fixed text and never quote the certificate or key.
-				logger.Error("upstream client certificate cannot be presented", slog.String("binding", s.Binding), slog.String("reason", s.Problem.Error()))
-			case s.Problem == nil && (!seen || prev.Problem != nil || prev.Version != s.Version || !prev.NotAfter.Equal(s.NotAfter)):
-				logger.Info("upstream client certificate in use", slog.String("binding", s.Binding), slog.Int("version", s.Version),
-					slog.String("not_after", s.NotAfter.UTC().Format(time.RFC3339)))
-			}
-		}
-		last = next
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// serveMetrics serves GET /metrics, and nothing else, on every interface at
-// port (AGENT_VAULT_METRICS_PORT; unset serves nothing), in the Prometheus
-// text format a scraper such as groundcover's reads: when each client
-// certificate the broker presents upstream expires, and whether it can be
-// presented now (ClientCertificates.WriteMetrics). The page holds entry names
-// and times, never a credential; admit only the scraper to the port.
-func serveMetrics(port string, certs *httpcatalog.ClientCertificates, logger *slog.Logger) error {
-	if port == "" {
-		return nil
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
-		return fmt.Errorf("AGENT_VAULT_METRICS_PORT must be a port number from 1 through 65535")
-	}
-	ln, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		return fmt.Errorf("listen on AGENT_VAULT_METRICS_PORT: %w", err)
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_ = certs.WriteMetrics(w)
-	})
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second,
-		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("metrics listener stopped", slog.String("error", err.Error()))
-		}
-	}()
-	return nil
 }
