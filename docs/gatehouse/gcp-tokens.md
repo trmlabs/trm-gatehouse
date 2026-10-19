@@ -53,6 +53,7 @@ the non-production grants.
 
 1. **Broker identity:**
    - Create a broker service account, bound with `roles/iam.workloadIdentityUser` to the member above, on that service account only.
+   - The broker takes up this identity when a catalog version first holds a gcp entry, and lets it go when the last one is removed, with no restart. A broker with no Google identity still starts; its gcp entries answer 503 until a catalog change finds one.
 2. **Impersonating entry:**
    - Create one service account per entry, holding only the entry's role on the entry's resource (for example `roles/bigquery.dataViewer` on one dataset, plus `roles/bigquery.jobUser` where queries run).
    - Grant the broker service account `roles/iam.serviceAccountTokenCreator` on that service account alone, for example with `google_service_account_iam_member`.
