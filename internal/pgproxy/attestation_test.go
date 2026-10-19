@@ -44,7 +44,7 @@ func TestAttestationPreambleReachesEveryIdentityCheck(t *testing.T) {
 	auth := &attestationAuth{}
 	_, addr := startBroker(t, Options{Auth: auth, Databases: r, Leases: &fakeMinter{lease: lease},
 		TrustProxyHeader: true, AuthorizationInterval: 50 * time.Millisecond})
-	conn, err := openSession(t, addr, header("10.200.0.7")+"GHATTS1 "+attestation+"\nGHSESS1 "+runnerToken+"\n")
+	conn, err := openSession(t, addr, header("192.0.2.7")+"GHATTS1 "+attestation+"\nGHSESS1 "+runnerToken+"\n")
 	if err != nil {
 		t.Fatal(err)
 	}

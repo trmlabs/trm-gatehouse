@@ -32,7 +32,7 @@ func (t BrowserToken) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(t.Stri
 
 // Auth0Tokens logs test users in and caches each access token until a
 // quarter of its life remains. An entry logs in with Auth0's password-realm
-// grant through a confidential client, or, when it names one, through TRM's
+// grant through a confidential client, or, when it names one, through an
 // automated-auth service (see automatedAuthLogin). The user's password and
 // the client secret or service key come from Vault on each login and are
 // never cached here. The login keeps no refresh token and never follows a

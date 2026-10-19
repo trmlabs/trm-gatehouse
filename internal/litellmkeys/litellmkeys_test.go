@@ -147,14 +147,14 @@ func newFakeLiteLLM(t *testing.T) (*fakeLiteLLM, *httptest.Server) {
 	return f, srv
 }
 
-const devPath = "gatehouse/data/vendors/litellm-staging/gatehouse-trial-database-developer"
+const devPath = "gatehouse/data/vendors/litellm-example/example-developers"
 
 func testConfig(gateway string) Config {
 	return Config{
-		Gateway: gateway, TeamID: "gatehouse-staging",
-		MinterKey:    KeyRef{Mount: "gatehouse", Path: "vendors/litellm-staging-minter", Field: "key"},
+		Gateway: gateway, TeamID: "example-team",
+		MinterKey:    KeyRef{Mount: "gatehouse", Path: "vendors/litellm-example-minter", Field: "key"},
 		RotateBefore: "7d", RevokeAfter: "1h",
-		Keys: []Key{{Pool: "gatehouse-trial-database-developer", Mount: "gatehouse", Path: "vendors/litellm-staging/gatehouse-trial-database-developer",
+		Keys: []Key{{Pool: "example-developers", Mount: "gatehouse", Path: "vendors/litellm-example/example-developers",
 			MaxBudget: 250, BudgetDuration: "30d", Duration: "30d", Models: []string{"claude-sonnet-5-5", "gpt-5.5"}}},
 	}
 }
@@ -162,7 +162,7 @@ func testConfig(gateway string) Config {
 func setup(t *testing.T) (*Reconciler, *fakeVault, *fakeLiteLLM, *time.Time, *bytes.Buffer) {
 	f, srv := newFakeLiteLLM(t)
 	v := newFakeVault()
-	v.put("gatehouse/data/vendors/litellm-staging-minter", map[string]interface{}{"key": minterValue})
+	v.put("gatehouse/data/vendors/litellm-example-minter", map[string]interface{}{"key": minterValue})
 	now := time.Now()
 	var logs bytes.Buffer
 	r := &Reconciler{Config: testConfig(srv.URL), Vault: v, Client: srv.Client(), Now: func() time.Time { return now },
@@ -185,8 +185,8 @@ func TestFirstRunMintsUnderTheTeam(t *testing.T) {
 	f.mu.Lock()
 	body := f.generated[0]
 	f.mu.Unlock()
-	if body["team_id"] != "gatehouse-staging" || body["key_type"] != "llm_api" || body["max_budget"] != 250.0 || body["duration"] != "30d" || body["budget_duration"] != "30d" ||
-		fmt.Sprint(body["models"]) != "[claude-sonnet-5-5 gpt-5.5]" || !strings.HasPrefix(body["key_alias"].(string), "gatehouse-gatehouse-trial-database-developer-") {
+	if body["team_id"] != "example-team" || body["key_type"] != "llm_api" || body["max_budget"] != 250.0 || body["duration"] != "30d" || body["budget_duration"] != "30d" ||
+		fmt.Sprint(body["models"]) != "[claude-sonnet-5-5 gpt-5.5]" || !strings.HasPrefix(body["key_alias"].(string), "gatehouse-example-developers-") {
 		t.Fatalf("minted with %v", body)
 	}
 	doc := v.latest(devPath)
@@ -291,14 +291,14 @@ func TestFailedWriteRevokesTheNewKey(t *testing.T) {
 func TestOnePoolFailingDoesNotStopTheOthers(t *testing.T) {
 	r, v, f, _, _ := setup(t)
 	other := r.Config.Keys[0]
-	other.Pool, other.Path = "gatehouse-other-pool", "vendors/litellm-staging/gatehouse-other-pool"
+	other.Pool, other.Path = "gatehouse-other-pool", "vendors/litellm-example/gatehouse-other-pool"
 	r.Config.Keys = append(r.Config.Keys, other)
-	f.failMint["gatehouse-trial-database-developer"] = true
+	f.failMint["example-developers"] = true
 	res, err := r.Run(context.Background())
 	if err == nil || res.Failed != 1 || res.Minted != 1 {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
-	if v.latest("gatehouse/data/vendors/litellm-staging/gatehouse-other-pool") == nil {
+	if v.latest("gatehouse/data/vendors/litellm-example/gatehouse-other-pool") == nil {
 		t.Fatal("the healthy pool got no key")
 	}
 }
@@ -341,7 +341,7 @@ func TestRevocationFailureKeepsThePreviousAlias(t *testing.T) {
 func TestMinterKeyMissingFailsTheRun(t *testing.T) {
 	r, v, f, _, _ := setup(t)
 	v.mu.Lock()
-	delete(v.docs, "gatehouse/data/vendors/litellm-staging-minter")
+	delete(v.docs, "gatehouse/data/vendors/litellm-example-minter")
 	v.mu.Unlock()
 	if _, err := r.Run(context.Background()); err == nil {
 		t.Fatal("ran without a minter key")

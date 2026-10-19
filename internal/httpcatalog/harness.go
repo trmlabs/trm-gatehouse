@@ -67,8 +67,8 @@ type HarnessIdentity struct {
 	Namespaces   []string `json:"namespaces"`
 	ImageDigests []string `json:"imageDigests,omitempty"`
 	// ImagePrefix, proxy-attested only, admits any image pulled from under
-	// this agent-sandbox repository path; ImageDigests then holds only the
-	// platform's own containers, and may be empty.
+	// this repository path in the agent image registry; ImageDigests then
+	// holds only the platform's own containers, and may be empty.
 	ImagePrefix string            `json:"imagePrefix,omitempty"`
 	Requester   *HarnessRequester `json:"requester,omitempty"` // optional
 }
@@ -171,7 +171,7 @@ func (h Harness) validate() error {
 		seen[ns] = true
 	}
 	if id.ImagePrefix != "" && (id.Kind != IdentityProxyAttested || !imagerule.ValidPrefix(id.ImagePrefix)) {
-		return errors.New("identity.imagePrefix is for proxy-attested harnesses: an agent-sandbox repository or tenant path ending in /")
+		return errors.New("identity.imagePrefix is for proxy-attested harnesses: a repository or tenant path under AGENT_VAULT_IMAGE_REGISTRY, ending in /")
 	}
 	// No upper bound on digests: each is short and fixed-size, and the
 	// catalog's own size limit bounds the list.

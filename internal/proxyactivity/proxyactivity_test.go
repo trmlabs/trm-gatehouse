@@ -52,7 +52,7 @@ func newService(t *testing.T) (*Service, http.Handler) {
 func call(h http.Handler, token, path string, body any) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
-	req.RemoteAddr = "10.200.0.7:40000"
+	req.RemoteAddr = "192.0.2.7:40000"
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

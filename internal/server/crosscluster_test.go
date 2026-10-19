@@ -34,7 +34,7 @@ func loopbackPair(t *testing.T, send string) net.Conn {
 	return c
 }
 
-const proxyLine = "PROXY TCP4 10.200.0.7 10.0.0.1 51000 16443\r\n"
+const proxyLine = "PROXY TCP4 192.0.2.7 10.0.0.1 51000 16443\r\n"
 
 func TestCrossClusterRoutesByFirstBytes(t *testing.T) {
 	for name, c := range map[string]struct {
@@ -131,7 +131,7 @@ func (c remoteConn) RemoteAddr() net.Addr { return c.remote }
 // header from anywhere else is refused.
 func TestCrossClusterTrustsPROXYOnlyFromLoopback(t *testing.T) {
 	c := loopbackPair(t, proxyLine+"CONNECT h:443 HTTP/1.1\r\n\r\n")
-	peer := remoteConn{Conn: c, remote: &net.TCPAddr{IP: net.ParseIP("10.200.0.7"), Port: 51000}}
+	peer := remoteConn{Conn: c, remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: 51000}}
 	if _, _, err := routeCrossCluster(peer); err == nil {
 		t.Fatal("a PROXY header from a non-loopback peer was trusted")
 	}
@@ -146,7 +146,7 @@ func TestCrossClusterRoutesCertificateRequests(t *testing.T) {
 	if err != nil || route != routeCertificate {
 		t.Fatalf("route %q err %v", route, err)
 	}
-	if got := routed.RemoteAddr().String(); got != "10.200.0.7:0" {
+	if got := routed.RemoteAddr().String(); got != "192.0.2.7:0" {
 		t.Errorf("remote address %s, want the proxy's", got)
 	}
 	b, _ := io.ReadAll(routed)

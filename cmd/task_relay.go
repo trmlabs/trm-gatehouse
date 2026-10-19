@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/Infisical/agent-vault/internal/imagerule"
 	"github.com/Infisical/agent-vault/internal/taskrelay"
 	"github.com/spf13/cobra"
 )
@@ -11,6 +13,9 @@ import (
 func init() {
 	var configPath string
 	command := &cobra.Command{Use: "task-relay", Short: "Serve a fixed trusted relay for one isolated task", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if e := imagerule.SetRegistry(os.Getenv(imagerule.RegistryEnv)); e != nil {
+			return e
+		}
 		config, e := taskrelay.LoadConfig(configPath)
 		if e != nil {
 			return e

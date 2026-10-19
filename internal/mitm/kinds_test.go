@@ -27,7 +27,7 @@ func (a kindAttestor) Attest(context.Context, string, netip.Addr) (*brokercore.P
 // Each listener admits only the identity kinds it was opened for.
 func TestListenerAdmitsOnlyItsIdentityKinds(t *testing.T) {
 	cross := []string{brokercore.KindProxyAttested}
-	peer := netip.MustParseAddr("10.200.0.7")
+	peer := netip.MustParseAddr("192.0.2.7")
 	for name, c := range map[string]struct {
 		kind  string
 		kinds []string
@@ -132,7 +132,7 @@ func TestKeyRefusalNamesKidAndPeer(t *testing.T) {
 		name, reason, kid, wantKid string
 		hashed                     bool
 	}{
-		{"pinned", "token_keys_pinned_mismatch", "ZQVpb7vyW0cXKr--ggHnuB24sV1iYirOsQNSZKxruVI", "ZQVpb7vyW0cXKr--ggHnuB24sV1iYirOsQNSZKxruVI", false},
+		{"pinned", "token_keys_pinned_mismatch", "c3ludGhldGljLXBpbm5lZC1rZXktaWQtMDAwMDAwMQ", "c3ludGhldGljLXBpbm5lZC1rZXktaWQtMDAwMDAwMQ", false},
 		{"in-cluster", "token_keys_in_cluster_unknown", "k.1_a", "k.1_a", false},
 		{"signature", "token_signature", "k1", "k1", false},
 		{"quote", "token_signature", `k"1`, "invalid", true},
