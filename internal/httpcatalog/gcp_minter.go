@@ -10,13 +10,12 @@ import (
 // last one goes, so neither takes a restart. With no minter, a gcp request is
 // refused with ErrGCPToken. Follow is its Source.OnChange hook and runs once
 // for the catalog the broker starts with; it is never called concurrently.
+//
+// Building never fails the broker. A minter whose identity is not there yet
+// refuses each request, and mints again as soon as the identity appears.
 type GCPMinter struct {
 	// Build makes the minter from the broker's own identity.
-	Build func() (*GCPTokens, error)
-	// Failed, if set, is told why a Build failed. A failed Build leaves the
-	// minter unset, so gcp requests are refused until the next catalog change
-	// builds it. The error must not carry secrets.
-	Failed func(error)
+	Build func() *GCPTokens
 
 	cur atomic.Pointer[GCPTokens]
 }
@@ -35,14 +34,7 @@ func (m *GCPMinter) Follow(c Catalog) {
 	case !gcp:
 		m.cur.Store(nil)
 	case m.cur.Load() == nil && m.Build != nil:
-		g, err := m.Build()
-		if err != nil {
-			if m.Failed != nil {
-				m.Failed(err)
-			}
-			return
-		}
-		m.cur.Store(g)
+		m.cur.Store(m.Build())
 	}
 }
 

@@ -38,10 +38,10 @@ func newGCPMinterFixture(t *testing.T) *gcpMinterFixture {
 		_ = json.NewEncoder(w).Encode(map[string]any{"accessToken": "impersonated", "expireTime": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)})
 	}))
 	t.Cleanup(srv.Close)
-	f.minter = &GCPMinter{Build: func() (*GCPTokens, error) {
+	f.minter = &GCPMinter{Build: func() *GCPTokens {
 		f.builds.Add(1)
 		return &GCPTokens{Root: staticRoot{&oauth2.Token{AccessToken: "root-token", Expiry: time.Now().Add(time.Hour)}}, Client: srv.Client(),
-			STSURL: srv.URL + "/v1/token", IAMCredentialsURL: srv.URL}, nil
+			STSURL: srv.URL + "/v1/token", IAMCredentialsURL: srv.URL}
 	}}
 	f.loader = &scriptedLoader{doc: `{"entries":[` + validEntry + `]}`, version: 1}
 	source, err := Open(context.Background(), f.loader.load)
@@ -118,28 +118,35 @@ func TestGCPMinterRefusesAnInvalidEntry(t *testing.T) {
 	}
 }
 
-// A broker with no Google identity still serves; each catalog change tries
-// again, and the first change that finds an identity gives it a minter.
-func TestGCPMinterRefusesUntilItCanBuild(t *testing.T) {
-	var failed []error
-	identity := errors.New("no identity")
-	minter := &GCPMinter{Failed: func(err error) { failed = append(failed, err) }}
-	minter.Build = func() (*GCPTokens, error) {
-		if identity != nil {
-			return nil, identity
+// A minter whose identity is not there yet refuses each request, and mints as
+// soon as the identity appears, with no catalog change in between.
+func TestGCPMinterRecoversWhenTheIdentityAppears(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"accessToken": "impersonated", "expireTime": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)})
+	}))
+	defer srv.Close()
+	var identity atomic.Bool
+	root := tokenSourceFunc(func() (*oauth2.Token, error) {
+		if !identity.Load() {
+			return nil, errors.New("no identity")
 		}
-		return &GCPTokens{}, nil
-	}
+		return &oauth2.Token{AccessToken: "root-token", Expiry: time.Now().Add(time.Hour)}, nil
+	})
+	minter := &GCPMinter{Build: func() *GCPTokens {
+		return &GCPTokens{Root: root, Client: srv.Client(), STSURL: srv.URL + "/v1/token", IAMCredentialsURL: srv.URL}
+	}}
 	c := gcpCatalog(t, bqEntry)
 	entry := c.Entries()[0]
 	minter.Follow(c)
-	if _, err := minter.Token(context.Background(), &entry); !errors.Is(err, ErrGCPToken) || len(failed) != 1 {
-		t.Fatalf("no identity: %v, %d failures", err, len(failed))
+	if _, err := minter.Token(context.Background(), &entry); !errors.Is(err, ErrGCPToken) {
+		t.Fatalf("no identity: %v", err)
 	}
-	minter.Invalidate(&entry) // nothing to invalidate yet
-	identity = nil
-	minter.Follow(c)
-	if minter.cur.Load() == nil || len(failed) != 1 {
-		t.Fatalf("identity found: %d failures", len(failed))
+	identity.Store(true)
+	if token, err := minter.Token(context.Background(), &entry); err != nil || token.Value() != "impersonated" {
+		t.Fatalf("identity appeared: %v", err)
 	}
 }
+
+type tokenSourceFunc func() (*oauth2.Token, error)
+
+func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }

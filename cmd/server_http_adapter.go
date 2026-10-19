@@ -185,7 +185,7 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 	for _, e := range source.Current().Entries() {
 		githubEntries = githubEntries || e.Kind == "git" || e.Kind == "github-api"
 	}
-	attachGoogleMinter(adapter, source, func() (*httpcatalog.GCPTokens, error) { return googleTokens(ctx) }, srv.Logger())
+	attachGoogleMinter(adapter, source, func() *httpcatalog.GCPTokens { return googleTokens(ctx, srv.Logger()) })
 	signer, err := githubAppSigner(client, getenv)
 	switch {
 	case err == nil:

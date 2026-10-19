@@ -3,6 +3,7 @@ module github.com/Infisical/agent-vault
 go 1.26.9
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/denisbrodbeck/machineid v1.0.1
@@ -30,7 +31,6 @@ require (
 require (
 	cloud.google.com/go/auth v0.18.2 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.1.11 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
