@@ -86,8 +86,13 @@ catalog, and checks again on every request.
 | Tier | Who may use it |
 |---|---|
 | T0 (default) | Any worker in a granted pool, including a pool with no person behind its agents |
-| T1 | A verified person in every group the entry `requires`, from a person pool (a Claude session, a Cursor run or an agent-sandbox Pod that names the person); or an automation pool whose fixed groups include them all. Never a pool with no person behind it. |
+| T1 | A verified person in every group the entry `requires`, from a person pool (a Claude session, a Cursor run or an agent-sandbox Pod that names the person); or a workload pool whose fixed groups include them all. Never a pool with no person behind it. |
 | T2 | As T1, from a person pool only, with the groups granted for a limited time |
+
+The table covers person and workload pools. A Cursor Automation, on a
+`cursor-automation` pool, may use the entries the catalog lists for it, at
+any tier up to that pool's ceiling, with no group check, whoever's run it is.
+See [broker catalog](broker-catalog.md).
 
 `gcp` entries are always T1 or T2. Gatehouse looks up a person's groups in
 Microsoft Entra ID once a deployment turns that lookup on, and caches them for

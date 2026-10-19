@@ -106,7 +106,7 @@ func Session(ctx context.Context) string {
 // credential: the token is identified only by its hash.
 type Requester struct {
 	// Subject is the verified identity the audit row names: the person, the
-	// agent, or for an Automation the person its run token names.
+	// agent, or for an Automation the person its run token names, if any.
 	Kind, Subject, ObjectID, TokenSHA256 string
 	Tier, Decision, Groups               string
 	Department                           string // directory department, audit only

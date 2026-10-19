@@ -214,9 +214,10 @@ func (c cursorRuns) VerifyCursor(_ context.Context, token string) (runnerid.Sess
 }
 
 // On an automation pool the database path records what the HTTP path does,
-// allowed or refused: the person whose run it is as the requester, and the
-// run's source and Automation. The entry is decided on the owner's account,
-// and a run that is not the owner's is refused with no object ID.
+// allowed or refused: the person whose run it is as the requester, if any,
+// and the run's source, Automation and owning team. The entry is decided on
+// the Automation's own entries, whoever's run it is: no one's groups or
+// account, and no object ID.
 func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })
@@ -224,34 +225,84 @@ func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	 "entries":[
 	  {"name":"open","kind":"postgres","host":"db.example","pools":["automations"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
 	  {"name":"t1db","kind":"postgres","host":"db.example","pools":["automations"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}}],
-	 "automations":[{"id":"auto-1","name":"explorer","owner":"alice@example.com","entries":["t1db"]}]}`))
+	 "automations":[{"id":"auto-1","name":"explorer","owner":"platform-team","entries":["t1db"]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	runs := cursorRuns{
 		"alice": {Kind: runnerid.KindPerson, Subject: "alice@example.com", Owner: "user:1", Run: "bc-1", Source: "AUTOMATIONS", Automation: "auto-1"},
 		"bob":   {Kind: runnerid.KindPerson, Subject: "bob@example.com", Owner: "user:2", Run: "bc-2", Source: "AUTOMATIONS", Automation: "auto-1"},
+		"svc":   {Kind: runnerid.KindAgent, Subject: "service_account:3", Owner: "service_account:3", Run: "bc-3", Source: "AUTOMATIONS", Automation: "auto-1"},
 	}
-	cache := &entitlement.Cache{Source: directory{"alice@example.com": {t1Group}, "bob@example.com": {t1Group}}}
+	// Neither person is in the T1 group, and the directory never answers.
+	cache := &entitlement.Cache{Source: directory{}}
 	r := NewCatalogDatabaseResolver(httpcatalog.NewSource(catalog, 1), runs, cache, &authorizetest.MemBinder{})
-	for _, c := range []struct{ token, database, decision, oid string }{
-		{"alice", "t1db", "entitled", "oid-alice@example.com"},
+	for _, c := range []struct{ token, database, decision string }{
+		{"alice", "t1db", "automation_granted"},
+		{"bob", "t1db", "automation_granted"},
+		// A service account's run names no person and is served the same.
+		{"svc", "t1db", "automation_granted"},
 		// Granted to the pool but not listed for the Automation.
-		{"alice", "open", "automation_not_granted", ""},
-		// Not the owner, though bob's own groups would admit him.
-		{"bob", "t1db", "automation_not_owner", ""},
+		{"alice", "open", "automation_not_granted"},
 	} {
 		run := runs[c.token]
 		var record pgproxy.Requester
 		ctx := pgproxy.WithRequesterRecord(pgproxy.WithSession(context.Background(), c.token), &record)
 		_, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{ActorID: "a", Pool: "automations", WorkloadID: "pod-" + c.token, ClaimedRun: run.Run}, c.database)
 		var refused *pgproxy.RefusedError
-		if (c.decision == "entitled") != (err == nil) || (err != nil && (!errors.As(err, &refused) || refused.Outcome != c.decision)) {
+		if (c.decision == "automation_granted") != (err == nil) || (err != nil && (!errors.As(err, &refused) || refused.Outcome != c.decision)) {
 			t.Fatalf("%s: %v", c.database, err)
 		}
-		if record.Kind != "automation" || record.Subject != run.Subject || record.ObjectID != c.oid || record.Decision != c.decision ||
-			record.Source != "AUTOMATIONS" || record.Automation != "auto-1" || record.AutomationName != "explorer" || record.AutomationOwner != "alice@example.com" {
-			t.Errorf("%s: recorded %+v", c.database, record)
+		requester := run.Subject
+		if run.Kind != runnerid.KindPerson {
+			requester = ""
+		}
+		if record.Kind != "automation" || record.Subject != requester || record.ObjectID != "" || record.Groups != "" || record.Decision != c.decision ||
+			record.Source != "AUTOMATIONS" || record.Automation != "auto-1" || record.AutomationName != "explorer" || record.AutomationOwner != "platform-team" {
+			t.Errorf("%s on %s: recorded %+v", c.token, c.database, record)
+		}
+	}
+}
+
+// liveCatalog is a catalog source a test replaces between calls.
+type liveCatalog struct{ current httpcatalog.Catalog }
+
+func (l *liveCatalog) Current() httpcatalog.Catalog { return l.current }
+
+// Removing an entry from an Automation's list, or the Automation from the
+// catalog, is how it is stopped: the next recheck of an open session refuses.
+func TestCatalogEditStopsAnAutomationsOpenSession(t *testing.T) {
+	httpcatalog.Environment.Store("staging")
+	t.Cleanup(func() { httpcatalog.Environment.Store("") })
+	parse := func(automations string) httpcatalog.Catalog {
+		t.Helper()
+		c, err := httpcatalog.Parse([]byte(`{"pools":[{"name":"automations","namespace":"n","serviceAccount":"worker","identity":"cursor-automation","ceiling":"T1"}],
+		 "entries":[
+		  {"name":"open","kind":"postgres","host":"db.example","pools":["automations"],"postgres":{"database":"open","mount":"database","role":"staging.us.crunchy.open-readonly"}},
+		  {"name":"t1db","kind":"postgres","host":"db.example","pools":["automations"],"tier":"T1","requires":["` + t1Group + `"],"postgres":{"database":"t1db","mount":"database","role":"staging.us.crunchy.t1-readonly"}}],
+		 "automations":[` + automations + `]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	runs := cursorRuns{"svc": {Kind: runnerid.KindAgent, Subject: "service_account:3", Owner: "service_account:3", Run: "bc-3", Source: "AUTOMATIONS", Automation: "auto-1"}}
+	live := &liveCatalog{current: parse(`{"id":"auto-1","name":"explorer","owner":"platform-team","entries":["open","t1db"]}`)}
+	r := NewCatalogDatabaseResolver(live, runs, &entitlement.Cache{Source: directory{}}, &authorizetest.MemBinder{})
+	scope := pgproxy.AgentScope{ActorID: "a", Pool: "automations", WorkloadID: "pod-svc", ClaimedRun: "bc-3"}
+	admit := pgproxy.WithSession(context.Background(), "svc")
+	if _, err := r.ResolveDatabase(admit, scope, "t1db"); err != nil {
+		t.Fatalf("admission: %v", err)
+	}
+	for _, c := range []struct{ automations, outcome string }{
+		{`{"id":"auto-1","name":"explorer","owner":"platform-team","entries":["open"]}`, "automation_not_granted"},
+		{`{"id":"auto-2","name":"other","owner":"platform-team","entries":["t1db"]}`, "automation_unlisted"},
+	} {
+		live.current = parse(c.automations)
+		_, err := r.ResolveDatabase(pgproxy.WithRecheck(admit), scope, "t1db")
+		var refused *pgproxy.RefusedError
+		if !errors.As(err, &refused) || refused.Outcome != c.outcome {
+			t.Errorf("recheck after the edit: %v, want %s", err, c.outcome)
 		}
 	}
 }

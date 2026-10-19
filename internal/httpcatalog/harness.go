@@ -95,7 +95,7 @@ type HarnessPath struct {
 // HarnessAuthorization decides access for the "pool" (its ceiling and fixed
 // entitlements), for the "person" behind each session (their groups), or for
 // the "automation" that started each run (the entries the catalog lists for
-// it, decided on its owner's account).
+// it, and nothing about a person).
 // PoolName is the catalog pool the harness's agents are admitted into.
 type HarnessAuthorization struct {
 	Mode     string `json:"mode"`
