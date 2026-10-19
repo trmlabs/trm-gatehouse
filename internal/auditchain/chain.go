@@ -83,7 +83,7 @@ type Event struct {
 	NotAfter string
 	DNSNames string // comma-separated lower-case DNS names the certificate holds
 	Target   string // refusals: see Row; set it with TargetField
-	Branch   string // CI restarts: see Row; set it with BranchField
+	Branch   string // pushes, pull request writes and CI restarts: see Row; set it with BranchField
 	// Operation, Database and RequesterDepartment: see Row. Set Database with
 	// DatabaseField and RequesterDepartment with DepartmentField.
 	Operation           string

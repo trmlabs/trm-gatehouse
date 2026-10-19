@@ -53,24 +53,26 @@ func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 		Entitlements: &entitlement.Cache{Source: directory{}}}}
 	open, _ := catalog.Match("api.vendor.example", 443, "GET", "/open/x", "automations")
 	other, _ := catalog.Match("api.other.example", 443, "GET", "/x", "automations")
+	// A {requester} push prefix names the Automation, never the run's
+	// person, so every run of one Automation shares its branches.
 	for _, c := range []struct {
-		token                                     string
-		entry                                     *httpcatalog.Entry
-		refusal, decision, name, owner, requester string
+		token                                              string
+		entry                                              *httpcatalog.Entry
+		refusal, decision, name, owner, requester, segment string
 	}{
-		{"listed", open, "", "t0", "explorer", "platform-team", "owner@example.com"},
-		{"runner", open, "", "t0", "explorer", "platform-team", "bob@example.com"},
-		{"svc", open, "", "t0", "explorer", "platform-team", ""},
-		{"svc", other, "automation_not_granted", "automation_not_granted", "explorer", "platform-team", ""},
-		{"unlisted", open, "automation_unlisted", "", "", "", ""},
+		{"listed", open, "", "t0", "explorer", "platform-team", "owner@example.com", "automation-auto-1"},
+		{"runner", open, "", "t0", "explorer", "platform-team", "bob@example.com", "automation-auto-1"},
+		{"svc", open, "", "t0", "explorer", "platform-team", "", "automation-auto-1"},
+		{"svc", other, "automation_not_granted", "automation_not_granted", "explorer", "platform-team", "", "automation-auto-1"},
+		{"unlisted", open, "automation_unlisted", "", "", "", "", ""},
 	} {
 		event := auditchain.Event{Event: auditchain.EventHTTPRequest}
 		run := runner[c.token].Run
-		got := p.authorize(withSessionToken(context.Background(), c.token), &brokercore.ProxyScope{Pool: "automations", AgentID: "a", WorkloadID: "pod-" + c.token, ClaimedRun: run}, c.entry, &event)
+		who, got := p.authorize(withSessionToken(context.Background(), c.token), &brokercore.ProxyScope{Pool: "automations", AgentID: "a", WorkloadID: "pod-" + c.token, ClaimedRun: run}, c.entry, &event)
 		if got != c.refusal || event.Decision != c.decision || event.Source != "AUTOMATIONS" || event.Automation != runner[c.token].Automation ||
 			event.AutomationName != c.name || event.AutomationOwner != c.owner || event.Requester != c.requester || event.TokenSHA256 != "sha-"+c.token ||
-			event.RequesterOID != "" || event.Groups != "" || event.RequesterDepartment != "" {
-			t.Errorf("%s on %s: %q %+v", c.token, c.entry.Name, got, event)
+			event.RequesterOID != "" || event.Groups != "" || event.RequesterDepartment != "" || who.BranchSegment() != c.segment {
+			t.Errorf("%s on %s: %q %+v, branch segment %q", c.token, c.entry.Name, got, event, who.BranchSegment())
 		}
 		if err := event.Validate(); err != nil {
 			t.Errorf("%s: audit row refused: %v", c.token, err)

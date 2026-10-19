@@ -83,6 +83,11 @@ func (r Requester) Audited() string {
 	return ""
 }
 
+// BranchSegment is the branch segment a {requester} push prefix names for
+// this requester (httpcatalog.RequesterSegment): a person's email, or an
+// Automation's id; "" for anyone else, who then gets no branch there.
+func (r Requester) BranchSegment() string { return httpcatalog.RequesterSegment(r.Kind, r.Subject) }
+
 // Resolve derives the requester for a pool from the session token the sidecar
 // relayed (empty when none), as the pool's harness profile says. It returns a
 // refusal code when a presented token is invalid, was issued for another

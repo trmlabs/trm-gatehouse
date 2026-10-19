@@ -109,7 +109,10 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	switch api.Route {
 	case "open-pull":
 		var rebuilt []byte
-		if rebuilt, ok = pullRequestFromPoolBranch(body, api.HeadPrefixes); !ok {
+		var head string
+		rebuilt, head, ok = pullRequestFromPoolBranch(body, api.HeadPrefixes)
+		event.Branch = auditchain.BranchField(head)
+		if !ok {
 			deny(http.StatusForbidden, "head")
 			return
 		}
@@ -167,7 +170,8 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 		api.Target = number
 	}
 	if api.Target > 0 {
-		id, ok := p.pullRequestInScope(r, target, expected, api, token.Value(), api.Target)
+		id, branch, ok := p.pullRequestInScope(r, target, expected, api, token.Value(), api.Target)
+		event.Branch = auditchain.BranchField(branch)
 		if !ok {
 			deny(http.StatusForbidden, targetOutcome(api.Route))
 			return
@@ -356,12 +360,14 @@ func (p *Proxy) githubGet(r *http.Request, target, host, path, token string, v a
 
 // pullRequestInScope reads the pull request a write targets, with the same
 // one-repository token, and reports whether its head is a branch of this
-// repository under one of HeadPrefixes (the pool's push prefixes and the
-// repository's pull request prefixes), returning its node ID. An issue that
-// is not a pull request, a pull request from a fork or from a branch outside
-// those prefixes, or any failed read refuses the write, so an agent acts only
-// on the pull requests its pool may, never on people's.
-func (p *Proxy) pullRequestInScope(r *http.Request, target, host string, api httpcatalog.GitRequest, token string, number int64) (string, bool) {
+// repository under one of HeadPrefixes (the pool's push prefixes, narrowed to
+// the requester's own where the pool gives each requester theirs, and the
+// repository's pull request prefixes), returning its node ID and its head
+// branch as GitHub named it ("" when the read failed). An issue that is not a
+// pull request, a pull request from a fork or from a branch outside those
+// prefixes, or any failed read refuses the write, so an agent acts only on
+// the pull requests its requester may, never on people's or another run's.
+func (p *Proxy) pullRequestInScope(r *http.Request, target, host string, api httpcatalog.GitRequest, token string, number int64) (string, string, bool) {
 	var pr struct {
 		NodeID string `json:"node_id"`
 		Head   struct {
@@ -372,11 +378,13 @@ func (p *Proxy) pullRequestInScope(r *http.Request, target, host string, api htt
 		} `json:"head"`
 	}
 	path := "/repos/" + api.Repo.Repo + "/pulls/" + strconv.FormatInt(number, 10)
-	if !p.githubGet(r, target, host, path, token, &pr) || pr.Head.Repo == nil ||
-		!headInReach(api.Repo.Repo, pr.Head.Repo.FullName, pr.Head.Ref, api.HeadPrefixes) {
-		return "", false
+	if !p.githubGet(r, target, host, path, token, &pr) {
+		return "", "", false
 	}
-	return pr.NodeID, true
+	if pr.Head.Repo == nil || !headInReach(api.Repo.Repo, pr.Head.Repo.FullName, pr.Head.Ref, api.HeadPrefixes) {
+		return "", pr.Head.Ref, false
+	}
+	return pr.NodeID, pr.Head.Ref, true
 }
 
 // headInReach reports whether a pull request's head is a branch of repo itself
@@ -385,8 +393,15 @@ func headInReach(repo, headRepo, ref string, prefixes []string) bool {
 	if !strings.EqualFold(headRepo, repo) || strings.Contains(ref, ":") || unsafeBranch(ref) {
 		return false
 	}
+	return underBranchPrefix(ref, prefixes)
+}
+
+// underBranchPrefix reports whether branch is a branch below one of prefixes,
+// not the prefix itself. A {requester} prefix that ForRequester has not
+// narrowed matches nothing, so a check that skipped the narrowing refuses.
+func underBranchPrefix(branch string, prefixes []string) bool {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(ref, prefix) && len(ref) > len(prefix) {
+		if !httpcatalog.IsRequesterTemplate(prefix) && strings.HasPrefix(branch, prefix) && len(branch) > len(prefix) {
 			return true
 		}
 	}
@@ -540,16 +555,17 @@ func containsString(list []string, v string) bool {
 var pullRequestFields = map[string]bool{"title": true, "body": true, "head": true, "base": true, "draft": true}
 
 // pullRequestFromPoolBranch checks a create-pull-request body and returns it
-// rebuilt from the checked values alone. The body must be one JSON object with
+// rebuilt from the checked values alone, with its head ("" when the body could
+// not be read). The body must be one JSON object with
 // only title, body, head and base (strings) and draft (a boolean), each at
 // most once, in exactly that case; the head must be a branch of this
 // repository under one of the pool's push prefixes. Anything else (an
 // owner:branch head, head_repo, issue, a duplicate or unknown key, trailing
 // data) is refused.
-func pullRequestFromPoolBranch(body []byte, prefixes []string) ([]byte, bool) {
+func pullRequestFromPoolBranch(body []byte, prefixes []string) ([]byte, string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return nil, false
+		return nil, "", false
 	}
 	fields := map[string]json.RawMessage{}
 	seen := map[string]bool{}
@@ -557,20 +573,20 @@ func pullRequestFromPoolBranch(body []byte, prefixes []string) ([]byte, bool) {
 		t, err := dec.Token()
 		key, isKey := t.(string)
 		if err != nil || !isKey || !pullRequestFields[key] || seen[strings.ToLower(key)] {
-			return nil, false
+			return nil, "", false
 		}
 		seen[strings.ToLower(key)] = true
 		var raw json.RawMessage
 		if dec.Decode(&raw) != nil {
-			return nil, false
+			return nil, "", false
 		}
 		fields[key] = raw
 	}
 	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
-		return nil, false
+		return nil, "", false
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, false // trailing data
+		return nil, "", false // trailing data
 	}
 	var req struct {
 		Title, Body, Head, Base string
@@ -597,19 +613,14 @@ func pullRequestFromPoolBranch(body []byte, prefixes []string) ([]byte, bool) {
 			out[key] = req.Draft
 		}
 		if err != nil || string(raw) == "null" {
-			return nil, false
+			return nil, "", false
 		}
 	}
-	if strings.Contains(req.Head, ":") || unsafeBranch(req.Head) {
-		return nil, false
+	if strings.Contains(req.Head, ":") || unsafeBranch(req.Head) || !underBranchPrefix(req.Head, prefixes) {
+		return nil, req.Head, false
 	}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(req.Head, prefix) && len(req.Head) > len(prefix) {
-			rebuilt, err := json.Marshal(out)
-			return rebuilt, err == nil
-		}
-	}
-	return nil, false
+	rebuilt, err := json.Marshal(out)
+	return rebuilt, req.Head, err == nil
 }
 
 // unsafeBranch refuses a branch name with a path step that could leave the

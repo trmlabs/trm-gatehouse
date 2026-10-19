@@ -107,7 +107,9 @@ var (
 	deployProd = nodeID("LA", 1000, 502)
 	otherLabel = nodeID("LA", 2000, 503)
 	publicPR   = nodeID("PR", 1000, 77)
-	exampleR   = repoNodeID(1000) // example-repo itself
+	alicePR    = nodeID("PR", 1000, 40) // head cursor/pool-agent/alice@example.com/fix
+	bobPR      = nodeID("PR", 1000, 41) // head cursor/pool-agent/bob@example.com/fix
+	exampleR   = repoNodeID(1000)       // example-repo itself
 	secretR    = repoNodeID(3000)
 )
 
@@ -137,6 +139,8 @@ var fakeNodes = map[string]fakeNode{
 	// Its ID names example-repo, but GitHub answers with a public
 	// repository's pull request, which any token can see.
 	publicPR: {"PullRequest", "public-repo", "public-repo", "cursor/pool-agent/x", "", true},
+	alicePR:  {"PullRequest", "example-repo", "example-repo", "cursor/pool-agent/alice@example.com/fix", "", false},
+	bobPR:    {"PullRequest", "example-repo", "example-repo", "cursor/pool-agent/bob@example.com/fix", "", false},
 	exampleR: {"Repository", "example-repo", "", "", "", false},
 	secretR:  {"Repository", "secret-repo", "", "", "", false},
 }
@@ -342,6 +346,13 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 	}
 	t.Cleanup(f.client.CloseIdleConnections)
 	return f
+}
+
+// as sends the fixture's next requests with this runner session.
+func (f *graphqlFixture) as(t *testing.T, session string) {
+	t.Helper()
+	f.client.CloseIdleConnections()
+	f.client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{SessionHeader: {session}}
 }
 
 // send makes one request through the broker, as gh would with the

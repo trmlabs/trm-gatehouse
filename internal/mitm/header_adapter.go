@@ -290,21 +290,26 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	// Every matched entry passes the authorization model before any credential
 	// is fetched: pool ceiling, then the verified requester's entitlements.
+	// who is the requester the last check authorized; a git or github-api
+	// request is narrowed to that requester's own branches (ForRequester).
+	var who authorize.Requester
 	refused := func(entry *httpcatalog.Entry, err error) bool {
 		if err != nil || entry == nil {
 			return false
 		}
-		if outcome := p.authorize(r.Context(), scope, entry, &event); outcome != "" {
+		requester, outcome := p.authorize(r.Context(), scope, entry, &event)
+		if outcome != "" {
 			event.Binding = entry.Name
 			deny(http.StatusForbidden, outcome)
 			return true
 		}
+		who = requester
 		return false
 	}
 	if git, ok, err := catalog.GitMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
 		event.Operation = gitOperation(git)
 		if !refused(git.Entry, err) {
-			p.forwardGit(w, r, target, scope, event, git, err)
+			p.forwardGit(w, r, target, scope, event, git.ForRequester(who.BranchSegment()), err)
 		}
 		return
 	}
@@ -323,7 +328,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		// with the git entry's tier and groups. That is intended: both entries
 		// admitted the request, and the git entry is what guards the code.
 		if !refused(api.Entry, err) && (api.CloneEntry == nil || !refused(api.CloneEntry, nil)) {
-			p.forwardGitHubAPI(w, r, target, scope, event, api, err)
+			p.forwardGitHubAPI(w, r, target, scope, event, api.ForRequester(who.BranchSegment()), err)
 		}
 		return
 	}
