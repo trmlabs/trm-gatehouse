@@ -41,6 +41,7 @@ Set `AGENT_VAULT_HTTP_CATALOG_FILE` to a JSON file. One entry per binding:
 | `basicUser` | The key is an HTTP Basic user name with an empty password, as axios `auth.username` and `curl -u key:` send it. The header is `Authorization` and `scheme` is unset. The worker sends its placeholder encoded the same way (set the client's key to the placeholder), or nothing. |
 | `basicPair` | The key is stored as `user:password` and sent as HTTP Basic credentials, for vendors that issue a key pair, such as a public and a secret key. The header is `Authorization` and `scheme` is unset; it excludes `basicUser`. The worker sends the placeholder as both user name and password (set both of the client's keys to the placeholder), or nothing. A stored key without a non-empty user and password is never sent: it is refused as `key_not_basic_pair`, a 503 without `Retry-After`, since only rewriting the value clears it. Responses that echo the encoded pair or the password alone are cut off. The user half is not screened, so store only a non-secret user name there, such as a public key. A client that also sends the user name in another header cannot use the entry: with the placeholder there it is refused (`placeholder_misplaced`), and with the real user name its `Authorization` no longer matches (`credential_header`). Langfuse's Python SDK is one, since it also sends its public key in `x-langfuse-public-key`. Use a client that sends only `Authorization`. |
 | `key` | A KV version 2 secret on the `gatehouse` mount, at a path under `vendors/` (lower-case segments, at most 127 characters). Writing a new version rotates the key. |
+| `clientCertificate` | A client certificate the broker presents to the host in the TLS handshake, for a service that accepts only client certificates (mutual TLS): `{"mount": "gatehouse", "path": "vendors/<name>"}`, a KV version 2 secret whose `cert` field holds the PEM certificate and whose `key` field holds its PEM private key. An entry with one may leave out `header`, `scheme`, `placeholder` and `key`, and the worker then sends no credential. See [Client certificates](#client-certificates-mutual-tls). |
 | `pools` | Broker agent IDs of the worker pools granted this entry. |
 | `forwardHeaders` | Extra caller headers the vendor needs. Only Accept, Accept-Language, Content-Type and User-Agent pass otherwise; routing headers such as `X-Forwarded-Host` or `X-HTTP-Method-Override` can never be listed. |
 | `http2` | The worker may speak HTTP/2 to this host, which gRPC needs. See [HTTP/2 and gRPC](#http2-and-grpc). Every entry on one host and port must agree. |
@@ -61,7 +62,7 @@ A tunnel offers HTTP/2 only to a host whose entries set `http2`; every other hos
 
 - **Calls that work:** unary and server-streaming calls. The broker reads the whole request before it contacts the vendor, as it does for HTTP/1.1, so a call whose client waits for answers before it finishes sending (bidirectional streaming) does not complete.
 - **Streaming:** each response message reaches the worker as it arrives. The tail held back for screening is released at every message boundary, so a stream never waits for the next message. Trailers are screened too; a key in a message or a trailer ends the call with `INTERNAL`, recorded as `secret_echo`.
-- **Headers:** the broker sets `te: trailers` and asks for uncompressed responses. `grpc-timeout` passes on an `http2` entry. A compressed request is refused as `request_shape`; a compressed response, which could not be screened, as `response_refused`.
+- **Headers:** the broker sets `te: trailers` and asks for uncompressed responses. `grpc-timeout` passes on an `http2` entry. A request compressed with gzip, which some clients send unasked (Temporal's Rust-based SDKs, Python's among them), is decompressed, checked and forwarded uncompressed, and `maxRequestBytes` applies to it decompressed; a request compressed any other way is refused as `request_shape`, and a compressed response, which could not be screened, as `response_refused`. A call's authority may name the host without its port, as a client that sets a TLS server name sends it; the call still goes to the tunnel's port.
 - **Refusals:** a gRPC client never reads an HTTP status, so a refused call answers with a gRPC status in trailers and the refusal text in `grpc-message`. `X-Gatehouse-Refusal` still names the code, and a `Retry-After` is also sent as `grpc-retry-pushback-ms`.
 
 | Refusal or upstream HTTP status | gRPC status |
@@ -79,11 +80,53 @@ A tunnel offers HTTP/2 only to a host whose entries set `http2`; every other hos
 - **Limits:** `maxRequestBytes` and `maxResponseBytes` apply per call. One tunnel carries at most `AGENT_VAULT_MITM_HTTP2_MAX_STREAMS` concurrent calls (default 1000); a client past it waits for a free stream.
 - **Proxy hop:** gRPC clients do not speak TLS to a proxy, so gRPC needs a plain `http://` hop to the local relay, usually as `grpc_proxy`, and the broker's CA as the client's TLS roots (`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` for gRPC C-core clients such as Python's).
 
+## Client certificates (mutual TLS)
+
+Some services take no key at all: they accept a client only by the certificate it presents in the TLS handshake. An entry's `clientCertificate` names one in Vault, and the broker presents it to that entry's host whenever the host asks for one. The worker holds no certificate and no key and sends no credential; it trusts the broker's CA as it does for any other host. A read-only gRPC entry lists each method it allows as a path prefix, so every other method, every write included, is refused with `PERMISSION_DENIED` (`unlisted`) before it reaches the service:
+
+```json
+{"name": "workflow-reads", "http2": true, "host": "temporal.example.com", "port": 7233,
+ "pathPrefixes": ["/temporal.api.workflowservice.v1.WorkflowService/GetSystemInfo",
+                  "/temporal.api.workflowservice.v1.WorkflowService/ListWorkflowExecutions",
+                  "/temporal.api.workflowservice.v1.WorkflowService/CountWorkflowExecutions",
+                  "/temporal.api.workflowservice.v1.WorkflowService/DescribeWorkflowExecution",
+                  "/temporal.api.workflowservice.v1.WorkflowService/GetWorkflowExecutionHistory"],
+ "methods": ["POST"], "clientCertificate": {"mount": "gatehouse", "path": "vendors/workflow-reads"},
+ "pools": ["<pool agent ID>"]}
+```
+
+Those five methods are every call the Temporal Python SDK and the Temporal CLI make to connect, list, count, describe a workflow and read its history; starting, signalling and terminating a workflow are refused. Store the certificate and key with `vault kv put gatehouse/vendors/workflow-reads cert=@client.pem key=@client.key`.
+
+- **What is presented:** the first certificate in `cert`, with any that follow as its chain, and the matching `key` (RSA, ECDSA or Ed25519, as PKCS #1, PKCS #8 or SEC 1 PEM). A CA certificate is refused as `client_cert_invalid`: its key can sign new certificates, which a broker presenting one identity never needs. Ask whoever issues the service's client certificates for an end-entity certificate made for this entry.
+- **One certificate per entry:** each certificate gets connections of its own. A connection opened with one entry's certificate never carries a request for another entry, and a host whose entries name no certificate never receives one. Entries on different hosts can carry different certificates. An entry may also carry a header key, for a service that asks for both.
+- **Rotation without a restart:** write a new KV version with both fields. The broker reads each certificate at most once a minute and presents the new one from its next connection; calls in flight finish on the old one. A TLS alert from the host refusing the certificate, or a 401, 403, `UNAUTHENTICATED` or `PERMISSION_DENIED` answer, drops the cached copy, so a fixed certificate is read on the next call.
+- **Never to the worker:** the key signs the handshake inside the broker and is sent nowhere else, so no response can echo it. Neither field is logged or written to the audit trail, and errors name what is wrong, never the value.
+- **Clients:** gRPC needs a plain `http://` hop to the broker, as above. Temporal's Python SDK takes one as `http_connect_proxy_config` and trusts the broker's CA through `TLSConfig(server_root_ca_cert=...)`, with no client certificate of its own; the Temporal CLI takes `HTTPS_PROXY` and `--tls-ca-path`.
+
+| Refusal | When | Status |
+| --- | --- | --- |
+| `client_cert_unavailable` | Vault could not be read and no cached copy is under five minutes past its minute. | 503 with `Retry-After` (`UNAVAILABLE`) |
+| `client_cert_deleted` | The secret, its current version, or either field is deleted or empty. | 503 (`FAILED_PRECONDITION`) |
+| `client_cert_invalid` | Not a PEM certificate with its matching key, over 64 KiB (16 KiB for the key), or a CA certificate. | 503 (`FAILED_PRECONDITION`) |
+| `client_cert_expired` | The certificate has expired or is not yet valid. | 503 (`FAILED_PRECONDITION`) |
+| `client_cert_rejected` | The host refused the certificate in the handshake, for example one from a CA it does not trust. | 503 (`FAILED_PRECONDITION`) |
+
+Under TLS 1.3 a host refuses a certificate just after the handshake. When the connection closes before the broker reads that refusal, the call fails as `upstream_error` (502) instead, and the cached certificate is read again within a minute as usual.
+
+**Expiry metric.** Every minute the broker checks each certificate the catalog names, logs `upstream client certificate in use` (with the binding, KV version and expiry) when one is first read or rotated, and `upstream client certificate cannot be presented` (with the reason) when one cannot be. With `AGENT_VAULT_METRICS_PORT` set, it also serves `GET /metrics` on that port, and nothing else, in the Prometheus text format:
+
+- `gatehouse_upstream_client_certificate_expiry_timestamp_seconds{binding}`: when the certificate expires, in Unix seconds.
+- `gatehouse_upstream_client_certificate_valid{binding}`: 1 when the certificate was read and is inside its validity window at the last check, else 0.
+
+Alert when `gatehouse_upstream_client_certificate_expiry_timestamp_seconds - time()` falls below the time a reissue takes, and when `gatehouse_upstream_client_certificate_valid` is 0. The page holds entry names and times, never a credential; the port listens on every interface, so admit only the metrics scraper to it.
+
+Grant the broker read on each certificate path, as for keys. A broker older than this field leaves out any entry that lists it, so deploy the broker before the catalog change.
+
 ## Guarantees
 
 - **No key to the worker.** A placeholder anywhere other than the catalog header, including the body or query, is refused, so it can never reach the vendor verbatim. Responses stream to the worker, including server-sent events, but the broker holds back any tail that could be the start of the key. A response that echoes the key in any of nine encodings is cut off before that part is sent, and is recorded as `secret_echo`.
 - **Signed audit.** Each call records an `http_request` row before the vendor is contacted and an `http_response` row with the status and outcome. Each refusal records a `denied` row with its reason: `unlisted`, `method`, `pool`, `request_shape`, `placeholder_misplaced` and the rest. Rows name the pool, the Pod, the binding, the method, the path once the caller is authenticated (never the query, and never on a browser-session host), and a request ID returned to the worker as `X-Request-Id`.
-- **Fail closed.** No catalog entry, no pool grant, no key from Vault, or an overdue audit checkpoint: the call is refused before the vendor is contacted.
+- **Fail closed.** No catalog entry, no pool grant, no key or client certificate from Vault, or an overdue audit checkpoint: the call is refused before the vendor is contacted.
 
 ## Keys and rotation
 

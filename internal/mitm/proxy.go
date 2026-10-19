@@ -70,6 +70,8 @@ type Proxy struct {
 	graphql               graphqlLookups // what GitHub said about node IDs (github_graphql.go)
 	http2MaxStreams       int
 	h2Upstream            atomic.Pointer[http.Transport] // built from upstream on first HTTP/2 request (grpc.go)
+	certificatesMu        sync.Mutex
+	certificateTransports map[certificateTransportKey]certificateTransport // per client certificate (clientcert.go)
 
 	// Tunnel drain (opt-in): Shutdown lets each tunnel finish its current
 	// request instead of leaving tunnels to die with the process.
@@ -240,6 +242,7 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	if h2 := p.h2Upstream.Load(); h2 != nil {
 		h2.CloseIdleConnections()
 	}
+	p.closeCertificateUpstreams()
 	// Cached GitHub installation tokens are revoked however the stop goes.
 	defer p.revokeGitTokens()
 	if !p.drainTunnels {

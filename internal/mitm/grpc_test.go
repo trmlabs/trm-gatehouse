@@ -28,7 +28,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -388,8 +387,9 @@ func TestGRPCRefusalsAndUpstreamStatuses(t *testing.T) {
 	if last := f.audit.last(); last.Outcome != "unlisted" || last.Path != "/example.v1.Writes/Append" || last.Method != "POST" {
 		t.Fatalf("unlisted row: %+v", last)
 	}
-	// A compressed request could not be checked for decoys or placeholders.
-	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "x", grpc.UseCompressor(gzip.Name)); status.Code(err) != codes.InvalidArgument {
+	// A request compressed with anything but gzip could not be checked for
+	// decoys or placeholders (gzip: grpc_gzip_test.go).
+	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "x", grpc.UseCompressor(testDeflate{}.Name())); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("compressed: %v", err)
 	}
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "missing"); status.Code(err) != codes.NotFound || status.Convert(err).Message() != "no such row" {
