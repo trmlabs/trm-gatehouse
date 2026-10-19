@@ -3,6 +3,7 @@ package mitm
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -467,5 +468,52 @@ func TestClientCertificatePerEntryOverHTTP1(t *testing.T) {
 	}
 	if f.vault.readsOf(restPath) != reads {
 		t.Fatalf("Vault read %d more times", f.vault.readsOf(restPath)-reads)
+	}
+}
+
+// An entry may hold a Basic pair whose user name the client also sends in a
+// header of its own, and present a client certificate as well. A client
+// holding the stored user name is served with both; another user name is
+// refused before the certificate is read or the vendor is called.
+func TestClientCertificateWithABasicPairClient(t *testing.T) {
+	const publicKey = "pk-synthetic-mtls"
+	pair := publicKey + ":" + grpcKey
+	catalog, err := httpcatalog.Parse([]byte(`{"entries":[{"name":"pair-read","host":"rest.example.com","pathPrefixes":["/v1/"],"methods":["GET"],
+	  "header":"Authorization","basicPair":true,"pairUserHeader":"X-Example-Public-Key","placeholder":"__vault_PAIR_KEY__",
+	  "key":{"mount":"gatehouse","path":"vendors/pair","field":"key"},
+	  "clientCertificate":{"mount":"gatehouse","path":"vendors/rest-read"},"pools":["pool-agent"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newClientCertFixture(t, func(a *HeaderAdapter) { a.Catalog = catalog })
+	f.keys.mu.Lock()
+	f.keys.value = pair
+	f.keys.mu.Unlock()
+	basic := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(s)) }
+	get := func(user string) (int, string) {
+		r, _ := http.NewRequest(http.MethodGet, "https://rest.example.com/v1/rows", nil)
+		r.Header.Set("Authorization", basic(user+":__vault_PAIR_KEY__"))
+		r.Header.Set("X-Example-Public-Key", user)
+		resp, err := f.http.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, resp.Header.Get(RefusalHeader) + string(body)
+	}
+
+	reads := f.vault.readsOf(restPath)
+	if code, body := get("pk-worker-own"); code != http.StatusBadRequest || !strings.HasPrefix(body, "credential_header") {
+		t.Fatalf("another user: %d %q", code, body)
+	}
+	if len(f.restSide.all()) != 0 || f.vault.readsOf(restPath) != reads {
+		t.Fatalf("a refused user reached the vendor (%d calls) or read the certificate", len(f.restSide.all()))
+	}
+	if code, body := get(publicKey); code != http.StatusOK || body != "hello" {
+		t.Fatalf("stored user: %d %q", code, body)
+	}
+	if last := f.restSide.last(); last.client != "rest-reader" || last.auth != basic(pair) {
+		t.Fatalf("vendor saw client %q, stored pair injected %v", last.client, last.auth == basic(pair))
 	}
 }

@@ -45,7 +45,7 @@ var moduleName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0
 func databaseKind(kind string) bool { return kind == "postgres" || kind == "memgraph" }
 
 func (e *Entry) normalizeMemgraph() error {
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) ||
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.PairUserHeader != "" || e.Placeholder != "" || e.Key != (KeyRef{}) ||
 		len(e.ForwardHeaders) > 0 || e.Git != nil || e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
 		return errors.New("memgraph entries take only host, port, pools, tier and memgraph settings")
 	}
