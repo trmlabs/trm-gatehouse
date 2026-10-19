@@ -44,14 +44,20 @@ type GraphService struct {
 	// fields username and password.
 	KeyMount, KeyPath string
 	// Procedures and Functions are the procedures and module functions a
-	// read may call; every other one is refused.
+	// query may call; every other one is refused.
 	Procedures []string
 	Functions  []string
+	// Write is the entry's write access: graph writes run and commit. The
+	// rest of the guard still holds (no file loads, no commits of their own,
+	// only the listed procedures and functions, no system queries). Without
+	// it every transaction is a read the broker rolls back.
+	Write bool
 }
 
 func sameGraph(a, b GraphService) bool {
 	return a.Name == b.Name && a.Addr == b.Addr && a.ServerName == b.ServerName && a.CA == b.CA && a.Plaintext == b.Plaintext &&
-		a.KeyMount == b.KeyMount && a.KeyPath == b.KeyPath && slices.Equal(a.Procedures, b.Procedures) && slices.Equal(a.Functions, b.Functions)
+		a.KeyMount == b.KeyMount && a.KeyPath == b.KeyPath && slices.Equal(a.Procedures, b.Procedures) && slices.Equal(a.Functions, b.Functions) &&
+		a.Write == b.Write
 }
 
 // GraphResolver selects the graph database an authorized agent asks for by
@@ -111,6 +117,21 @@ func boltForbidden(outcome string) boltRefusal {
 func boltReadOnly(detail string) boltRefusal {
 	return boltRefusal{"Gatehouse.ClientError.Statement.AccessMode", "read_only",
 		"this database is read-only; only queries that read the graph run here (refused: " + detail + ")"}
+}
+
+// boltGuarded refuses one query on a write connection: a file load, a commit
+// of its own, or a procedure or function the entry does not list.
+func boltGuarded(detail string) boltRefusal {
+	return boltRefusal{"Gatehouse.ClientError.Statement.AccessMode", "query_refused",
+		"only queries that read or change the graph run here (refused: " + detail + ")"}
+}
+
+// guarded is the guard's refusal for this session's access.
+func (s *boltSession) guarded(detail string) boltRefusal {
+	if s.svc.Write {
+		return boltGuarded(detail)
+	}
+	return boltReadOnly(detail)
 }
 
 // boltPeer is one side of a Bolt session: buffered, with a bound on each
@@ -607,6 +628,9 @@ type boltSession struct {
 	failed   bool // the client was sent FAILURE; requests are IGNORED until RESET
 	explicit bool // the client's own transaction (BEGIN) is open
 	implicit bool // the broker opened a transaction for an auto-commit query
+	// empty is the result of a BEGIN, COMMIT or ROLLBACK statement the broker
+	// carried out itself, whose PULL or DISCARD it also answers.
+	empty    bool
 	refusals int
 }
 
@@ -641,11 +665,17 @@ func (s *boltSession) handle(msg *bolt.Structure, raw []byte) error {
 		_ = s.upstream.send(raw)
 		return io.EOF
 	case bolt.TagReset:
-		s.failed, s.explicit, s.implicit = false, false, false
+		s.failed, s.explicit, s.implicit, s.empty = false, false, false, false
 		return s.forward(raw)
 	}
 	if s.failed {
 		return s.client.send(bolt.Ignored())
+	}
+	if s.empty {
+		s.empty = false
+		if msg.Tag == bolt.TagPull || msg.Tag == bolt.TagDiscard {
+			return s.client.send(bolt.Success(map[string]any{"has_more": false}))
+		}
 	}
 	switch msg.Tag {
 	case bolt.TagHello, bolt.TagLogon, bolt.TagLogoff:
@@ -656,51 +686,102 @@ func (s *boltSession) handle(msg *bolt.Structure, raw []byte) error {
 	case bolt.TagRoute:
 		return s.route(msg)
 	case bolt.TagBegin:
-		if s.explicit || s.implicit {
-			return s.refuse(boltRefusal{"Gatehouse.ClientError.Transaction.Invalid", "protocol", "a transaction is already open"}, "")
-		}
 		extra, err := msg.Map(0)
 		if err != nil {
 			return errBoltProtocol
 		}
-		begin, refusal := s.transactionExtra(extra)
-		if refusal != "" {
-			return s.refuse(boltReadOnly(refusal), "request:"+strings.ReplaceAll(refusal, " ", "_"))
-		}
-		ok, err := s.call(mustEncode(bolt.TagBegin, begin))
-		if ok {
-			s.explicit = true
-		}
-		return err
+		return s.begin(extra, false)
 	case bolt.TagRun:
 		return s.run(msg)
 	case bolt.TagPull, bolt.TagDiscard:
 		return s.stream(raw)
 	case bolt.TagCommit:
-		if !s.explicit {
-			return s.refuse(boltRefusal{"Gatehouse.ClientError.Transaction.Invalid", "protocol", "no transaction is open"}, "")
-		}
-		// A read-only transaction has nothing to commit: roll it back, so
-		// nothing it might have changed can persist.
-		ok, err := s.callQuiet(mustEncode(bolt.TagRollback))
-		if err != nil {
-			return err
-		}
-		s.explicit = false
-		if !ok {
-			s.failed = true
-			return nil
-		}
-		return s.client.send(bolt.Success(nil))
+		return s.end(true, false)
 	case bolt.TagRollback:
-		if !s.explicit {
-			return s.refuse(boltRefusal{"Gatehouse.ClientError.Transaction.Invalid", "protocol", "no transaction is open"}, "")
-		}
-		s.explicit = false
-		_, err := s.call(raw)
-		return err
+		return s.end(false, false)
 	}
 	return errBoltProtocol
+}
+
+// begin opens the client's own transaction, for a BEGIN message or, with
+// statement true, a RUN of the statement BEGIN.
+func (s *boltSession) begin(extra map[string]any, statement bool) error {
+	if s.explicit || s.implicit {
+		return s.refuse(boltRefusal{"Gatehouse.ClientError.Transaction.Invalid", "protocol", "a transaction is already open"}, "")
+	}
+	begin, refusal := s.transactionExtra(extra)
+	if refusal != "" {
+		return s.refuse(s.guarded(refusal), "request:"+strings.ReplaceAll(refusal, " ", "_"))
+	}
+	if !statement {
+		ok, err := s.call(mustEncode(bolt.TagBegin, begin))
+		s.explicit = ok
+		return err
+	}
+	ok, err := s.callQuiet(mustEncode(bolt.TagBegin, begin))
+	if err != nil || !ok {
+		return err
+	}
+	s.explicit = true
+	return s.statementDone()
+}
+
+// end closes the client's own transaction, for a COMMIT (commit true) or
+// ROLLBACK message or, with statement true, a RUN of that statement. A read
+// entry's transaction has nothing to commit: COMMIT rolls it back, so nothing
+// it might have changed can persist.
+func (s *boltSession) end(commit, statement bool) error {
+	if !s.explicit {
+		return s.refuse(boltRefusal{"Gatehouse.ClientError.Transaction.Invalid", "protocol", "no transaction is open"}, "")
+	}
+	s.explicit = false
+	tag := bolt.TagRollback
+	if commit && s.svc.Write {
+		tag = bolt.TagCommit
+	}
+	if !statement && commit == (tag == bolt.TagCommit) {
+		// The database's own answer: COMMIT's carries its bookmark.
+		_, err := s.call(mustEncode(tag))
+		return err
+	}
+	ok, err := s.callQuiet(mustEncode(tag))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		s.failed = true
+		return nil
+	}
+	if statement {
+		return s.statementDone()
+	}
+	return s.client.send(bolt.Success(nil))
+}
+
+// statementDone answers a RUN of BEGIN, COMMIT or ROLLBACK the broker carried
+// out itself: an empty result, whose PULL or DISCARD the broker answers too.
+func (s *boltSession) statementDone() error {
+	s.empty = true
+	return s.client.send(bolt.Success(map[string]any{"fields": []any{}}))
+}
+
+// transactionStatement recognizes a query that is only BEGIN, COMMIT or
+// ROLLBACK, which some drivers (pymgclient without autocommit) send in place
+// of the Bolt messages. Memgraph cannot plan them, so the broker carries them
+// out as the messages they stand for. Anything more than the bare word,
+// even a comment, is a query like any other.
+func transactionStatement(query string) byte {
+	word := strings.TrimSpace(query)
+	word = strings.TrimSpace(strings.TrimSuffix(word, ";"))
+	switch {
+	case strings.EqualFold(word, "BEGIN"):
+		return bolt.TagBegin
+	case strings.EqualFold(word, "COMMIT"):
+		return bolt.TagCommit
+	case strings.EqualFold(word, "ROLLBACK"):
+		return bolt.TagRollback
+	}
+	return 0
 }
 
 func mustEncode(tag byte, fields ...any) []byte {
@@ -715,12 +796,12 @@ func mustEncode(tag byte, fields ...any) []byte {
 // client must RESET before its next request, as after any FAILURE.
 func (s *boltSession) refuse(r boltRefusal, decision string) error {
 	s.failed = true
-	if r.reason == "read_only" {
+	if r.reason == "read_only" || r.reason == "query_refused" {
 		s.refusals++
 		e := s.event
 		e.Operation, e.Decision = "bolt.query", decision
 		s.b.auditDenied(e, r.reason)
-		s.b.logger.Warn("pgproxy: Bolt query refused on a read-only database", slog.String("service", s.svc.Name), slog.String("actor", s.event.Agent), slog.String("step", decision))
+		s.b.logger.Warn("pgproxy: Bolt query refused by the query guard", slog.String("service", s.svc.Name), slog.String("actor", s.event.Agent), slog.String("step", decision))
 	}
 	return s.client.send(r.frame())
 }
@@ -775,10 +856,14 @@ func (s *boltSession) callQuiet(raw []byte) (bool, error) {
 }
 
 // transactionExtra builds the BEGIN extra the broker sends from the client's
-// RUN or BEGIN extra: read mode always, the client's timeout, metadata and
-// bookmarks kept, and no other database or impersonated user.
+// RUN or BEGIN extra: the entry's mode (read unless the entry writes), never
+// the client's, the client's timeout, metadata and bookmarks kept, and no
+// other database or impersonated user.
 func (s *boltSession) transactionExtra(extra map[string]any) (map[string]any, string) {
 	out := map[string]any{"mode": "r"}
+	if s.svc.Write {
+		out["mode"] = "w"
+	}
 	for k, v := range extra {
 		switch k {
 		case "db":
@@ -790,7 +875,7 @@ func (s *boltSession) transactionExtra(extra map[string]any) (map[string]any, st
 				return nil, "impersonation"
 			}
 		case "mode":
-			// Always read.
+			// The entry's, never the client's.
 		case "tx_timeout", "tx_metadata", "bookmarks":
 			out[k] = v
 		}
@@ -821,12 +906,20 @@ func (s *boltSession) run(msg *bolt.Structure) error {
 	if err != nil {
 		return errBoltProtocol
 	}
+	switch transactionStatement(query) {
+	case bolt.TagBegin:
+		return s.begin(extra, true)
+	case bolt.TagCommit:
+		return s.end(true, true)
+	case bolt.TagRollback:
+		return s.end(false, true)
+	}
 	begin, refusal := s.transactionExtra(extra)
 	if refusal != "" {
-		return s.refuse(boltReadOnly(refusal), "request:"+strings.ReplaceAll(refusal, " ", "_"))
+		return s.refuse(s.guarded(refusal), "request:"+strings.ReplaceAll(refusal, " ", "_"))
 	}
 	if name := refusedFunction(query, s.svc.Functions); name != "" {
-		return s.refuse(boltReadOnly("function "+name), "function:"+auditToken(name))
+		return s.refuse(s.guarded("function "+name), "function:"+auditToken(name))
 	}
 	verdict, failure, err := s.plan(query, params)
 	if err != nil {
@@ -843,11 +936,12 @@ func (s *boltSession) run(msg *bolt.Structure) error {
 		if name, ok := strings.CutPrefix(verdict, "CALL "); ok {
 			decision = "procedure:" + auditToken(name)
 		}
-		return s.refuse(boltReadOnly(verdict), decision)
+		return s.refuse(s.guarded(verdict), decision)
 	}
 	if !s.explicit {
-		// An auto-commit query runs in a read transaction the broker opens
-		// and rolls back once its result has been read.
+		// An auto-commit query runs in a transaction the broker opens and,
+		// once its result has been read, commits for a write entry or rolls
+		// back for a read entry.
 		ok, err := s.callQuiet(mustEncode(bolt.TagBegin, begin))
 		if err != nil || !ok {
 			return err
@@ -912,7 +1006,7 @@ func (s *boltSession) plan(query string, params map[string]any) (string, []byte,
 			lines = append(lines, line)
 			continue
 		case bolt.TagSuccess:
-			return planVerdict(lines, s.svc.Procedures), nil, nil
+			return planVerdict(lines, s.svc.Procedures, s.svc.Write), nil, nil
 		case bolt.TagFailure:
 			return "", raw, nil
 		}
@@ -931,8 +1025,9 @@ func mustEncodeRun(query string, params map[string]any) []byte {
 }
 
 // stream relays a PULL or DISCARD: records as they come, then the summary.
-// The last batch of an auto-commit query's result rolls back the broker's
-// transaction before the client sees the summary.
+// The last batch of an auto-commit query's result ends the broker's
+// transaction (a commit for a write entry, else a rollback) before the client
+// sees the summary.
 func (s *boltSession) stream(raw []byte) error {
 	if err := s.upstream.send(raw); err != nil {
 		return err
@@ -965,7 +1060,11 @@ func (s *boltSession) stream(raw []byte) error {
 					return errBoltProtocol
 				}
 				if more, _ := meta["has_more"].(bool); !more {
-					ok, err := s.callQuiet(mustEncode(bolt.TagRollback))
+					end := bolt.TagRollback
+					if s.svc.Write {
+						end = bolt.TagCommit
+					}
+					ok, err := s.callQuiet(mustEncode(end))
 					if err != nil {
 						return err
 					}

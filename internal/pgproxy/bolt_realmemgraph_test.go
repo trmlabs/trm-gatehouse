@@ -32,7 +32,11 @@ import (
 	"github.com/Infisical/agent-vault/internal/taskrelay"
 )
 
-func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
+// realMemgraph starts a broker in front of the real Memgraph the environment
+// names, for an entry with write access or not, and returns its address and
+// a count of the graph's nodes read directly with the broker's login.
+func realMemgraph(t *testing.T, write bool) (broker string, nodes func() int64, auth *fakeAuth, audit *recordingAudit) {
+	t.Helper()
 	addr := os.Getenv("AV_TEST_MEMGRAPH_ADDR")
 	if addr == "" {
 		t.Skip("set AV_TEST_MEMGRAPH_ADDR")
@@ -43,10 +47,10 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 	}
 	login := &GraphLogin{Username: os.Getenv("AV_TEST_MEMGRAPH_USER"), Password: os.Getenv("AV_TEST_MEMGRAPH_PASSWORD")}
 	svc := &GraphService{Name: "app-graph", Addr: addr, ServerName: os.Getenv("AV_TEST_MEMGRAPH_SERVER_NAME"), CA: string(ca),
-		Procedures: []string{"schema.node_type_properties"}, Functions: []string{"date.add"}}
-	audit := &recordingAudit{}
-	auth := &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "cursor-agents"}}
-	_, broker := startBroker(t, Options{
+		Procedures: []string{"schema.node_type_properties"}, Functions: []string{"date.add"}, Write: write}
+	audit = &recordingAudit{}
+	auth = &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "cursor-agents"}}
+	_, broker = startBroker(t, Options{
 		Auth:        auth,
 		Databases:   &fakeResolver{},
 		Leases:      &fakeMinter{lease: newLease()},
@@ -56,7 +60,7 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 	})
 
 	// The graph as Memgraph holds it, read directly with the broker's login.
-	nodes := func() int64 {
+	nodes = func() int64 {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		direct, err := dialBolt(ctx, (&net.Dialer{}).DialContext, svc, bolt.Version{Major: 5, Minor: 2}, login, 1<<20)
@@ -87,6 +91,11 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 			}
 		}
 	}
+	return broker, nodes, auth, audit
+}
+
+func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
+	broker, nodes, auth, audit := realMemgraph(t, false)
 	before := nodes()
 
 	for _, version := range [][]byte{bolt52, proposals([3]byte{4, 4, 2})} {
@@ -118,6 +127,8 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 			"USING PERIODIC COMMIT 1 UNWIND range(1, 3) AS x CREATE (:Escape {x: x})":                                                            "PeriodicCommit",
 			"CALL export_util.json('/var/lib/memgraph/escape.json') YIELD path RETURN path":                                                      "CALL export_util.json",
 			"LOAD CSV FROM '/etc/passwd' NO HEADER AS row RETURN row":                                                                            "LoadCsv",
+			"LOAD JSONL FROM '/etc/passwd' AS row RETURN row":                                                                                    "LoadJsonl",
+			"UNWIND range(1, 3) AS x CALL { WITH x CREATE (:Escape {x: x}) } IN TRANSACTIONS OF 1 ROWS":                                          "PeriodicSubquery",
 			"RETURN llm.complete('hello') AS answer":                                                                                             "function llm.complete",
 		}
 		for query, step := range refused {
@@ -144,6 +155,17 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 		if reply := c.call(bolt.TagCommit); reply.Tag != bolt.TagSuccess {
 			t.Fatalf("COMMIT: %+v", reply)
 		}
+		// The same as statements, as pymgclient sends them: reads run, a
+		// write is still refused, and COMMIT persists nothing.
+		for _, q := range []string{"BEGIN", "MATCH (n) RETURN n", "COMMIT", "BEGIN"} {
+			if res := c.query(q, nil, nil); res.code != "" {
+				t.Fatalf("%q: %+v", q, res)
+			}
+		}
+		if res := c.query("CREATE (:Probe)", nil, nil); res.code != "Gatehouse.ClientError.Statement.AccessMode" {
+			t.Fatalf("write in a transaction: %+v", res)
+		}
+		c.reset()
 		c.send(bolt.TagGoodbye)
 	}
 
@@ -250,4 +272,82 @@ func (f *fakeAuth) token() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.gotToken
+}
+
+// A write entry's writes commit; its file loads, commits of their own,
+// unlisted procedures and functions and system queries never run.
+func TestRealMemgraph_WriteEntryThroughTheBroker(t *testing.T) {
+	broker, nodes, _, audit := realMemgraph(t, true)
+	before := nodes()
+	c, reply := dialBoltTest(t, broker, bolt52, "app-graph", "agent-proof-token")
+	if reply == nil || reply.Tag != bolt.TagSuccess {
+		t.Fatalf("sign-in: %+v", reply)
+	}
+	run := func(q string) {
+		t.Helper()
+		if res := c.query(q, nil, nil); res.code != "" {
+			t.Fatalf("%q: %+v", q, res)
+		}
+	}
+	run("CREATE (:GatehouseWriteProbe {via: 'auto-commit'})")
+	if reply := c.call(bolt.TagBegin, map[string]any{"mode": "r"}); reply.Tag != bolt.TagSuccess {
+		t.Fatalf("BEGIN: %+v", reply)
+	}
+	run("CREATE (:GatehouseWriteProbe {via: 'rolled back'})")
+	if reply := c.call(bolt.TagRollback); reply.Tag != bolt.TagSuccess {
+		t.Fatalf("ROLLBACK: %+v", reply)
+	}
+	if reply := c.call(bolt.TagBegin, map[string]any{}); reply.Tag != bolt.TagSuccess {
+		t.Fatalf("BEGIN: %+v", reply)
+	}
+	run("MATCH (n:GatehouseWriteProbe) SET n.seen = true")
+	run("CREATE (:GatehouseWriteProbe {via: 'explicit'})")
+	if reply := c.call(bolt.TagCommit); reply.Tag != bolt.TagSuccess {
+		t.Fatalf("COMMIT: %+v", reply)
+	}
+	for _, q := range []string{"BEGIN", "CREATE (:GatehouseWriteProbe {via: 'statements'})", "COMMIT"} {
+		run(q)
+	}
+	if got := nodes(); got != before+3 {
+		t.Fatalf("%d nodes after three committed writes, want %d", got, before+3)
+	}
+	refused := map[string]string{
+		"CALL periodic.iterate('UNWIND range(1, 3) AS x RETURN x', 'CREATE (:Escape {x: x})', {batch_size: 1}) YIELD success RETURN success": "CALL periodic.iterate",
+		"USING PERIODIC COMMIT 1 UNWIND range(1, 3) AS x CREATE (:Escape {x: x})":                                                            "PeriodicCommit",
+		"UNWIND range(1, 3) AS x CALL { WITH x CREATE (:Escape {x: x}) } IN TRANSACTIONS OF 1 ROWS":                                          "PeriodicSubquery",
+		"CALL export_util.json('/var/lib/memgraph/escape.json') YIELD path RETURN path":                                                      "CALL export_util.json",
+		"LOAD CSV FROM '/etc/passwd' NO HEADER AS row CREATE (:Escape {row: row})":                                                           "LoadCsv",
+		"RETURN llm.complete('hello') AS answer":                                                                                             "function llm.complete",
+	}
+	for query, step := range refused {
+		res := c.query(query, nil, nil)
+		if res.code != "Gatehouse.ClientError.Statement.AccessMode" || !strings.Contains(res.message, step) {
+			t.Fatalf("%q: %+v", query, res)
+		}
+		c.reset()
+	}
+	for _, query := range []string{"CREATE USER intruder IDENTIFIED BY 'x'", "SET PASSWORD FOR intruder TO 'y'", "GRANT ALL PRIVILEGES TO intruder",
+		"SET DATABASE SETTING 'query.timeout' TO '1'", "CREATE INDEX ON :Person(name)", "DROP GRAPH", "STORAGE MODE IN_MEMORY_ANALYTICAL"} {
+		if res := c.query(query, nil, nil); res.code == "" {
+			t.Fatalf("%q ran: %+v", query, res)
+		}
+		c.reset()
+	}
+	if got := nodes(); got != before+3 {
+		t.Fatalf("a refused query changed the graph: %d nodes, want %d", got, before+3)
+	}
+	run("MATCH (n:GatehouseWriteProbe) DETACH DELETE n")
+	if got := nodes(); got != before {
+		t.Fatalf("%d nodes after cleanup, want %d", got, before)
+	}
+	c.send(bolt.TagGoodbye)
+	var denied int
+	for _, e := range audit.recorded() {
+		if e.Outcome == "query_refused" {
+			denied++
+		}
+	}
+	if denied != len(refused) {
+		t.Fatalf("audited %d refusals, want %d", denied, len(refused))
+	}
 }

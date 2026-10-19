@@ -8,14 +8,16 @@ import (
 // A graph login cannot be made read-only on Memgraph's Community edition: it
 // has no roles, any user may create users, and a session's read access mode
 // does not stop writes. Rolling every transaction back is not enough either:
-// periodic.iterate and USING PERIODIC COMMIT commit on their own, and
-// procedures such as export_util write files on the server. So the broker
-// decides each query itself before it runs, from Memgraph's own plan for it
-// (EXPLAIN), and refuses unless every step of the plan is one that only
-// reads. A procedure call is one step, refused unless the entry lists the
-// procedure. Functions never show in a plan, and a module function can reach
-// the network (llm.complete), so a call to any module function is refused
-// unless the entry lists it. Transactions still open in read mode and are
+// periodic.iterate, USING PERIODIC COMMIT and CALL { } IN TRANSACTIONS commit
+// on their own, and procedures such as export_util write files on the server.
+// So the broker decides each query itself before it runs, from Memgraph's own
+// plan for it (EXPLAIN), and refuses unless every step of the plan is one the
+// entry's access allows. Memgraph cannot plan anything but a Cypher query, so
+// user, privilege, setting and other system queries never run. A procedure
+// call is one step, refused unless the entry lists the procedure. Functions
+// never show in a plan, and a module function can reach the network
+// (llm.complete), so a call to any module function is refused unless the
+// entry lists it. A read entry's transactions open in read mode and are
 // rolled back, so a mistake in this list cannot commit.
 
 // readPlanSteps are the plan operators that only read the graph. Anything
@@ -30,16 +32,28 @@ var readPlanSteps = map[string]bool{
 	"WeightedShortestPath": true, "AllShortestPaths": true, "KShortestPaths": true,
 }
 
+// writePlanSteps are the plan operators that change the graph, which a write
+// entry also allows. Loading files (LoadCsv, LoadParquet, LoadJsonl), a commit
+// of its own (PeriodicCommit, PeriodicSubquery) and every operator not named
+// here stay refused.
+var writePlanSteps = map[string]bool{
+	"CreateNode": true, "CreateExpand": true, "Merge": true, "Delete": true, "Foreach": true,
+	"SetProperty": true, "SetProperties": true, "SetNestedProperty": true, "SetLabels": true,
+	"RemoveProperty": true, "RemoveNestedProperty": true, "RemoveLabels": true,
+	"EmptyResult": true, "Accumulate": true,
+}
+
 // planVerdict checks the lines EXPLAIN returned. It returns "" when every step
-// reads, or the step that does not (a procedure as "CALL name"), naming the
+// is one the entry's access allows (reads, and graph writes when write is
+// true), or the step that is not (a procedure as "CALL name"), naming the
 // write itself rather than the steps that only wrap a write.
-func planVerdict(lines []string, procedures []string) string {
+func planVerdict(lines []string, procedures []string, write bool) string {
 	if len(lines) == 0 {
 		return "empty plan"
 	}
 	verdict := ""
 	for _, line := range lines {
-		step := planStep(line, procedures)
+		step := planStep(line, procedures, write)
 		if step == "" {
 			continue
 		}
@@ -56,12 +70,13 @@ func planVerdict(lines []string, procedures []string) string {
 // wrapsWrite are steps that appear around a write and say less than it does.
 var wrapsWrite = map[string]bool{"EmptyResult": true, "Accumulate": true}
 
-// planStep returns "" for a line that reads, or the step it refuses.
-func planStep(line string, procedures []string) string {
+// planStep returns "" for a line the entry's access allows, or the step it
+// refuses.
+func planStep(line string, procedures []string, write bool) string {
 	rest := strings.TrimLeft(line, " |\\")
 	switch {
 	case rest == "", rest == "On Match", rest == "On Create":
-		// Branch markers. Merge, the only step that has these, is refused.
+		// Branch markers. Merge, the only step that has these, is a write.
 		return ""
 	case !strings.HasPrefix(rest, "* "):
 		return "unrecognized plan line"
@@ -82,7 +97,7 @@ func planStep(line string, procedures []string) string {
 			return "CALL " + name[:i]
 		}
 		return "CALL"
-	case strings.HasPrefix(step, "ScanAll"), readPlanSteps[step]:
+	case strings.HasPrefix(step, "ScanAll"), readPlanSteps[step], write && writePlanSteps[step]:
 		return ""
 	}
 	if step == "" {

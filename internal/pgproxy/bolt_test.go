@@ -329,3 +329,107 @@ func TestBolt_PostgresStillServedOnTheSameListener(t *testing.T) {
 		t.Fatalf("PostgreSQL on the shared listener: %v", err)
 	}
 }
+
+// pymgclient without autocommit sends BEGIN, COMMIT and ROLLBACK as queries,
+// which Memgraph cannot plan. The broker carries them out as the Bolt
+// messages, so a read entry still runs every query in a read transaction it
+// rolls back, and a write inside one is still refused.
+func TestBolt_TransactionStatementsOnAReadEntry(t *testing.T) {
+	f := startBoltFixture(t, nil)
+	c := signedIn(t, f)
+	if res := c.query("BEGIN", nil, map[string]any{"mode": "w"}); res.code != "" || len(res.records) != 0 {
+		t.Fatalf("BEGIN: %+v", res)
+	}
+	if res := c.query("MATCH (n) RETURN n.x AS x", nil, nil); res.code != "" || len(res.records) != 2 {
+		t.Fatalf("read in transaction: %+v", res)
+	}
+	if res := c.query(" commit ;", nil, nil); res.code != "" {
+		t.Fatalf("COMMIT: %+v", res)
+	}
+	if res := c.query("Begin", nil, nil); res.code != "" {
+		t.Fatalf("second BEGIN: %+v", res)
+	}
+	if res := c.query("CREATE (:X)", nil, nil); res.code != "Gatehouse.ClientError.Statement.AccessMode" {
+		t.Fatalf("write in a transaction: %+v", res)
+	}
+	c.reset()
+	if res := c.query("BEGIN", nil, nil); res.code != "" {
+		t.Fatalf("BEGIN after RESET: %+v", res)
+	}
+	if res := c.query("ROLLBACK", nil, nil); res.code != "" {
+		t.Fatalf("ROLLBACK: %+v", res)
+	}
+	want := []string{"LOGIN gatehouse_reader", "BEGIN mode=r", "EXPLAIN MATCH (n) RETURN n.x AS x", "RUN MATCH (n) RETURN n.x AS x tx=true", "ROLLBACK",
+		"BEGIN mode=r", "EXPLAIN CREATE (:X)", "RESET", "BEGIN mode=r", "ROLLBACK"}
+	if got := f.upstream.entries(); !slices.Equal(got, want) {
+		t.Fatalf("upstream saw %q, want %q", got, want)
+	}
+	// Only the bare word is a transaction statement: anything more is a
+	// query, planned and refused like any other.
+	for _, q := range []string{"COMMIT // done", "BEGIN TRANSACTION", "COMMIT; MATCH (n) RETURN n"} {
+		if res := c.query(q, nil, nil); res.code == "" {
+			t.Fatalf("%q ran: %+v", q, res)
+		}
+		c.reset()
+	}
+	if res := c.query("COMMIT", nil, nil); res.code != "Gatehouse.ClientError.Transaction.Invalid" {
+		t.Fatalf("COMMIT with no transaction: %+v", res)
+	}
+}
+
+// A write entry's graph writes run and commit, and the rest of the guard
+// still holds: no file loads, no unlisted procedures or functions.
+func TestBolt_WriteEntry(t *testing.T) {
+	f := startBoltFixture(t, nil)
+	f.graphs.svc.Write = true
+	c := signedIn(t, f)
+	if res := c.query("CREATE (:X)", nil, map[string]any{"mode": "r"}); res.code != "" {
+		t.Fatalf("auto-commit write: %+v", res)
+	}
+	if reply := c.call(bolt.TagBegin, map[string]any{}); reply.Tag != bolt.TagSuccess {
+		t.Fatalf("BEGIN: %+v", reply)
+	}
+	if res := c.query("MATCH (n) SET n.x = 1", nil, nil); res.code != "" {
+		t.Fatalf("write in a transaction: %+v", res)
+	}
+	reply := c.call(bolt.TagCommit)
+	if meta, _ := reply.Map(0); reply.Tag != bolt.TagSuccess || meta["bookmark"] != "b1" {
+		t.Fatalf("COMMIT answered %+v, want the database's own answer", reply)
+	}
+	if res := c.query("BEGIN", nil, nil); res.code != "" {
+		t.Fatalf("BEGIN statement: %+v", res)
+	}
+	if res := c.query("COMMIT", nil, nil); res.code != "" {
+		t.Fatalf("COMMIT statement: %+v", res)
+	}
+	want := []string{"LOGIN gatehouse_reader", "EXPLAIN CREATE (:X)", "BEGIN mode=w", "RUN CREATE (:X) tx=true", "COMMIT",
+		"BEGIN mode=w", "EXPLAIN MATCH (n) SET n.x = 1", "RUN MATCH (n) SET n.x = 1 tx=true", "COMMIT", "BEGIN mode=w", "COMMIT"}
+	if got := f.upstream.entries(); !slices.Equal(got, want) {
+		t.Fatalf("upstream saw %q, want %q", got, want)
+	}
+	for query, step := range map[string]string{
+		"CALL periodic.iterate('MATCH (n) RETURN n', 'SET n.x = 1', {batch_size: 1}) YIELD success RETURN success": "CALL periodic.iterate",
+		"LOAD CSV FROM '/etc/passwd' NO HEADER AS row RETURN row":                                                  "LoadCsv",
+		"RETURN llm.complete('hello') AS a":                                                                        "function llm.complete",
+	} {
+		res := c.query(query, nil, nil)
+		if res.code != "Gatehouse.ClientError.Statement.AccessMode" || !strings.Contains(res.message, step) || strings.Contains(res.message, "read-only") {
+			t.Fatalf("%q: %+v", query, res)
+		}
+		c.reset()
+	}
+	for _, e := range f.upstream.entries()[len(want):] {
+		if strings.HasPrefix(e, "RUN ") || e == "COMMIT" || strings.HasPrefix(e, "BEGIN") {
+			t.Fatalf("a refused query reached the database: %q", e)
+		}
+	}
+	var refused int
+	for _, e := range f.audit.recorded() {
+		if e.Event == auditchain.EventDenied && e.Outcome == "query_refused" && e.Operation == "bolt.query" {
+			refused++
+		}
+	}
+	if refused != 3 {
+		t.Fatalf("audited %d refusals, want 3", refused)
+	}
+}

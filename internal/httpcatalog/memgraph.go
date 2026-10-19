@@ -11,11 +11,14 @@ import (
 // MemgraphBinding is a graph database reached over Bolt, such as Memgraph.
 // The broker signs in with one login it reads from Vault (fields username and
 // password at Login), which never reaches a worker, and holds every session
-// to reads itself: Memgraph's Community edition has no read-only role. See
+// to the entry's access itself: Memgraph's Community edition has no roles. See
 // docs/gatehouse/graph-databases.md.
 type MemgraphBinding struct {
 	Login KVRef `json:"login"`
-	// Access is "read", the only access a graph entry may have.
+	// Access is "read" (the default): queries that only read, in transactions
+	// the broker rolls back. "write" also lets graph writes run and commit;
+	// file loads, commits of their own, unlisted procedures and functions and
+	// system queries stay refused.
 	Access string `json:"access,omitempty"`
 	// SSLMode is verify-full, the default and the only mode outside a test
 	// deployment, which may use disable for a cluster-local host.
@@ -56,9 +59,9 @@ func (e *Entry) normalizeMemgraph() error {
 	switch m.Access {
 	case "":
 		m.Access = "read"
-	case "read":
+	case "read", "write":
 	default:
-		return fmt.Errorf("access %q: graph entries are read-only", m.Access)
+		return fmt.Errorf("access %q: read or write", m.Access)
 	}
 	switch {
 	case m.SSLMode == "":

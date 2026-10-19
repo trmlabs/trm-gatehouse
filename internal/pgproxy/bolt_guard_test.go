@@ -25,32 +25,50 @@ func TestPlanVerdict(t *testing.T) {
 		"listed procedure": plan(" * Produce {name}", " * CallProcedure<schema.node_type_properties> {name}", " * Once"),
 	}
 	for name, lines := range reads {
-		if got := planVerdict(lines, []string{"schema.node_type_properties"}); got != "" {
-			t.Errorf("%s: refused at %q", name, got)
+		for _, write := range []bool{false, true} {
+			if got := planVerdict(lines, []string{"schema.node_type_properties"}, write); got != "" {
+				t.Errorf("%s (write %v): refused at %q", name, write, got)
+			}
 		}
 	}
-	writes := map[string]struct {
-		lines []string
-		want  string
+	// Each refused on a read entry; graph writes (writes true) run on a write
+	// entry, and everything else stays refused there too.
+	refused := map[string]struct {
+		lines  []string
+		want   string
+		writes bool
 	}{
-		"create":           {plan(" * EmptyResult", " * CreateNode", " * Once"), "CreateNode"},
-		"set":              {plan(" * SetProperty", " * ScanAll (a)", " * Once"), "SetProperty"},
-		"delete":           {plan(" * Delete", " * ScanAll (a)", " * Once"), "Delete"},
-		"merge":            {plan(" * Produce {a}", " * Accumulate", " * Merge", " |\\ On Match", " | * ScanAllByLabelProperties (a :A {x})", " | * Once", " |\\ On Create", " | * CreateNode", " | * Once", " * Once"), "Merge"},
-		"remove":           {plan(" * RemoveLabels", " * ScanAll (a)", " * Once"), "RemoveLabels"},
-		"foreach":          {plan(" * Foreach", " |\\ ", " | * SetProperty", " | * Once", " * ScanAll (a)", " * Once"), "Foreach"},
-		"periodic.iterate": {plan(" * Produce {success}", " * CallProcedure<periodic.iterate> {success}", " * Once"), "CALL periodic.iterate"},
-		"periodic commit":  {plan(" * PeriodicCommit", " * Unwind", " * Once"), "PeriodicCommit"},
-		"in transactions":  {plan(" * Produce {n}", " * PeriodicSubquery", " * Once"), "PeriodicSubquery"},
-		"load csv":         {plan(" * Produce {row}", " * LoadCsv {row}", " * Once"), "LoadCsv"},
-		"load parquet":     {plan(" * Produce {row}", " * LoadParquet {row}", " * Once"), "LoadParquet"},
-		"empty":            {nil, "empty plan"},
-		"unknown format":   {plan("CreateNode"), "unrecognized plan line"},
-		"no step name":     {plan(" * {x}"), "unrecognized plan line"},
+		"create":           {plan(" * EmptyResult", " * CreateNode", " * Once"), "CreateNode", true},
+		"create edge":      {plan(" * EmptyResult", " * CreateExpand (a)-[anon1:R]->(b)", " * CreateNode", " * Once"), "CreateExpand", true},
+		"set":              {plan(" * SetProperty", " * ScanAll (a)", " * Once"), "SetProperty", true},
+		"set map":          {plan(" * EmptyResult", " * SetProperties", " * ScanAll (a)", " * Once"), "SetProperties", true},
+		"set nested":       {plan(" * EmptyResult", " * SetNestedProperty", " * ScanAll (a)", " * Once"), "SetNestedProperty", true},
+		"set labels":       {plan(" * EmptyResult", " * SetLabels", " * ScanAll (a)", " * Once"), "SetLabels", true},
+		"delete":           {plan(" * Delete", " * ScanAll (a)", " * Once"), "Delete", true},
+		"merge":            {plan(" * Produce {a}", " * Accumulate", " * Merge", " |\\ On Match", " | * ScanAllByLabelProperties (a :A {x})", " | * Once", " |\\ On Create", " | * CreateNode", " | * Once", " * Once"), "Merge", true},
+		"remove":           {plan(" * RemoveLabels", " * ScanAll (a)", " * Once"), "RemoveLabels", true},
+		"remove nested":    {plan(" * EmptyResult", " * RemoveNestedProperty", " * ScanAll (a)", " * Once"), "RemoveNestedProperty", true},
+		"foreach":          {plan(" * Foreach", " |\\ ", " | * SetProperty", " | * Once", " * ScanAll (a)", " * Once"), "Foreach", true},
+		"periodic.iterate": {plan(" * Produce {success}", " * CallProcedure<periodic.iterate> {success}", " * Once"), "CALL periodic.iterate", false},
+		"periodic commit":  {plan(" * PeriodicCommit", " * EmptyResult", " * CreateNode", " * Unwind", " * Once"), "PeriodicCommit", false},
+		"in transactions": {plan(" * Produce {i}", " * PeriodicSubquery", " |\\ ", " | * EmptyResult", " | * CreateNode", " | * Once", " * Unwind", " * Once"),
+			"PeriodicSubquery", false},
+		"write then load": {plan(" * EmptyResult", " * CreateNode", " * LoadCsv {row}", " * Once"), "CreateNode", false},
+		"load csv":        {plan(" * Produce {row}", " * LoadCsv {row}", " * Once"), "LoadCsv", false},
+		"load parquet":    {plan(" * Produce {row}", " * LoadParquet {row}", " * Once"), "LoadParquet", false},
+		"load jsonl":      {plan(" * Produce {row}", " * LoadJsonl {row}", " * Once"), "LoadJsonl", false},
+		"unlisted step":   {plan(" * Produce {n}", " * SomethingNew", " * Once"), "SomethingNew", false},
+		"empty":           {nil, "empty plan", false},
+		"unknown format":  {plan("CreateNode"), "unrecognized plan line", false},
+		"no step name":    {plan(" * {x}"), "unrecognized plan line", false},
 	}
-	for name, c := range writes {
-		if got := planVerdict(c.lines, []string{"schema.node_type_properties"}); got != c.want {
-			t.Errorf("%s: verdict %q, want %q", name, got, c.want)
+	for name, c := range refused {
+		if got := planVerdict(c.lines, []string{"schema.node_type_properties"}, false); got != c.want {
+			t.Errorf("%s: read verdict %q, want %q", name, got, c.want)
+		}
+		got := planVerdict(c.lines, []string{"schema.node_type_properties"}, true)
+		if c.writes && got != "" || !c.writes && got == "" {
+			t.Errorf("%s: write verdict %q", name, got)
 		}
 	}
 }

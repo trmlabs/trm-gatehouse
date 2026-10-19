@@ -23,6 +23,13 @@ func TestMemgraphEntry(t *testing.T) {
 	if e.Port != 7687 || m.Access != "read" || m.SSLMode != "verify-full" || e.Tier != "" {
 		t.Fatalf("defaults: port %d access %q sslmode %q tier %q", e.Port, m.Access, m.SSLMode, e.Tier)
 	}
+	w, err := Parse([]byte(`{"entries":[` + strings.Replace(graphEntry, `"serverName"`, `"access":"write","serverName"`, 1) + `]}`))
+	if err != nil {
+		t.Fatalf("write access: %v", err)
+	}
+	if e, err := w.Graph("app-graph", "pool-a"); err != nil || e.Memgraph.Access != "write" {
+		t.Fatalf("write access: %v", err)
+	}
 	if _, err := c.Graph("app-graph", "pool-b"); !errors.Is(err, ErrPool) {
 		t.Fatalf("ungranted pool: %v", err)
 	}
@@ -40,7 +47,7 @@ func TestMemgraphEntry(t *testing.T) {
 
 func TestMemgraphEntryRefusals(t *testing.T) {
 	cases := map[string]string{
-		"write access":          strings.Replace(graphEntry, `"serverName"`, `"access":"write","serverName"`, 1),
+		"unknown access":        strings.Replace(graphEntry, `"serverName"`, `"access":"admin","serverName"`, 1),
 		"plaintext":             strings.Replace(graphEntry, `"serverName":"community.memgraph.example.com",`, `"sslmode":"disable",`, 1),
 		"no login":              strings.Replace(graphEntry, `"login":{"mount":"gatehouse","path":"vendors/memgraph-app"},`, ``, 1),
 		"login path escape":     strings.Replace(graphEntry, `vendors/memgraph-app`, `vendors/../catalog`, 1),

@@ -38,7 +38,8 @@ func (r catalogGraphResolver) ResolveGraph(ctx context.Context, scope pgproxy.Ag
 	return &pgproxy.GraphService{Name: entry.Name, Addr: net.JoinHostPort(entry.Host, strconv.Itoa(entry.Port)),
 		ServerName: m.ServerName, CA: m.CA, Plaintext: m.SSLMode == "disable", MaxConns: m.MaxConns,
 		KeyMount: m.Login.Mount, KeyPath: m.Login.Path,
-		Procedures: append([]string(nil), m.Procedures...), Functions: append([]string(nil), m.Functions...)}, nil
+		Procedures: append([]string(nil), m.Procedures...), Functions: append([]string(nil), m.Functions...),
+		Write: m.Access == "write"}, nil
 }
 
 // NewVaultGraphLogins reads graph database logins through the catalog's key
