@@ -43,9 +43,15 @@ type Entry struct {
 	BasicUser bool `json:"basicUser,omitempty"`
 	// BasicPair sends the key, stored as "user:password", as HTTP Basic
 	// credentials, for vendors that issue a key pair (a public and a secret
-	// key). The worker sends the placeholder as both user name and password.
-	// The header is Authorization and the scheme is Basic, so neither is set.
+	// key). The worker sends the placeholder as both user name and password,
+	// or the stored user name, which is not secret, and the placeholder as
+	// the password. The header is Authorization and the scheme is Basic, so
+	// neither is set.
 	BasicPair bool `json:"basicPair,omitempty"`
+	// PairUserHeader names a second header in which the client also sends a
+	// Basic pair's user name, such as Langfuse's X-Langfuse-Public-Key. Its
+	// value must be the stored user name. basicPair entries only.
+	PairUserHeader string `json:"pairUserHeader,omitempty"`
 	// Placeholder is what a worker may send in Header instead of the key, so
 	// SDKs that insist on a key still work. The worker may also omit Header.
 	Placeholder string `json:"placeholder"`
@@ -635,6 +641,13 @@ func (e *Entry) normalize() error {
 			return fmt.Errorf("forward header %q not allowed", h)
 		}
 	}
+	if e.PairUserHeader != "" {
+		h := e.PairUserHeader
+		e.PairUserHeader = http.CanonicalHeaderKey(h)
+		if !e.BasicPair || !tokenPattern.MatchString(h) || reservedHeaders[e.PairUserHeader] || contains(e.ForwardHeaders, e.PairUserHeader) {
+			return errors.New("pairUserHeader needs basicPair and a plain header name that is neither reserved nor forwarded")
+		}
+	}
 	if e.MaxRequestBytes == 0 {
 		e.MaxRequestBytes = 1 << 20
 	}
@@ -652,7 +665,7 @@ func (e *Entry) normalize() error {
 }
 
 func (e *Entry) normalizePostgres() error {
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) ||
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.PairUserHeader != "" || e.Placeholder != "" || e.Key != (KeyRef{}) ||
 		len(e.ForwardHeaders) > 0 || e.Git != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
 		return errors.New("postgres entries take only host, port, pools and postgres settings")
 	}
@@ -752,7 +765,7 @@ func (e *Entry) normalizeGit() error {
 	if e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil {
 		return errors.New("postgres settings require kind postgres")
 	}
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.PairUserHeader != "" || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
 		return errors.New("git entries derive paths, methods and credentials; leave them unset")
 	}
 	g := e.Git
@@ -1867,9 +1880,10 @@ func (e *Entry) Credential(v string) string {
 	return v
 }
 
-// CallerCredential is the only value a worker may send in Header: the
-// placeholder encoded as the key would be, and for a Basic pair, the
-// placeholder as both user name and password.
+// CallerCredential is the value a worker sends in Header: the placeholder
+// encoded as the key would be, and for a Basic pair, the placeholder as both
+// user name and password. A Basic pair also takes the stored user name with
+// the placeholder as password (CallerPairUser).
 func (e *Entry) CallerCredential() string {
 	if e.BasicPair {
 		return e.Credential(e.Placeholder + ":" + e.Placeholder)
@@ -1877,9 +1891,31 @@ func (e *Entry) CallerCredential() string {
 	return e.Credential(e.Placeholder)
 }
 
-// PairPassword is the password half of a Basic pair key, and false when v is
-// not "user:password" with both halves set, so a malformed key is never sent.
-func PairPassword(v string) (string, bool) {
-	user, password, ok := strings.Cut(v, ":")
-	return password, ok && user != "" && password != ""
+// CallerPairUser is the user name in value when value is Basic credentials
+// with a user name of the worker's own and the placeholder as password, as a
+// client given a pair's public key and, as its secret key, the placeholder
+// sends them. Basic pair entries only. The user half of a pair is not
+// secret; the broker serves the request only when it equals the stored one.
+func (e *Entry) CallerPairUser(value string) (string, bool) {
+	encoded, ok := strings.CutPrefix(value, "Basic ")
+	if !e.BasicPair || !ok {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
+		return "", false
+	}
+	user, ok := strings.CutSuffix(string(decoded), ":"+e.Placeholder)
+	if !ok || user == "" || strings.Contains(user, ":") {
+		return "", false
+	}
+	return user, true
+}
+
+// SplitPair is the user and password halves of a Basic pair key, and false
+// when v is not "user:password" with both halves set, so a malformed key is
+// never sent.
+func SplitPair(v string) (user, password string, ok bool) {
+	user, password, ok = strings.Cut(v, ":")
+	return user, password, ok && user != "" && password != ""
 }

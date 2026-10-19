@@ -369,12 +369,26 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	expectedCredential := entry.CallerCredential()
+	// A Basic pair's user name is not secret, so a client may hold the real
+	// one and send it where it puts it: in Header, with the placeholder as
+	// the password, and in the entry's PairUserHeader. Each must equal the
+	// stored user name, which is known once the key is read.
+	var sentUsers []string
+	sentUserHeader := false
 	forwarded := http.Header{}
 	for name, values := range r.Header {
 		if name == entry.Header {
-			if len(values) != 1 || values[0] != expectedCredential {
+			if len(values) != 1 {
 				deny(http.StatusBadRequest, "credential_header")
 				return
+			}
+			if values[0] != expectedCredential {
+				user, ok := entry.CallerPairUser(values[0])
+				if !ok {
+					deny(http.StatusBadRequest, "credential_header")
+					return
+				}
+				sentUsers = append(sentUsers, user)
 			}
 			continue
 		}
@@ -383,6 +397,14 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 				deny(http.StatusBadRequest, "placeholder_misplaced")
 				return
 			}
+		}
+		if entry.PairUserHeader != "" && name == entry.PairUserHeader {
+			if len(values) != 1 {
+				deny(http.StatusBadRequest, "credential_header")
+				return
+			}
+			sentUsers, sentUserHeader = append(sentUsers, values[0]), true
+			continue
 		}
 		if entry.ForwardsHeader(name) {
 			forwarded[name] = append([]string(nil), values...)
@@ -401,12 +423,18 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusServiceUnavailable, keyOutcome(err))
 		return
 	}
-	password, pair := httpcatalog.PairPassword(secret.Value())
+	user, password, pair := httpcatalog.SplitPair(secret.Value())
 	if entry.BasicPair && !pair {
 		// As for a key no header may carry, only rewriting the stored value
 		// clears this, so the refusal is lasting.
 		deny(http.StatusServiceUnavailable, "key_not_basic_pair")
 		return
+	}
+	for _, sent := range sentUsers {
+		if sent != user {
+			deny(http.StatusBadRequest, "credential_header")
+			return
+		}
 	}
 	outURL := &url.URL{Scheme: "https", Host: target, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(body))
@@ -418,6 +446,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	out.Header = forwarded
 	credential := entry.Credential(secret.Value())
 	out.Header.Set(entry.Header, credential)
+	if sentUserHeader {
+		out.Header.Set(entry.PairUserHeader, user)
+	}
 	out.Header.Set("Accept-Encoding", "identity")
 
 	admitted := event

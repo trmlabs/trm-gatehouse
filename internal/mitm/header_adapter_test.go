@@ -144,7 +144,8 @@ func basicKey(key string) string {
 
 // newAdapterFixtureWith builds the fixture with a Bearer entry, or with auth
 // "basicUser" or "basicPair", an entry whose vendor takes the key as an HTTP
-// Basic user name or as a "user:password" pair.
+// Basic user name or as a "user:password" pair, or "pairUserHeader", a Basic
+// pair whose client also sends the user name in X-Langfuse-Public-Key.
 func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options)) *adapterFixture {
 	t.Helper()
 	f := &adapterFixture{keys: &adapterKeys{value: adapterKeyV1}, audit: &adapterAudit{}, acceptsV: adapterKeyV1, release: make(chan struct{})}
@@ -155,7 +156,7 @@ func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options))
 		switch auth {
 		case "basicUser":
 			want = basicKey(f.acceptsV)
-		case "basicPair":
+		case "basicPair", "pairUserHeader":
 			want = "Basic " + base64.StdEncoding.EncodeToString([]byte(f.acceptsV))
 		}
 		if r.Header.Get("Authorization") != want {
@@ -201,7 +202,11 @@ func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options))
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(f.vendor.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
 	scheme := `"scheme":"Bearer"`
-	if auth != "" {
+	switch auth {
+	case "":
+	case "pairUserHeader":
+		scheme = `"basicPair":true,"pairUserHeader":"x-langfuse-public-key"`
+	default:
 		scheme = `"` + auth + `":true`
 	}
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{
@@ -485,6 +490,88 @@ func TestAdapterSendsKeyPairAsBasic(t *testing.T) {
 			!strings.HasPrefix(string(body), "key_not_basic_pair: ") || f.calls.Load() != calls || f.audit.last().Outcome != "key_not_basic_pair" {
 			t.Fatalf("%s: %d %q Retry-After %q, outcome %q", name, resp.StatusCode, resp.Header.Get(RefusalHeader), resp.Header.Get("Retry-After"), f.audit.last().Outcome)
 		}
+	}
+}
+
+// A Basic pair client given the real public key and the placeholder as its
+// secret key, as Langfuse's SDKs need, is served: the stored user name may
+// stand in Authorization and in the entry's user header, which reaches the
+// vendor only when the client sent it. Any other user name, two values, or
+// the placeholder in the user header is refused before the vendor is called.
+func TestAdapterServesAPairClientHoldingItsPublicKey(t *testing.T) {
+	const publicKey = "pk-synthetic-adapter"
+	pair := publicKey + ":" + adapterKeyV1
+	encode := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(s)) }
+	sdk := encode(publicKey + ":__vault_LLM_KEY__")
+	placeholders := encode("__vault_LLM_KEY__:__vault_LLM_KEY__")
+	setPair := func(f *adapterFixture) {
+		f.keys.mu.Lock()
+		f.keys.value, f.acceptsV = pair, pair
+		f.keys.mu.Unlock()
+	}
+	headers := func(values map[string][]string) func(*http.Request) {
+		return func(r *http.Request) {
+			r.Header.Del("Authorization")
+			for name, v := range values {
+				r.Header[name] = v
+			}
+		}
+	}
+
+	f := newAdapterFixtureWith(t, "pairUserHeader")
+	setPair(f)
+	for _, tc := range []struct {
+		name     string
+		mutate   func(*http.Request)
+		wantUser string
+	}{
+		{"sdk", headers(map[string][]string{"Authorization": {sdk}, "X-Langfuse-Public-Key": {publicKey}, "X-Langfuse-Sdk-Name": {"python"}}), publicKey},
+		{"sdk without the user header", headers(map[string][]string{"Authorization": {sdk}}), ""},
+		{"placeholders and the user header", headers(map[string][]string{"Authorization": {placeholders}, "X-Langfuse-Public-Key": {publicKey}}), publicKey},
+		{"placeholders only", headers(map[string][]string{"Authorization": {placeholders}}), ""},
+		{"user header only", headers(map[string][]string{"X-Langfuse-Public-Key": {publicKey}}), publicKey},
+	} {
+		code, body, err := f.do(t, "POST", "/v1/chat/completions", `{}`, tc.mutate)
+		seen, _ := f.seen.Load().(http.Header)
+		if err != nil || code != 200 || body != `{"method":"POST","bytes":2}` {
+			t.Fatalf("%s: %d %q %v", tc.name, code, body, err)
+		}
+		if got := seen.Values("X-Langfuse-Public-Key"); (tc.wantUser == "" && len(got) != 0) || (tc.wantUser != "" && (len(got) != 1 || got[0] != tc.wantUser)) {
+			t.Fatalf("%s: vendor saw user header %q", tc.name, got)
+		}
+		if seen.Get("X-Langfuse-Sdk-Name") != "" {
+			t.Fatalf("%s: an unlisted header was forwarded", tc.name)
+		}
+	}
+	for _, tc := range []struct {
+		name, outcome string
+		mutate        func(*http.Request)
+	}{
+		{"another user", "credential_header", headers(map[string][]string{"Authorization": {encode("pk-worker-own:__vault_LLM_KEY__")}})},
+		{"another user in the header", "credential_header", headers(map[string][]string{"Authorization": {sdk}, "X-Langfuse-Public-Key": {"pk-worker-own"}})},
+		{"another user beside placeholders", "credential_header", headers(map[string][]string{"Authorization": {placeholders}, "X-Langfuse-Public-Key": {"pk-worker-own"}})},
+		{"empty user header", "credential_header", headers(map[string][]string{"X-Langfuse-Public-Key": {""}})},
+		{"two user headers", "credential_header", headers(map[string][]string{"Authorization": {sdk}, "X-Langfuse-Public-Key": {publicKey, publicKey}})},
+		{"own secret key", "credential_header", headers(map[string][]string{"Authorization": {encode(publicKey + ":sk-worker-own")}})},
+		{"user with a colon", "credential_header", headers(map[string][]string{"Authorization": {encode(publicKey + ":x:__vault_LLM_KEY__")}})},
+		{"unpadded", "credential_header", headers(map[string][]string{"Authorization": {strings.TrimRight(sdk, "=")}})},
+		{"placeholder in the user header", "placeholder_misplaced", headers(map[string][]string{"Authorization": {sdk}, "X-Langfuse-Public-Key": {"__vault_LLM_KEY__"}})},
+	} {
+		calls := f.calls.Load()
+		code, _, _ := f.do(t, "POST", "/v1/chat/completions", `{}`, tc.mutate)
+		if code != 400 || f.calls.Load() != calls || f.audit.last().Outcome != tc.outcome {
+			t.Fatalf("%s: %d %+v", tc.name, code, f.audit.last())
+		}
+	}
+
+	// Without a user header in the entry, the public key may still stand in
+	// Authorization, and the client's copy of it is dropped like any
+	// unlisted header.
+	plain := newAdapterFixtureWith(t, "basicPair")
+	setPair(plain)
+	code, _, err := plain.do(t, "POST", "/v1/chat/completions", `{}`, headers(map[string][]string{"Authorization": {sdk}, "X-Langfuse-Public-Key": {publicKey}}))
+	if seen, _ := plain.seen.Load().(http.Header); err != nil || code != 200 || seen.Get("X-Langfuse-Public-Key") != "" {
+		t.Fatalf("plain pair: %d %v %v", code, err, seen)
 	}
 }
 
