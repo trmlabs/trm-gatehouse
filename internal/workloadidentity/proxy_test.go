@@ -31,7 +31,7 @@ func setupProxy(t *testing.T) *proxyFixture {
 		Namespace: "example-edge", ServiceAccount: "example-edge", ServiceAccountUID: "edge-account-uid",
 		AgentID: "agent", VaultID: "vault", TrustDomain: "agent-sandbox",
 		Proxy: &ProxyBinding{Profiles: []ProxyProfile{
-			{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes"},
+			{Namespace: "agent-sandboxes", Profile: "example-sandbox-profile", Pool: "sandboxes"},
 			{Namespace: "team-a-sandboxes", Profile: "agent-sandbox-team-a", Pool: "team-a"}},
 			OwnerKind: "Sandbox", ImageDigests: []string{workerDigest}, SourceCIDRs: []string{"192.0.2.0/24"}, MaxSessionSeconds: 1800},
 	})
@@ -45,7 +45,7 @@ func setupProxy(t *testing.T) *proxyFixture {
 			ImageDigests: []string{workerDigest}}
 		switch pool {
 		case "sandboxes":
-			profile.Name, profile.Namespaces = "agent-sandbox-developers", []string{"agent-sandboxes"}
+			profile.Name, profile.Namespaces = "example-sandbox-profile", []string{"agent-sandboxes"}
 		case "team-a":
 			profile.Name, profile.Namespaces = "agent-sandbox-team-a", []string{"team-a-sandboxes"}
 		default:
@@ -55,7 +55,7 @@ func setupProxy(t *testing.T) *proxyFixture {
 	})
 	return &proxyFixture{pool: f, rc: rc, r: r, a: Attestation{Namespace: "agent-sandboxes", PodName: "sandbox-x1", PodUID: "agent-pod-uid",
 		OwnerKind: "Sandbox", OwnerUID: "sandbox-uid", Images: []string{"registry.example/worker@" + workerDigest}, NotAfter: time.Now().Add(20 * time.Minute).Unix(),
-		Profile: "agent-sandbox-developers"}}
+		Profile: "example-sandbox-profile"}}
 }
 
 func (p *proxyFixture) ctx(t *testing.T, a Attestation) context.Context {
@@ -151,7 +151,7 @@ func TestNamespacePicksTheProfile(t *testing.T) {
 	}
 	// A catalog profile from another trust domain, or none, admits nothing.
 	p.r.SetProfiles(func(string) (Profile, bool) {
-		return Profile{Name: "agent-sandbox-developers", Issuer: p.pool.c.Issuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested,
+		return Profile{Name: "example-sandbox-profile", Issuer: p.pool.c.Issuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested,
 			OwnerKind: "Sandbox", Namespaces: []string{"agent-sandboxes"}, ImageDigests: []string{workerDigest}}, true
 	})
 	if _, err := p.r.Attest(p.ctx(t, p.a), token, linkIP); err == nil {
@@ -260,7 +260,7 @@ func TestAdmissionMatchesTheDeclaredProfile(t *testing.T) {
 	profiles := map[string]Profile{
 		"database-developers": {Issuer: ownIssuer, Audience: "gatehouse", Kind: IdentityPodToken, OwnerKind: "ReplicaSet",
 			Namespaces: []string{"pool"}, ImageDigests: []string{workerDigest, sidecarDigest}},
-		"sandboxes": {Name: "agent-sandbox-developers", Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
+		"sandboxes": {Name: "example-sandbox-profile", Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
 			Namespaces: []string{"agent-sandboxes"}, ImageDigests: []string{workerDigest}},
 	}
 	p.r.SetProfiles(func(pool string) (Profile, bool) { pr, ok := profiles[pool]; return pr, ok })
@@ -411,7 +411,7 @@ func TestProxyImagePrefixes(t *testing.T) {
 	c.Bindings = append([]Binding(nil), c.Bindings...)
 	proxy := *c.Bindings[1].Proxy
 	proxy.Profiles = []ProxyProfile{
-		{Namespace: "agent-sandboxes", Profile: "agent-sandbox-developers", Pool: "sandboxes", ImagePrefix: developerPrefix},
+		{Namespace: "agent-sandboxes", Profile: "example-sandbox-profile", Pool: "sandboxes", ImagePrefix: developerPrefix},
 		{Namespace: "team-a-sandboxes", Profile: "agent-sandbox-team-a", Pool: "team-a", ImagePrefix: teamAPrefix}}
 	proxy.ImageDigests = []string{sidecarDigest} // a platform sidecar
 	c.Bindings[1].Proxy = &proxy
@@ -424,7 +424,7 @@ func TestProxyImagePrefixes(t *testing.T) {
 			ImageDigests: []string{sidecarDigest}}
 		switch pool {
 		case "sandboxes":
-			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-developers", []string{"agent-sandboxes"}, developerPrefix
+			profile.Name, profile.Namespaces, profile.ImagePrefix = "example-sandbox-profile", []string{"agent-sandboxes"}, developerPrefix
 		case "team-a":
 			profile.Name, profile.Namespaces, profile.ImagePrefix = "agent-sandbox-team-a", []string{"team-a-sandboxes"}, teamAPrefix
 		default:
@@ -529,7 +529,7 @@ func setupProfiles(p *proxyFixture) {
 			ImageDigests: []string{workerDigest}}
 		switch pool {
 		case "sandboxes":
-			profile.Name, profile.Namespaces = "agent-sandbox-developers", []string{"agent-sandboxes"}
+			profile.Name, profile.Namespaces = "example-sandbox-profile", []string{"agent-sandboxes"}
 		case "team-a":
 			profile.Name, profile.Namespaces = "agent-sandbox-team-a", []string{"team-a-sandboxes"}
 		default:
@@ -556,7 +556,7 @@ func TestProxyBindingListsAreFleetSized(t *testing.T) {
 		return func(b *Binding) {
 			b.Proxy.Profiles = nil
 			for i := range n {
-				b.Proxy.Profiles = append(b.Proxy.Profiles, ProxyProfile{Namespace: fmt.Sprintf("tenant-%d", i), Profile: "agent-sandbox-developers", Pool: "sandboxes"})
+				b.Proxy.Profiles = append(b.Proxy.Profiles, ProxyProfile{Namespace: fmt.Sprintf("tenant-%d", i), Profile: "example-sandbox-profile", Pool: "sandboxes"})
 			}
 		}
 	}

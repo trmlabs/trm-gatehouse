@@ -44,7 +44,7 @@ func sandboxPod(name, uid, ip string) map[string]any {
 }
 
 func sharedConfig() *SharedConfig {
-	return &SharedConfig{Profiles: map[string]string{"agent-sandboxes": "agent-sandbox-developers"}, OwnerKind: "Sandbox", OwnerAPIVersion: "agents.x-k8s.io/v1beta1",
+	return &SharedConfig{Profiles: map[string]string{"agent-sandboxes": "example-sandbox-profile"}, OwnerKind: "Sandbox", OwnerAPIVersion: "agents.x-k8s.io/v1beta1",
 		ImageDigests: []string{sandboxDigest}, MaxPodSeconds: 3600}
 }
 
@@ -219,7 +219,7 @@ func TestSharedProxyAttestsThenDropsTheAgent(t *testing.T) {
 	}
 	raw, _ := base64.RawURLEncoding.DecodeString(<-sf.attested)
 	var a workloadidentity.Attestation
-	if json.Unmarshal(raw, &a) != nil || a.PodUID != "pod-a" || a.Profile != "agent-sandbox-developers" || a.OwnerUID != "sandbox-pod-a" ||
+	if json.Unmarshal(raw, &a) != nil || a.PodUID != "pod-a" || a.Profile != "example-sandbox-profile" || a.OwnerUID != "sandbox-pod-a" ||
 		a.OwnerKind != "Sandbox" || a.Namespace != "agent-sandboxes" || a.NotAfter <= time.Now().Unix() {
 		t.Fatalf("attestation %s", raw)
 	}
@@ -597,7 +597,7 @@ func TestStandingSharedConfig(t *testing.T) {
 	dir := t.TempDir()
 	write := func(withListener bool) string {
 		config := map[string]any{
-			"taskID": "gatehouse-proxy-staging", "auditFile": "/dev/stdout",
+			"taskID": "example-shared-proxy", "auditFile": "/dev/stdout",
 			"kubernetes": map[string]any{"apiURL": "https://kubernetes.default.svc", "caFile": "/etc/task-relay/kube/ca.crt",
 				"reviewerTokenFile": "/var/run/task-relay/proofs/api"},
 			"shared": map[string]any{

@@ -306,7 +306,7 @@ func fakeAutomatedAuth(t *testing.T) (*automatedFake, *http.Client) {
 		access := fmt.Sprintf("synthetic-access-token-%d", n)
 		if f.jwt.Load() {
 			payload, _ := json.Marshal(map[string]any{"sub": "auth0|qa-user", "org_id": f.org.Load(), "aud": json.RawMessage(f.aud.Load().(string)), "exp": exp.Unix(),
-				"email": automatedSecrets["email"], "https://example.com/email": namespacedEmail, "permissions": []string{"read:cases"}})
+				"email": automatedSecrets["email"], "https://example.com/email": namespacedEmail, "permissions": []string{"read:example"}})
 			access = "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + "." + access
 		}
 		out := map[string]any{"accessToken": access, "refreshToken": syntheticRefresh, "target": "https://app.example.com/",

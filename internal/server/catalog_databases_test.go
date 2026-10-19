@@ -10,7 +10,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/pgproxy"
 )
 
-const databaseCatalog = `{"pools":[{"name":"cursor","namespace":"agents","serviceAccount":"cursor-worker"},{"name":"ci","namespace":"ci","serviceAccount":"runner"}],
+const databaseCatalog = `{"pools":[{"name":"cursor","namespace":"agents","serviceAccount":"example-worker"},{"name":"ci","namespace":"ci","serviceAccount":"runner"}],
 "entries":[
  {"name":"examplecore","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["cursor"],
   "postgres":{"database":"app","mount":"database","role":"staging.us.example.app-readonly","maxConns":20}},

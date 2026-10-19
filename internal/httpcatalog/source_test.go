@@ -253,8 +253,8 @@ func TestGitScope(t *testing.T) {
 	}
 }
 
-// The catalog refuses the strings the Terraform module refuses, since they
-// end up in the broker's Vault policy.
+// The catalog refuses strings that are unsafe inside a Vault policy path,
+// since they end up in the broker's Vault policy.
 func TestCatalogRefusesPolicyUnsafeStrings(t *testing.T) {
 	keyDoc := func(mount, path string) string {
 		return `{"entries":[{"name":"serpapi","host":"serpapi.com","pathPrefixes":["/search"],"methods":["GET"],"header":"X-Api-Key",
