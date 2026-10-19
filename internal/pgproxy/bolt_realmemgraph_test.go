@@ -162,11 +162,12 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 		}
 
 		// The whole path a worker uses: the stock driver signs in to its
-		// sidecar with the placeholder, the sidecar reaches the broker over
+		// sidecar as the catalog entry with the placeholder, the sidecar's
+		// routed port reaches the broker over
 		// TLS (here a terminator standing in for the broker Pod's) with the
 		// worker's proof, and the broker reaches Memgraph with its login.
 		relay := startBoltSidecar(t, broker)
-		out, err = exec.Command(args[0], append(args[1:], "gatehouse", "gatehouse-relay-placeholder", relay)...).CombinedOutput() // #nosec G204 -- test-only command from the test's own environment
+		out, err = exec.Command(args[0], append(args[1:], "app-graph", "gatehouse-relay-placeholder", relay)...).CombinedOutput() // #nosec G204 -- test-only command from the test's own environment
 		t.Logf("driver check through the sidecar:\n%s", out)
 		if err != nil {
 			t.Fatalf("driver check through the sidecar failed: %v", err)
@@ -184,8 +185,8 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 // relayProof is the synthetic identity proof the sidecar presents.
 var relayProof = "e30." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":4102444800,"aud":["gatehouse"]}`)) + ".synthetic"
 
-// startBoltSidecar runs a worker sidecar with one Bolt binding, reaching the
-// broker through a TLS terminator, and returns the sidecar's local address.
+// startBoltSidecar runs a worker sidecar with its routed Bolt port, reaching
+// the broker through a TLS terminator, and returns the sidecar's local address.
 func startBoltSidecar(t *testing.T, broker string) string {
 	t.Helper()
 	cfg := selfSignedTLSConfig(t)
@@ -228,7 +229,7 @@ func startBoltSidecar(t *testing.T, broker string) string {
 	listen := probe.Addr().String()
 	_ = probe.Close()
 	c := taskrelay.FixedConfig{TaskID: "pool-worker", Deadline: time.Now().Add(time.Hour), AuditFile: filepath.Join(dir, "audit.jsonl"), Self: true,
-		BoltBindings: []taskrelay.BoltConfig{{Listen: listen, Database: "app-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder",
+		BoltListeners: []taskrelay.BoltListenerConfig{{Listen: listen, Routes: "broker", Placeholder: "gatehouse-relay-placeholder",
 			Upstream: taskrelay.UpstreamConfig{Address: terminator.Addr().String(), ServerName: "127.0.0.1", CAFile: ca, ProofFile: proof, Audience: "gatehouse"}}}}
 	if err := c.Validate(time.Now()); err != nil {
 		t.Fatal(err)

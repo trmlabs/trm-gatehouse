@@ -176,10 +176,6 @@ func (c FixedConfig) validateShared(now time.Time) error {
 	if len(c.PostgresBindings) > 8 || (c.Postgres != nil && len(c.PostgresBindings) != 0) {
 		return errConfig
 	}
-	// Bolt is served by sidecars only, not yet by a shared proxy.
-	if len(c.BoltBindings) > 0 {
-		return errConfig
-	}
 	for _, p := range c.postgresBindings() {
 		if check(p.Listen, p.Upstream) != nil || !safeName.MatchString(p.Database) || !safeName.MatchString(p.User) || !safeName.MatchString(p.Placeholder) {
 			return errConfig

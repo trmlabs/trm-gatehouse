@@ -117,7 +117,7 @@ end-to-end test harness's.
 | Git | `git clone https://github.com/<org>/<repo>` through the proxy | Nothing. Any `Authorization` header is refused. |
 | Google | The same proxy, with `CLOUDSDK_AUTH_ACCESS_TOKEN=__vault_GCP__` | `Authorization: Bearer` and the entry's placeholder |
 | PostgreSQL | `host=127.0.0.1`, one port per database (15000 for the harness's first, 15001 for the next), with that binding's `dbname` and `user` (`workload` in the harness) | The binding's placeholder password (`gatehouse-relay-placeholder` in the harness) |
-| Graph database | `bolt://127.0.0.1:<port>` or `neo4j://127.0.0.1:<port>`, one port per graph database, with a stock driver | The binding's user and placeholder password. Refusals are Bolt failures with a `Gatehouse.` code; see [graph databases](graph-databases.md#refusals). |
+| Graph database | `bolt://127.0.0.1:<port>` or `neo4j://127.0.0.1:<port>` with a stock driver, and the catalog entry's name as the user. One port serves every graph database the pool is granted. | The port's placeholder password. Refusals are Bolt failures with a `Gatehouse.` code; see [graph databases](graph-databases.md#refusals). |
 | Web app | A Playwright storage state from `https://<api host>/.gatehouse/browser-seed` | Nothing |
 
 - **Trust:** the worker must trust Gatehouse's interception certificate authority, at `/public/mitm-ca.crt` in the harness. Point `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` at it.

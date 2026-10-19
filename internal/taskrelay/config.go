@@ -35,10 +35,10 @@ type FixedConfig struct {
 	// PostgresListener, in shared mode only, is one port for every catalog
 	// database; see PostgresListenerConfig.
 	PostgresListener *PostgresListenerConfig `json:"postgresListener,omitempty"`
-	// BoltBindings are graph databases, one local Bolt port each (paired or
-	// self mode); see BoltConfig.
-	BoltBindings []BoltConfig   `json:"boltBindings,omitempty"`
-	Browser      *BrowserConfig `json:"browser,omitempty"`
+	Browser          *BrowserConfig          `json:"browser,omitempty"`
+	// BoltListeners, in self mode only, are the sidecar's Bolt ports; see
+	// BoltListenerConfig.
+	BoltListeners []BoltListenerConfig `json:"boltListeners,omitempty"`
 	// Self runs the relay as a sidecar in the worker's own Pod: loopback,
 	// plaintext listeners only, and no Kubernetes pairing, because the broker
 	// verifies this Pod's token and address on every connection.
@@ -210,6 +210,9 @@ func (c FixedConfig) Validate(now time.Time) error {
 	if (c.AdminListen != "" || c.PostgresListener != nil || c.TLS != nil) && c.Shared == nil {
 		return errConfig
 	}
+	if len(c.BoltListeners) != 0 && (!c.Self || c.Shared != nil) {
+		return errConfig
+	}
 	// Activity reaches the broker over the CONNECT upstream.
 	if d := c.DurableActivity; d != nil && (c.AdminListen == "" || c.Connect == nil || d.PushSeconds < 0 || d.PushSeconds > 3600) {
 		return errConfig
@@ -235,11 +238,6 @@ func (c FixedConfig) Validate(now time.Time) error {
 	}
 	for _, p := range c.postgresBindings() {
 		if p.Upstream.hasSession() {
-			return errConfig
-		}
-	}
-	for _, b := range c.BoltBindings {
-		if b.Upstream.hasSession() {
 			return errConfig
 		}
 	}
@@ -287,11 +285,6 @@ func (c FixedConfig) Validate(now time.Time) error {
 			return errConfig
 		}
 	}
-	for _, b := range c.BoltBindings {
-		if check(b.Listen, b.Upstream) != nil || !b.valid() {
-			return errConfig
-		}
-	}
 	if c.Browser != nil && check(c.Browser.Listen, c.Browser.Upstream) != nil {
 		return errConfig
 	}
@@ -308,11 +301,6 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 	}
 	for _, p := range c.postgresBindings() {
 		if !p.Upstream.validSession() {
-			return errConfig
-		}
-	}
-	for _, b := range c.BoltBindings {
-		if !b.Upstream.validSession() {
 			return errConfig
 		}
 	}
@@ -348,20 +336,13 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 			return errConfig
 		}
 	}
-	for _, b := range c.BoltBindings {
-		if check(b.Listen, b.Upstream) != nil || !b.valid() {
-			return errConfig
-		}
+	if c.validBolt(check) != nil {
+		return errConfig
 	}
 	if len(used) == 0 {
 		return errConfig
 	}
 	return nil
-}
-
-// valid checks the names a Bolt binding fixes.
-func (b BoltConfig) valid() bool {
-	return safeName.MatchString(b.Database) && safeName.MatchString(b.User) && safeName.MatchString(b.Placeholder)
 }
 
 // postgresBindings preserves the legacy single binding without mixing authority.

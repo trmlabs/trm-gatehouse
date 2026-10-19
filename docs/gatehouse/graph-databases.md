@@ -1,20 +1,20 @@
 # Graph databases
 
-A worker can read a Memgraph graph database with any stock Neo4j or Memgraph driver. It connects to its sidecar at a `bolt://` (or `neo4j://`) address on its own loopback, signs in with a fixed placeholder, and runs Cypher as usual. The worker never holds the database's login: the broker signs in to the database for it, and lets only queries that read the graph through. Adding a graph database is one catalog entry and one login in Vault.
+A worker can read a Memgraph graph database with any stock Neo4j or Memgraph driver. It connects to its sidecar at a `bolt://` (or `neo4j://`) address on its own loopback, signs in with the catalog entry's name and a fixed placeholder, and runs Cypher as usual. The worker never holds the database's login: the broker signs in to the database for it, and lets only queries that read the graph through. One sidecar port serves every graph database the pool is granted, so adding one is a catalog entry and a login in Vault, with no change to the worker.
 
 ## Connect from a worker
 
 | Setting | Value |
 |---|---|
-| URI | `bolt://127.0.0.1:<port>` or `neo4j://127.0.0.1:<port>`, the port of the pool's Bolt binding |
-| User | The binding's user (`gatehouse` in the examples here) |
-| Password | The binding's placeholder (`gatehouse-relay-placeholder` in the examples here) |
+| URI | `bolt://127.0.0.1:<port>` or `neo4j://127.0.0.1:<port>`, the pool's Bolt port (17687 in the examples here) |
+| User | The catalog entry's name (`app-graph` in the examples here); it picks the database |
+| Password | The port's placeholder (`gatehouse-relay-placeholder` in the examples here) |
 | Encryption | None. The sidecar is on loopback; it reaches the broker over TLS. |
 
 ```python
 from neo4j import GraphDatabase
 
-with GraphDatabase.driver("neo4j://127.0.0.1:15100", auth=("gatehouse", "gatehouse-relay-placeholder")) as driver:
+with GraphDatabase.driver("neo4j://127.0.0.1:17687", auth=("app-graph", "gatehouse-relay-placeholder")) as driver:
     records, _, _ = driver.execute_query("MATCH (n:Person) RETURN n.name AS name", routing_="r")
 ```
 
@@ -45,7 +45,7 @@ As a second guard, every query runs inside a read transaction that the broker ro
 
 ```yaml
 entries:
-  - name: app-graph                     # the name the binding uses
+  - name: app-graph                     # the user name workers sign in with
     kind: memgraph
     host: memgraph.graphs.svc.cluster.local
     pools: [cursor-agents]
@@ -68,23 +68,22 @@ entries:
 
 `tier`, `requires` and pool grants work as for every other entry.
 
-The pool's worker template then gets a Bolt binding in the sidecar's configuration, one local port per graph database:
+The pool's worker template needs nothing new for it. Its sidecar has one routed Bolt port, which forwards any well-formed user name and leaves the decision to the broker's catalog:
 
 ```json
-"boltBindings": [{
-  "listen": "127.0.0.1:15100",
-  "database": "app-graph",
-  "user": "gatehouse",
+"boltListeners": [{
+  "listen": "127.0.0.1:17687",
+  "routes": "broker",
   "placeholder": "gatehouse-relay-placeholder",
   "upstream": {"address": "gatehouse.gatehouse.svc:15443", "serverName": "gatehouse.gatehouse.svc", "caFile": "/ca/ca.crt", "proofFile": "/proof/token", "audience": "gatehouse"}
 }]
 ```
 
-`upstream` is the same as a PostgreSQL binding's: Bolt arrives on the broker's database listener, which tells the two protocols apart from the first bytes. A shared proxy does not serve Bolt yet; a pool that needs a graph database runs a sidecar.
+`entries`, a list of entry names, may replace `routes` to fix the port's route table. `upstream` is the same as a PostgreSQL binding's: Bolt arrives on the broker's database listener, which tells the two protocols apart from the first bytes. A shared proxy does not serve Bolt yet; a pool that needs a graph database runs a sidecar.
 
 ## How a session is checked
 
-The sidecar checks everything the worker controls first: that the connection comes from the worker, a Bolt version both sides speak, and the user and placeholder. Only then does it read the worker's identity proof and sign in to the broker with it, naming the catalog entry. The broker admits the session exactly as it admits a PostgreSQL session: the worker's identity, its pool's grant, the entry's tier and groups, the per-worker and per-database budgets, and a recheck while the session is open that ends it when access is withdrawn or the worker's deadline passes. Then it reads the login from Vault and signs in to the database. Any failure refuses the session; nothing falls back to a weaker path.
+The sidecar checks everything the worker controls first: that the connection comes from the worker, a Bolt version both sides speak, the placeholder, and that the user name is a well-formed entry name (or, with `entries`, a listed one). Only then does it read the worker's identity proof and sign in to the broker with it, naming the catalog entry. The broker refuses a name its catalog does not grant the pool. The broker admits the session exactly as it admits a PostgreSQL session: the worker's identity, its pool's grant, the entry's tier and groups, the per-worker and per-database budgets, and a recheck while the session is open that ends it when access is withdrawn or the worker's deadline passes. Then it reads the login from Vault and signs in to the database. Any failure refuses the session; nothing falls back to a weaker path.
 
 A driver that tries to sign in again on an open connection (`LOGON` after `LOGOFF`) is refused and the connection closes; drivers open a new connection instead.
 
@@ -95,8 +94,10 @@ Gatehouse's refusals arrive as Bolt failures with a code starting `Gatehouse.`. 
 | Code | Message | Fix |
 |---|---|---|
 | `Gatehouse.ClientError.Statement.AccessMode` | this database is read-only; only queries that read the graph run here (refused: ...) | Read instead; ask for a procedure or function to be listed if it only reads |
-| `Gatehouse.ClientError.Security.Unauthorized` | wrong user or placeholder password for this binding | Use the binding's user and placeholder |
+| `Gatehouse.ClientError.Security.Unauthorized` | wrong placeholder password for this port | Use the port's placeholder |
+| `Gatehouse.ClientError.Security.Unauthorized` | this user name is not a Gatehouse catalog entry for your pool | Use the entry's name as the user |
 | `Gatehouse.ClientError.Security.Unauthorized` | Gatehouse could not verify this worker | Retry; tell the Gatehouse operators if it persists |
+| `Gatehouse.TransientError.Security.NotVerified` | Gatehouse could not verify this worker | The sidecar could not read its identity proof; retry, and tell the Gatehouse operators if it persists |
 | `Gatehouse.ClientError.Security.Forbidden` | this session's person is not authorized for this database (...) | Request the group, or use a pool with a person behind it |
 | `Gatehouse.ClientError.Database.DatabaseNotFound` | this database isn't in the Gatehouse catalog for your pool | Add the entry or the grant |
 | `Gatehouse.TransientError.General.SessionCap` | this worker reached its session cap | Close idle sessions |
