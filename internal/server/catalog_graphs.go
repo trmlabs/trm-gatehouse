@@ -44,7 +44,9 @@ func (r catalogGraphResolver) ResolveGraph(ctx context.Context, scope pgproxy.Ag
 // NewVaultGraphLogins reads graph database logins through the catalog's key
 // cache: fields username and password of the entry's login secret, each read
 // from Vault about once a minute.
-func NewVaultGraphLogins(keys *httpcatalog.Keys) pgproxy.GraphLogins { return vaultGraphLogins{keys: keys} }
+func NewVaultGraphLogins(keys *httpcatalog.Keys) pgproxy.GraphLogins {
+	return vaultGraphLogins{keys: keys}
+}
 
 type vaultGraphLogins struct{ keys *httpcatalog.Keys }
 

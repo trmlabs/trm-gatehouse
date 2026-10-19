@@ -273,8 +273,10 @@ func TestBoltBindingConfig(t *testing.T) {
 		"off loopback":      func(c *FixedConfig) { c.BoltBindings[0].Listen = "0.0.0.0:15100" },
 		"bad database name": func(c *FixedConfig) { c.BoltBindings[0].Database = "orion graph" },
 		"no placeholder":    func(c *FixedConfig) { c.BoltBindings[0].Placeholder = "" },
-		"shared listen":     func(c *FixedConfig) { c.PostgresBindings = []PostgresConfig{{Listen: "127.0.0.1:15100", Upstream: up, Database: "core", User: "w", Placeholder: "p"}} },
-		"shared proxy":      func(c *FixedConfig) { c.Self = false; c.Shared = &SharedConfig{} },
+		"shared listen": func(c *FixedConfig) {
+			c.PostgresBindings = []PostgresConfig{{Listen: "127.0.0.1:15100", Upstream: up, Database: "core", User: "w", Placeholder: "p"}}
+		},
+		"shared proxy": func(c *FixedConfig) { c.Self = false; c.Shared = &SharedConfig{} },
 	} {
 		c := base()
 		c.BoltBindings = append([]BoltConfig(nil), c.BoltBindings...)

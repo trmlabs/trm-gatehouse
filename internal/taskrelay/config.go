@@ -37,8 +37,8 @@ type FixedConfig struct {
 	PostgresListener *PostgresListenerConfig `json:"postgresListener,omitempty"`
 	// BoltBindings are graph databases, one local Bolt port each (paired or
 	// self mode); see BoltConfig.
-	BoltBindings []BoltConfig `json:"boltBindings,omitempty"`
-	Browser          *BrowserConfig          `json:"browser,omitempty"`
+	BoltBindings []BoltConfig   `json:"boltBindings,omitempty"`
+	Browser      *BrowserConfig `json:"browser,omitempty"`
 	// Self runs the relay as a sidecar in the worker's own Pod: loopback,
 	// plaintext listeners only, and no Kubernetes pairing, because the broker
 	// verifies this Pod's token and address on every connection.

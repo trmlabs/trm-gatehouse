@@ -72,9 +72,9 @@ type Entry struct {
 	// key is a GitHub App installation token minted per repository.
 	// Kind "browser-session" lets an agent's own browser use a web app as a
 	// test user; see BrowserSessionBinding.
-	Kind           string                 `json:"kind,omitempty"`
-	Git            *GitBinding            `json:"git,omitempty"`
-	Postgres       *PostgresBinding       `json:"postgres,omitempty"`
+	Kind     string           `json:"kind,omitempty"`
+	Git      *GitBinding      `json:"git,omitempty"`
+	Postgres *PostgresBinding `json:"postgres,omitempty"`
 	// Kind "memgraph" is a graph database reached over Bolt; see
 	// MemgraphBinding.
 	Memgraph       *MemgraphBinding       `json:"memgraph,omitempty"`
