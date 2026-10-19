@@ -14,7 +14,11 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strings"
 	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // TrustDomain is another cluster whose service-account tokens the broker
@@ -50,6 +54,106 @@ type TrustDomain struct {
 	// token is never checked against a live Pod in the broker's cluster, so
 	// its lifetime is the revocation window.
 	MaxTokenLifetimeSeconds int64 `json:"maxTokenLifetimeSeconds,omitempty"`
+	// Pods, when set, lets the broker read Pods in this cluster, so its pool
+	// bindings may admit sidecars there directly; see RemotePods. Without
+	// it the domain admits only proxy bindings.
+	Pods *RemotePods `json:"pods,omitempty"`
+}
+
+// RemotePods is how the broker reads a remote cluster's Pods, so a sidecar
+// in that cluster is admitted as a pool worker in the broker's own is: its
+// token verified by the domain's keys, then its live Pod (UID, controller,
+// images, container, deadline and claimed run) read on every admission and
+// recheck. One check is not made: the connection's source address, which
+// across clusters is a load balancer's, not the Pod's. The Pod must still be
+// running for its token to admit, and the token's lifetime bounds a replay
+// from anywhere else.
+type RemotePods struct {
+	// APIServer is the cluster's HTTPS control-plane origin, named by host
+	// (for GKE, the cluster's DNS-based endpoint), never by address, so the
+	// address is looked up when the broker connects.
+	APIServer string `json:"apiServer"`
+	// CAFile, when set, replaces the system roots for the API server.
+	CAFile string `json:"caFile,omitempty"`
+	// Credential is "google": the broker's own Google identity (Workload
+	// Identity), whose access token the cluster accepts through IAM; it needs
+	// only container.pods.get on that cluster. Or "token-file": TokenFile
+	// holds a bearer token, re-read on every call so its writer can rotate
+	// it.
+	Credential string `json:"credential"`
+	TokenFile  string `json:"tokenFile,omitempty"`
+}
+
+// googleTokenSource is the broker's own Google identity; tests replace it.
+var googleTokenSource = func(ctx context.Context) (oauth2.TokenSource, error) {
+	return google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+}
+
+// remotePodsDial, when set, replaces the dialer for remote API servers, so a
+// test can serve a named host locally. Nil dials as net.Dialer does.
+var remotePodsDial func(ctx context.Context, network, address string) (net.Conn, error)
+
+// remotePodReader returns a call to the remote cluster's API server: HTTPS
+// to a named host only, no redirects, no proxy from the environment, a
+// bounded response.
+func remotePodReader(p RemotePods, timeout time.Duration) (func(context.Context, string, string, []byte, any) error, error) {
+	u, err := url.Parse(p.APIServer)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return nil, errors.New("trust domain pods apiServer must be an HTTPS origin")
+	}
+	if _, err := netip.ParseAddr(strings.Trim(u.Hostname(), "[]")); err == nil {
+		return nil, errors.New("trust domain pods apiServer must name its host, not an address")
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if p.CAFile != "" {
+		pem, err := os.ReadFile(p.CAFile)
+		if err != nil {
+			return nil, errors.New("cannot read trust domain pods CA")
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, errors.New("invalid trust domain pods CA")
+		}
+		tlsConfig.RootCAs = pool
+	}
+	var bearer func() (string, error)
+	switch p.Credential {
+	case "google":
+		if p.TokenFile != "" {
+			return nil, errors.New("trust domain pods credential google takes no tokenFile")
+		}
+		source, err := googleTokenSource(context.Background())
+		if err != nil {
+			return nil, errors.New("trust domain pods credential google: the broker has no Google identity")
+		}
+		bearer = func() (string, error) {
+			token, err := source.Token()
+			if err != nil || token.AccessToken == "" {
+				return "", errors.New("google identity unavailable")
+			}
+			return token.AccessToken, nil
+		}
+	case "token-file":
+		if !strings.HasPrefix(p.TokenFile, "/") {
+			return nil, errors.New("trust domain pods credential token-file needs an absolute tokenFile")
+		}
+		bearer = func() (string, error) { return readBearer(p.TokenFile) }
+	default:
+		return nil, errors.New("trust domain pods credential must be google or token-file")
+	}
+	client := &http.Client{
+		Timeout:       timeout,
+		Transport:     &http.Transport{TLSClientConfig: tlsConfig, Proxy: nil, MaxResponseHeaderBytes: 16 << 10, DialContext: remotePodsDial},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	server := strings.TrimSuffix(p.APIServer, "/")
+	return func(ctx context.Context, method, path string, body []byte, out any) error {
+		token, err := bearer()
+		if err != nil {
+			return errors.New("workload verifier unavailable")
+		}
+		return kubeCall(ctx, client, server, token, method, path, body, out)
+	}, nil
 }
 
 // domain is one trust domain at run time: its issuer and audience, its key
@@ -65,6 +169,9 @@ type domain struct {
 	pinned      map[string]crypto.PublicKey // set for keys "pinned"; nil otherwise
 	// fallback, for remote keys, verifies only while no live set is usable.
 	fallback map[string]crypto.PublicKey
+	// pods, for a remote domain with RemotePods, calls its API server; nil
+	// where the broker cannot read the domain's Pods.
+	pods func(ctx context.Context, method, path string, body []byte, out any) error
 }
 
 // remoteKeys returns a fetch for a published key set: HTTPS only, no
@@ -172,6 +279,11 @@ func (r *Resolver) buildDomains(c Config) error {
 				}
 			}
 			if dom.fetch, err = remoteKeys(td, jwksFetchTimeout); err != nil {
+				return err
+			}
+		}
+		if td.Pods != nil {
+			if dom.pods, err = remotePodReader(*td.Pods, time.Duration(c.TimeoutSeconds)*time.Second); err != nil {
 				return err
 			}
 		}

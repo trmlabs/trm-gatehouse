@@ -251,10 +251,10 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 				proxyNamespaces[key] = true
 			}
 		}
-		if b.TrustDomain != "" && b.Proxy == nil {
-			// The broker cannot read a remote cluster's Pods, so neither the
-			// TokenReview path nor the pool Pod check can admit its tokens.
-			return nil, errors.New("a remote trust domain admits only proxy bindings")
+		if b.TrustDomain != "" && b.Proxy == nil && (len(b.OwnerUIDs) == 0 || !readsPods(c.TrustDomains, b.TrustDomain)) {
+			// TokenReview runs only in the broker's own cluster, and the pool
+			// Pod check only where the broker can read the domain's Pods.
+			return nil, errors.New("a remote trust domain admits proxy bindings, and pool bindings only where the broker reads its Pods")
 		}
 		key := b.TrustDomain + "/" + b.Namespace + ":" + b.ServiceAccount
 		if seen[key] {
@@ -282,6 +282,17 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 	}
 	r.jwks = r.domains[0].keys
 	return r, nil
+}
+
+// readsPods reports whether the named trust domain gives the broker its
+// cluster's Pods.
+func readsPods(domains []TrustDomain, name string) bool {
+	for _, d := range domains {
+		if d.Name == name {
+			return d.Pods != nil
+		}
+	}
+	return false
 }
 
 func listedDomain(domains []TrustDomain, name string) bool {
@@ -504,21 +515,36 @@ func exactly(values []string, value string) bool { return len(values) == 1 && va
 
 func (r *Resolver) api(ctx context.Context, method, path string, body []byte, out any) error {
 	// Re-read the broker's projected reviewer token so kubelet rotation works.
-	credential, err := os.ReadFile(r.config.ReviewerTokenFile)
+	bearer, err := readBearer(r.config.ReviewerTokenFile)
 	if err != nil {
 		return errors.New("workload verifier unavailable")
 	}
+	return kubeCall(ctx, r.client, r.config.APIServer, bearer, method, path, body, out)
+}
+
+// readBearer reads a bearer token file: one line, no whitespace inside.
+func readBearer(path string) (string, error) {
+	credential, err := os.ReadFile(path) //nolint:gosec // G304: an operator-configured token path, not request input
+	if err != nil {
+		return "", errors.New("workload verifier unavailable")
+	}
 	bearer := strings.TrimSpace(string(credential))
 	if bearer == "" || strings.ContainsAny(bearer, "\r\n") {
-		return errors.New("workload verifier unavailable")
+		return "", errors.New("workload verifier unavailable")
 	}
-	req, err := http.NewRequestWithContext(ctx, method, r.config.APIServer+path, bytes.NewReader(body))
+	return bearer, nil
+}
+
+// kubeCall makes one JSON call to a Kubernetes API server and decodes a
+// bounded 200 or 201 answer into out.
+func kubeCall(ctx context.Context, client *http.Client, server, bearer, method, path string, body []byte, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, server+path, bytes.NewReader(body))
 	if err != nil {
 		return errors.New("workload verifier unavailable")
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return errors.New("workload verifier unavailable")
 	}

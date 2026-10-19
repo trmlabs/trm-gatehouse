@@ -188,8 +188,7 @@ func TestIncompleteOrContradictoryHarnessIsRefused(t *testing.T) {
 		"remote keys on one cluster": func(c map[string]any) {
 			harnessAt(c, 2)["path"].(map[string]any)["crossCluster"] = false
 		},
-		"pod token across clusters": func(c map[string]any) {
-			harnessAt(c, 0)["trustDomain"].(map[string]any)["keys"] = "remote"
+		"pod token across clusters on in-cluster keys": func(c map[string]any) {
 			harnessAt(c, 0)["path"].(map[string]any)["crossCluster"] = true
 		},
 		"pool identity disagrees with mode": func(c map[string]any) {
@@ -335,6 +334,24 @@ func TestHarnessImagePrefixes(t *testing.T) {
 		if _, err := parseCatalog(t, cc); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// A sidecar harness may serve agents in another cluster, on that cluster's
+// keys: the broker's identity configuration decides whether it can read
+// their Pods (a trust domain's pods), and refuses the binding otherwise.
+func TestHarnessSidecarAcrossClusters(t *testing.T) {
+	c := harnessCatalog()
+	for _, i := range []int{0, 1} {
+		harnessAt(c, i)["trustDomain"] = map[string]any{"issuer": "https://container.googleapis.com/v1/projects/s/locations/l/clusters/workers", "keys": "remote", "audience": "gatehouse"}
+		harnessAt(c, i)["path"].(map[string]any)["crossCluster"] = true
+	}
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatalf("cross-cluster sidecar harnesses refused: %v", err)
+	}
+	if p, _ := catalog.Pool("cursor-workers"); p.Profile().TrustDomain.Keys != KeysRemote {
+		t.Fatalf("profile %+v", p.Profile())
 	}
 }
 
