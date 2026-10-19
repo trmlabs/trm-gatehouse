@@ -176,7 +176,7 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 		}
 		return bind(address)
 	}
-	failures := make(chan error, 4+len(c.postgresBindings()))
+	failures := make(chan error, 4+len(c.postgresBindings())+len(c.BoltBindings))
 	var start []func()
 	startHTTP := func(l net.Listener, h http.Handler) {
 		tracked := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -260,6 +260,13 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 			return errConfig
 		}
 		servePostgres(l, func(conn net.Conn) { r.postgres(conn, binding, nil) })
+	}
+	for _, binding := range c.BoltBindings {
+		l, e := bind(binding.Listen)
+		if e != nil {
+			return errConfig
+		}
+		servePostgres(l, func(conn net.Conn) { r.bolt(conn, binding) })
 	}
 	if pl := c.PostgresListener; pl != nil {
 		l, e := bindPostgres(pl.Listen)

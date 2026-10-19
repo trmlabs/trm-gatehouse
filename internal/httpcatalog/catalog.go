@@ -75,6 +75,9 @@ type Entry struct {
 	Kind           string                 `json:"kind,omitempty"`
 	Git            *GitBinding            `json:"git,omitempty"`
 	Postgres       *PostgresBinding       `json:"postgres,omitempty"`
+	// Kind "memgraph" is a graph database reached over Bolt; see
+	// MemgraphBinding.
+	Memgraph       *MemgraphBinding       `json:"memgraph,omitempty"`
 	BrowserSession *BrowserSessionBinding `json:"browserSession,omitempty"`
 	// Kind "gcp" mints a short-lived Google token per entry; see GCPBinding.
 	GCP *GCPBinding `json:"gcp,omitempty"`
@@ -535,6 +538,9 @@ func (e *Entry) normalize() error {
 		if e.Kind == "postgres" {
 			e.Port = 5432
 		}
+		if e.Kind == "memgraph" {
+			e.Port = 7687
+		}
 	}
 	if e.Port < 1 || e.Port > 65535 {
 		return errors.New("invalid port")
@@ -551,6 +557,8 @@ func (e *Entry) normalize() error {
 	switch e.Kind {
 	case "postgres":
 		return e.normalizePostgres()
+	case "memgraph":
+		return e.normalizeMemgraph()
 	case "git":
 		return e.normalizeGit()
 	case "github-api":
@@ -579,8 +587,8 @@ func (e *Entry) normalize() error {
 	case "gcp":
 		return e.normalizeGCP()
 	case "":
-		if e.Git != nil || e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil {
-			return errors.New("git, postgres, browserSession or gcp settings require their kind")
+		if e.Git != nil || e.Postgres != nil || e.Memgraph != nil || e.BrowserSession != nil || e.GCP != nil {
+			return errors.New("git, postgres, memgraph, browserSession or gcp settings require their kind")
 		}
 	default:
 		return fmt.Errorf("unknown kind %q", e.Kind)
@@ -653,7 +661,7 @@ func (e *Entry) normalize() error {
 
 func (e *Entry) normalizePostgres() error {
 	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) ||
-		len(e.ForwardHeaders) > 0 || e.Git != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
+		len(e.ForwardHeaders) > 0 || e.Git != nil || e.Memgraph != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
 		return errors.New("postgres entries take only host, port, pools and postgres settings")
 	}
 	p := e.Postgres
@@ -749,7 +757,7 @@ func (c Catalog) CheckHosts(suffixes []string) error {
 }
 
 func (e *Entry) normalizeGit() error {
-	if e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil {
+	if e.Postgres != nil || e.Memgraph != nil || e.BrowserSession != nil || e.GCP != nil {
 		return errors.New("postgres settings require kind postgres")
 	}
 	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
@@ -1507,7 +1515,7 @@ func (c Catalog) Match(host string, port int, method, path, pool string) (*Entry
 func (c Catalog) HasHost(host string, port int) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
-		if e.Kind != "postgres" && e.Host == host && e.Port == port {
+		if !databaseKind(e.Kind) && e.Host == host && e.Port == port {
 			return true
 		}
 		if e.BrowserSession != nil && e.BrowserSession.AppHost == host && e.Port == port {
@@ -1526,7 +1534,7 @@ func (c Catalog) HasHostForPool(host string, port int, pool string) bool {
 		if !contains(e.Pools, pool) {
 			continue
 		}
-		if e.Kind != "postgres" && e.Host == host && e.Port == port {
+		if !databaseKind(e.Kind) && e.Host == host && e.Port == port {
 			return true
 		}
 		if e.BrowserSession != nil && e.BrowserSession.AppHost == host && e.Port == port {

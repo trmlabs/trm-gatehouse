@@ -23,6 +23,11 @@ func (v Version) AtLeast(major, minor uint8) bool {
 	return v.Major > major || v.Major == major && v.Minor >= minor
 }
 
+// Supported are the versions Gatehouse speaks, in the worker's sidecar and in
+// the broker alike: the ones Memgraph 3 accepts that current drivers offer,
+// 5.2 (every 5.x driver) and 4.3.
+var Supported = []Version{{Major: 5, Minor: 2}, {Major: 4, Minor: 3}}
+
 // Proposal is one of the client's four handshake slots: a version and how
 // many minor versions below it the client also speaks (Bolt 4.3 and later).
 // A manifest proposal (Bolt 5.7's version negotiation) is skipped: a server
