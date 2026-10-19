@@ -247,13 +247,12 @@ func (h Harness) validate() error {
 			return errors.New("a proxy-attested harness names exactly one namespace")
 		}
 	}
-	// The broker reads Pods only in its own cluster, so an agent in another
-	// cluster is attested by a proxy there, whose keys are fetched remotely.
+	// An agent in another cluster is verified by that cluster's keys: a
+	// shared proxy there attests its agents, and a sidecar there is admitted
+	// directly only where the broker's identity configuration reads that
+	// cluster's Pods (a trust domain's pods), which refuses it otherwise.
 	if h.Path.CrossCluster != (td.Keys != KeysInCluster) {
 		return errors.New("a cross-cluster path uses another cluster's keys (remote or pinned), and only it does")
-	}
-	if h.Path.CrossCluster && id.Kind != IdentityProxyAttested {
-		return errors.New("a cross-cluster harness must be proxy-attested")
 	}
 	return nil
 }
