@@ -29,7 +29,7 @@ const workersIssuer = "https://container.googleapis.com/v1/projects/workers/loca
 
 // loadBalancer is the peer a remote sidecar's connection arrives from: not
 // its Pod's address.
-var loadBalancer = netip.MustParseAddr("10.128.0.40")
+var loadBalancer = netip.MustParseAddr("198.51.100.40")
 
 // remotePods is another cluster with sidecar workers: its signing keys and
 // its API server, which serves one worker Pod to a bearer token. The API
@@ -62,7 +62,7 @@ func newRemotePods(t *testing.T) *remotePods {
 			"annotations":     map[string]any{brokercore.CursorRunAnnotation: "bc-remote"},
 			"ownerReferences": []any{map[string]any{"uid": "remote-controller-uid", "controller": controller, "blockOwnerDeletion": true}}},
 		"spec": map[string]any{"serviceAccountName": "worker", "activeDeadlineSeconds": 1800},
-		"status": map[string]any{"phase": "Running", "podIP": "10.60.0.9", "startTime": start.UTC().Format(time.RFC3339),
+		"status": map[string]any{"phase": "Running", "podIP": "10.244.1.9", "startTime": start.UTC().Format(time.RFC3339),
 			"containerStatuses":     []any{map[string]any{"name": "agent", "imageID": "registry.example/worker@" + workerDigest, "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}},
 			"initContainerStatuses": []any{map[string]any{"name": "gatehouse-sidecar", "imageID": "registry.example/broker@" + sidecarDigest, "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}}},
 	}
