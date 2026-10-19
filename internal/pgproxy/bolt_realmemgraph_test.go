@@ -42,7 +42,7 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	login := &GraphLogin{Username: os.Getenv("AV_TEST_MEMGRAPH_USER"), Password: os.Getenv("AV_TEST_MEMGRAPH_PASSWORD")}
-	svc := &GraphService{Name: "orion-graph", Addr: addr, ServerName: os.Getenv("AV_TEST_MEMGRAPH_SERVER_NAME"), CA: string(ca),
+	svc := &GraphService{Name: "app-graph", Addr: addr, ServerName: os.Getenv("AV_TEST_MEMGRAPH_SERVER_NAME"), CA: string(ca),
 		Procedures: []string{"schema.node_type_properties"}, Functions: []string{"date.add"}}
 	audit := &recordingAudit{}
 	auth := &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "cursor-agents"}}
@@ -90,7 +90,7 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 	before := nodes()
 
 	for _, version := range [][]byte{bolt52, proposals([3]byte{4, 4, 2})} {
-		c, reply := dialBoltTest(t, broker, version, "orion-graph", "agent-proof-token")
+		c, reply := dialBoltTest(t, broker, version, "app-graph", "agent-proof-token")
 		if reply == nil || reply.Tag != bolt.TagSuccess {
 			t.Fatalf("sign-in: %+v", reply)
 		}
@@ -228,7 +228,7 @@ func startBoltSidecar(t *testing.T, broker string) string {
 	listen := probe.Addr().String()
 	_ = probe.Close()
 	c := taskrelay.FixedConfig{TaskID: "pool-worker", Deadline: time.Now().Add(time.Hour), AuditFile: filepath.Join(dir, "audit.jsonl"), Self: true,
-		BoltBindings: []taskrelay.BoltConfig{{Listen: listen, Database: "orion-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder",
+		BoltBindings: []taskrelay.BoltConfig{{Listen: listen, Database: "app-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder",
 			Upstream: taskrelay.UpstreamConfig{Address: terminator.Addr().String(), ServerName: "127.0.0.1", CAFile: ca, ProofFile: proof, Audience: "gatehouse"}}}}
 	if err := c.Validate(time.Now()); err != nil {
 		t.Fatal(err)

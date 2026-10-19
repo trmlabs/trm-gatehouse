@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-const graphEntry = `{"name":"orion-graph","kind":"memgraph","host":"memgraph-community.trm-orion.svc.cluster.local","pools":["pool-a"],` +
-	`"memgraph":{"login":{"mount":"gatehouse","path":"vendors/memgraph-orion"},"serverName":"community.memgraph.example.com",` +
+const graphEntry = `{"name":"app-graph","kind":"memgraph","host":"memgraph.graphs.svc.cluster.local","pools":["pool-a"],` +
+	`"memgraph":{"login":{"mount":"gatehouse","path":"vendors/memgraph-app"},"serverName":"community.memgraph.example.com",` +
 	`"procedures":["schema.node_type_properties"],"functions":["date.add"]}}`
 
 func TestMemgraphEntry(t *testing.T) {
@@ -15,7 +15,7 @@ func TestMemgraphEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := c.Graph("orion-graph", "pool-a")
+	e, err := c.Graph("app-graph", "pool-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,13 +23,13 @@ func TestMemgraphEntry(t *testing.T) {
 	if e.Port != 7687 || m.Access != "read" || m.SSLMode != "verify-full" || e.Tier != "" {
 		t.Fatalf("defaults: port %d access %q sslmode %q tier %q", e.Port, m.Access, m.SSLMode, e.Tier)
 	}
-	if _, err := c.Graph("orion-graph", "pool-b"); !errors.Is(err, ErrPool) {
+	if _, err := c.Graph("app-graph", "pool-b"); !errors.Is(err, ErrPool) {
 		t.Fatalf("ungranted pool: %v", err)
 	}
 	if _, err := c.Graph("other", "pool-a"); !errors.Is(err, ErrUnlisted) {
 		t.Fatalf("unknown graph: %v", err)
 	}
-	if _, err := c.Database("orion-graph", "pool-a"); !errors.Is(err, ErrUnlisted) {
+	if _, err := c.Database("app-graph", "pool-a"); !errors.Is(err, ErrUnlisted) {
 		t.Fatalf("a graph entry answered as a PostgreSQL database: %v", err)
 	}
 	// No HTTP tunnel reaches a database host.
@@ -42,8 +42,8 @@ func TestMemgraphEntryRefusals(t *testing.T) {
 	cases := map[string]string{
 		"write access":          strings.Replace(graphEntry, `"serverName"`, `"access":"write","serverName"`, 1),
 		"plaintext":             strings.Replace(graphEntry, `"serverName":"community.memgraph.example.com",`, `"sslmode":"disable",`, 1),
-		"no login":              strings.Replace(graphEntry, `"login":{"mount":"gatehouse","path":"vendors/memgraph-orion"},`, ``, 1),
-		"login path escape":     strings.Replace(graphEntry, `vendors/memgraph-orion`, `vendors/../catalog`, 1),
+		"no login":              strings.Replace(graphEntry, `"login":{"mount":"gatehouse","path":"vendors/memgraph-app"},`, ``, 1),
+		"login path escape":     strings.Replace(graphEntry, `vendors/memgraph-app`, `vendors/../catalog`, 1),
 		"bare procedure name":   strings.Replace(graphEntry, `"schema.node_type_properties"`, `"node_type_properties"`, 1),
 		"function with spaces":  strings.Replace(graphEntry, `"date.add"`, `"date. add"`, 1),
 		"http key":              strings.Replace(graphEntry, `"pools"`, `"header":"X-Api-Key","pools"`, 1),
@@ -58,7 +58,7 @@ func TestMemgraphEntryRefusals(t *testing.T) {
 		}
 	}
 	// One host serves one kind: a graph and an HTTP entry cannot share it.
-	mixed := `{"entries":[` + graphEntry + `,{"name":"web","host":"memgraph-community.trm-orion.svc.cluster.local","port":7687,"pathPrefixes":["/"],"methods":["GET"],` +
+	mixed := `{"entries":[` + graphEntry + `,{"name":"web","host":"memgraph.graphs.svc.cluster.local","port":7687,"pathPrefixes":["/"],"methods":["GET"],` +
 		`"header":"X-Api-Key","placeholder":"__vault_X__","key":{"mount":"gatehouse","path":"vendors/x","field":"k"},"pools":["pool-a"]}]}`
 	if _, err := Parse([]byte(mixed)); err == nil {
 		t.Error("a graph host was shared with an HTTP entry")

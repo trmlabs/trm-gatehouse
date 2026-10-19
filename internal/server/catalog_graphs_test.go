@@ -24,9 +24,9 @@ func TestCatalogGraphResolver(t *testing.T) {
 	  {"name":"cursor","namespace":"n","serviceAccount":"cursor"},
 	  {"name":"claude","namespace":"n","serviceAccount":"claude","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T2"}],
 	 "entries":[
-	  {"name":"graph","kind":"memgraph","host":"memgraph.trm-orion.svc.cluster.local","pools":["cursor","claude"],
+	  {"name":"graph","kind":"memgraph","host":"memgraph.graphs.svc.cluster.local","pools":["cursor","claude"],
 	   "memgraph":{"login":{"mount":"gatehouse","path":"vendors/memgraph-graph"},"serverName":"graph.example.com","maxConns":200,"procedures":["schema.node_type_properties"]}},
-	  {"name":"t1graph","kind":"memgraph","host":"other.trm-orion.svc.cluster.local","pools":["claude"],"tier":"T1","requires":["` + t1Group + `"],
+	  {"name":"t1graph","kind":"memgraph","host":"other.graphs.svc.cluster.local","pools":["claude"],"tier":"T1","requires":["` + t1Group + `"],
 	   "memgraph":{"login":{"mount":"gatehouse","path":"vendors/memgraph-t1"}}},
 	  {"name":"appdb","kind":"postgres","host":"db.example","pools":["cursor"],"postgres":{"database":"app","mount":"database","role":"staging.us.example.app-readonly"}}]}`))
 	if err != nil {
@@ -43,7 +43,7 @@ func TestCatalogGraphResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if svc.Addr != "memgraph.trm-orion.svc.cluster.local:7687" || svc.ServerName != "graph.example.com" || svc.MaxConns != 200 || svc.Plaintext ||
+	if svc.Addr != "memgraph.graphs.svc.cluster.local:7687" || svc.ServerName != "graph.example.com" || svc.MaxConns != 200 || svc.Plaintext ||
 		svc.KeyMount != "gatehouse" || svc.KeyPath != "vendors/memgraph-graph" || len(svc.Procedures) != 1 {
 		t.Fatalf("resolved %+v", svc)
 	}

@@ -40,7 +40,7 @@ func startBoltFixture(t *testing.T, change func(*Options)) *boltFixture {
 		audit:    &recordingAudit{},
 		auth:     &fakeAuth{scope: &AgentScope{VaultID: "vault-1", ActorID: "agent-1", WorkloadID: "pod-1", Pool: "cursor-agents"}},
 	}
-	f.graphs = &fakeGraphs{svc: &GraphService{Name: "orion-graph", Addr: f.upstream.addr(), Plaintext: true,
+	f.graphs = &fakeGraphs{svc: &GraphService{Name: "app-graph", Addr: f.upstream.addr(), Plaintext: true,
 		Procedures: []string{"schema.node_type_properties"}, Functions: []string{"date.add"}}}
 	opts := Options{
 		Auth:        f.auth,
@@ -61,7 +61,7 @@ var bolt52 = proposals([3]byte{5, 8, 8}, [3]byte{4, 4, 2})
 
 func signedIn(t *testing.T, f *boltFixture) *boltTestClient {
 	t.Helper()
-	c, reply := dialBoltTest(t, f.addr, bolt52, "orion-graph", "agent-proof-token")
+	c, reply := dialBoltTest(t, f.addr, bolt52, "app-graph", "agent-proof-token")
 	if reply == nil || reply.Tag != bolt.TagSuccess {
 		t.Fatalf("sign-in answered %+v", reply)
 	}
@@ -176,7 +176,7 @@ func TestBolt_SignInRefusals(t *testing.T) {
 	t.Run("bad proof", func(t *testing.T) {
 		f := startBoltFixture(t, nil)
 		f.auth.err = errors.New("token rejected")
-		_, reply := dialBoltTest(t, f.addr, bolt52, "orion-graph", "forged")
+		_, reply := dialBoltTest(t, f.addr, bolt52, "app-graph", "forged")
 		if reply == nil || reply.Tag != bolt.TagFailure {
 			t.Fatalf("sign-in with a bad proof: %+v", reply)
 		}
@@ -194,7 +194,7 @@ func TestBolt_SignInRefusals(t *testing.T) {
 	t.Run("tier refusal", func(t *testing.T) {
 		f := startBoltFixture(t, nil)
 		f.graphs.err = &RefusedError{Outcome: "no_person"}
-		_, reply := dialBoltTest(t, f.addr, bolt52, "orion-graph", "agent-proof-token")
+		_, reply := dialBoltTest(t, f.addr, bolt52, "app-graph", "agent-proof-token")
 		if meta, _ := reply.Map(0); reply.Tag != bolt.TagFailure || meta["code"] != "Gatehouse.ClientError.Security.Forbidden" {
 			t.Fatalf("tier refusal: %+v", reply)
 		}
@@ -203,7 +203,7 @@ func TestBolt_SignInRefusals(t *testing.T) {
 		f := startBoltFixture(t, func(o *Options) {
 			o.GraphLogins = fakeLogins{login: &GraphLogin{Username: "gatehouse_reader", Password: "rotated-away"}}
 		})
-		_, reply := dialBoltTest(t, f.addr, bolt52, "orion-graph", "agent-proof-token")
+		_, reply := dialBoltTest(t, f.addr, bolt52, "app-graph", "agent-proof-token")
 		meta, _ := reply.Map(0)
 		if reply.Tag != bolt.TagFailure || meta["code"] != "Gatehouse.TransientError.General.DatabaseUnavailable" {
 			t.Fatalf("refused login: %+v", reply)
@@ -214,14 +214,14 @@ func TestBolt_SignInRefusals(t *testing.T) {
 	})
 	t.Run("no login in Vault", func(t *testing.T) {
 		f := startBoltFixture(t, func(o *Options) { o.GraphLogins = fakeLogins{err: errors.New("deleted")} })
-		_, reply := dialBoltTest(t, f.addr, bolt52, "orion-graph", "agent-proof-token")
+		_, reply := dialBoltTest(t, f.addr, bolt52, "app-graph", "agent-proof-token")
 		if meta, _ := reply.Map(0); reply.Tag != bolt.TagFailure || meta["code"] != "Gatehouse.TransientError.General.CredentialUnavailable" {
 			t.Fatalf("missing login: %+v", reply)
 		}
 	})
 	t.Run("no common version", func(t *testing.T) {
 		f := startBoltFixture(t, nil)
-		c, _ := dialBoltTest(t, f.addr, proposals([3]byte{5, 8, 2}), "orion-graph", "agent-proof-token")
+		c, _ := dialBoltTest(t, f.addr, proposals([3]byte{5, 8, 2}), "app-graph", "agent-proof-token")
 		if c.v != (bolt.Version{}) {
 			t.Fatalf("negotiated %v with 5.8 to 5.6 only", c.v)
 		}
@@ -245,7 +245,7 @@ func TestBolt_SignInRefusals(t *testing.T) {
 
 func TestBolt_Version43SignsInThroughHello(t *testing.T) {
 	f := startBoltFixture(t, nil)
-	c, reply := dialBoltTest(t, f.addr, proposals([3]byte{4, 4, 2}), "orion-graph", "agent-proof-token")
+	c, reply := dialBoltTest(t, f.addr, proposals([3]byte{4, 4, 2}), "app-graph", "agent-proof-token")
 	if c.v != (bolt.Version{Major: 4, Minor: 3}) || reply.Tag != bolt.TagSuccess {
 		t.Fatalf("4.3 sign-in: %v %+v", c.v, reply)
 	}
@@ -283,7 +283,7 @@ func TestBolt_SessionRulesAfterSignIn(t *testing.T) {
 			switch e.Event {
 			case auditchain.EventSessionOpen:
 				opened++
-				if e.Binding != "vault-1/orion-graph" || e.Pool != "cursor-agents" || e.PodUID != "pod-1" {
+				if e.Binding != "vault-1/app-graph" || e.Pool != "cursor-agents" || e.PodUID != "pod-1" {
 					t.Fatalf("session row: %+v", e)
 				}
 			case auditchain.EventSessionClose:

@@ -100,7 +100,7 @@ func startBoltRelay(t *testing.T, up UpstreamConfig) string {
 	t.Helper()
 	listen := freeAddress(t)
 	c := FixedConfig{TaskID: "pool-worker", Deadline: time.Now().Add(time.Hour), AuditFile: filepath.Join(t.TempDir(), "audit.jsonl"), Self: true,
-		BoltBindings: []BoltConfig{{Listen: listen, Upstream: up, Database: "orion-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder"}}}
+		BoltBindings: []BoltConfig{{Listen: listen, Upstream: up, Database: "app-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder"}}}
 	if e := c.Validate(time.Now()); e != nil {
 		t.Fatalf("config refused: %v", e)
 	}
@@ -194,7 +194,7 @@ func TestBoltBindingSignsInWithTheProofNotThePlaceholder(t *testing.T) {
 				t.Fatalf("echo %+v", echo)
 			}
 			s := <-saw
-			if s.version != v || s.auth["principal"] != "orion-graph" || s.auth["credentials"] != strings.TrimSpace(string(proof)) || s.auth["scheme"] != "basic" {
+			if s.version != v || s.auth["principal"] != "app-graph" || s.auth["credentials"] != strings.TrimSpace(string(proof)) || s.auth["scheme"] != "basic" {
 				t.Fatalf("broker saw version %v auth %v", s.version, s.auth)
 			}
 			if !strings.HasPrefix(s.preamble, "GHSESS1 eyJ") || !s.echoed {
@@ -264,14 +264,14 @@ func TestBoltBindingConfig(t *testing.T) {
 	up := UpstreamConfig{Address: "gatehouse.gatehouse.svc:15443", ServerName: "gatehouse.gatehouse.svc", CAFile: "/ca", ProofFile: "/proof", Audience: "gatehouse"}
 	base := func() FixedConfig {
 		return FixedConfig{TaskID: "pool-worker", Deadline: time.Now().Add(time.Hour), AuditFile: "/data/audit.jsonl", Self: true,
-			BoltBindings: []BoltConfig{{Listen: "127.0.0.1:15100", Upstream: up, Database: "orion-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder"}}}
+			BoltBindings: []BoltConfig{{Listen: "127.0.0.1:15100", Upstream: up, Database: "app-graph", User: "gatehouse", Placeholder: "gatehouse-relay-placeholder"}}}
 	}
 	if e := base().Validate(time.Now()); e != nil {
 		t.Fatalf("valid Bolt sidecar refused: %v", e)
 	}
 	for name, mutate := range map[string]func(*FixedConfig){
 		"off loopback":      func(c *FixedConfig) { c.BoltBindings[0].Listen = "0.0.0.0:15100" },
-		"bad database name": func(c *FixedConfig) { c.BoltBindings[0].Database = "orion graph" },
+		"bad database name": func(c *FixedConfig) { c.BoltBindings[0].Database = "app graph" },
 		"no placeholder":    func(c *FixedConfig) { c.BoltBindings[0].Placeholder = "" },
 		"shared listen": func(c *FixedConfig) {
 			c.PostgresBindings = []PostgresConfig{{Listen: "127.0.0.1:15100", Upstream: up, Database: "core", User: "w", Placeholder: "p"}}
