@@ -33,9 +33,33 @@ another, even with the token Gatehouse used.
 ```
 
 - **Tier:** gcp entries are T1 or T2. Under the authorization model they are never granted to a pool without a person behind it, such as the Cursor pool, and every request needs a verified person in the `requires` groups.
-- **Hosts:** must be `*.googleapis.com`. Hosts that mint or manage credentials (STS, IAM Credentials, IAM, OAuth) are refused.
+- **Hosts:** `storage.googleapis.com`, `bigquery.googleapis.com` or `bigquerystorage.googleapis.com`. Hosts that mint or manage credentials (STS, IAM Credentials, IAM, OAuth) are refused.
 - **Paths:** downscoped entries default to the bucket's JSON API paths. Impersonating entries must list their paths.
-- **On the worker:** set the client's access token to the placeholder, for example `CLOUDSDK_AUTH_ACCESS_TOKEN=__vault_GCP__`, and send HTTPS through the Gatehouse sidecar.
+- **On the worker:** give the client the placeholder as its access token and send HTTPS through the Gatehouse sidecar. See [Worker setup](#worker-setup).
+
+## BigQuery Storage Read API
+
+`google-cloud-bigquery` reads query results and tables through the BigQuery Storage Read API by default, for example in `to_dataframe()`. That API is gRPC, so its entry sets `http2` (see the HTTP header adapter guide) and lists the read service:
+
+```json
+{"name": "bq-cases-read", "kind": "gcp", "http2": true, "host": "bigquerystorage.googleapis.com", "tier": "T1",
+ "requires": ["<directory group object ID>"], "placeholder": "__vault_GCP__", "pools": ["claude"],
+ "pathPrefixes": ["/google.cloud.bigquery.storage.v1.BigQueryRead/"],
+ "gcp": {"serviceAccount": "bq-cases@example-analytics.iam.gserviceaccount.com"}}
+```
+
+- A read session streams the table as many `ReadRows` messages; each reaches the client as it arrives, screened for the token.
+- `x-goog-request-params`, which routes a call to its session or stream, passes on every gcp entry.
+- The entry's service account needs `roles/bigquery.readSessionUser` on the project that runs the session, besides read on the data.
+
+## Worker setup
+
+The worker holds only the placeholder; the broker replaces it with the entry's token.
+
+- **bq and gcloud:** write the placeholder to a file and set `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` to it. gsutil ignores that setting, so use `gcloud storage`. Set `CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true`, since the update check reaches a host outside the catalog.
+- **Client libraries:** `google.auth.default()` finds no credential without a key file. Either pass the placeholder as a token (`google.oauth2.credentials.Credentials("__vault_GCP__")`), or run a local metadata server that answers with it, with `GCE_METADATA_HOST` and `GCE_METADATA_IP` pointing at it and that address in `NO_PROXY`. Such a server answers with `Metadata-Flavor: Google` and serves the token, the account, the project ID and the universe domain under both `default` and the account's email, which clients use after their first refresh. No client contacts the OAuth or STS endpoints with either.
+- **CA:** `REQUESTS_CA_BUNDLE` for the REST half and `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` for gRPC, both naming the broker's CA.
+- **Proxy:** gRPC clients do not speak TLS to a proxy, so set `grpc_proxy` to a plain `http://` hop to the relay.
 
 ## Google Cloud IAM
 
@@ -53,8 +77,9 @@ the non-production grants.
 
 1. **Broker identity:**
    - Create a broker service account, bound with `roles/iam.workloadIdentityUser` to the member above, on that service account only.
+   - The broker takes up this identity when a catalog version first holds a gcp entry, and lets it go when the last one is removed, with no restart. A broker with no Google identity still starts and serves every other entry; its gcp entries answer 503 until the identity appears, then mint again with no restart.
 2. **Impersonating entry:**
-   - Create one service account per entry, holding only the entry's role on the entry's resource (for example `roles/bigquery.dataViewer` on one dataset, plus `roles/bigquery.jobUser` where queries run).
+   - Create one service account per entry, holding only the entry's role on the entry's resource (for example `roles/bigquery.dataViewer` on one dataset, plus `roles/bigquery.jobUser` where queries run and `roles/bigquery.readSessionUser` where Storage Read API sessions run).
    - Grant the broker service account `roles/iam.serviceAccountTokenCreator` on that service account alone, for example with `google_service_account_iam_member`.
    - **Never grant TokenCreator at project or folder level.** The broker may mint only for the accounts the catalog names.
 3. **Downscoped entry:**

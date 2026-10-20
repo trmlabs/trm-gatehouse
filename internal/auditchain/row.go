@@ -48,10 +48,10 @@ type Row struct {
 	Outcome   string `json:"outcome,omitempty"`   // fixed code
 	Requester string `json:"requester,omitempty"` // developer identity, only from a verified source
 	// Authorization decision fields (see mitm authorize). On an automation
-	// row, requester is the person the run's token names; tier, decision,
-	// groups, cacheAgeSec, requesterOID and requesterDepartment come from the
-	// decision on automationOwner's account. A run that is not the owner's
-	// records only tier and decision automation_not_owner.
+	// row, requester is the person the run's token names, or empty when it
+	// names none, and decides nothing: the Automation is decided on its own
+	// catalog entries, so the row records tier and decision only, with no
+	// groups, cacheAgeSec, requesterOID or requesterDepartment.
 	RequesterKind string `json:"requesterKind,omitempty"` // person, agent, workload, automation or none
 	RequesterOID  string `json:"requesterOID,omitempty"`  // Entra object ID of the person named by requester
 	TokenSHA256   string `json:"tokenSHA256,omitempty"`   // runner session token hash; never the token
@@ -78,12 +78,17 @@ type Row struct {
 	// vocabulary: a github-api repository operation such as "pr.open",
 	// "git.fetch" or "git.push", "graphql" for a GitHub GraphQL request no
 	// route admits, or the Slack Web API method a Slack entry's listed path
-	// names, such as "slack.conversations_history". Never a path or body.
+	// names, such as "slack.conversations_history". On a graph database
+	// row, "bolt.session" or "bolt.query". Never a path, body or query text.
 	Operation string `json:"operation,omitempty"`
-	// Branch is the head branch of what a CI restart (pr.update_branch,
-	// actions.rerun, actions.rerun_failed) acted on or was refused for, as
-	// GitHub named it, or "invalid" when it is not a plain name (see
-	// BranchField). Empty when the lookup failed before GitHub named one.
+	// Branch is, on a git push row, the refs the push changes (comma-separated,
+	// "+N" for any that do not fit) or the one a refused push was refused
+	// for; on a pull request write (opening one, a comment, edit, label or
+	// ready, over REST or GraphQL) or a CI restart (pr.update_branch,
+	// actions.rerun, actions.rerun_failed), the head branch the request named
+	// or GitHub reported for the pull request or run. "invalid" when it is not
+	// a plain name (see BranchField); empty when the lookup failed before
+	// GitHub named one.
 	Branch string `json:"branch,omitempty"`
 	// Database is the database name a refused PostgreSQL session asked for,
 	// before any catalog entry matched it, or "invalid" when it is not a plain
@@ -95,8 +100,8 @@ type Row struct {
 	RequesterDepartment string `json:"requesterDepartment,omitempty"`
 	// Source and Automation are what a verified Cursor run token said: how
 	// the run started (AUTOMATIONS for an Automation) and the Automation's
-	// id. AutomationName and AutomationOwner are the catalog's for that
-	// Automation, on a pool that decides per Automation.
+	// id. AutomationName and AutomationOwner (its owning team) are the
+	// catalog's for that Automation, on a pool that decides per Automation.
 	Source          string `json:"source,omitempty"`
 	Automation      string `json:"automation,omitempty"`
 	AutomationName  string `json:"automationName,omitempty"`
@@ -108,6 +113,11 @@ type Row struct {
 	SignedMAC       string `json:"signedMAC,omitempty"`
 	Signature       string `json:"signature,omitempty"` // checkpoint: Transit "vault:vN:..." signature
 	PrevKey         int    `json:"prevKeyVersion,omitempty"`
+	// Path is the request path an HTTP row is about, as the worker sent it
+	// and PathField bounds it, without the query. A gRPC call's path names
+	// its service and method, such as /example.v1.Reads/ReadRows. Never a
+	// query, header or body, and absent on a decoy refusal.
+	Path string `json:"path,omitempty"`
 	// chain_start: the previous boot and its last persisted checkpoint row,
 	// so a deleted boot or a truncated tail is detectable.
 	PrevBoot          uint64 `json:"prevBoot,omitempty"`
@@ -119,14 +129,15 @@ type Row struct {
 	// authorization fields existed; 2 adds them; 3 adds the signing-key
 	// refusal fields; 4 adds the proxy certificate fields; 5 adds the refused
 	// target; 6 adds the operation, the refused database and the requester's
-	// department; 7 adds a CI restart's branch; MACVersionCurrent (8) adds
-	// the run's source and Automation, and covers every field.
+	// department; 7 adds a CI restart's branch; 8 adds the run's source and
+	// Automation; MACVersionCurrent (9) adds the request path, and covers
+	// every field.
 	MACVersion int    `json:"macVersion,omitempty"`
 	MAC        string `json:"mac"`
 }
 
 // MACVersionCurrent is the MAC input every new row uses.
-const MACVersionCurrent = 8
+const MACVersionCurrent = 9
 
 // macInput encodes every field except MAC with explicit lengths, so no two
 // distinct rows share an input regardless of field contents. Version 2 adds
@@ -134,10 +145,10 @@ const MACVersionCurrent = 8
 // signing-key refusal fields, and version 4 the proxy certificate fields, and
 // version 5 the refused target, and version 6 the operation, the refused
 // database and the requester's department, and version 7 a CI restart's
-// branch, and version 8 the run's source and Automation. Older versions are
-// kept only to verify rows written before them, and a row carrying a field
-// its version's MAC does not cover fails verification (see v2Only through
-// v8Only).
+// branch, and version 8 the run's source and Automation, and version 9 the
+// request path. Older versions are kept only to verify rows written before
+// them, and a row carrying a field its version's MAC does not cover fails
+// verification (see v2Only through v9Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,
@@ -175,7 +186,11 @@ func (r Row) macInput() []byte {
 		return lengthPrefixed("gatehouse-audit-v7", fields...)
 	}
 	fields = append(fields, r.Source, r.Automation, r.AutomationName, r.AutomationOwner)
-	return lengthPrefixed("gatehouse-audit-v8", fields...)
+	if r.MACVersion < 9 {
+		return lengthPrefixed("gatehouse-audit-v8", fields...)
+	}
+	fields = append(fields, r.Path)
+	return lengthPrefixed("gatehouse-audit-v9", fields...)
 }
 
 // v2Only reports whether a row sets a field that only the v2 MAC covers.
@@ -205,6 +220,9 @@ func (r Row) v7Only() bool { return r.Branch != "" }
 func (r Row) v8Only() bool {
 	return r.Source != "" || r.Automation != "" || r.AutomationName != "" || r.AutomationOwner != ""
 }
+
+// v9Only reports whether a row sets a field that only the v9 MAC covers.
+func (r Row) v9Only() bool { return r.Path != "" }
 
 func (r Row) computeMAC(key []byte) string {
 	h := hmac.New(sha256.New, key)

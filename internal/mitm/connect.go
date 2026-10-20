@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
@@ -214,9 +215,16 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// else, so a browser pinning it trusts Gatehouse for those hosts only. Its
 	// SNI must be that host.
 	browser := p.adapter.valid() && p.adapter.Catalog.Current().BrowserHost(host, port)
+	// HTTP/2, which gRPC needs, only to a host whose catalog entries take it;
+	// every other host keeps the HTTP/1.1 path unchanged.
+	protos := []string{"http/1.1"}
+	h2 := p.strictCredentialProxy && p.adapter.valid() && p.adapter.Catalog.Current().HTTP2Host(host, port)
+	if h2 {
+		protos = []string{"h2", "http/1.1"}
+	}
 	tlsConf := &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"http/1.1"},
+		NextProtos: protos,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := hello.ServerName
 			if sni == "" {
@@ -250,12 +258,22 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// ConnState tracks when the connection leaves the hijacked state and
 	// closes the listener so Serve returns.
 	listener := newOneShotListener(tlsConn)
+	connDone := make(chan struct{})
+	var connDoneOnce sync.Once
 	// Requests inside the tunnel arrive on its own TLS connection, so they
 	// take the listener's identity kinds from the CONNECT.
 	kinds := connKinds(r.Context())
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r = r.WithContext(withConnectTarget(r.Context(), target))
+			if r.ProtoMajor == 2 {
+				r = r.WithContext(withHTTP2(r.Context()))
+				// Every answer a gRPC client gets, refusals included, is one
+				// it can read as a gRPC status.
+				if isGRPC(r) {
+					w = &grpcWriter{ResponseWriter: w}
+				}
+			}
 			// A tunnel can outlive its token or grant. Recheck each request
 			// against the original proxy identity before injecting credentials.
 			scope, err := p.resolveScope(withKinds(brokercore.WithAttestation(r.Context(), brokercore.AttestationFrom(attested)), kinds), token, hint, peer, peerErr, true)
@@ -281,12 +299,16 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      30 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
+		// HTTP/2 tunnels apply the same timeouts per request (stream); a
+		// gRPC request body ends with its last message.
+		HTTP2: &http.HTTP2Config{MaxConcurrentStreams: p.http2MaxStreams},
 		ConnState: func(c net.Conn, state http.ConnState) {
 			// Either terminal state means Serve should return. The
 			// underlying conn is owned by http.Server (Closed) or by
 			// the hijack handler (Hijacked); we must not close it here.
 			if state == http.StateHijacked || state == http.StateClosed {
 				_ = listener.Close()
+				connDoneOnce.Do(func() { close(connDone) })
 			}
 		},
 	}
@@ -296,14 +318,17 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		deadline := time.AfterFunc(time.Until(connectScope.NotAfter), func() { _ = tlsConn.Close() })
 		defer deadline.Stop()
 	}
-	defer p.trackTunnel(srv)()
+	defer p.trackTunnel(srv, h2)()
 	_ = srv.Serve(listener)
 	// Serve can stop before taking the connection (a forced close during
-	// shutdown); nothing else owns it then.
+	// shutdown); nothing else owns it then. Once it took it, the tunnel lasts
+	// until the connection ends: a draining HTTP/2 tunnel's Shutdown stops
+	// Serve while its last calls are still finishing.
 	select {
 	case c := <-listener.yield:
 		_ = c.Close()
 	default:
+		<-connDone
 	}
 }
 

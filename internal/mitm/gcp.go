@@ -34,15 +34,15 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 		return
 	}
 	if a.GCPTokens == nil {
-		// Waiting does not help: only an operator (a restart, for a minter
-		// wired at startup) can give the broker one.
+		// An adapter built without a minter never gets one; the broker wires
+		// a GCPMinter, which refuses through the token path below instead.
 		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
-	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" ||
+	if r.URL.IsAbs() || !authorityMatches(r, target) || r.URL.User != nil || r.URL.Fragment != "" ||
 		unsafePath(r.URL.Path) || containsPlaceholder(r.URL.RawQuery) || r.Header.Get("Upgrade") != "" ||
-		r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 {
+		r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 || (isGRPC(r) && grpcCompressedRequest(r)) {
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	}
@@ -51,6 +51,13 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
+	if err == nil && int64(len(body)) <= entry.MaxRequestBytes && isGRPC(r) {
+		var outcome string
+		if body, outcome = grpcPlainMessages(body, r.Header.Get("Grpc-Encoding"), entry.MaxRequestBytes); outcome != "" {
+			deny(grpcBodyStatus(outcome), outcome)
+			return
+		}
+	}
 	if err == nil && p.refuseDecoyBody(w, event, target, body) {
 		return
 	}
@@ -92,6 +99,9 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 	credential := "Bearer " + token.Value()
 	out.Header.Set("Authorization", credential)
 	out.Header.Set("Accept-Encoding", "identity")
+	if isGRPC(r) {
+		prepareGRPC(out)
+	}
 
 	admitted := event
 	admitted.Event, admitted.Outcome = auditchain.EventHTTPRequest, "admitted"

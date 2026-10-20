@@ -284,7 +284,7 @@ func (v fakeVault) ReadWithDataWithContext(context.Context, string, map[string][
 }
 
 func (v fakeVault) WriteWithContext(_ context.Context, path string, data map[string]interface{}) (*vaultapi.Secret, error) {
-	if path != "gatehouse-transit/sign/github-app/sha2-256" || data["signature_algorithm"] != "pkcs1v15" {
+	if path != "example-transit/sign/github-app/sha2-256" || data["signature_algorithm"] != "pkcs1v15" {
 		return nil, errors.New("wrong transit call")
 	}
 	input, _ := base64.StdEncoding.DecodeString(data["input"].(string))
@@ -298,7 +298,7 @@ func TestTransitAndKVSignersMintAcceptedJWTs(t *testing.T) {
 	der := x509.MarshalPKCS1PrivateKey(g.key)
 	vault := fakeVault{key: g.key, pemKey: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}))}
 	for name, signer := range map[string]JWTSigner{
-		"transit": TransitSigner{Vault: vault, Mount: "gatehouse-transit", Key: "github-app"},
+		"transit": TransitSigner{Vault: vault, Mount: "example-transit", Key: "github-app"},
 		"kv":      KVSigner{Vault: vault, Mount: "gatehouse", Path: "github-app", Field: "key"},
 	} {
 		m := &Minter{Signer: signer, API: srv.URL, Client: srv.Client()}

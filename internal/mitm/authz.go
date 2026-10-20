@@ -27,8 +27,10 @@ func sessionToken(ctx context.Context) string {
 }
 
 // authorize applies the authorization model to one matched catalog entry and
-// fills the audit event. It returns a refusal code, or "".
-func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, entry *httpcatalog.Entry, event *auditchain.Event) string {
+// fills the audit event. It returns who stands behind the request, whose
+// branch segment narrows a git or github-api request's push prefixes
+// (httpcatalog.GitRequest.ForRequester), and a refusal code, or "".
+func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, entry *httpcatalog.Entry, event *auditchain.Event) (authorize.Requester, string) {
 	a := p.adapter
 	pool, _ := a.Catalog.Current().Pool(scope.Pool) // undefined pools: no identity, ceiling T0
 	var verifier authorize.Verifier
@@ -39,7 +41,7 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 	event.TokenSHA256, event.RequesterKind = who.TokenSHA256, who.Kind
 	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
 	if refusal != "" {
-		return refusal
+		return who, refusal
 	}
 	event.Requester = who.Audited()
 	d := authorize.Decide(ctx, a.Entitlements, pool, *entry, who)
@@ -48,7 +50,7 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 	event.Groups = strings.Join(d.Groups, ",")
 	event.CacheAgeSec = int64(d.CacheAge.Seconds())
 	if !d.Allowed {
-		return d.Outcome
+		return who, d.Outcome
 	}
-	return ""
+	return who, ""
 }

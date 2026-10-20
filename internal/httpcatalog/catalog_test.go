@@ -2,6 +2,7 @@ package httpcatalog
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -118,8 +119,74 @@ func TestCredentialEncodesBasicPair(t *testing.T) {
 		}
 	}
 	for key, want := range map[string]bool{"pk:sk": true, "pk:sk:x": true, "pk": false, ":sk": false, "pk:": false, "": false} {
-		if password, ok := PairPassword(key); ok != want || (ok && password != strings.SplitN(key, ":", 2)[1]) {
-			t.Errorf("PairPassword(%q) = %q, %v", key, password, ok)
+		halves := strings.SplitN(key, ":", 2)
+		if user, password, ok := SplitPair(key); ok != want || (ok && (user != halves[0] || password != halves[1])) {
+			t.Errorf("SplitPair(%q) = %q, %q, %v", key, user, password, ok)
+		}
+	}
+}
+
+// A Basic pair client may hold the pair's user name, which is not secret, and
+// send it with the placeholder as password; only that exact encoding yields
+// the user name for the broker to compare with the stored one.
+func TestCallerPairUserReadsOnlyTheUserBesideThePlaceholder(t *testing.T) {
+	e := Entry{BasicPair: true, Placeholder: "__vault_SERPAPI_KEY__"}
+	encode := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(s)) }
+	if user, ok := e.CallerPairUser(encode("pk-lf-synthetic:__vault_SERPAPI_KEY__")); !ok || user != "pk-lf-synthetic" {
+		t.Fatalf("public key with the placeholder: %q %v", user, ok)
+	}
+	for name, value := range map[string]string{
+		"own secret":        encode("pk-lf-synthetic:sk-lf-synthetic"),
+		"other placeholder": encode("pk-lf-synthetic:__vault_OTHER__"),
+		"placeholder tail":  encode("pk-lf-synthetic:x__vault_SERPAPI_KEY__"),
+		"no user":           encode(":__vault_SERPAPI_KEY__"),
+		"user with colon":   encode("pk:lf:__vault_SERPAPI_KEY__"),
+		"unpadded":          strings.TrimRight(encode("pk-lf-synthetic:__vault_SERPAPI_KEY__"), "="),
+		"not base64":        "Basic pk-lf-synthetic:__vault_SERPAPI_KEY__",
+		"other scheme":      "Bearer " + base64.StdEncoding.EncodeToString([]byte("pk-lf-synthetic:__vault_SERPAPI_KEY__")),
+		"lower-case basic":  "basic " + base64.StdEncoding.EncodeToString([]byte("pk-lf-synthetic:__vault_SERPAPI_KEY__")),
+	} {
+		if user, ok := e.CallerPairUser(value); ok {
+			t.Errorf("%s: read user %q", name, user)
+		}
+	}
+	notPair := Entry{BasicUser: true, Placeholder: "__vault_SERPAPI_KEY__"}
+	if _, ok := notPair.CallerPairUser(encode("pk-lf-synthetic:__vault_SERPAPI_KEY__")); ok {
+		t.Fatal("a basicUser entry read a pair user")
+	}
+}
+
+// pairUserHeader names the header a pair client also sends its user name in.
+// It needs basicPair and a plain header name that is neither reserved nor
+// forwarded, and no other entry kind takes it.
+func TestPairUserHeaderNeedsABasicPairEntry(t *testing.T) {
+	authorization := func(doc string) string { return strings.Replace(doc, `"x-api-key"`, `"authorization"`, 1) }
+	c, err := Parse([]byte(authorization(entryWith(`,"basicPair":true,"pairUserHeader":"x-langfuse-public-key"`))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Entries()[0].PairUserHeader; got != "X-Langfuse-Public-Key" {
+		t.Fatalf("header not canonical: %q", got)
+	}
+	for name, doc := range map[string]string{
+		"without basicPair": authorization(entryWith(`,"pairUserHeader":"X-Langfuse-Public-Key"`)),
+		"basicUser":         authorization(entryWith(`,"basicUser":true,"pairUserHeader":"X-Langfuse-Public-Key"`)),
+		"reserved":          authorization(entryWith(`,"basicPair":true,"pairUserHeader":"Cookie"`)),
+		"the key header":    authorization(entryWith(`,"basicPair":true,"pairUserHeader":"Authorization"`)),
+		"forwarded too":     authorization(entryWith(`,"basicPair":true,"pairUserHeader":"X-Langfuse-Public-Key","forwardHeaders":["x-langfuse-public-key"]`)),
+		"forwarded anyway":  authorization(entryWith(`,"basicPair":true,"pairUserHeader":"user-agent"`)),
+		"not a token":       authorization(entryWith(`,"basicPair":true,"pairUserHeader":"X Langfuse"`)),
+		"postgres entry":    `{"entries":[{"name":"db","kind":"postgres","host":"db.example.com","pools":["pool-a"],"pairUserHeader":"X-User","postgres":{"database":"core","mount":"database","role":"readonly"}}]}`,
+		"browser session":   `{"entries":[` + browserEntryJSON(`,"pairUserHeader":"X-User"`) + `]}`,
+		"gcp entry":         `{` + gcpPools + `,"entries":[` + strings.Replace(gcsEntry, `"kind":"gcp",`, `"kind":"gcp","pairUserHeader":"X-User",`, 1) + `]}`,
+		"git entry":         `{"entries":[` + strings.Replace(gitEntry, `"kind":"git",`, `"kind":"git","pairUserHeader":"X-User",`, 1) + `]}`,
+		"github-api entry":  `{"entries":[` + strings.Replace(apiEntry, `"kind":"github-api",`, `"kind":"github-api","pairUserHeader":"X-User",`, 1) + `]}`,
+		"memgraph entry":    `{"entries":[` + strings.Replace(graphEntry, `"kind":"memgraph",`, `"kind":"memgraph","pairUserHeader":"X-User",`, 1) + `]}`,
+		"certificate only": `{"entries":[{"name":"reads","host":"rpc.example.com","pathPrefixes":["/v1/"],"methods":["GET"],` +
+			`"clientCertificate":{"mount":"gatehouse","path":"vendors/example-mtls"},"pairUserHeader":"X-User","pools":["pool-a"]}]}`,
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Errorf("%s: pairUserHeader accepted", name)
 		}
 	}
 }

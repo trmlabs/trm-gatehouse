@@ -22,12 +22,12 @@ type BrowserSessionBinding struct {
 	Auth0   Auth0Binding `json:"auth0"`
 	// User is a KV version 2 secret with fields email and password.
 	User KVRef `json:"user"`
-	// AutomatedAuth names TRM's automated-auth service when Auth0.Login is
+	// AutomatedAuth names an automated-auth service when Auth0.Login is
 	// "automated-auth".
 	AutomatedAuth *AutomatedAuthBinding `json:"automatedAuth,omitempty"`
 }
 
-// AutomatedAuthBinding names TRM's automated-auth service, the login profile
+// AutomatedAuthBinding names an automated-auth service, the login profile
 // it holds for the app, and the Auth0 organization the user signs in to.
 type AutomatedAuthBinding struct {
 	// URL is the service's https base URL: an exact DNS name, no path.
@@ -50,7 +50,7 @@ type Auth0Binding struct {
 	Scope string `json:"scope,omitempty"`
 	// Login is how the broker signs the user in: "password-realm" (the
 	// default), Auth0's password-realm grant through TokenClient, or
-	// "automated-auth", Universal Login through TRM's automated-auth service.
+	// "automated-auth", Universal Login through an automated-auth service.
 	// Only the second can sign in to an Auth0 organization: Auth0 refuses the
 	// password-realm grant for organization-enabled applications.
 	Login string `json:"login,omitempty"`
@@ -91,7 +91,7 @@ var BrowserForwardHeaders = []string{"Accept", "Accept-Language", "Access-Contro
 	"Cache-Control", "Content-Type", "If-Modified-Since", "If-None-Match", "Origin", "Pragma", "Referer", "User-Agent"}
 
 func (e *Entry) normalizeBrowser() error {
-	if e.Git != nil || e.Postgres != nil || e.GCP != nil || e.Key != (KeyRef{}) || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || len(e.Methods) > 0 {
+	if e.Git != nil || e.Postgres != nil || e.Memgraph != nil || e.GCP != nil || e.Key != (KeyRef{}) || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.PairUserHeader != "" || len(e.Methods) > 0 {
 		return errors.New("browser-session entries take host, pools, placeholder, browserSession and optional path prefixes and forward headers")
 	}
 	b := e.BrowserSession

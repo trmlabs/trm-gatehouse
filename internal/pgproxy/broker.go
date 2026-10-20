@@ -3,6 +3,7 @@ package pgproxy
 import (
 	"net/netip"
 
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/bolt"
 	"github.com/Infisical/agent-vault/internal/decoy"
 	"github.com/Infisical/agent-vault/internal/runtimestatus"
 )
@@ -74,6 +76,14 @@ type Options struct {
 	// package decoy). A password that is one refuses the session before it
 	// reaches Auth. Nil recognizes none.
 	Decoys interface{ Current() *decoy.Set }
+	// Graphs resolves graph databases for Bolt connections, which arrive on
+	// this listener; nil refuses every Bolt connection. GraphLogins reads
+	// the broker's login for one.
+	Graphs      GraphResolver
+	GraphLogins GraphLogins
+	// MaxBoltMessageBytes bounds one Bolt message in either direction
+	// (default 64 MiB).
+	MaxBoltMessageBytes int
 }
 
 // Broker is the PostgreSQL credential-brokering TCP listener. It mirrors the
@@ -601,6 +611,21 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 		b.logger.Debug("pgproxy: session preamble refused")
 		return
 	}
+	// Bolt shares this listener: its magic can never open a PostgreSQL
+	// startup packet, whose first four bytes are a small length.
+	head := make([]byte, len(bolt.Magic))
+	if _, err := io.ReadFull(stream, head); err != nil {
+		return
+	}
+	if [4]byte(head) == bolt.Magic {
+		if b.opts.Graphs == nil {
+			b.logger.Debug("pgproxy: Bolt connection refused: no graph databases configured")
+			return
+		}
+		b.handleBolt(conn, stream, session, attestation, peer)
+		return
+	}
+	stream = io.MultiReader(bytes.NewReader(head), stream)
 	clientReader := &messageReader{reader: stream, startup: true}
 	backend := pgproto3.NewBackend(clientReader, conn)
 	backend.SetMaxBodyLen(maxAuthMessageBytes)

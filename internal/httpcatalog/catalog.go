@@ -43,13 +43,26 @@ type Entry struct {
 	BasicUser bool `json:"basicUser,omitempty"`
 	// BasicPair sends the key, stored as "user:password", as HTTP Basic
 	// credentials, for vendors that issue a key pair (a public and a secret
-	// key). The worker sends the placeholder as both user name and password.
-	// The header is Authorization and the scheme is Basic, so neither is set.
+	// key). The worker sends the placeholder as both user name and password,
+	// or the stored user name, which is not secret, and the placeholder as
+	// the password. The header is Authorization and the scheme is Basic, so
+	// neither is set.
 	BasicPair bool `json:"basicPair,omitempty"`
+	// PairUserHeader names a second header in which the client also sends a
+	// Basic pair's user name, such as Langfuse's X-Langfuse-Public-Key. Its
+	// value must be the stored user name. basicPair entries only.
+	PairUserHeader string `json:"pairUserHeader,omitempty"`
 	// Placeholder is what a worker may send in Header instead of the key, so
 	// SDKs that insist on a key still work. The worker may also omit Header.
 	Placeholder string `json:"placeholder"`
 	Key         KeyRef `json:"key"`
+	// ClientCertificate, header entries only, is a certificate and key in
+	// Vault the broker presents to the upstream in the TLS handshake, for a
+	// service that accepts only client certificates (mutual TLS). An entry
+	// with one may leave out header, placeholder and key, so the worker sends
+	// no credential at all. Neither the certificate nor the key reaches the
+	// worker. See ClientCertificateRef.
+	ClientCertificate *ClientCertificateRef `json:"clientCertificate,omitempty"`
 	// Pools are the broker agent IDs of the worker pools granted this entry.
 	Pools []string `json:"pools"`
 	// ForwardHeaders are extra request headers the vendor needs, such as an
@@ -72,16 +85,24 @@ type Entry struct {
 	// key is a GitHub App installation token minted per repository.
 	// Kind "browser-session" lets an agent's own browser use a web app as a
 	// test user; see BrowserSessionBinding.
-	Kind           string                 `json:"kind,omitempty"`
-	Git            *GitBinding            `json:"git,omitempty"`
-	Postgres       *PostgresBinding       `json:"postgres,omitempty"`
+	Kind     string           `json:"kind,omitempty"`
+	Git      *GitBinding      `json:"git,omitempty"`
+	Postgres *PostgresBinding `json:"postgres,omitempty"`
+	// Kind "memgraph" is a graph database reached over Bolt; see
+	// MemgraphBinding.
+	Memgraph       *MemgraphBinding       `json:"memgraph,omitempty"`
 	BrowserSession *BrowserSessionBinding `json:"browserSession,omitempty"`
 	// Kind "gcp" mints a short-lived Google token per entry; see GCPBinding.
 	GCP *GCPBinding `json:"gcp,omitempty"`
+	// HTTP2 lets workers speak HTTP/2 to the entry's host, which gRPC needs:
+	// the broker offers h2 on the tunnel and forwards over HTTP/2. Header and
+	// gcp entries only, and every entry on one host and port agrees, since
+	// the protocol is chosen before the first request names a path.
+	HTTP2 bool `json:"http2,omitempty"`
 	// Tier is T0 (data every worker allowed on the pool may read; the default),
 	// T1 (a verified person in every Requires group) or T2 (T1 with
-	// time-boxed groups granted through P0). Requires lists Entra group
-	// object IDs and is mandatory for T1 and T2.
+	// time-boxed groups granted through an access-request tool). Requires
+	// lists Entra group object IDs and is mandatory for T1 and T2.
 	Tier     string   `json:"tier,omitempty"`
 	Requires []string `json:"requires,omitempty"`
 }
@@ -92,7 +113,17 @@ type GitBinding struct {
 	AppID          int64     `json:"appID"`
 	InstallationID int64     `json:"installationID"`
 	Repos          []GitRepo `json:"repos"`
+	// MaxPushCommandBytes, git entries only, bounds the command list the
+	// broker reads from each push to check and audit its refs (default
+	// DefaultMaxPushCommandBytes, at most the entry's maxRequestBytes); a push
+	// with a longer list is refused.
+	MaxPushCommandBytes int64 `json:"maxPushCommandBytes,omitempty"`
 }
+
+// DefaultMaxPushCommandBytes is the command list a push may send by default:
+// 16 MiB, about 75,000 refs or more at once (a command is two object IDs and a
+// ref name, under 220 bytes for most refs).
+const DefaultMaxPushCommandBytes = 16 << 20
 
 // GitRepo is one repository. RefPrefixes, when set, restrict which refs a
 // push may create, update or delete (for example refs/heads/cursor/), for
@@ -100,6 +131,10 @@ type GitBinding struct {
 // (see PushPrefixes): once a repository lists either, a pool may push only
 // under the shared prefixes and its own, and a pool with none pushes nothing,
 // so one entry serves many pools without any pushing to another's branches.
+// A prefix ending in {requester}/ (RequesterToken) goes further: each person
+// or Automation on the pool pushes only under their own branch segment there,
+// so requesters sharing a pool never write to each other's branches or pull
+// requests.
 type GitRepo struct {
 	Repo            string       `json:"repo"` // owner/name
 	Access          string       `json:"access"`
@@ -120,13 +155,37 @@ type GitRepo struct {
 	// Labels are the only labels pr.label may add.
 	Labels []string `json:"labels,omitempty"`
 	// DispatchEvents are the only repository_dispatch event types dispatch may
-	// send. A dispatch runs workflows from the default branch, never the pool's.
+	// send. A dispatch runs workflows from the default branch, never the pool's,
+	// and names in its client_payload the pull request it acts on, which must
+	// be in the pool's reach like any other write's target.
 	DispatchEvents []string `json:"dispatchEvents,omitempty"`
+	// PoolOperations narrow Operations for one pool of the entry each: a pool
+	// listed here may use only those, each one of the repository's. A pool not
+	// listed has the repository's operations, except a cursor-automation pool,
+	// which has none here until the repository lists it (see forPool).
+	PoolOperations PoolOperations `json:"poolOperations,omitempty"`
 }
 
 // PoolPrefixes maps each pool of an entry to prefixes of its own
 // (poolRefPrefixes, poolPullRequestPrefixes).
 type PoolPrefixes map[string][]string
+
+// PoolOperations maps a pool of a github-api entry to the repository
+// operations it may use there (poolOperations).
+type PoolOperations map[string][]string
+
+// UnmarshalJSON decodes the map and refuses null, as PoolPrefixes does.
+func (p *PoolOperations) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("poolOperations may not be null; list each pool with its operations, or leave the field out")
+	}
+	var m map[string][]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	*p = m
+	return nil
+}
 
 // errNullPoolPrefixes refuses a per-pool field written as null, which would
 // decode to no map, as if the field were absent. For poolRefPrefixes that
@@ -216,6 +275,22 @@ func (r GitRepo) operations() []string {
 
 // Allows reports whether a github-api repository grants an operation.
 func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
+
+// forPool returns the repository as pool sees it, with Operations narrowed to
+// the pool's poolOperations line, or to none for a cursor-automation pool the
+// repository does not list there, so every check made of the returned
+// repository (Allows, GrantsScope) holds the pool to its own operations.
+func (c Catalog) forPool(r GitRepo, pool string) GitRepo {
+	ops, listed := r.PoolOperations[pool]
+	p, defined := c.Pool(pool)
+	switch {
+	case listed:
+		r.Operations = append([]string{}, ops...)
+	case defined && p.Identity == IdentityCursorAutomation:
+		r.Operations = []string{}
+	}
+	return r
+}
 
 // GrantsScope is grantsScope for callers outside the catalog (GraphQL tokens).
 func (r GitRepo) GrantsScope(scope string) bool { return r.grantsScope(scope) }
@@ -337,8 +412,8 @@ var (
 	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 	idPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	kvPattern           = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
-	// The same shapes the catalog's Terraform module accepts, since these
-	// strings end up in the broker's Vault policy.
+	// Shapes that are safe inside a Vault policy path, since these strings
+	// end up in the broker's Vault policy.
 	vendorKeyPath = regexp.MustCompile(`^vendors(/[a-z0-9][a-z0-9_-]*)+$`)
 	vaultMount    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$`)
 )
@@ -349,10 +424,11 @@ var (
 func ValidMount(mount string) bool { return len(mount) <= 127 && vaultMount.MatchString(mount) }
 
 // Environment, when set (AGENT_VAULT_CATALOG_ENVIRONMENT, such as staging),
-// requires every database role to be that environment's named role:
+// requires every database role to be that environment's named role, by the
+// role naming rule (SetRolePattern; by default
 // <env>.<region>.<cluster>.<name>-readonly or -readwrite, or the
 // Gatehouse-only role for the same connection, the same name prefixed with
-// "gatehouse-".
+// "gatehouse-").
 var Environment atomic.Value // string
 
 func environment() string {
@@ -371,8 +447,7 @@ func validRole(role string) bool {
 	if env == "" {
 		return rolesWithoutEnvironment && vaultSegment.MatchString(role)
 	}
-	pattern := `^(gatehouse-)?` + regexp.QuoteMeta(env) + `\.[a-z]+\.[a-z0-9]+\.[a-z0-9-]+-(readonly|readwrite)$`
-	return regexp.MustCompile(pattern).MatchString(role)
+	return vaultSegment.MatchString(role) && environmentRole(env).MatchString(role)
 }
 
 var allowedMethods = map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
@@ -448,6 +523,9 @@ func Parse(data []byte) (Catalog, error) {
 	users := map[KVRef]string{}
 	routes := map[string]string{}
 	kinds := map[string]string{}
+	http2Hosts := map[string]bool{}
+	gitRepos := map[string]string{}   // repository: the first git entry listing it
+	perRequester := map[string]bool{} // repository: a git entry listing it has {requester} push prefixes
 	for i := range file.Entries {
 		e := &file.Entries[i]
 		if err := e.normalize(); err != nil {
@@ -464,7 +542,7 @@ func Parse(data []byte) (Catalog, error) {
 			if len(poolNames) > 0 && !poolNames[pool] {
 				return Catalog{}, fmt.Errorf("HTTP catalog entry %q grants undefined pool %q", e.Name, pool)
 			}
-			if err := grantable(*e, pools[pool], len(poolNames) > 0); err != nil {
+			if err := grantable(*e, pool, pools[pool], len(poolNames) > 0); err != nil {
 				return Catalog{}, fmt.Errorf("HTTP catalog entry %q to pool %q: %w", e.Name, pool, err)
 			}
 		}
@@ -473,6 +551,10 @@ func Parse(data []byte) (Catalog, error) {
 			return Catalog{}, fmt.Errorf("host %s mixes entry kinds or repeats a browser-session host", hostKey)
 		}
 		kinds[hostKey] = e.Kind
+		if h2, ok := http2Hosts[hostKey]; ok && h2 != e.HTTP2 {
+			return Catalog{}, fmt.Errorf("entries on host %s disagree on http2", hostKey)
+		}
+		http2Hosts[hostKey] = e.HTTP2
 		if e.BrowserSession != nil {
 			// A test user signs in for one entry only, so its session and
 			// audit trail belong to that entry's pool.
@@ -494,6 +576,17 @@ func Parse(data []byte) (Catalog, error) {
 					return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q share repository %s", other, e.Name, repo.Repo)
 				}
 				routes[route] = e.Name
+				if e.Kind != "git" {
+					continue
+				}
+				other, listed := gitRepos[repo.Repo]
+				perRequester[repo.Repo] = perRequester[repo.Repo] || repo.perRequester()
+				if listed && perRequester[repo.Repo] {
+					return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q share repository %s: %w", other, e.Name, repo.Repo, errRequesterRepo)
+				}
+				if !listed {
+					gitRepos[repo.Repo] = e.Name
+				}
 			}
 		}
 		for _, prefix := range e.PathPrefixes {
@@ -535,6 +628,9 @@ func (e *Entry) normalize() error {
 		if e.Kind == "postgres" {
 			e.Port = 5432
 		}
+		if e.Kind == "memgraph" {
+			e.Port = 7687
+		}
 	}
 	if e.Port < 1 || e.Port > 65535 {
 		return errors.New("invalid port")
@@ -548,12 +644,24 @@ func (e *Entry) normalize() error {
 	if e.Kind != "browser-session" && (len(e.DeniedPaths) > 0 || len(e.ReadOnlyPaths) > 0) {
 		return errors.New("deniedPaths and readOnlyPaths apply to browser-session entries only")
 	}
+	if e.HTTP2 && e.Kind != "" && e.Kind != "gcp" {
+		return errors.New("http2 applies to header and gcp entries only")
+	}
+	if e.ClientCertificate != nil && (e.Kind != "" || !e.ClientCertificate.valid()) {
+		prefix, _ := keyPath()
+		return fmt.Errorf("clientCertificate applies to header entries only and needs a KV mount and a path under %s/", prefix)
+	}
 	switch e.Kind {
 	case "postgres":
 		return e.normalizePostgres()
+	case "memgraph":
+		return e.normalizeMemgraph()
 	case "git":
 		return e.normalizeGit()
 	case "github-api":
+		if e.Git != nil && e.Git.MaxPushCommandBytes != 0 {
+			return errors.New("maxPushCommandBytes is for git entries only")
+		}
 		// A write body is small JSON. A response keeps the git default, since
 		// a log or artifact download streams hundreds of MiB.
 		if e.MaxRequestBytes == 0 {
@@ -566,7 +674,7 @@ func (e *Entry) normalize() error {
 			if r.Access != "write" || len(r.RefPrefixes) > 0 || len(r.PoolRefPrefixes) > 0 {
 				return fmt.Errorf("github-api repository %s must have access write (open pull requests) and no ref prefixes", r.Repo)
 			}
-			if err := r.normalizeGitHubAPI(); err != nil {
+			if err := r.normalizeGitHubAPI(e.Pools); err != nil {
 				return err
 			}
 		}
@@ -579,8 +687,8 @@ func (e *Entry) normalize() error {
 	case "gcp":
 		return e.normalizeGCP()
 	case "":
-		if e.Git != nil || e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil {
-			return errors.New("git, postgres, browserSession or gcp settings require their kind")
+		if e.Git != nil || e.Postgres != nil || e.Memgraph != nil || e.BrowserSession != nil || e.GCP != nil {
+			return errors.New("git, postgres, memgraph, browserSession or gcp settings require their kind")
 		}
 	default:
 		return fmt.Errorf("unknown kind %q", e.Kind)
@@ -602,24 +710,14 @@ func (e *Entry) normalize() error {
 			return fmt.Errorf("method %q not supported", m)
 		}
 	}
-	e.Header = http.CanonicalHeaderKey(e.Header)
-	if !tokenPattern.MatchString(e.Header) || (reservedHeaders[e.Header] && e.Header != "Authorization" && e.Header != "X-Api-Key") {
-		return errors.New("header must be a plain header name that does not affect routing")
-	}
-	if e.Scheme != "" && !tokenPattern.MatchString(e.Scheme) {
-		return errors.New("scheme must be a single token such as Bearer")
-	}
-	if e.BasicUser && (e.Header != "Authorization" || e.Scheme != "") {
-		return errors.New("basicUser needs header Authorization and no scheme")
-	}
-	if e.BasicPair && (e.Header != "Authorization" || e.Scheme != "" || e.BasicUser) {
-		return errors.New("basicPair needs header Authorization, no scheme and no basicUser")
-	}
-	if !placeholder.MatchString(e.Placeholder) {
-		return errors.New("placeholder must look like __vault_NAME__")
-	}
-	if !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !vendorKeyPath.MatchString(e.Key.Path) || e.Key.Field == "" {
-		return errors.New("key needs a KV mount, a path under vendors/ and a field")
+	if e.HeaderCredential() {
+		if err := e.normalizeHeaderCredential(); err != nil {
+			return err
+		}
+	} else if e.ClientCertificate == nil || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) {
+		// Only a client certificate stands in for the header credential, and
+		// then the credential's settings go with the header.
+		return errors.New("a header entry needs a header, placeholder and key, unless it has a clientCertificate and none of them")
 	}
 	if len(e.Pools) == 0 {
 		return errors.New("at least one pool is required")
@@ -633,6 +731,13 @@ func (e *Entry) normalize() error {
 		e.ForwardHeaders[i] = http.CanonicalHeaderKey(h)
 		if !tokenPattern.MatchString(h) || reservedHeaders[e.ForwardHeaders[i]] || e.ForwardHeaders[i] == e.Header {
 			return fmt.Errorf("forward header %q not allowed", h)
+		}
+	}
+	if e.PairUserHeader != "" {
+		h := e.PairUserHeader
+		e.PairUserHeader = http.CanonicalHeaderKey(h)
+		if !e.BasicPair || !tokenPattern.MatchString(h) || reservedHeaders[e.PairUserHeader] || e.ForwardsHeader(e.PairUserHeader) {
+			return errors.New("pairUserHeader needs basicPair and a plain header name that is neither reserved nor otherwise forwarded")
 		}
 	}
 	if e.MaxRequestBytes == 0 {
@@ -651,9 +756,36 @@ func (e *Entry) normalize() error {
 	return nil
 }
 
+// HeaderCredential reports whether the entry injects a key into a header.
+// Only a header entry with a client certificate may go without one.
+func (e *Entry) HeaderCredential() bool { return e.Header != "" }
+
+func (e *Entry) normalizeHeaderCredential() error {
+	e.Header = http.CanonicalHeaderKey(e.Header)
+	if !tokenPattern.MatchString(e.Header) || (reservedHeaders[e.Header] && e.Header != "Authorization" && e.Header != "X-Api-Key") {
+		return errors.New("header must be a plain header name that does not affect routing")
+	}
+	if e.Scheme != "" && !tokenPattern.MatchString(e.Scheme) {
+		return errors.New("scheme must be a single token such as Bearer")
+	}
+	if e.BasicUser && (e.Header != "Authorization" || e.Scheme != "") {
+		return errors.New("basicUser needs header Authorization and no scheme")
+	}
+	if e.BasicPair && (e.Header != "Authorization" || e.Scheme != "" || e.BasicUser) {
+		return errors.New("basicPair needs header Authorization, no scheme and no basicUser")
+	}
+	if !placeholder.MatchString(e.Placeholder) {
+		return errors.New("placeholder must look like __vault_NAME__")
+	}
+	if prefix, path := keyPath(); !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !path.MatchString(e.Key.Path) || e.Key.Field == "" {
+		return fmt.Errorf("key needs a KV mount, a path under %s/ and a field", prefix)
+	}
+	return nil
+}
+
 func (e *Entry) normalizePostgres() error {
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) ||
-		len(e.ForwardHeaders) > 0 || e.Git != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.PairUserHeader != "" || e.Placeholder != "" || e.Key != (KeyRef{}) ||
+		len(e.ForwardHeaders) > 0 || e.Git != nil || e.Memgraph != nil || e.BrowserSession != nil || e.GCP != nil || e.MaxRequestBytes != 0 || e.MaxResponseBytes != 0 {
 		return errors.New("postgres entries take only host, port, pools and postgres settings")
 	}
 	p := e.Postgres
@@ -730,7 +862,7 @@ func (c Catalog) Database(name, pool string) (*Entry, error) {
 }
 
 // CheckHosts requires every host to end with one of suffixes (for example
-// ".crunchybridge.com"), so CI can hold the catalog inside the ranges the
+// ".example.com"), so CI can hold the catalog inside the ranges the
 // broker's network policy allows.
 func (c Catalog) CheckHosts(suffixes []string) error {
 	for _, e := range c.entries {
@@ -749,10 +881,10 @@ func (c Catalog) CheckHosts(suffixes []string) error {
 }
 
 func (e *Entry) normalizeGit() error {
-	if e.Postgres != nil || e.BrowserSession != nil || e.GCP != nil {
+	if e.Postgres != nil || e.Memgraph != nil || e.BrowserSession != nil || e.GCP != nil {
 		return errors.New("postgres settings require kind postgres")
 	}
-	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
+	if len(e.PathPrefixes) > 0 || len(e.Methods) > 0 || e.Header != "" || e.Scheme != "" || e.BasicUser || e.BasicPair || e.PairUserHeader != "" || e.Placeholder != "" || e.Key != (KeyRef{}) || len(e.ForwardHeaders) > 0 {
 		return errors.New("git entries derive paths, methods and credentials; leave them unset")
 	}
 	g := e.Git
@@ -771,8 +903,8 @@ func (e *Entry) normalizeGit() error {
 	for i := range g.Repos {
 		r := &g.Repos[i]
 		r.Repo = strings.ToLower(r.Repo)
-		if e.Kind == "git" && (r.Operations != nil || len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
-			return fmt.Errorf("repository %s: operations, pull request prefixes, labels and dispatch events belong to a github-api entry", r.Repo)
+		if e.Kind == "git" && (r.Operations != nil || r.PoolOperations != nil || len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
+			return fmt.Errorf("repository %s: operations, pool operations, pull request prefixes, labels and dispatch events belong to a github-api entry", r.Repo)
 		}
 		if !repoPattern.MatchString(r.Repo) || strings.Contains(r.Repo, "..") || strings.HasSuffix(r.Repo, ".git") || seen[r.Repo] {
 			return fmt.Errorf("invalid or duplicate repository %q", r.Repo)
@@ -805,10 +937,25 @@ func (e *Entry) normalizeGit() error {
 	if e.MaxRequestBytes < 1 || e.MaxRequestBytes > 2<<30 || e.MaxResponseBytes < 1 || e.MaxResponseBytes > 8<<30 {
 		return errors.New("size limits out of range")
 	}
+	if e.Kind == "git" && g.MaxPushCommandBytes == 0 {
+		g.MaxPushCommandBytes = min(DefaultMaxPushCommandBytes, e.MaxRequestBytes)
+	}
+	if g.MaxPushCommandBytes < 0 || g.MaxPushCommandBytes > e.MaxRequestBytes {
+		return errors.New("maxPushCommandBytes is out of range: at most maxRequestBytes")
+	}
 	return nil
 }
 
+// validRefPrefix is a push prefix: a ref prefix, or a branch prefix ending in
+// {requester}/ (validRequesterTemplate).
 func validRefPrefix(prefix string) bool {
+	if IsRequesterTemplate(prefix) {
+		return validRequesterTemplate(prefix)
+	}
+	return validPlainRefPrefix(prefix)
+}
+
+func validPlainRefPrefix(prefix string) bool {
 	return refPattern.MatchString(prefix) && !strings.Contains(prefix, "..") && !strings.Contains(prefix, "//")
 }
 
@@ -819,21 +966,13 @@ func validPullRequestPrefix(prefix string) bool {
 // checkPoolPrefixes checks a repository's per-pool prefixes: a map that is
 // present names at least one pool (an empty one would read as no limit), each
 // pool is one the entry grants and lists distinct, valid prefixes, and no
-// pool's prefix starts another pool's or a shared one, nor is started by one
-// (ignoring case), so each pool's branches are its own. Sorting puts every
-// prefix right before the ones it starts, so each is compared only with
-// those, never with every other prefix.
+// prefix overlaps another holder's (overlappingPrefixes).
 func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]string, pools []string, valid func(string) bool) error {
 	if byPool == nil {
-		return nil
+		return overlappingPrefixes(repo, what, shared, nil)
 	}
 	if len(byPool) == 0 {
 		return fmt.Errorf("repository %s: list a pool with its %ses, or leave the per-pool field out", repo, what)
-	}
-	type owned struct{ pool, prefix, spelled string } // prefix lowercased; spelled as written
-	var all []owned
-	for _, prefix := range shared {
-		all = append(all, owned{"", strings.ToLower(prefix), prefix}) // "" is no pool: every pool of the entry
 	}
 	for pool, prefixes := range byPool {
 		if !contains(pools, pool) {
@@ -848,24 +987,65 @@ func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]s
 				return fmt.Errorf("repository %s: invalid or duplicate %s %q for pool %q", repo, what, prefix, pool)
 			}
 			seen[strings.ToLower(prefix)] = true
-			all = append(all, owned{pool, strings.ToLower(prefix), prefix})
+		}
+	}
+	return overlappingPrefixes(repo, what, shared, byPool)
+}
+
+// overlappingPrefixes refuses a prefix that starts, or is started by, one
+// another holder holds (ignoring case): no pool's prefix may overlap another
+// pool's or a shared one, so each pool's branches are its own. A {requester}
+// prefix is compared by the part before the token and held apart from every
+// other prefix, its own pool's and the shared ones included: each requester's
+// branches are theirs alone, so no prefix anyone else holds may reach into
+// them. Sorting puts every prefix right before the ones it starts, so each is
+// compared only with those, never with every other prefix.
+func overlappingPrefixes(repo, what string, shared []string, byPool map[string][]string) error {
+	type owned struct{ holder, prefix, spelled string } // prefix lowercased; spelled as written
+	var all []owned
+	// own keys a prefix by what it reaches: a {requester} prefix by the part
+	// before the token, under a holder of its own (see holder).
+	own := func(pool, prefix string) owned {
+		if static, ok := requesterTemplate(prefix); ok {
+			return owned{pool + requesterHolder + strings.ToLower(static), strings.ToLower(static), prefix}
+		}
+		return owned{pool, strings.ToLower(prefix), prefix}
+	}
+	for _, prefix := range shared {
+		all = append(all, own("", prefix)) // "" is no pool: every pool of the entry
+	}
+	for pool, prefixes := range byPool {
+		for _, prefix := range prefixes {
+			all = append(all, own(pool, prefix))
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
 	for i := range all {
 		for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
-			if all[j].pool != all[i].pool {
-				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].spelled, holder(all[j].pool), all[i].spelled, holder(all[i].pool))
+			if all[j].holder != all[i].holder {
+				return fmt.Errorf("repository %s: %s %q (%s) overlaps %q (%s)", repo, what, all[j].spelled, holder(all[j].holder), all[i].spelled, holder(all[i].holder))
 			}
 		}
 	}
 	return nil
 }
 
-// holder names who holds a checked prefix: a pool, or "" for the shared list.
-func holder(pool string) string {
-	if pool == "" {
+// requesterHolder separates a pool from the part before the token of one of
+// its {requester} prefixes, in the holder overlappingPrefixes gives that
+// prefix.
+const requesterHolder = "\x00"
+
+// holder names who holds a checked prefix: a pool, or "" for the shared list,
+// followed for a {requester} prefix by requesterHolder.
+func holder(key string) string {
+	pool, _, perRequester := strings.Cut(key, requesterHolder)
+	switch {
+	case pool == "" && perRequester:
+		return "each requester's own, in every pool"
+	case pool == "":
 		return "shared by every pool"
+	case perRequester:
+		return "each requester's own, in pool " + strconv.Quote(pool)
 	}
 	return "pool " + strconv.Quote(pool)
 }
@@ -879,19 +1059,24 @@ type pullRequestCrossing struct {
 }
 
 // pullRequestCrossings checks each repository of a github-api entry against
-// the git entry a clone of it would use, the same pairing the code-reading
-// routes use: no pull request prefix may start, or be started by, a push
-// prefix there that a pool it reaches does not hold (compared as refs,
+// every git entry listing it, on any host or port, since a pool's pull
+// request reach draws on each of them (pushBranchPrefixes): no pull request
+// prefix may start, or be started by, a push prefix there that a pool it
+// reaches does not hold (compared as refs,
 // ignoring case, as checkPoolPrefixes compares). Otherwise that pool's
 // comment, edit, label and ready routes would act on pull requests from
 // branches only other pools push to. A pool's own pull request prefixes reach
 // that pool only, the shared ones every pool of the github-api entry. A pool's
 // own push prefixes are held by that pool alone, the git entry's shared ones
 // by each pool of the git entry, so a shared push prefix crosses only a pool
-// outside it. A write repository with no push prefixes counts as a shared
-// push prefix of refs/heads/. It returns one crossing per repository, each
-// naming its git entry. As in checkPoolPrefixes, sorting puts every prefix
-// right before the ones it starts, so each is compared only with those.
+// outside it. A {requester} push prefix is held by each requester alone, so
+// no pool holds it whole: any pull request prefix that starts, or is started
+// by, the part before its token crosses, since it would let one requester act
+// on another's pull requests. A write repository with no push prefixes counts
+// as a shared push prefix of refs/heads/. It returns one crossing per
+// repository and git entry, each naming that entry. As in overlappingPrefixes, sorting
+// puts every prefix right before the ones it starts, so each is compared only
+// with those.
 func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	if api.Kind != "github-api" || api.Git == nil {
 		return nil
@@ -899,73 +1084,106 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	type owned struct {
 		prefix, spelled string // prefix: the ref, lowercased; spelled: as written
 		push            bool
-		pool            string // "": shared by every pool of its entry
+		pool            string // "": shared by every pool of its entry; for a {requester} prefix, followed by requesterHolder
+	}
+	// pushed keys a push prefix by what it reaches, as overlappingPrefixes does.
+	pushed := func(pool, prefix string) owned {
+		if static, ok := requesterTemplate(prefix); ok {
+			return owned{strings.ToLower(static), prefix, true, pool + requesterHolder}
+		}
+		return owned{strings.ToLower(prefix), prefix, true, pool}
 	}
 	var out []pullRequestCrossing
 	for _, r := range api.Git.Repos {
-		git, gr := pairedGit(entries, api.Host, r.Repo)
-		if gr == nil {
+		for _, listing := range gitListings(entries, r.Repo) {
+			git, gr := listing.entry, listing.repo
+			var all []owned
+			// A write repository that lists no push prefixes lets each pool of
+			// the git entry push any branch: a shared push prefix of refs/heads/.
+			if gr.Access == "write" && len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0 {
+				all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
+			}
+			for _, prefix := range gr.RefPrefixes {
+				all = append(all, pushed("", prefix))
+			}
+			for pool, prefixes := range gr.PoolRefPrefixes {
+				for _, prefix := range prefixes {
+					all = append(all, pushed(pool, prefix))
+				}
+			}
+			for _, prefix := range r.PullRequestPrefixes {
+				all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, ""})
+			}
+			for pool, prefixes := range r.PoolPullRequestPrefixes {
+				for _, prefix := range prefixes {
+					all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, pool})
+				}
+			}
+			sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
+			crosses := func(a, b owned) bool {
+				if a.push == b.push {
+					return false // each field's own overlaps are checkPoolPrefixes'
+				}
+				push, head := a, b
+				if b.push {
+					push, head = b, a
+				}
+				holds := func(pool string) bool {
+					if strings.Contains(push.pool, requesterHolder) {
+						return false // each requester's own: never a whole pool's
+					}
+					if push.pool == "" {
+						return contains(git.Pools, pool)
+					}
+					return pool == push.pool
+				}
+				if head.pool != "" {
+					return !holds(head.pool)
+				}
+				for _, pool := range api.Pools {
+					if !holds(pool) {
+						return true
+					}
+				}
+				return false
+			}
+		scan:
+			for i := range all {
+				for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
+					if crosses(all[i], all[j]) {
+						push, head := all[i], all[j]
+						if all[j].push {
+							push, head = all[j], all[i]
+						}
+						out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (%s) in entry %q",
+							r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, holder(push.pool), git.Name)})
+						break scan
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// gitListing is one git entry listing a repository, and its binding there.
+type gitListing struct {
+	entry *Entry
+	repo  *GitRepo
+}
+
+// gitListings are the git entries listing repo, on any host or port: each one
+// whose pools a pool's pull request reach draws on (pushBranchPrefixes).
+func gitListings(entries []Entry, repo string) []gitListing {
+	var out []gitListing
+	for i := range entries {
+		e := &entries[i]
+		if e.Kind != "git" || e.Git == nil {
 			continue
 		}
-		var all []owned
-		// A write repository that lists no push prefixes lets each pool of
-		// the git entry push any branch: a shared push prefix of refs/heads/.
-		if gr.Access == "write" && len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0 {
-			all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
-		}
-		for _, prefix := range gr.RefPrefixes {
-			all = append(all, owned{strings.ToLower(prefix), prefix, true, ""})
-		}
-		for pool, prefixes := range gr.PoolRefPrefixes {
-			for _, prefix := range prefixes {
-				all = append(all, owned{strings.ToLower(prefix), prefix, true, pool})
-			}
-		}
-		for _, prefix := range r.PullRequestPrefixes {
-			all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, ""})
-		}
-		for pool, prefixes := range r.PoolPullRequestPrefixes {
-			for _, prefix := range prefixes {
-				all = append(all, owned{"refs/heads/" + strings.ToLower(prefix), prefix, false, pool})
-			}
-		}
-		sort.Slice(all, func(i, j int) bool { return all[i].prefix < all[j].prefix })
-		crosses := func(a, b owned) bool {
-			if a.push == b.push {
-				return false // each field's own overlaps are checkPoolPrefixes'
-			}
-			push, head := a, b
-			if b.push {
-				push, head = b, a
-			}
-			holds := func(pool string) bool {
-				if push.pool == "" {
-					return contains(git.Pools, pool)
-				}
-				return pool == push.pool
-			}
-			if head.pool != "" {
-				return !holds(head.pool)
-			}
-			for _, pool := range api.Pools {
-				if !holds(pool) {
-					return true
-				}
-			}
-			return false
-		}
-	scan:
-		for i := range all {
-			for j := i + 1; j < len(all) && strings.HasPrefix(all[j].prefix, all[i].prefix); j++ {
-				if crosses(all[i], all[j]) {
-					push, head := all[i], all[j]
-					if all[j].push {
-						push, head = all[j], all[i]
-					}
-					out = append(out, pullRequestCrossing{git.Name, fmt.Errorf("repository %s: pull request prefix %q (%s) in entry %q overlaps push prefix %q (%s) in entry %q",
-						r.Repo, head.spelled, holder(head.pool), api.Name, push.spelled, holder(push.pool), git.Name)})
-					break scan
-				}
+		for j := range e.Git.Repos {
+			if e.Git.Repos[j].Repo == repo {
+				out = append(out, gitListing{e, &e.Git.Repos[j]})
 			}
 		}
 	}
@@ -975,9 +1193,11 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 // normalizeGitHubAPI checks a github-api repository's operations and their
 // parameters: every operation is in the vocabulary, each list holds distinct,
 // well-formed values, labels come exactly with pr.label, dispatch events
-// exactly with dispatch, and pull request prefixes only with an operation
-// that acts on an existing pull request.
-func (r *GitRepo) normalizeGitHubAPI() error {
+// exactly with dispatch, pull request prefixes only with an operation that
+// acts on an existing pull request, and each pool's own operations
+// (poolOperations) name a pool the entry grants and only operations the
+// repository has.
+func (r *GitRepo) normalizeGitHubAPI(pools []string) error {
 	if r.Operations != nil && len(r.Operations) == 0 {
 		return fmt.Errorf("repository %s: list at least one operation, or leave operations unset for the default", r.Repo)
 	}
@@ -1017,7 +1237,31 @@ func (r *GitRepo) normalizeGitHubAPI() error {
 	if err := check("label", r.Labels, labelPattern); err != nil {
 		return err
 	}
-	return check("dispatch event", r.DispatchEvents, eventPattern)
+	if err := check("dispatch event", r.DispatchEvents, eventPattern); err != nil {
+		return err
+	}
+	if r.PoolOperations != nil && len(r.PoolOperations) == 0 {
+		return fmt.Errorf("repository %s: list a pool with its operations, or leave poolOperations out", r.Repo)
+	}
+	for pool, ops := range r.PoolOperations {
+		if !contains(pools, pool) {
+			return fmt.Errorf("repository %s: operations for pool %q, which the entry does not grant", r.Repo, pool)
+		}
+		if len(ops) == 0 {
+			return fmt.Errorf("repository %s: list at least one operation for pool %q, or leave the pool out", r.Repo, pool)
+		}
+		seen := map[string]bool{}
+		for _, op := range ops {
+			if _, ok := githubOperations[op]; !ok || seen[op] {
+				return fmt.Errorf("repository %s: unknown or duplicate operation %q for pool %q", r.Repo, op, pool)
+			}
+			if !r.Allows(op) {
+				return fmt.Errorf("repository %s: operation %q for pool %q is not one of the repository's operations", r.Repo, op, pool)
+			}
+			seen[op] = true
+		}
+	}
+	return nil
 }
 
 // GitRequest is a matched git smart-HTTP request.
@@ -1027,8 +1271,13 @@ type GitRequest struct {
 	Write bool // receive-pack: the push service; for github-api, a POST
 	// RefPrefixes are, for a push, the refs it may create, update or delete:
 	// the repository's shared prefixes and the pool's own (PushPrefixes);
-	// none when the repository limits no ref.
+	// none when the repository limits no ref. A {requester} prefix among them
+	// matches nothing until ForRequester narrows it to one requester's.
 	RefPrefixes []string
+	// Limited marks a push to a repository that limits which refs a push may
+	// change: only refs under RefPrefixes, and none when ForRequester left no
+	// prefix (a requester with no branch segment of their own).
+	Limited bool
 	// OpensPullRequest marks a github-api request that opens a pull request;
 	// its head must start with one of HeadPrefixes, the pool's own push
 	// prefixes (none: no pull request may be opened).
@@ -1049,9 +1298,9 @@ type GitRequest struct {
 	Operation string
 	Method    string
 	// Target is the pull request a write acts on (comment, label, body edit,
-	// ready); the broker acts only when its head is under HeadPrefixes, which
-	// then also holds the repository's pull request prefixes, shared and the
-	// pool's own. CommentID is the comment an edit targets, which must be the
+	// ready, and a dispatch's, read from its body); the broker acts only when
+	// its head is under HeadPrefixes, which then also holds the repository's
+	// pull request prefixes, shared and the pool's own. CommentID is the comment an edit targets, which must be the
 	// App's own.
 	Target    int64
 	CommentID int64
@@ -1122,8 +1371,7 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 				return matched, true, ErrReadOnly
 			}
 			if write {
-				var limited bool
-				if matched.RefPrefixes, limited = r.PushPrefixes(pool); limited && len(matched.RefPrefixes) == 0 {
+				if matched.RefPrefixes, matched.Limited = r.PushPrefixes(pool); matched.Limited && len(matched.RefPrefixes) == 0 {
 					// The repository holds every pool to its own prefixes, and
 					// this pool has none: it may clone and fetch only.
 					return matched, true, ErrReadOnly
@@ -1149,9 +1397,12 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 // restarts exist only where the repository grants them; a CI restart also
 // needs the git entry a push would use to grant the pool branch prefixes,
 // which then hold its target's head (HeadPrefixes), and authorizes the
-// requester against that entry too (CloneEntry). Reviews, merging a pull
-// request, pushes through the API other than a CI restart's branch update
-// (which merges the base into the head) and everything else are unlisted.
+// requester against that entry too (CloneEntry). A repository dispatch names
+// its pull request in the body, which must be in the same reach. Reviews,
+// merging a pull request, pushes through the API other than a CI restart's
+// branch update (which merges the base into the head) and everything else are
+// unlisted. A pool uses only its own operations there (forPool): a route
+// whose operation the pool lacks is ErrPool.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -1206,6 +1457,12 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
+			// The pool's own operations (forPool) decide from here, so every
+			// check made of the request's repository holds the pool to them.
+			if r = c.forPool(r, pool); !r.Allows(route.op) {
+				return matched, true, ErrPool
+			}
+			matched.Repo = r
 			if route.code {
 				// A file list or compare returns code: only for a pool whose git
 				// entry lets it clone the repository, and only for a requester
@@ -1234,6 +1491,10 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 				if route.name == "comment" {
 					matched.CommentsOn = route.target
 				}
+			case route.name == "dispatch":
+				// The target comes from the body (client_payload.pr_number) and is
+				// held to the same reach as any other write's.
+				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 			case route.comment > 0:
 				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 			}
@@ -1261,7 +1522,7 @@ func (c Catalog) GitHubAPIRepos(host string, port int, pool string) ([]GitReques
 			continue
 		}
 		for _, r := range e.Git.Repos {
-			out = append(out, GitRequest{Entry: e, Repo: r, Write: true, Route: "graphql", Method: http.MethodPost,
+			out = append(out, GitRequest{Entry: e, Repo: c.forPool(r, pool), Write: true, Route: "graphql", Method: http.MethodPost,
 				Permissions: "pull-requests", HeadPrefixes: append(c.pushBranchPrefixes(r.Repo, pool), r.pullRequestHeads(pool)...)})
 		}
 	}
@@ -1507,7 +1768,7 @@ func (c Catalog) Match(host string, port int, method, path, pool string) (*Entry
 func (c Catalog) HasHost(host string, port int) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
-		if e.Kind != "postgres" && e.Host == host && e.Port == port {
+		if !databaseKind(e.Kind) && e.Host == host && e.Port == port {
 			return true
 		}
 		if e.BrowserSession != nil && e.BrowserSession.AppHost == host && e.Port == port {
@@ -1526,10 +1787,22 @@ func (c Catalog) HasHostForPool(host string, port int, pool string) bool {
 		if !contains(e.Pools, pool) {
 			continue
 		}
-		if e.Kind != "postgres" && e.Host == host && e.Port == port {
+		if !databaseKind(e.Kind) && e.Host == host && e.Port == port {
 			return true
 		}
 		if e.BrowserSession != nil && e.BrowserSession.AppHost == host && e.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+// HTTP2Host reports whether the entries on host and port take HTTP/2, so a
+// tunnel to it offers h2 and every other host keeps HTTP/1.1.
+func (c Catalog) HTTP2Host(host string, port int) bool {
+	host = strings.ToLower(host)
+	for _, e := range c.entries {
+		if e.HTTP2 && e.Host == host && e.Port == port {
 			return true
 		}
 	}
@@ -1727,7 +2000,17 @@ func (e *Entry) ForwardsHeader(name string) bool {
 	case "Accept", "Accept-Language", "Content-Type", "User-Agent":
 		return true
 	}
-	return contains(e.ForwardHeaders, name)
+	return e.forwardsGRPCHeader(name) || contains(e.ForwardHeaders, name)
+}
+
+// grpcForwardHeaders are the gRPC protocol headers a client sets and its
+// server reads: the call's deadline. The broker sets te and
+// grpc-accept-encoding itself and refuses a compressed request, so every
+// message it forwards or returns can be checked.
+var grpcForwardHeaders = []string{"Grpc-Timeout"}
+
+func (e *Entry) forwardsGRPCHeader(name string) bool {
+	return e.HTTP2 && contains(grpcForwardHeaders, name)
 }
 
 var (
@@ -1816,10 +2099,15 @@ func (e *Entry) validateTier() error {
 }
 
 // grantable is the CI rule: an entry above T0 is never granted to a pool that
-// cannot carry it. Without defined pools only T0 entries may be granted.
-func grantable(e Entry, p Pool, defined bool) error {
+// cannot carry it. Without defined pools only T0 entries may be granted. At
+// any tier, a git entry's {requester} push prefix goes only to a pool that
+// names who runs each request (requesterGrantable).
+func grantable(e Entry, name string, p Pool, defined bool) error {
 	if p.Ceiling == CeilingExternal {
 		return fmt.Errorf("a pool at the external ceiling holds no entries")
+	}
+	if err := requesterGrantable(e, name, p, defined); err != nil {
+		return err
 	}
 	rank := tierRank[e.Tier]
 	if rank == 0 {
@@ -1867,9 +2155,10 @@ func (e *Entry) Credential(v string) string {
 	return v
 }
 
-// CallerCredential is the only value a worker may send in Header: the
-// placeholder encoded as the key would be, and for a Basic pair, the
-// placeholder as both user name and password.
+// CallerCredential is the value a worker sends in Header: the placeholder
+// encoded as the key would be, and for a Basic pair, the placeholder as both
+// user name and password. A Basic pair also takes the stored user name with
+// the placeholder as password (CallerPairUser).
 func (e *Entry) CallerCredential() string {
 	if e.BasicPair {
 		return e.Credential(e.Placeholder + ":" + e.Placeholder)
@@ -1877,9 +2166,31 @@ func (e *Entry) CallerCredential() string {
 	return e.Credential(e.Placeholder)
 }
 
-// PairPassword is the password half of a Basic pair key, and false when v is
-// not "user:password" with both halves set, so a malformed key is never sent.
-func PairPassword(v string) (string, bool) {
-	user, password, ok := strings.Cut(v, ":")
-	return password, ok && user != "" && password != ""
+// CallerPairUser is the user name in value when value is Basic credentials
+// with a user name of the worker's own and the placeholder as password, as a
+// client given a pair's public key and, as its secret key, the placeholder
+// sends them. Basic pair entries only. The user half of a pair is not
+// secret; the broker serves the request only when it equals the stored one.
+func (e *Entry) CallerPairUser(value string) (string, bool) {
+	encoded, ok := strings.CutPrefix(value, "Basic ")
+	if !e.BasicPair || !ok {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
+		return "", false
+	}
+	user, ok := strings.CutSuffix(string(decoded), ":"+e.Placeholder)
+	if !ok || user == "" || strings.Contains(user, ":") {
+		return "", false
+	}
+	return user, true
+}
+
+// SplitPair is the user and password halves of a Basic pair key, and false
+// when v is not "user:password" with both halves set, so a malformed key is
+// never sent.
+func SplitPair(v string) (user, password string, ok bool) {
+	user, password, ok = strings.Cut(v, ":")
+	return user, password, ok && user != "" && password != ""
 }

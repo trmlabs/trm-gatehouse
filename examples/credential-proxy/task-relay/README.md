@@ -111,6 +111,38 @@ pairing, deadline, journal and connection limits. If any listener cannot start,
 the relay closes the others and exits. It starts accepting requests only after
 all listeners and browser policy are ready.
 
+### Graph databases over Bolt
+
+A sidecar (self mode only) can serve Memgraph and other Neo4j-compatible
+databases on one loopback Bolt port per broker, with `boltListeners`:
+
+```json
+"boltListeners": [{"listen": "127.0.0.1:17687", "upstream": {"address": "broker.example.internal:15443", "serverName": "broker.example.internal",
+  "caFile": "/etc/gatehouse/trust/ca.crt", "proofFile": "/var/run/gatehouse/proof/token", "audience": "gatehouse"},
+  "routes": "broker", "placeholder": "gatehouse-relay-placeholder"}]
+```
+
+Clients use a stock driver with `bolt://127.0.0.1:17687` (or `neo4j://`),
+basic auth, the catalog entry's name as the user and the placeholder as the
+password. The user name picks the route: `"routes": "broker"` forwards any
+name of 1 to 63 printable ASCII bytes with no space and leaves the decision to
+the broker's catalog, so a new entry needs no change to the worker; `entries`,
+in its place, is a fixed route table. The relay answers the version handshake
+itself (Bolt 5.2 or 4.3, the versions the broker speaks), reads HELLO and, from Bolt 5.1, LOGON,
+and refuses a wrong placeholder or an unrouted name with
+`Gatehouse.ClientError.Security.Unauthorized` before the broker is dialed, audited as
+`denied:placeholder` or `denied:no-entry`. A HELLO that carries a login from
+Bolt 5.1, or anything that is not a well-formed opening, is refused as
+`denied:bad-opening`. From Bolt 5.1 the relay answers HELLO itself, as the
+broker does, so a client may wait for that answer before sending LOGON; the
+broker's answer to the forwarded HELLO is dropped. Once admitted, the relay sends the session line,
+the client's own handshake bytes, the HELLO, and the login with exactly the
+scheme, the user name and its proof as the password. The broker must answer
+the version the relay agreed, and the relay holds the broker's answers to the
+opening until every one succeeds; a broker refusal is passed on and audited as
+`refused:<reason>`. After that the relay copies bytes both ways until the
+proof's expiry or the deadline. The broker refuses a second HELLO or LOGON.
+
 ### Shared proxy for many agents
 
 For a runtime whose agent Pods hold no token of their own (agent-sandbox), one relay Deployment serves every agent in the listed namespaces. Set `shared` instead of `sandbox` and `self`; `deadline` may be omitted:
@@ -123,7 +155,7 @@ For a runtime whose agent Pods hold no token of their own (agent-sandbox), one r
 "auditFile": "/dev/stdout"
 ```
 
-`profiles` maps each agent namespace to its harness profile, which every attestation names. A standing Deployment omits `deadline`. Without `tlsCertFile` and `tlsKeyFile` the listeners serve plaintext on the Pod network: the HTTP listener takes only CONNECT, so HTTPS stays end to end, a PostgreSQL client asking for TLS is told no (sslmode=prefer goes on, require stops), and every upstream to the broker is TLS regardless. `auditFile` may be `/dev/stdout` in shared mode only; admission rows name the agent Pod, its namespace, its Sandbox and the images it pulled. Images are judged on what the node pulled (`status.containerStatuses[].imageID`, init containers included): each must lie under its namespace's `imagePrefixes` path (`us-central1-docker.pkg.dev/<project>/<repository>/` or `.../<repository>/<tenant>/`, never overlapping) or match an exact `imageDigests` entry, which is for containers the platform injects. Today `<project>` must be the one Artifact Registry project built into the broker; any other registry or project is refused when the configuration loads. A later change makes the project configurable. The relay lists and watches Pods in those namespaces (its Role needs `get`, `list` and `watch` on `pods` there), so admitting a connection costs no API call. It matches each connection's source address to exactly one Pod that is Running, not deleting, not on the host network, with no ephemeral container, controlled by `ownerKind` at `ownerAPIVersion` with `blockOwnerDeletion`, running only listed images, and inside `maxPodSeconds` (or its `activeDeadlineSeconds`). It then presents its own projected token with an attestation of that Pod: the `Gatehouse-Attestation` CONNECT header, or a `GHATTS1` line ahead of the PostgreSQL startup. Every second it rechecks each open connection's Pod and closes the connection when the Pod or its controller's UID changes or the Pod stops qualifying. A namespace whose watch has been down for more than 10 seconds admits nothing; a silent stream counts as down after 75 seconds. Node addresses never match: only Pod addresses are indexed, and host-network Pods are refused. A client that sends its own attestation, session or PROXY line is refused. Listeners serve TLS on any address; session files and the browser are refused. The broker side is a proxy binding (see the identity reference). Scale with replicas; `maxConnections` bounds one replica.
+`profiles` maps each agent namespace to its harness profile, which every attestation names. A standing Deployment omits `deadline`. Without `tlsCertFile` and `tlsKeyFile` the listeners serve plaintext on the Pod network: the HTTP listener takes only CONNECT, so HTTPS stays end to end, a PostgreSQL client asking for TLS is told no (sslmode=prefer goes on, require stops), and every upstream to the broker is TLS regardless. `auditFile` may be `/dev/stdout` in shared mode only; admission rows name the agent Pod, its namespace, its Sandbox and the images it pulled. Images are judged on what the node pulled (`status.containerStatuses[].imageID`, init containers included): each must lie under its namespace's `imagePrefixes` path (one repository, `<registry><repository>/`, or one tenant path in it, `<registry><repository>/<tenant>/`, never overlapping, where `<registry>` is `AGENT_VAULT_IMAGE_REGISTRY`) or match an exact `imageDigests` entry, which is for containers the platform injects. A prefix outside that registry is refused when the configuration loads, and with the variable unset every prefix is. The relay lists and watches Pods in those namespaces (its Role needs `get`, `list` and `watch` on `pods` there), so admitting a connection costs no API call. It matches each connection's source address to exactly one Pod that is Running, not deleting, not on the host network, with no ephemeral container, controlled by `ownerKind` at `ownerAPIVersion` with `blockOwnerDeletion`, running only listed images, and inside `maxPodSeconds` (or its `activeDeadlineSeconds`). It then presents its own projected token with an attestation of that Pod: the `Gatehouse-Attestation` CONNECT header, or a `GHATTS1` line ahead of the PostgreSQL startup. Every second it rechecks each open connection's Pod and closes the connection when the Pod or its controller's UID changes or the Pod stops qualifying. A namespace whose watch has been down for more than 10 seconds admits nothing; a silent stream counts as down after 75 seconds. Node addresses never match: only Pod addresses are indexed, and host-network Pods are refused. A client that sends its own attestation, session or PROXY line is refused. Listeners serve TLS on any address; session files and the browser are refused. The broker side is a proxy binding (see the identity reference). Scale with replicas; `maxConnections` bounds one replica.
 
 `requesterNamespaces` lists the namespaces whose attestations name the person behind the agent: the Pod's `gatehouse.trmlabs.com/requester` annotation, which admission policy there fixes to the Sandbox creator's login. It must be a lower-case `name@domain`; a Pod in such a namespace without one is not admitted, an open connection ends if it changes, and admission rows carry it. Elsewhere the attestation never names a requester.
 
@@ -160,6 +192,7 @@ The relay writes a structured JSON log to stderr, apart from its audit trail. Ev
 |---|---|---|
 | HTTP | CONNECT to an exact approved host:port, without proxy credentials | Injects fresh proof into the fixed broker connection; returns no broker headers. The inner HTTPS request still follows the broker's approved placeholder and read-only policy. |
 | PostgreSQL | Fixed database/user and the configured public placeholder password | Replaces the password with proof; keeps actual database credentials at the broker. Preserves optional `client_encoding=UTF8`, a printable ASCII `application_name` of at most 63 bytes, and a positive decimal `statement_timeout` in milliseconds (at most 2147483647). Other startup fields are denied. The broker applies these three bounds too, plus a control-character and length bound on the other client settings it forwards, and drops a value that fails, so a caller reaching the broker directly cannot use the startup packet to clear or extend a role-level limit such as `statement_timeout` either. In-session `SET` remains governed by the role's SQL permissions. |
+| Bolt | Basic auth with a routed catalog entry name as the user and the configured public placeholder password | Replaces the password with proof in HELLO (below Bolt 5.1) or LOGON; drops any other credential keys; forwards the rest of the opening unchanged. |
 | Browser | POST `{}` with `Content-Type: application/json` to the fixed relay route | Uses one fixed task and a private broker session handle; returns only readiness, a boolean check or closure. |
 
 All relay listeners use native TLS so the actual peer address survives. A

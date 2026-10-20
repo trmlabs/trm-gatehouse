@@ -69,6 +69,19 @@ func newGitFixture(t *testing.T) *gitFixture {
 // granting pools whose example-app binding carries push.
 func newGitFixtureFor(t *testing.T, pools, push string) *gitFixture {
 	t.Helper()
+	return newGitFixtureCatalog(t, func(port int) string {
+		return fmt.Sprintf(`{"entries":[{"name":"github","host":"example.com","port":%d,"kind":"git","pools":%s,
+		"git":{"appID":7,"installationID":42,"repos":[
+			{"repo":"example-org/example-app","access":"write",%s},
+			{"repo":"example-org/docs","access":"read"}]}}]}`, port, pools, push)
+	}, nil)
+}
+
+// newGitFixtureCatalog serves the catalog catalogFor builds for the fake
+// GitHub's port, with configure (when set) adding to the broker's adapter,
+// such as the runner that verifies person sessions.
+func newGitFixtureCatalog(t *testing.T, catalogFor func(port int) string, configure func(*HeaderAdapter)) *gitFixture {
+	t.Helper()
 	backend := filepath.Join(strings.TrimSpace(mustOutput(t, "git", "--exec-path")), "git-http-backend")
 	if _, err := os.Stat(backend); err != nil {
 		t.Skip("git http-backend not available")
@@ -135,10 +148,7 @@ func newGitFixtureFor(t *testing.T, pools, push string) *gitFixture {
 	t.Cleanup(github.Close)
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(github.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
-	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github","host":"example.com","port":%d,"kind":"git","pools":%s,
-		"git":{"appID":7,"installationID":42,"repos":[
-			{"repo":"example-org/example-app","access":"write",%s},
-			{"repo":"example-org/docs","access":"read"}]}}]}`, f.port, pools, push)))
+	catalog, err := httpcatalog.Parse([]byte(catalogFor(f.port)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +157,9 @@ func newGitFixtureFor(t *testing.T, pools, push string) *gitFixture {
 	proxyURL, _, p := setupProxy(t, validTokenResolver("workload-token", scope), &fakeCredProvider{}, func(o *Options) {
 		o.StrictCredentialProxy = true
 		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{}, Audit: f.audit, GitTokens: minter, Decoys: f.decoys}
+		if configure != nil {
+			configure(o.HeaderAdapter)
+		}
 	})
 	p.upstream.TLSClientConfig.RootCAs = github.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	githubAddr := strings.TrimPrefix(github.URL, "https://")
@@ -384,9 +397,10 @@ func TestReceivePackCommandParsing(t *testing.T) {
 	zero, one := strings.Repeat("0", 40), strings.Repeat("a", 40)
 	pkt := func(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 	body := pkt("shallow "+one+"\n") + pkt(zero+" "+one+" refs/heads/cursor/a\x00report-status side-band-64k\n") + pkt(one+" "+zero+" refs/heads/cursor/b\n") + "0000PACK..."
-	consumed, refs, err := readReceivePackCommands(strings.NewReader(body))
-	if err != nil || strings.Join(refs, ",") != "refs/heads/cursor/a,refs/heads/cursor/b" || string(consumed)+"PACK..." != body {
-		t.Fatalf("parse: %v %v", refs, err)
+	consumed, refs, capabilities, err := readReceivePackCommands(strings.NewReader(body), httpcatalog.DefaultMaxPushCommandBytes)
+	if err != nil || strings.Join(refs, ",") != "refs/heads/cursor/a,refs/heads/cursor/b" || string(consumed)+"PACK..." != body ||
+		strings.Join(capabilities, " ") != "report-status side-band-64k" {
+		t.Fatalf("parse: %v %v %v", refs, capabilities, err)
 	}
 	for name, bad := range map[string]string{
 		"push certificate": pkt("push-cert\x00caps\n") + "0000",
@@ -395,8 +409,21 @@ func TestReceivePackCommandParsing(t *testing.T) {
 		"bad length":       "00zz",
 		"truncated":        pkt(zero + " " + one + " refs/heads/x\n")[:10],
 	} {
-		if _, _, err := readReceivePackCommands(strings.NewReader(bad)); err == nil {
+		if _, _, _, err := readReceivePackCommands(strings.NewReader(bad), httpcatalog.DefaultMaxPushCommandBytes); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+	// The default clears 10,000 refs in one push; a list past the entry's
+	// limit is refused.
+	var many strings.Builder
+	for i := range 10000 {
+		many.WriteString(pkt(zero + " " + one + " refs/heads/cursor/pool-a/alice@example.com/branch-" + strconv.Itoa(i) + "\n"))
+	}
+	many.WriteString("0000")
+	if _, refs, _, err := readReceivePackCommands(strings.NewReader(many.String()), httpcatalog.DefaultMaxPushCommandBytes); err != nil || len(refs) != 10000 {
+		t.Errorf("10,000 refs: %d %v", len(refs), err)
+	}
+	if _, _, _, err := readReceivePackCommands(strings.NewReader(many.String()), 1<<20); err == nil {
+		t.Error("a command list over the limit was accepted")
 	}
 }

@@ -13,30 +13,32 @@ import (
 // Automation that started the run (the run token's automation_id). A new
 // Automation is one block of catalog data, never a new pool, image or
 // deployment.
+//
+// Its access is its own: the entries listed here, which the catalog's review
+// approves. No person's groups or account decide it, whoever the run's token
+// names, so a run with no person behind it is served the same entries.
 type Automation struct {
 	// ID is the vendor's automation id, as the run token carries it.
 	ID string `json:"id"`
 	// Name is a short label for audit rows and logs.
 	Name string `json:"name"`
-	// Owner is the email of the person accountable for the Automation. Its
-	// requests are decided on the owner's account: it never reaches what the
-	// owner could not, and it stops, at every tier, when the owner's account
-	// is disabled.
+	// Owner names the team accountable for the Automation, for audit rows and
+	// alerts: a directory group's name or object id. A catalog written before
+	// owners named teams may still give a person's lower-case email, read as
+	// the team's contact. It decides no access.
 	Owner string `json:"owner"`
-	// RunnerGroup is refused at load: a group allowed to run the Automation
-	// on the owner's account would limit who runs it only if Cursor named
-	// the person who set off each run, and the run tokens seen so far name
-	// only the owner. Only runs whose token names the owner are served. The
-	// field is declared so a catalog that sets it gets that reason, not an
-	// unknown-field error.
+	// RunnerGroup is refused at load: who sets off a run decides nothing, so
+	// a group of allowed runners would limit no one. The field is declared so
+	// a catalog that sets it gets that reason, not an unknown-field error.
 	RunnerGroup string `json:"runnerGroup,omitempty"`
 	// Entries are the catalog entries the Automation may use. Each must also
-	// be granted to the pool its runs land on.
+	// be granted to the pool its runs land on, whose ceiling caps their tier.
 	Entries []string `json:"entries"`
 }
 
-// automationOwner is a plain lower-case email address.
-var automationOwner = regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+// automationContact is a plain lower-case email address: an owner as
+// catalogs named it before owners named teams.
+var automationContact = regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 
 // validate checks one Automation on its own and sorts its entries, so Uses is
 // a binary search. Whether each entry exists is checked against the catalog.
@@ -47,11 +49,14 @@ func (a *Automation) validate() error {
 	if !idPattern.MatchString(a.Name) {
 		return errors.New("name must be a short identifier")
 	}
-	if len(a.Owner) > 254 || !automationOwner.MatchString(a.Owner) {
-		return errors.New("owner must be a lower-case email address")
+	// A plain identifier covers a group's object id and a name without
+	// spaces; an audit row holds no space, so a group whose name has one is
+	// named by its id.
+	if !idPattern.MatchString(a.Owner) && (len(a.Owner) > 254 || !automationContact.MatchString(a.Owner)) {
+		return errors.New("owner must name a team: a group's name (letters, digits, '.', '_' or '-') or object id, or a lower-case contact email")
 	}
 	if a.RunnerGroup != "" {
-		return errors.New("runnerGroup is not accepted: run tokens name only the owner, so it would limit no one")
+		return errors.New("runnerGroup is not accepted: an Automation is served its own entries whoever runs it, so it would limit no one")
 	}
 	if len(a.Entries) == 0 {
 		return errors.New("entries must name at least one catalog entry")
@@ -120,5 +125,5 @@ func (p Pool) Automation(id string) (Automation, bool) {
 }
 
 // IdentityCursorAutomation is the pool identity whose runs are decided per
-// Automation.
+// Automation, on its own entries.
 const IdentityCursorAutomation = "cursor-automation"

@@ -176,7 +176,7 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 		}
 		return bind(address)
 	}
-	failures := make(chan error, 4+len(c.postgresBindings()))
+	failures := make(chan error, 4+len(c.postgresBindings())+len(c.PostgresListeners)+len(c.BoltListeners))
 	var start []func()
 	startHTTP := func(l net.Listener, h http.Handler) {
 		tracked := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -261,21 +261,30 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 		}
 		servePostgres(l, func(conn net.Conn) { r.postgres(conn, binding, nil) })
 	}
-	if pl := c.PostgresListener; pl != nil {
+	// A routed listener takes the database from the client's startup: the
+	// shared proxy's one port, or each of a sidecar's ports, one per broker.
+	routed := append([]PostgresListenerConfig(nil), c.PostgresListeners...)
+	if c.PostgresListener != nil {
+		routed = append(routed, *c.PostgresListener)
+	}
+	for i := range routed {
+		pl := &routed[i]
 		l, e := bindPostgres(pl.Listen)
 		if e != nil {
 			return errConfig
 		}
-		route := brokerRouteDatabase
-		if pl.Routes != routesBroker {
-			catalog := make(map[string]bool, len(pl.Databases))
-			for _, name := range pl.Databases {
-				catalog[name] = true
-			}
-			route = func(name string) bool { return catalog[name] }
-		}
+		route := routeNames(pl.Routes, pl.Databases, brokerRouteDatabase)
 		binding := pl.route("")
 		servePostgres(l, func(conn net.Conn) { r.postgres(conn, binding, route) })
+	}
+	for i := range c.BoltListeners {
+		bl := &c.BoltListeners[i]
+		l, e := bind(bl.Listen)
+		if e != nil {
+			return errConfig
+		}
+		route := routeNames(bl.Routes, bl.Entries, brokerRouteDatabase)
+		servePostgres(l, func(conn net.Conn) { r.bolt(conn, bl, route) })
 	}
 	if c.Browser != nil {
 		bc := c.Browser

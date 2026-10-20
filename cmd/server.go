@@ -31,6 +31,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/crypto"
 	"github.com/Infisical/agent-vault/internal/hashicorp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
+	"github.com/Infisical/agent-vault/internal/imagerule"
 	"github.com/Infisical/agent-vault/internal/infisical"
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/netguard"
@@ -117,6 +118,10 @@ var serverCmd = &cobra.Command{
 		if err := checkShutdownSeconds(os.Getenv); err != nil {
 			return err
 		}
+		if err := imagerule.SetRegistry(os.Getenv(imagerule.RegistryEnv)); err != nil {
+			return err
+		}
+		httpcatalog.EmailClaim.Store(os.Getenv("AGENT_VAULT_AUTOMATED_AUTH_EMAIL_CLAIM"))
 		logger := buildLogger(logLevel)
 
 		// --- Detached child path: read master key + initialized flag from stdin pipe ---
@@ -298,6 +303,8 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 			DrainTunnels:          drainSeconds > 0,
 			// Pending or active credential-proxy tunnels per replica.
 			MaxCredentialProxyTunnels: intEnvValue("AGENT_VAULT_MITM_MAX_TUNNELS"),
+			// Concurrent requests on one HTTP/2 tunnel (gRPC destinations).
+			HTTP2MaxStreams: intEnvValue("AGENT_VAULT_MITM_HTTP2_MAX_STREAMS"),
 		},
 	))
 	return nil
@@ -648,6 +655,12 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 			return fmt.Errorf("postgres broker authorization: %w", err)
 		}
 		opts.Databases = server.NewCatalogDatabaseResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore()))
+		// Graph databases (Bolt) arrive on this listener too.
+		opts.Graphs = server.NewCatalogGraphResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore()))
+		opts.GraphLogins = server.NewVaultGraphLogins(&httpcatalog.Keys{Vault: client.Logical()})
+	}
+	if v := intEnvValue("AGENT_VAULT_BOLT_MAX_MESSAGE_BYTES"); v > 0 {
+		opts.MaxBoltMessageBytes = v
 	}
 	if chain, err := sharedAuditChain(context.Background(), client, srv.CleanupStore(), os.Getenv, logger); err != nil {
 		return fmt.Errorf("postgres broker audit: %w", err)

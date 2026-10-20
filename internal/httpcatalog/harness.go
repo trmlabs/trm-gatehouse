@@ -67,8 +67,8 @@ type HarnessIdentity struct {
 	Namespaces   []string `json:"namespaces"`
 	ImageDigests []string `json:"imageDigests,omitempty"`
 	// ImagePrefix, proxy-attested only, admits any image pulled from under
-	// this agent-sandbox repository path; ImageDigests then holds only the
-	// platform's own containers, and may be empty.
+	// this repository path in the agent image registry; ImageDigests then
+	// holds only the platform's own containers, and may be empty.
 	ImagePrefix string            `json:"imagePrefix,omitempty"`
 	Requester   *HarnessRequester `json:"requester,omitempty"` // optional
 }
@@ -95,7 +95,7 @@ type HarnessPath struct {
 // HarnessAuthorization decides access for the "pool" (its ceiling and fixed
 // entitlements), for the "person" behind each session (their groups), or for
 // the "automation" that started each run (the entries the catalog lists for
-// it, decided on its owner's account).
+// it, and nothing about a person).
 // PoolName is the catalog pool the harness's agents are admitted into.
 type HarnessAuthorization struct {
 	Mode     string `json:"mode"`
@@ -171,7 +171,7 @@ func (h Harness) validate() error {
 		seen[ns] = true
 	}
 	if id.ImagePrefix != "" && (id.Kind != IdentityProxyAttested || !imagerule.ValidPrefix(id.ImagePrefix)) {
-		return errors.New("identity.imagePrefix is for proxy-attested harnesses: an agent-sandbox repository or tenant path ending in /")
+		return errors.New("identity.imagePrefix is for proxy-attested harnesses: a repository or tenant path under AGENT_VAULT_IMAGE_REGISTRY, ending in /")
 	}
 	// No upper bound on digests: each is short and fixed-size, and the
 	// catalog's own size limit bounds the list.
@@ -247,13 +247,12 @@ func (h Harness) validate() error {
 			return errors.New("a proxy-attested harness names exactly one namespace")
 		}
 	}
-	// The broker reads Pods only in its own cluster, so an agent in another
-	// cluster is attested by a proxy there, whose keys are fetched remotely.
+	// An agent in another cluster is verified by that cluster's keys: a
+	// shared proxy there attests its agents, and a sidecar there is admitted
+	// directly only where the broker's identity configuration reads that
+	// cluster's Pods (a trust domain's pods), which refuses it otherwise.
 	if h.Path.CrossCluster != (td.Keys != KeysInCluster) {
 		return errors.New("a cross-cluster path uses another cluster's keys (remote or pinned), and only it does")
-	}
-	if h.Path.CrossCluster && id.Kind != IdentityProxyAttested {
-		return errors.New("a cross-cluster harness must be proxy-attested")
 	}
 	return nil
 }

@@ -318,8 +318,10 @@ func (p *livePod) images() []string {
 
 // deadline returns when the Pod's admission ends, or the zero time if it is
 // not an admissible pool Pod right now. refusedContainer names the container
-// when an unlisted image is the reason, for the operational log.
-func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, now time.Time) (end time.Time, refusedContainer string) {
+// when an unlisted image is the reason, for the operational log. A remote
+// Pod's address is not compared with the peer: across clusters the peer is a
+// load balancer (see RemotePods).
+func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, remote bool, now time.Time) (end time.Time, refusedContainer string) {
 	k := c.Kubernetes
 	m := p.Metadata
 	if m.UID != k.Pod.UID || m.Name != k.Pod.Name || m.Namespace != k.Namespace || m.DeletionTimestamp != nil ||
@@ -331,7 +333,7 @@ func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, now time.Time)
 	for _, ip := range p.Status.PodIPs {
 		addresses = append(addresses, ip.IP)
 	}
-	matched := false
+	matched := remote
 	for _, a := range addresses {
 		if parsed, err := netip.ParseAddr(a); err == nil && parsed == peer {
 			matched = true
@@ -432,18 +434,23 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 	if binding.Proxy != nil {
 		return r.attestProxied(ctx, binding, c, d, peer, attestation, renewal)
 	}
-	// Only a proxy binding may vouch for another Pod.
-	if attestation != "" || d.remote {
+	// Only a proxy binding may vouch for another Pod, and a remote cluster's
+	// sidecar is admitted only where the broker reads that cluster's Pods.
+	if attestation != "" || (d.remote && d.pods == nil) {
 		return nil, brokercore.Denied("attestation_not_proxy")
 	}
 	if len(binding.OwnerUIDs) == 0 {
 		return r.ResolveForProxy(ctx, token, "")
 	}
+	read := r.api
+	if d.remote {
+		read = d.pods
+	}
 	var pod livePod
-	if r.api(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(k.Namespace)+"/pods/"+url.PathEscape(k.Pod.Name), nil, &pod) != nil {
+	if read(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(k.Namespace)+"/pods/"+url.PathEscape(k.Pod.Name), nil, &pod) != nil {
 		return nil, brokercore.Denied("pod_unreadable")
 	}
-	notAfter, refusedContainer := pod.deadline(binding, c, peer, r.now())
+	notAfter, refusedContainer := pod.deadline(binding, c, peer, d.remote, r.now())
 	if refusedContainer != "" {
 		r.logger.Warn("workloadidentity: pool Pod refused", "reason", "image_not_allowed", "container", refusedContainer,
 			"namespace", k.Namespace, "pod", k.Pod.Name)

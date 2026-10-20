@@ -104,6 +104,17 @@ jobs:
       - name: Run tests
         run: go test -race -count=1 ./...
 
+      # The leak check's name list is the operator's, so it lives in a
+      # repository secret rather than in this public repository; a secret is
+      # also masked in the public log. A fork's pull request gets no secrets
+      # and checks hostnames, addresses and IDs only; the push to main checks
+      # the list.
+      - name: Check for internal names
+        env:
+          LEAKCHECK_DENIED_TOKENS: ${{ secrets.LEAKCHECK_DENIED_TOKENS }}
+          LEAKCHECK_REQUIRED: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: go test -count=1 -run TestNoInternalNames ./internal/leakcheck/
+
       # The e2e build (the Kind fixture's) compiles extra files; vet all of it
       # and test every package that has e2e-only code.
       - name: Vet and test the e2e build

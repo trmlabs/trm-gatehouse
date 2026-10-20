@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -36,7 +37,7 @@ type SharedConfig struct {
 	// agent Pod, such as Sandbox and agents.x-k8s.io/v1beta1.
 	OwnerKind       string `json:"ownerKind"`
 	OwnerAPIVersion string `json:"ownerAPIVersion"`
-	// ImagePrefixes maps a namespace to the agent-sandbox repository path its
+	// ImagePrefixes maps a namespace to the agent image registry path its
 	// agents' images are pulled from (see imagerule.ValidPrefix). ImageDigests
 	// are exact digests allowed in every namespace, for containers the
 	// platform injects. Each container must match one or the other, judged on
@@ -110,8 +111,13 @@ func (s *SharedConfig) validate() error {
 		}
 	}
 	for ns, prefix := range s.ImagePrefixes {
-		if s.Profiles[ns] == "" || !imagerule.ValidPrefix(prefix) {
+		if s.Profiles[ns] == "" {
 			return errConfig
+		}
+		// The registry setting is the one a deployment most often misses,
+		// so this refusal names it.
+		if !imagerule.ValidPrefix(prefix) {
+			return fmt.Errorf("%w: imagePrefixes[%q] must be a repository or tenant path under %s", errConfig, ns, imagerule.RegistryEnv)
 		}
 		for other, otherPrefix := range s.ImagePrefixes {
 			if other != ns && imagerule.Overlap(prefix, otherPrefix) {
@@ -137,8 +143,11 @@ func (s *SharedConfig) connections() int {
 // validateShared allows TLS listeners on any address, Kubernetes access for
 // the Pod cache, no pairing, no browser and no session files.
 func (c FixedConfig) validateShared(now time.Time) error {
-	if c.Self || c.Browser != nil || c.Sandbox != (SandboxConfig{}) || c.Shared.validate() != nil {
+	if c.Self || c.Browser != nil || c.Sandbox != (SandboxConfig{}) {
 		return errConfig
+	}
+	if e := c.Shared.validate(); e != nil {
+		return e
 	}
 	// Plaintext listeners are allowed (no certificate and no key) on the Pod
 	// network; the HTTP listener takes CONNECT only, so HTTPS stays end to
@@ -187,16 +196,8 @@ func (c FixedConfig) validateShared(now time.Time) error {
 		return errConfig
 	}
 	if l := c.PostgresListener; l != nil {
-		if check(l.Listen, l.Upstream) != nil || (l.Routes != "" && l.Routes != routesBroker) || (l.Routes == routesBroker) == (len(l.Databases) != 0) ||
-			!safeName.MatchString(l.User) || !safeName.MatchString(l.Placeholder) {
+		if check(l.Listen, l.Upstream) != nil || !l.validRoutes() || !safeName.MatchString(l.User) || !safeName.MatchString(l.Placeholder) {
 			return errConfig
-		}
-		seen := make(map[string]bool, len(l.Databases))
-		for _, name := range l.Databases {
-			if !safeName.MatchString(name) || seen[name] {
-				return errConfig
-			}
-			seen[name] = true
 		}
 	}
 	if len(used) == 0 {

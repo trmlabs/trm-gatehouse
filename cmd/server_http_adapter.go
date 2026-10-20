@@ -19,7 +19,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/netguard"
 	"github.com/Infisical/agent-vault/internal/server"
-	"golang.org/x/oauth2/google"
 )
 
 var sharedCatalog struct {
@@ -48,7 +47,7 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready 
 	if sharedCatalog.started {
 		return sharedCatalog.source, nil
 	}
-	if err := catalogEnvironment(getenv); err != nil {
+	if err := catalogSettings(getenv); err != nil {
 		return nil, err
 	}
 	testPlaintextDatabases(getenv, logger)
@@ -161,7 +160,8 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 		return nil, fmt.Errorf("requires AGENT_VAULT_AUDIT_CHAIN")
 	}
 	keys := &httpcatalog.Keys{Vault: client.Logical()}
-	adapter := &mitm.HeaderAdapter{Catalog: source, Keys: keys, Audit: chain}
+	certs := &httpcatalog.ClientCertificates{Vault: client.Logical()}
+	adapter := &mitm.HeaderAdapter{Catalog: source, Keys: keys, Audit: chain, ClientCertificates: certs}
 	if err := attachAuthorization(adapter, getenv); err != nil {
 		return nil, err
 	}
@@ -181,21 +181,11 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 		}}
 	adapter.BrowserTokens = browserTokens
 	source.OnChange(browserTokens.Prune)
-	githubEntries, gcpEntries := false, false
+	githubEntries := false
 	for _, e := range source.Current().Entries() {
 		githubEntries = githubEntries || e.Kind == "git" || e.Kind == "github-api"
-		gcpEntries = gcpEntries || e.Kind == "gcp"
 	}
-	if gcpEntries {
-		// The broker's own Workload Identity is the root; per-entry tokens are
-		// downscoped from it or minted for the entry's service account.
-		root, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
-		if err != nil {
-			return nil, fmt.Errorf("gcp catalog entries need the broker's Google identity: %w", err)
-		}
-		adapter.GCPTokens = &httpcatalog.GCPTokens{Root: root, Client: &http.Client{Timeout: 10 * time.Second,
-			Transport: &http.Transport{DialContext: netguard.SafeDialContext(netguard.AllowPrivateFromEnv()), TLSHandshakeTimeout: 5 * time.Second}}}
-	}
+	attachGoogleMinter(adapter, source, func() *httpcatalog.GCPTokens { return googleTokens(ctx, srv.Logger()) })
 	signer, err := githubAppSigner(client, getenv)
 	switch {
 	case err == nil:
@@ -247,7 +237,7 @@ func auth0Client(catalog interface{ Current() httpcatalog.Catalog }, dial func(c
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-// automatedAuthClient is how browser-session test users sign in through TRM's
+// automatedAuthClient is how browser-session test users sign in through an
 // automated-auth service: over the guarded dialer, to a service address the
 // current catalog names and nowhere else, never following a redirect. The
 // service drives a real login page, so a sign-in takes tens of seconds.
@@ -302,21 +292,26 @@ func catalogEnvironment(getenv func(string) string) error {
 
 // githubAppSigner signs App JWTs with the App key imported into Transit, so
 // the key never leaves Vault. AGENT_VAULT_GITHUB_APP_KV_PATH selects the
-// fallback, a PEM on the gatehouse KV mount read into the broker per signature.
+// fallback, a PEM on the broker's KV mount (AGENT_VAULT_KV_MOUNT) read into
+// the broker per signature.
 func githubAppSigner(client *hashicorp.Client, getenv func(string) string) (githubapp.JWTSigner, error) {
 	if key := getenv("AGENT_VAULT_GITHUB_APP_TRANSIT_KEY"); key != "" {
 		mount := getenv("AGENT_VAULT_GITHUB_APP_TRANSIT_MOUNT")
 		if mount == "" {
 			mount = "transit"
 		}
-		// The same shapes the catalog's Terraform module accepts.
+		// Names that are safe inside a Vault policy path.
 		if !transitKeyName.MatchString(key) || !httpcatalog.ValidMount(mount) {
 			return nil, fmt.Errorf("AGENT_VAULT_GITHUB_APP_TRANSIT_KEY or _MOUNT has an invalid name")
 		}
 		return githubapp.TransitSigner{Vault: client.Logical(), Mount: mount, Key: key}, nil
 	}
 	if path := getenv("AGENT_VAULT_GITHUB_APP_KV_PATH"); path != "" {
-		return githubapp.KVSigner{Vault: client.Logical(), Mount: "gatehouse", Path: path, Field: "private_key"}, nil
+		mount, err := kvMount(getenv)
+		if err != nil {
+			return nil, err
+		}
+		return githubapp.KVSigner{Vault: client.Logical(), Mount: mount, Path: path, Field: "private_key"}, nil
 	}
 	return nil, fmt.Errorf("git catalog entries require AGENT_VAULT_GITHUB_APP_TRANSIT_KEY or AGENT_VAULT_GITHUB_APP_KV_PATH")
 }

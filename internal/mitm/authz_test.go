@@ -88,7 +88,7 @@ func TestAuthorizeModel(t *testing.T) {
 	for _, c := range cases {
 		event := auditchain.Event{}
 		ctx := withSessionToken(context.Background(), c.token)
-		got := p.authorize(ctx, &brokercore.ProxyScope{Pool: c.pool, AgentID: "a", WorkloadID: "pod-a"}, c.entry, &event)
+		_, got := p.authorize(ctx, &brokercore.ProxyScope{Pool: c.pool, AgentID: "a", WorkloadID: "pod-a"}, c.entry, &event)
 		if got != c.want {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}

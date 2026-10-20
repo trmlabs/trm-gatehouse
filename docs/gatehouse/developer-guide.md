@@ -24,6 +24,7 @@ agent-vault broker-catalog validate --require-pools --environment staging catalo
 | To reach | `kind` | You also need |
 |---|---|---|
 | A PostgreSQL database | `postgres` | A Vault database role for it, ending `-readonly` or `-readwrite` |
+| A Memgraph graph database, read-only or with writes | `memgraph` | A login for the broker in a Vault key-value secret. See [graph databases](graph-databases.md). |
 | An HTTP API with a key | (leave unset) | The key, written by an operator to a Vault key-value mount the broker can read |
 | A GitHub repository (clone, push) | `git` | A GitHub App, installed on the repository |
 | Opening and commenting on GitHub pull requests | `github-api` | The same App |
@@ -36,7 +37,7 @@ once the `REPLACE` value and the group ID are real:
 
 ```yaml
 pools:
-  - {name: cursor-agents, namespace: cursor-agents, serviceAccount: cursor-worker}
+  - {name: example-agents, namespace: example-agents, serviceAccount: example-worker}
   - name: claude-developers                # sessions that name a person
     namespace: claude-developers
     serviceAccount: worker
@@ -48,7 +49,7 @@ entries:
   - name: appdb                            # a database
     kind: postgres
     host: db.example.com
-    pools: [cursor-agents]
+    pools: [example-agents]
     postgres: {database: app, mount: database, role: staging.us.example.app-readonly}
 
   - name: search-api                       # an HTTP API; tier T0 by default
@@ -58,12 +59,12 @@ entries:
     header: X-Api-Key
     placeholder: __vault_SEARCH_KEY__
     key: {mount: gatehouse, path: vendors/search-api, field: key}
-    pools: [cursor-agents]
+    pools: [example-agents]
 
   - name: example-repo                     # a repository; pushes only under cursor/
     kind: git
     host: github.com
-    pools: [cursor-agents]
+    pools: [example-agents]
     # appID and installationID come from the GitHub App installation
     git: {appID: 123456, installationID: 7890123, repos: [{repo: example-org/example-repo, access: write, refPrefixes: [refs/heads/cursor/]}]}
 
@@ -86,8 +87,13 @@ catalog, and checks again on every request.
 | Tier | Who may use it |
 |---|---|
 | T0 (default) | Any worker in a granted pool, including a pool with no person behind its agents |
-| T1 | A verified person in every group the entry `requires`, from a person pool (a Claude session, a Cursor run or an agent-sandbox Pod that names the person); or an automation pool whose fixed groups include them all. Never a pool with no person behind it. |
+| T1 | A verified person in every group the entry `requires`, from a person pool (a Claude session, a Cursor run or an agent-sandbox Pod that names the person); or a workload pool whose fixed groups include them all. Never a pool with no person behind it. |
 | T2 | As T1, from a person pool only, with the groups granted for a limited time |
+
+The table covers person and workload pools. A Cursor Automation, on a
+`cursor-automation` pool, may use the entries the catalog lists for it, at
+any tier up to that pool's ceiling, with no group check, whoever's run it is.
+See [broker catalog](broker-catalog.md).
 
 `gcp` entries are always T1 or T2. Gatehouse looks up a person's groups in
 Microsoft Entra ID once a deployment turns that lookup on, and caches them for
@@ -116,6 +122,8 @@ end-to-end test harness's.
 | Git | `git clone https://github.com/<org>/<repo>` through the proxy | Nothing. Any `Authorization` header is refused. |
 | Google | The same proxy, with `CLOUDSDK_AUTH_ACCESS_TOKEN=__vault_GCP__` | `Authorization: Bearer` and the entry's placeholder |
 | PostgreSQL | `host=127.0.0.1`, one port per database (15000 for the harness's first, 15001 for the next), with that binding's `dbname` and `user` (`workload` in the harness) | The binding's placeholder password (`gatehouse-relay-placeholder` in the harness) |
+| PostgreSQL, routed | `host=127.0.0.1` and the pool's routed port, with `dbname` set to the catalog entry's name, so one port serves every database the pool is granted and a new catalog database needs no change to the worker. A sidecar that reaches more than one broker has one routed port per broker. The port declines the client's TLS request, so libpq's default `sslmode=prefer` connects in plaintext on loopback. | The listener's placeholder password |
+| Graph database | `bolt://127.0.0.1:<port>` or `neo4j://127.0.0.1:<port>` with a stock driver, and the catalog entry's name as the user. One port serves every graph database the pool is granted. | The port's placeholder password. Refusals are Bolt failures with a `Gatehouse.` code; see [graph databases](graph-databases.md#refusals). |
 | Web app | A Playwright storage state from `https://<api host>/.gatehouse/browser-seed` | Nothing |
 
 - **Trust:** the worker must trust Gatehouse's interception certificate authority, at `/public/mitm-ca.crt` in the harness. Point `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` at it.
@@ -165,7 +173,7 @@ find the audit row.
 | 429 | This worker's rate limit for that entry (`rate_limited`), or too many group checks for one person in a minute (`entitlement_rate_limited`) | Slow down; wait the `Retry-After` seconds; after three refused retries, tell the Gatehouse operators |
 | 502 | The service could not be reached, or its response was refused, for example because it echoed the credential | Check the service |
 | 503 with `Retry-After` | Gatehouse could not get the credential or a token, the group lookup is unavailable (`entitlement_unavailable`), no run token reached it on this connection yet (`session_missing`), or its audit trail is down | Retry after the stated seconds; after three refused retries, tell the Gatehouse operators |
-| 503 without `Retry-After` | The key was deleted or emptied in Vault (`key_deleted`), the stored key cannot be sent in a header (`key_not_header_safe`) or is not the `user:password` pair a Basic pair entry sends (`key_not_basic_pair`), Gatehouse is not set up for this kind of entry (`broker_misconfigured`), or the worker ends too soon for a browser session (`seed_deadline`) | Fix the key in Vault, start a new run, or tell the Gatehouse operators; retrying does not help |
+| 503 without `Retry-After` | The key was deleted or emptied in Vault (`key_deleted`), the stored key cannot be sent in a header (`key_not_header_safe`) or is not the `user:password` pair a Basic pair entry sends (`key_not_basic_pair`), the client certificate the broker presents is deleted, invalid, expired or refused by the service (`client_cert_deleted`, `client_cert_invalid`, `client_cert_expired`, `client_cert_rejected`), Gatehouse is not set up for this kind of entry (`broker_misconfigured`), or the worker ends too soon for a browser session (`seed_deadline`) | Fix the key in Vault, start a new run, or tell the Gatehouse operators; retrying does not help |
 | Postgres 53300 "this worker reached its session cap" | This worker has as many sessions open as it may | Close idle sessions, or retry |
 | Postgres 53300 "the database's Gatehouse connection budget is full; retry shortly" | The database's connection budget is in use, at connect time or on a query | Retry shortly |
 | Postgres 53300 "Gatehouse is at capacity; retry shortly" | Gatehouse's overall connection cap is reached | Retry shortly |

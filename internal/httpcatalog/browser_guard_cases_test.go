@@ -21,7 +21,7 @@ func TestBrowserPathGuardAtLoad(t *testing.T) {
 		"password prefix":      entry(`["/users/change-password"]`, ""),
 		"mfa prefix":           entry(`["/users/MFA"]`, ""),
 		"oauth client prefix":  entry(`["/v1/oauth/clients"]`, ""),
-		"user admin prefix":    entry(`["/v1/parent-organizations/1/users/2/roles"]`, ""),
+		"user admin prefix":    entry(`["/v1/accounts/1/users/2/roles"]`, ""),
 		"client secret prefix": entry(`["/v1/apps/1/client_secret"]`, ""),
 		"sessions prefix":      entry(`["/v1/sessions"]`, ""),
 		"dot segment prefix":   entry(`["/v1/./cases"]`, ""),
@@ -38,7 +38,7 @@ func TestBrowserPathGuardAtLoad(t *testing.T) {
 		}
 	}
 	c, err := Parse([]byte(`{"entries":[` + entry(`["/v1","/users-organizations"]`,
-		`,"deniedPaths":["/v1/parent-organizations/*/users"],"readOnlyPaths":["/v1/reports"]`) + `]}`))
+		`,"deniedPaths":["/v1/accounts/*/users"],"readOnlyPaths":["/v1/reports"]`) + `]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +51,8 @@ func TestBrowserPathGuardAtLoad(t *testing.T) {
 // refused anywhere in the path, a denied template refuses itself and every
 // path below it, and membership and read-only templates admit only reads.
 func TestBrowserPathGuardPerRequest(t *testing.T) {
-	doc := strings.Replace(browserEntryJSON(`,"deniedPaths":["/v1/parent-organizations/*/users","/v1/parent-organizations/*/invitations",
-		"/v1/users/*/email","/v1/intel-vault"],"readOnlyPaths":["/v1/reports"]`),
+	doc := strings.Replace(browserEntryJSON(`,"deniedPaths":["/v1/accounts/*/users","/v1/accounts/*/invitations",
+		"/v1/users/*/email","/v1/archive"],"readOnlyPaths":["/v1/reports"]`),
 		`"pathPrefixes":["/v1"]`, `"pathPrefixes":["/v1","/v2","/api","/users-organizations","/organizations","/users"]`, 1)
 	c, err := Parse([]byte(`{"entries":[` + doc + `]}`))
 	if err != nil {
@@ -68,13 +68,13 @@ func TestBrowserPathGuardPerRequest(t *testing.T) {
 		{"POST", "/users/change-password", ErrDeniedPath},
 		{"GET", "/users/mfa", ErrDeniedPath},
 		{"POST", "/v1/oauth/clients/x/rotate-secret", ErrDeniedPath},
-		{"GET", "/v1/parent-organizations/1/users/2/roles", ErrDeniedPath},
-		{"GET", "/v1/parent-organizations/7/users", ErrDeniedPath},
-		{"GET", "/v1/Parent-Organizations/7/Users/3", ErrDeniedPath},
-		{"POST", "/v1/parent-organizations/7/invitations", ErrDeniedPath},
+		{"GET", "/v1/accounts/1/users/2/roles", ErrDeniedPath},
+		{"GET", "/v1/accounts/7/users", ErrDeniedPath},
+		{"GET", "/v1/Accounts/7/Users/3", ErrDeniedPath},
+		{"POST", "/v1/accounts/7/invitations", ErrDeniedPath},
 		{"PATCH", "/v1/users/5/email", ErrDeniedPath},
-		{"GET", "/v1/intel-vault/admin/1/permissions", ErrDeniedPath},
-		{"GET", "/v1/intel-vault/cases", ErrDeniedPath},
+		{"GET", "/v1/archive/admin/1/permissions", ErrDeniedPath},
+		{"GET", "/v1/archive/cases", ErrDeniedPath},
 		{"GET", "/v1/apps/1/client-secret", ErrDeniedPath},
 		{"POST", "/users-organizations", ErrReadOnlyPath},
 		{"PATCH", "/v1/users-organizations/users/2", ErrReadOnlyPath},
@@ -86,8 +86,8 @@ func TestBrowserPathGuardPerRequest(t *testing.T) {
 		{"OPTIONS", "/users-organizations", nil},
 		{"GET", "/v1/reports/9", nil},
 		{"POST", "/v1/cases", nil},
-		{"GET", "/v1/parent-organizations/7/environments", nil},
-		{"GET", "/v1/users/5/shared-with-me", nil},
+		{"GET", "/v1/accounts/7/workspaces", nil},
+		{"GET", "/v1/users/5/shared", nil},
 		{"GET", BrowserSeedPath, nil},
 	} {
 		if _, _, err := c.BrowserMatch("api.example.com", 443, tc.method, tc.path, "database-developers"); !errors.Is(err, tc.err) {

@@ -10,6 +10,16 @@ import (
 // revocation/expiry, grant removal, or a binding change. Store unavailability
 // fails closed. Capacity changes alone affect admission, not existing sessions.
 func (b *Broker) authorizationLoop(ctx context.Context, token, hint, requested string, scope AgentScope, svc DatabaseService, terminate func(), peer netip.Addr) {
+	b.authorizationLoopWith(ctx, token, hint, scope, svc.Name, func(ctx context.Context, current AgentScope) bool {
+		next, err := b.opts.Databases.ResolveDatabase(ctx, current, requested)
+		return err == nil && next != nil && sameBinding(svc, *next)
+	}, terminate, peer)
+}
+
+// authorizationLoopWith is authorizationLoop for any destination: confirm
+// resolves it again for the rechecked scope and reports whether it is still
+// the same binding.
+func (b *Broker) authorizationLoopWith(ctx context.Context, token, hint string, scope AgentScope, service string, confirm func(context.Context, AgentScope) bool, terminate func(), peer netip.Addr) {
 	defer func() {
 		if recover() != nil {
 			terminate()
@@ -30,15 +40,14 @@ func (b *Broker) authorizationLoop(ctx context.Context, token, hint, requested s
 		current, err := b.renewalAuthenticator(peer).Authenticate(checkCtx, token, hint)
 		valid := err == nil && current != nil && current.ActorID == scope.ActorID && current.VaultID == scope.VaultID && current.WorkloadID == scope.WorkloadID
 		if valid {
-			next, resolveErr := b.opts.Databases.ResolveDatabase(checkCtx, *current, requested)
-			valid = resolveErr == nil && next != nil && sameBinding(svc, *next)
+			valid = confirm(checkCtx, *current)
 		}
 		stopped := watchdog.Stop()
 		valid = valid && stopped && checkCtx.Err() == nil
 		cancel()
 		if !valid {
 			if ctx.Err() == nil {
-				b.logger.Warn("pgproxy: authorization no longer confirmed; terminating session", "service", svc.Name, "actor", scope.ActorID)
+				b.logger.Warn("pgproxy: authorization no longer confirmed; terminating session", "service", service, "actor", scope.ActorID)
 			}
 			terminate()
 			return

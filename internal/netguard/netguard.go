@@ -169,7 +169,8 @@ func isBlockedIP(ip net.IP, allowPrivate bool, allowed []net.IPNet) bool {
 // SafeDialContext returns a DialContext function that blocks connections to
 // forbidden IP ranges. When allowPrivate is true, only IMDS endpoints are
 // blocked. When false, private/reserved ranges are also blocked unless
-// allowlisted via AGENT_VAULT_NETWORK_ALLOWLIST.
+// allowlisted via AGENT_VAULT_NETWORK_ALLOWLIST, or the dial names a host
+// listed in AGENT_VAULT_PRIVATE_HOSTS (see PrivateHosts).
 //
 // Resolution and address selection are left to net.Dialer, which tries every
 // resolved address and races IPv6 against IPv4 (RFC 6555 Fast Fallback), so
@@ -182,8 +183,128 @@ func SafeDialContext(allowPrivate bool) func(ctx context.Context, network, addr 
 	if !allowPrivate {
 		allowed = AllowlistFromEnv()
 	}
-	return withEgressRanges(newSafeDialer(allowPrivate, allowed), os.Getenv("AGENT_VAULT_EGRESS_RANGES"),
-		os.Getenv("AGENT_VAULT_EGRESS_RANGES_FILE")).DialContext
+	setting, file := os.Getenv("AGENT_VAULT_EGRESS_RANGES"), os.Getenv("AGENT_VAULT_EGRESS_RANGES_FILE")
+	public := withEgressRanges(newSafeDialer(allowPrivate, allowed), setting, file)
+	if allowPrivate {
+		return public.DialContext
+	}
+	internal := withEgressRanges(newSafeDialer(true, nil), setting, file)
+	return withPrivateHosts(public, internal, PrivateHostsFromEnv())
+}
+
+// PrivateHosts names the internal hosts whose private addresses the broker
+// may dial, so an internal target (Vault, a database, an internal API) is
+// named in configuration by host name and its addresses are looked up at
+// run time, never written down. Each entry is a host name matched exactly,
+// or "*." and a suffix of at least two labels, matching every name under
+// that suffix (not the suffix itself). Matching ignores case and a trailing
+// dot.
+//
+// A dial whose target is a listed name may reach the private addresses DNS
+// returns for it. Everything else keeps the private-range block: an IP
+// literal, and any other name, even one that resolves to the same private
+// address, so a vendor's name rebound to an internal address is still
+// refused. Metadata endpoints stay blocked for every name, and the egress
+// ranges (AGENT_VAULT_EGRESS_RANGES and its file) still confine a listed
+// name's dials when they are set.
+type PrivateHosts struct {
+	exact    map[string]bool
+	suffixes []string // each with its leading dot
+}
+
+// PrivateHostsFromEnv reads AGENT_VAULT_PRIVATE_HOSTS.
+func PrivateHostsFromEnv() PrivateHosts {
+	return ParsePrivateHosts(os.Getenv("AGENT_VAULT_PRIVATE_HOSTS"), "AGENT_VAULT_PRIVATE_HOSTS")
+}
+
+// ParsePrivateHosts parses a comma-separated host list. Entries that are not
+// host names (an address, a range, a URL, a wildcard anywhere but the whole
+// leftmost label, or one over a suffix shorter than two labels) are logged
+// and skipped, so a bad entry never widens what is allowed. envName labels
+// the source in log messages.
+func ParsePrivateHosts(raw, envName string) PrivateHosts {
+	h := PrivateHosts{exact: map[string]bool{}}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(entry), "."))
+		if entry == "" {
+			continue
+		}
+		suffix, wildcard := strings.CutPrefix(entry, "*.")
+		if !hostName(suffix) || (wildcard && strings.Count(suffix, ".") < 1) {
+			slog.Warn("netguard: private hosts entry is not a host name or an allowed wildcard, skipping", //nolint:gosec // G706: structured slog attrs, handlers quote control chars
+				slog.String("env", envName), slog.String("value", entry))
+			continue
+		}
+		if wildcard {
+			h.suffixes = append(h.suffixes, "."+suffix)
+		} else {
+			h.exact[suffix] = true
+		}
+	}
+	return h
+}
+
+// Match reports whether host, a dial target's host part, is a listed name.
+// An address never matches.
+func (h PrivateHosts) Match(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if _, err := netip.ParseAddr(host); err == nil || !hostName(host) {
+		return false
+	}
+	if h.exact[host] {
+		return true
+	}
+	for _, suffix := range h.suffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h PrivateHosts) empty() bool { return len(h.exact) == 0 && len(h.suffixes) == 0 }
+
+// hostName reports whether s is a DNS host name: dot-separated labels of
+// letters, digits and inner hyphens, each 1 to 63 bytes, 253 bytes in all,
+// the last starting with a letter as every top-level domain does. That last
+// rule keeps out every form a C resolver reads as an IPv4 address
+// ("127.1", "0x7f.1", "1.0x7f").
+func hostName(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	if last := labels[len(labels)-1]; last == "" || !asciiLetter(last[0]) {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			if c := label[i]; !asciiLetter(c) && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func asciiLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
+// withPrivateHosts sends a dial whose target is a listed private host
+// through internal, which allows private ranges, and every other dial through
+// public. With no host listed it is public alone.
+func withPrivateHosts(public, internal *net.Dialer, hosts PrivateHosts) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if hosts.empty() {
+		return public.DialContext
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, _, err := net.SplitHostPort(addr); err == nil && hosts.Match(host) {
+			return internal.DialContext(ctx, network, addr)
+		}
+		return public.DialContext(ctx, network, addr)
+	}
 }
 
 func newSafeDialer(allowPrivate bool, allowed []net.IPNet) *net.Dialer {
@@ -276,7 +397,10 @@ const fileRangesInterval = 5 * time.Second
 // cannot tell a file cut off mid-write from a whole one, so the writer must
 // replace it atomically (write a temporary file and rename it; a Kubernetes
 // ConfigMap mounted as a directory does, but a subPath mount never updates).
-// The private and metadata blocks apply to these addresses as to every other.
+// The private and metadata blocks apply to these addresses as to every other:
+// a private address in the file serves only a dial to a listed private host
+// (PrivateHosts), so a bad write cannot open an internal address to any other
+// name.
 type fileRanges struct {
 	path    string
 	mu      sync.Mutex

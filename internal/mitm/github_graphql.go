@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/authorize"
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/githubapp"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
@@ -79,19 +80,24 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	var authorized []httpcatalog.GitRequest
 	for _, g := range granted {
 		probe := event
-		if p.authorize(r.Context(), scope, g.Entry, &probe) == "" {
+		if _, outcome := p.authorize(r.Context(), scope, g.Entry, &probe); outcome == "" {
 			authorized = append(authorized, g)
 		}
 	}
 	// authorizeInto runs the authorization model into the event this request
 	// logs, so its rows name the requester, tier and decision as REST rows do.
-	// It refuses (and reports false) when the entry does not authorize.
+	// It refuses (and reports false) when the entry does not authorize. who is
+	// the requester it last authorized, whose own branches a write's pull
+	// request must be on (ForRequester).
+	var who authorize.Requester
 	authorizeInto := func(entry *httpcatalog.Entry) bool {
-		if outcome := p.authorize(r.Context(), scope, entry, &event); outcome != "" {
+		requester, outcome := p.authorize(r.Context(), scope, entry, &event)
+		if outcome != "" {
 			event.Binding = entry.Name
 			deny(http.StatusForbidden, outcome)
 			return false
 		}
+		who = requester
 		return true
 	}
 	if len(authorized) == 0 {
@@ -179,8 +185,10 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 			candidates = nil
 			for _, g := range authorized {
 				probe := event
-				if clone := catalog.GitHubCloneEntry(host, g.Repo.Repo, scope.Pool); clone != nil && p.authorize(r.Context(), scope, clone, &probe) == "" {
-					candidates = append(candidates, g)
+				if clone := catalog.GitHubCloneEntry(host, g.Repo.Repo, scope.Pool); clone != nil {
+					if _, outcome := p.authorize(r.Context(), scope, clone, &probe); outcome == "" {
+						candidates = append(candidates, g)
+					}
 				}
 			}
 			if len(candidates) == 0 {
@@ -205,6 +213,9 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	case !authorizeInto(api.Entry):
 		return
 	}
+	// A write's pull request must be on the requester's own branches where
+	// the pool gives each requester theirs.
+	api = api.ForRequester(who.BranchSegment())
 	if req.Code {
 		// A pull request's file list is code-adjacent: as for REST, only a
 		// pool whose git entry may clone the repository, for a requester that
@@ -234,6 +245,8 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		// route: its head a branch of this repository under the pool's own
 		// push prefixes, and its base a plain branch name.
 		open, _, err := catalog.GitHubAPIMatch(host, port, http.MethodPost, "/repos/"+api.Repo.Repo+"/pulls", "", scope.Pool)
+		open = open.ForRequester(who.BranchSegment())
+		event.Branch = auditchain.BranchField(req.Head)
 		switch {
 		case err != nil || !open.OpensPullRequest:
 			deny(http.StatusForbidden, "unlisted")
@@ -281,7 +294,11 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 			return
 		}
 	}
-	if outcome := p.checkGraphQLTargets(r, target, expected, app, api, lookupToken.Value(), req); outcome != "" {
+	outcome, branch := p.checkGraphQLTargets(r, target, expected, app, api, lookupToken.Value(), req)
+	if branch != "" {
+		event.Branch = auditchain.BranchField(branch)
+	}
+	if outcome != "" {
 		deny(lookupStatus(outcome), outcome)
 		return
 	}
@@ -527,10 +544,12 @@ const nodesLookup = `query($ids: [ID!]!) { nodes(ids: $ids) { __typename ` +
 
 // checkGraphQLTargets confirms every node ID with GitHub: a pull request in
 // the repository (and, for a write, its head in reach), or a label in the
-// repository that the catalog lists. It returns the refusal's outcome, or "".
-func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app githubapp.App, api httpcatalog.GitRequest, token string, req httpcatalog.GitHubGraphQL) string {
+// repository that the catalog lists. It returns the refusal's outcome, or "",
+// and the head branch of the first pull request a write targets, as GitHub
+// named it, for the audit row.
+func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app githubapp.App, api httpcatalog.GitRequest, token string, req httpcatalog.GitHubGraphQL) (string, string) {
 	if len(req.Targets) == 0 {
-		return ""
+		return "", ""
 	}
 	facts := map[string]nodeFact{}
 	var missing []string
@@ -563,7 +582,7 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 			p.adapter.GitTokens.Invalidate(app, api.Repo.Repo, graphqlPermissions)
 		}
 		if !ok || len(reply.Data.Nodes) != len(missing) {
-			return "target_lookup"
+			return "target_lookup", ""
 		}
 		for i, n := range reply.Data.Nodes {
 			repo := ""
@@ -585,29 +604,33 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 			p.graphql.storeNode(target, missing[i], f)
 		}
 	}
+	var branch string
 	for _, t := range req.Targets {
 		f, ok := facts[t.ID]
 		inRepo := ok && strings.EqualFold(f.Repo, api.Repo.Repo)
 		switch t.Kind {
 		case httpcatalog.TargetLabel:
 			if !inRepo || f.Type != "Label" || !containsString(api.Repo.Labels, f.Name) {
-				return "request_shape"
+				return "request_shape", branch
 			}
 		case httpcatalog.TargetRepository:
 			if !inRepo || f.Type != "Repository" {
-				return "unlisted"
+				return "unlisted", branch
 			}
 		case httpcatalog.TargetPullRequestWrite:
+			if inRepo && f.Type == "PullRequest" && branch == "" {
+				branch = f.HeadRef
+			}
 			if !inRepo || f.Type != "PullRequest" || !headInReach(api.Repo.Repo, f.HeadRepo, f.HeadRef, api.HeadPrefixes) {
-				return targetOutcomeFor(req)
+				return targetOutcomeFor(req), branch
 			}
 		default:
 			if !inRepo || f.Type != "PullRequest" {
-				return "pull_request_target"
+				return "pull_request_target", branch
 			}
 		}
 	}
-	return ""
+	return "", branch
 }
 
 // githubGraphQL makes one of the broker's own GraphQL reads with token. ok

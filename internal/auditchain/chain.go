@@ -83,7 +83,7 @@ type Event struct {
 	NotAfter string
 	DNSNames string // comma-separated lower-case DNS names the certificate holds
 	Target   string // refusals: see Row; set it with TargetField
-	Branch   string // CI restarts: see Row; set it with BranchField
+	Branch   string // pushes, pull request writes and CI restarts: see Row; set it with BranchField
 	// Operation, Database and RequesterDepartment: see Row. Set Database with
 	// DatabaseField and RequesterDepartment with DepartmentField.
 	Operation           string
@@ -94,6 +94,7 @@ type Event struct {
 	Automation      string
 	AutomationName  string
 	AutomationOwner string
+	Path            string // HTTP rows: see Row; set it with PathField
 	Method          string
 	Status          int
 	Duration        int64 // milliseconds
@@ -213,6 +214,9 @@ func (e Event) Validate() error {
 	if e.Branch != "" && BranchField(e.Branch) != e.Branch {
 		return ErrInvalidEvent
 	}
+	if e.Path != "" && PathField(e.Path) != e.Path {
+		return ErrInvalidEvent
+	}
 	if e.Operation != "" && !operationName.MatchString(e.Operation) {
 		return ErrInvalidEvent
 	}
@@ -315,6 +319,33 @@ func BranchField(name string) string {
 	return name
 }
 
+// maxPathBytes bounds the request path a row may carry, longer than the
+// paths HTTP servers commonly accept, so a real path is never cut.
+const maxPathBytes = 8192
+
+// PathField returns a request path for a row's path: the path itself when it
+// starts with "/" and is printable ASCII other than a space, a quote or a
+// backslash (percent-encoding kept as sent), cut to maxPathBytes with "..."
+// when longer, or "invalid". The worker chooses it, so nothing else enters
+// the row. Canonical input comes back unchanged.
+func PathField(path string) string {
+	if path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "invalid"
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] <= ' ' || path[i] > '~' || path[i] == '"' || path[i] == '\\' {
+			return "invalid"
+		}
+	}
+	if len(path) > maxPathBytes {
+		return path[:maxPathBytes-3] + "..."
+	}
+	return path
+}
+
 // TargetField returns the canonical form of a requested host or host:port
 // for a row's target: a lower-case DNS name or IP address, with the port when
 // one was given, or "invalid" when the input is anything else. Its result is
@@ -373,7 +404,7 @@ func (c *Chain) Record(e Event) error {
 		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
 		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment, Branch: e.Branch,
 		Source: e.Source, Automation: e.Automation, AutomationName: e.AutomationName, AutomationOwner: e.AutomationOwner,
-		Method: e.Method, Status: e.Status, Duration: e.Duration})
+		Path: e.Path, Method: e.Method, Status: e.Status, Duration: e.Duration})
 	return err
 }
 
