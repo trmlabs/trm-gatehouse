@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
@@ -27,9 +28,10 @@ type Dropped struct {
 //   - An entry, pool or harness that fails its own validation (an unknown
 //     field from a newer format, a bad grant or tier) is dropped.
 //   - Parts that conflict (a duplicate name, a shared route, host, test user
-//     or repository, overlapping harness images, a github-api entry's pull
-//     request prefix reaching another pool's push prefix in a git entry) are
-//     all dropped: the loader never picks a winner.
+//     or repository, entries on one host that disagree on http2, overlapping
+//     harness images, a github-api entry's pull request prefix reaching
+//     another pool's push prefix in a git entry) are all dropped: the loader
+//     never picks a winner.
 //   - When the version defines pools, an entry granting a dropped or unknown
 //     pool is dropped. When it defines harnesses, a pool left with no harness
 //     is dropped, so dropping a harness never removes the harness check.
@@ -189,8 +191,8 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	entries = dropDuplicates(entries, func(e keptEntry) string { return e.entry.Name }, func(e keptEntry) {
 		drop("entry", e.entry.Name, errors.New("duplicate entry name"))
 	})
-	entries = dropClaims(entries, func(e keptEntry) []claim { return entryClaims(e.entry) }, func(e keptEntry) {
-		drop("entry", e.entry.Name, errors.New("shares a host, route, test user or repository with another entry"))
+	entries = dropClaims(entries, func(e keptEntry) []claim { return entryClaims(e.entry) }, func(e keptEntry, c claim) {
+		drop("entry", e.entry.Name, errors.New(c.conflict()))
 	})
 	entries = dropPullRequestCrossings(entries, func(e keptEntry) Entry { return e.entry }, func(e keptEntry, err error) {
 		drop("entry", e.entry.Name, err)
@@ -333,18 +335,30 @@ func dropConflicting[T any](parts []T, conflict func(a, b T) bool, dropped func(
 
 // claim is one key an entry occupies. Entries may share a key only when every
 // claim on it is shareable and of the same kind, as plain HTTP or git entries
-// on one host are.
+// on one host are. A setting every entry on a host must agree on is a
+// shareable claim whose kind is the setting's value.
 type claim struct {
 	key, kind string
 	shareable bool
+	reason    string // why a part holding it is dropped, when not a shared key
 }
 
-// entryClaims mirrors Parse's cross-entry checks: hosts, browser app hosts,
-// test users, git repository routes, repositories with {requester} push
-// prefixes (errRequesterRepo) and path prefix routes.
+func (c claim) conflict() string {
+	if c.reason != "" {
+		return c.reason
+	}
+	return "shares a host, route, test user or repository with another entry"
+}
+
+// entryClaims mirrors Parse's cross-entry checks: hosts, http2 per host,
+// browser app hosts, test users, git repository routes, repositories with
+// {requester} push prefixes (errRequesterRepo) and path prefix routes.
 func entryClaims(e Entry) []claim {
 	hostKey := fmt.Sprintf("%s:%d", e.Host, e.Port)
-	claims := []claim{{key: "host " + hostKey, kind: e.Kind, shareable: e.Kind != "browser-session"}}
+	claims := []claim{
+		{key: "host " + hostKey, kind: e.Kind, shareable: e.Kind != "browser-session"},
+		{key: "http2 " + hostKey, kind: strconv.FormatBool(e.HTTP2), shareable: true, reason: "disagrees on http2 with another entry on its host"},
+	}
 	if e.BrowserSession != nil {
 		claims = append(claims,
 			claim{key: "host " + fmt.Sprintf("%s:%d", e.BrowserSession.AppHost, e.Port), kind: "browser-session-app"},
@@ -365,20 +379,23 @@ func entryClaims(e Entry) []claim {
 }
 
 // dropClaims drops every part holding a claim that conflicts with another
-// claim on the same key, whichever part holds it, itself included.
-func dropClaims[T any](parts []T, claimsOf func(T) []claim, dropped func(T)) []T {
+// claim on the same key, whichever part holds it, itself included. dropped
+// gets the part's first conflicting claim, in claimsOf's order.
+func dropClaims[T any](parts []T, claimsOf func(T) []claim, dropped func(T, claim)) []T {
 	type holder struct {
 		part int
 		c    claim
 	}
+	claims := make([][]claim, len(parts))
 	byKey := map[string][]holder{}
 	for i, p := range parts {
-		for _, c := range claimsOf(p) {
+		claims[i] = claimsOf(p)
+		for _, c := range claims[i] {
 			byKey[c.key] = append(byKey[c.key], holder{i, c})
 		}
 	}
-	bad := make([]bool, len(parts))
-	for _, holders := range byKey {
+	conflicted := map[string]bool{}
+	for key, holders := range byKey {
 		if len(holders) < 2 {
 			continue
 		}
@@ -386,17 +403,16 @@ func dropClaims[T any](parts []T, claimsOf func(T) []claim, dropped func(T)) []T
 		for _, h := range holders {
 			shared = shared && h.c.shareable && h.c.kind == holders[0].c.kind
 		}
-		if !shared {
-			for _, h := range holders {
-				bad[h.part] = true
-			}
-		}
+		conflicted[key] = !shared
 	}
 	kept := parts[:0:0]
+next:
 	for i, p := range parts {
-		if bad[i] {
-			dropped(p)
-			continue
+		for _, c := range claims[i] {
+			if conflicted[c.key] {
+				dropped(p, c)
+				continue next
+			}
 		}
 		kept = append(kept, p)
 	}

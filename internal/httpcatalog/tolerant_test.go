@@ -191,6 +191,67 @@ func TestSourceDropsBadEntriesAndAppliesTheRest(t *testing.T) {
 	}
 }
 
+// Entries on one host that disagree on http2 conflict like any other pair:
+// both are left out and the rest of the version, a removal included, takes
+// effect. Parse refuses the disagreement, so without this the watcher would
+// refuse the whole version and keep a removed grant in force.
+func TestSourceDropsAnHTTP2DisagreementAndAppliesTheRest(t *testing.T) {
+	rpc := func(name, prefix, h2 string) string {
+		e := strings.Replace(entryNamed(name, "rpc.example.com"), `"/search","/account/"`, `"`+prefix+`"`, 1)
+		return strings.Replace(e, `"pools":["pool-a"]`, `"pools":["pool-a"]`+h2, 1)
+	}
+	reads := rpc("reads", "/example.v1.Reads/", `,"http2":true`)
+	loader := &scriptedLoader{doc: `{"entries":[` + validEntry + `,` + reads + `,` + entryNamed("retired", "retired.example.com") + `]}`, version: 1}
+	source, err := Start(context.Background(), loader.load, nil, nil)
+	if err != nil || entryNames(source.Current()) != "reads,retired,serpapi" {
+		t.Fatalf("start: %v %q", err, entryNames(source.Current()))
+	}
+	if _, err := source.Current().Match("retired.example.com", 443, "GET", "/search", "pool-a"); err != nil {
+		t.Fatalf("version 1 does not grant retired: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var rejected []error
+	go source.Watch(ctx, 5*time.Millisecond, loader.load, func(_ int, err error) {
+		mu.Lock()
+		rejected = append(rejected, err)
+		mu.Unlock()
+	})
+	// Version 2 removes retired and adds a second rpc.example.com entry that
+	// leaves http2 out.
+	v2 := `{"entries":[` + validEntry + `,` + reads + `,` + rpc("writes", "/example.v1.Writes/", ``) + `]}`
+	if _, err := Parse([]byte(v2)); err == nil {
+		t.Fatal("strict parse accepted entries that disagree on http2")
+	}
+	loader.set(v2, 2, nil)
+	waitFor(t, "version 2", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return source.Version() == 2 || len(rejected) > 0
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rejected) > 0 {
+		t.Fatalf("version 2 refused, so its removal never applied: %v", rejected[0])
+	}
+	c := source.Current()
+	if entryNames(c) != "serpapi" || droppedNames(source.Dropped()) != "entry:reads,entry:writes" {
+		t.Fatalf("in force %q, dropped %q", entryNames(c), droppedNames(source.Dropped()))
+	}
+	if _, err := c.Match("retired.example.com", 443, "GET", "/search", "pool-a"); !errors.Is(err, ErrUnlisted) || c.HasHost("retired.example.com", 443) {
+		t.Fatalf("the removed entry is still reachable: %v", err)
+	}
+	if c.HasHost("rpc.example.com", 443) || c.HTTP2Host("rpc.example.com", 443) {
+		t.Fatal("an entry in the disagreement is still reachable")
+	}
+	for _, d := range source.Dropped() {
+		if !strings.Contains(d.Reason, "http2") {
+			t.Fatalf("%s dropped for %q, which does not name http2", d.Name, d.Reason)
+		}
+	}
+}
+
 func TestSourceStartsFromTheStoredCatalogOrEmpty(t *testing.T) {
 	down := &scriptedLoader{err: errors.New("sealed")}
 	stored := &scriptedLoader{doc: `{"entries":[` + validEntry + `]}`, version: 4}
@@ -211,4 +272,82 @@ func TestSourceStartsFromTheStoredCatalogOrEmpty(t *testing.T) {
 	go source.Watch(ctx, 5*time.Millisecond, down.load, func(int, error) {})
 	down.set(`{"entries":[`+validEntry+`]}`, 5, nil)
 	waitFor(t, "recovery", func() bool { return source.Loaded() && source.Version() == 5 })
+}
+
+// Every cross-entry check Parse makes has a claim or crossing in
+// ParseTolerant, so two entries that conflict are dropped and never refuse
+// the version, and two entries Parse accepts together are both kept. Each
+// ordered pair of entry kinds is tried as written, on one host, on one host
+// with distinct paths, and on distinct hosts.
+func TestTolerantMirrorsEveryCrossEntryCheck(t *testing.T) {
+	pools := `"pools":[{"name":"pool-a","namespace":"a","serviceAccount":"w"},{"name":"pool-b","namespace":"b","serviceAccount":"w"},
+		{"name":"pool-c","namespace":"c","serviceAccount":"w"},{"name":"database-developers","namespace":"d","serviceAccount":"w"},
+		{"name":"people","namespace":"n","serviceAccount":"people","identity":"cursor-session"},
+		{"name":"automations","namespace":"n","serviceAccount":"automations","identity":"cursor-automation"},
+		{"name":"claude","namespace":"n","serviceAccount":"claude","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}]`
+	kinds := map[string]string{
+		"header":                   validEntry,
+		"header http2":             strings.Replace(validEntry, `"pools":["pool-a"]`, `"pools":["pool-a"],"http2":true`, 1),
+		"request fields":           slackEntry,
+		"gcp":                      bqEntry,
+		"gcp http2":                strings.Replace(bqEntry, `"kind":"gcp",`, `"kind":"gcp","http2":true,`, 1),
+		"git":                      gitEntry,
+		"github-api":               apiEntry,
+		"pool prefixes git":        poolsGitEntry,
+		"pool prefixes github-api": poolsAPIEntry,
+		"requester git": `{"name":"github","host":"github.com","kind":"git","pools":["people"],"git":{"appID":7,"installationID":42,
+			"repos":[{"repo":"example-org/example-app","access":"write","poolRefPrefixes":{"people":["refs/heads/cursor/people/{requester}/"]}}]}}`,
+		"browser session": browserEntryJSON(""),
+		"automated auth":  automatedEntryJSON(automatedSettings),
+		"memgraph":        graphEntry,
+		"postgres":        `{"name":"core","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["pool-a"],"postgres":{"database":"core","mount":"database","role":"r-readonly"}}`,
+	}
+	decode := func(t *testing.T, e string) map[string]any {
+		t.Helper()
+		var m map[string]any
+		if err := json.Unmarshal([]byte(e), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	moves := map[string]func(a, b map[string]any){
+		"as written": func(a, b map[string]any) {},
+		"one host": func(a, b map[string]any) {
+			b["host"], b["port"] = a["host"], a["port"]
+		},
+		"one host, distinct paths": func(a, b map[string]any) {
+			b["host"], b["port"] = a["host"], a["port"]
+			if prefixes, ok := b["pathPrefixes"].([]any); ok {
+				for i, p := range prefixes {
+					prefixes[i] = "/moved" + p.(string)
+				}
+			}
+		},
+		"distinct hosts": func(a, b map[string]any) { b["host"] = "moved." + b["host"].(string) },
+	}
+	for aName, aJSON := range kinds {
+		if _, err := Parse([]byte(`{` + pools + `,"entries":[` + aJSON + `]}`)); err != nil {
+			t.Fatalf("%s alone: %v", aName, err)
+		}
+		for bName, bJSON := range kinds {
+			for move, apply := range moves {
+				a, b := decode(t, aJSON), decode(t, bJSON)
+				b["name"] = "moved-" + b["name"].(string)
+				apply(a, b)
+				if b["port"] == nil {
+					delete(b, "port")
+				}
+				pair, _ := json.Marshal(map[string]any{"entries": []any{a, b}})
+				doc := []byte(`{` + pools + `,` + string(pair[1:]))
+				_, dropped, err := ParseTolerant(doc)
+				if err != nil {
+					t.Errorf("%s and %s, %s: the version is refused: %v", aName, bName, move, err)
+					continue
+				}
+				if _, strict := Parse(doc); strict == nil && len(dropped) > 0 {
+					t.Errorf("%s and %s, %s: Parse accepts the pair, but %q were dropped", aName, bName, move, droppedNames(dropped))
+				}
+			}
+		}
+	}
 }
