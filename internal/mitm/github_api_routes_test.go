@@ -36,6 +36,13 @@ type routesFixture struct {
 
 func newRoutesFixture(t *testing.T) *routesFixture {
 	t.Helper()
+	return newRoutesFixtureWith(t, func(catalog string) string { return catalog })
+}
+
+// newRoutesFixtureWith is newRoutesFixture with its catalog document passed
+// through change first.
+func newRoutesFixtureWith(t *testing.T, change func(catalog string) string) *routesFixture {
+	t.Helper()
 	saved := githubDownloadHosts
 	githubDownloadHosts = []string{"com"} // the fake serves every host as example.com
 	t.Cleanup(func() { githubDownloadHosts = saved })
@@ -87,8 +94,11 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 		scope := f.minted[token]
 		f.mu.Unlock()
 		want, ok := need[kind]
-		if kind == "pulls" && r.Method == http.MethodGet && scope == readyScope {
-			want = readyScope // pr.ready reads its target with the token it marks it ready with
+		if kind == "pulls" && r.Method == http.MethodGet && (scope == readyScope || scope == need["dispatches"]) {
+			// pr.ready reads its target with the token it marks it ready with,
+			// and a dispatch with its contents write token: GitHub serves a
+			// pull request to contents read as well as to pull requests read.
+			want = scope
 		}
 		if !ok || scope != want {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -109,6 +119,9 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 			return
 		case "GET /repos/example-org/example-repo/pulls/13":
 			fmt.Fprint(w, `{"number":13,"node_id":"PR_thirteen","head":{"ref":"person/x","repo":{"full_name":"example-org/example-repo"}}}`)
+			return
+		case "GET /repos/example-org/example-repo/pulls/14":
+			fmt.Fprint(w, `{"number":14,"node_id":"PR_fourteen","head":{"ref":"other/x","repo":{"full_name":"example-org/example-repo"}}}`)
 			return
 		case "GET /repos/example-org/example-repo/pulls/41":
 			fmt.Fprint(w, `{"number":41,"node_id":"PR_fortyone","head":{"ref":"factory/refused","repo":{"full_name":"example-org/example-repo"}}}`)
@@ -172,12 +185,12 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	// The API on api.example.com and git on example.com, as api.github.com
 	// and github.com: a code read uses the git entry on the matching host.
 	f.host = "api.example.com"
-	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api",
+	catalog, err := httpcatalog.Parse([]byte(change(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api",
 		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
 		"operations":["pr.open","pr.read","pr.list","pr.comment","pr.edit","pr.label","pr.ready","dispatch","actions.read","deployments.read"],
 		"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"]}]}},
 		{"name":"github","host":"example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
-		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port)))
+		"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`, f.port))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +257,9 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 		{"PATCH", routeRepo + "/pulls/30", `{ "body" : "filled" }`, "PATCH " + routeRepo + `/pulls/30 {"body":"filled"}`},
 		{"PATCH", routeRepo + "/issues/comments/5", `{"body":"updated"}`, "PATCH " + routeRepo + `/issues/comments/5 {"body":"updated"}`},
 		{"POST", routeRepo + "/issues/30/labels", `{"labels":["preview"]}`, "POST " + routeRepo + `/issues/30/labels {"labels":["preview"]}`},
-		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr":30}}`, "POST " + routeRepo + `/dispatches {"client_payload":{"pr":30},"event_type":"preview-build"}`},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30}}`, "POST " + routeRepo + `/dispatches {"client_payload":{"pr_number":30},"event_type":"preview-build"}`},
+		{"POST", routeRepo + "/dispatches", `{"client_payload":{"expected_sha":"` + strings.Repeat("ab", 20) + `","pr_number":"12"},"event_type":"preview-build"}`,
+			"POST " + routeRepo + `/dispatches {"client_payload":{"expected_sha":"` + strings.Repeat("ab", 20) + `","pr_number":"12"},"event_type":"preview-build"}`},
 		{"GET", routeRepo + "/actions/workflows/eval-replay.yml/runs?branch=main&per_page=5", "", "GET " + routeRepo + "/actions/workflows/eval-replay.yml/runs?branch=main&per_page=5"},
 		{"GET", routeRepo + "/deployments?environment=preview-30", "", "GET " + routeRepo + "/deployments?environment=preview-30"},
 		{"POST", routeRepo + "/pulls/30/ready", "", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_thirty"}}`},
@@ -385,8 +400,22 @@ func TestGitHubAPIRoutesRefuseOtherTargets(t *testing.T) {
 		{"POST", routeRepo + "/issues/30/labels", `{"labels":["deploy-prod"]}`, "request_shape"},
 		{"POST", routeRepo + "/issues/30/labels", `{"labels":[]}`, "request_shape"},
 		{"POST", routeRepo + "/issues/30/labels", `["preview"]`, "request_shape"},
-		{"POST", routeRepo + "/dispatches", `{"event_type":"deploy"}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"deploy","client_payload":{"pr_number":30}}`, "request_shape"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":"x"}`, "request_shape"},
+		// A dispatch acts only on a pull request in the pool's reach, named
+		// where the broker can read it; any payload it cannot resolve is refused.
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":13}}`, "pull_request_target"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":"13"}}`, "pull_request_target"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build"}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr":30}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30,"branch":"person/x"}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30,"PR_number":13}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":"030"}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30.0}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":-30}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":[30]}}`, "request_shape"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30,"expected_sha":"abc"}}`, "request_shape"},
 		{"PATCH", routeRepo + "/pulls/30", `{"body":"x","state":"closed"}`, "request_shape"},
 		{"POST", routeRepo + "/issues/30/comments", `{"body":"x","path":"a.go"}`, "request_shape"},
 		{"POST", routeRepo + "/issues/30/comments", `{"body":"x","body":"y"}`, "request_shape"},
@@ -415,5 +444,63 @@ func TestGitHubAPIRoutesRefuseOtherTargets(t *testing.T) {
 	f.mu.Unlock()
 	if len(received) != 0 {
 		t.Fatalf("GitHub received refused requests: %v", received)
+	}
+}
+
+// A pool named in a repository's poolOperations uses only those operations
+// there, and its dispatch reaches only a pull request in its own reach, not
+// one under another pool's pull request prefixes.
+func TestGitHubAPIPoolOperations(t *testing.T) {
+	f := newRoutesFixtureWith(t, func(catalog string) string {
+		return strings.NewReplacer(`"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",`,
+			`"pools":["pool-agent","pool-other"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
+			"poolOperations":{"pool-agent":["pr.read","dispatch"]},"poolPullRequestPrefixes":{"pool-other":["other/"]},`).Replace(catalog)
+	})
+	for _, tc := range []struct {
+		method, path, body, outcome string
+	}{
+		{"GET", routeRepo + "/pulls/12", "", "completed"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":12}}`, "completed"},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30}}`, "completed"},
+		// Another pool's pull request, under its own pull request prefix.
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":14}}`, "pull_request_target"},
+		// Operations the repository has and this pool does not.
+		{"POST", routeRepo + "/issues/12/comments", `{"body":"x"}`, "pool"},
+		{"POST", routeRepo + "/pulls", `{"head":"cursor/pool-agent/x","base":"main"}`, "pool"},
+		{"GET", routeRepo + "/pulls?state=open", "", "pool"},
+		{"GET", routeRepo + "/actions/runs/9", "", "pool"},
+		{"POST", routeRepo + "/issues/12/labels", `{"labels":["preview"]}`, "pool"},
+	} {
+		code, body := f.post(t, tc.method, tc.path, "", tc.body)
+		if got := f.audit.last().Outcome; got != tc.outcome || (tc.outcome == "completed") != (code == 200) {
+			t.Errorf("%s %s %s: %d %s, outcome %q, want %q", tc.method, tc.path, tc.body, code, body, got, tc.outcome)
+		}
+	}
+}
+
+// An Automation's pool reaches no GitHub API operation on a repository whose
+// line does not name it in poolOperations, whatever the repository grants:
+// every route is refused before a token is minted or GitHub is asked.
+func TestGitHubAPIAutomationPoolNeedsPoolOperations(t *testing.T) {
+	f := newRoutesFixtureWith(t, func(catalog string) string {
+		return strings.Replace(catalog, `{"entries":[`, `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],"entries":[`, 1)
+	})
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", routeRepo + "/pulls/12", ""},
+		{"GET", routeRepo + "/pulls?state=open", ""},
+		{"POST", routeRepo + "/pulls", `{"head":"cursor/pool-agent/x","base":"main"}`},
+		{"POST", routeRepo + "/issues/12/comments", `{"body":"x"}`},
+		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":12}}`},
+		{"GET", routeRepo + "/actions/runs/9", ""},
+		{"GET", routeRepo + "/deployments", ""},
+	} {
+		if code, body := f.post(t, tc.method, tc.path, "", tc.body); code != http.StatusForbidden || f.audit.last().Outcome != "pool" {
+			t.Errorf("%s %s: %d %s, outcome %q", tc.method, tc.path, code, body, f.audit.last().Outcome)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.minted) != 0 || len(f.received) != 0 {
+		t.Fatalf("a refused Automation pool minted %d tokens and GitHub received %v", len(f.minted), f.received)
 	}
 }

@@ -155,13 +155,37 @@ type GitRepo struct {
 	// Labels are the only labels pr.label may add.
 	Labels []string `json:"labels,omitempty"`
 	// DispatchEvents are the only repository_dispatch event types dispatch may
-	// send. A dispatch runs workflows from the default branch, never the pool's.
+	// send. A dispatch runs workflows from the default branch, never the pool's,
+	// and names in its client_payload the pull request it acts on, which must
+	// be in the pool's reach like any other write's target.
 	DispatchEvents []string `json:"dispatchEvents,omitempty"`
+	// PoolOperations narrow Operations for one pool of the entry each: a pool
+	// listed here may use only those, each one of the repository's. A pool not
+	// listed has the repository's operations, except a cursor-automation pool,
+	// which has none here until the repository lists it (see forPool).
+	PoolOperations PoolOperations `json:"poolOperations,omitempty"`
 }
 
 // PoolPrefixes maps each pool of an entry to prefixes of its own
 // (poolRefPrefixes, poolPullRequestPrefixes).
 type PoolPrefixes map[string][]string
+
+// PoolOperations maps a pool of a github-api entry to the repository
+// operations it may use there (poolOperations).
+type PoolOperations map[string][]string
+
+// UnmarshalJSON decodes the map and refuses null, as PoolPrefixes does.
+func (p *PoolOperations) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("poolOperations may not be null; list each pool with its operations, or leave the field out")
+	}
+	var m map[string][]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	*p = m
+	return nil
+}
 
 // errNullPoolPrefixes refuses a per-pool field written as null, which would
 // decode to no map, as if the field were absent. For poolRefPrefixes that
@@ -251,6 +275,22 @@ func (r GitRepo) operations() []string {
 
 // Allows reports whether a github-api repository grants an operation.
 func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
+
+// forPool returns the repository as pool sees it, with Operations narrowed to
+// the pool's poolOperations line, or to none for a cursor-automation pool the
+// repository does not list there, so every check made of the returned
+// repository (Allows, GrantsScope) holds the pool to its own operations.
+func (c Catalog) forPool(r GitRepo, pool string) GitRepo {
+	ops, listed := r.PoolOperations[pool]
+	p, defined := c.Pool(pool)
+	switch {
+	case listed:
+		r.Operations = append([]string{}, ops...)
+	case defined && p.Identity == IdentityCursorAutomation:
+		r.Operations = []string{}
+	}
+	return r
+}
 
 // GrantsScope is grantsScope for callers outside the catalog (GraphQL tokens).
 func (r GitRepo) GrantsScope(scope string) bool { return r.grantsScope(scope) }
@@ -634,7 +674,7 @@ func (e *Entry) normalize() error {
 			if r.Access != "write" || len(r.RefPrefixes) > 0 || len(r.PoolRefPrefixes) > 0 {
 				return fmt.Errorf("github-api repository %s must have access write (open pull requests) and no ref prefixes", r.Repo)
 			}
-			if err := r.normalizeGitHubAPI(); err != nil {
+			if err := r.normalizeGitHubAPI(e.Pools); err != nil {
 				return err
 			}
 		}
@@ -863,8 +903,8 @@ func (e *Entry) normalizeGit() error {
 	for i := range g.Repos {
 		r := &g.Repos[i]
 		r.Repo = strings.ToLower(r.Repo)
-		if e.Kind == "git" && (r.Operations != nil || len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
-			return fmt.Errorf("repository %s: operations, pull request prefixes, labels and dispatch events belong to a github-api entry", r.Repo)
+		if e.Kind == "git" && (r.Operations != nil || r.PoolOperations != nil || len(r.PullRequestPrefixes) > 0 || len(r.PoolPullRequestPrefixes) > 0 || len(r.Labels) > 0 || len(r.DispatchEvents) > 0) {
+			return fmt.Errorf("repository %s: operations, pool operations, pull request prefixes, labels and dispatch events belong to a github-api entry", r.Repo)
 		}
 		if !repoPattern.MatchString(r.Repo) || strings.Contains(r.Repo, "..") || strings.HasSuffix(r.Repo, ".git") || seen[r.Repo] {
 			return fmt.Errorf("invalid or duplicate repository %q", r.Repo)
@@ -1153,9 +1193,11 @@ func gitListings(entries []Entry, repo string) []gitListing {
 // normalizeGitHubAPI checks a github-api repository's operations and their
 // parameters: every operation is in the vocabulary, each list holds distinct,
 // well-formed values, labels come exactly with pr.label, dispatch events
-// exactly with dispatch, and pull request prefixes only with an operation
-// that acts on an existing pull request.
-func (r *GitRepo) normalizeGitHubAPI() error {
+// exactly with dispatch, pull request prefixes only with an operation that
+// acts on an existing pull request, and each pool's own operations
+// (poolOperations) name a pool the entry grants and only operations the
+// repository has.
+func (r *GitRepo) normalizeGitHubAPI(pools []string) error {
 	if r.Operations != nil && len(r.Operations) == 0 {
 		return fmt.Errorf("repository %s: list at least one operation, or leave operations unset for the default", r.Repo)
 	}
@@ -1195,7 +1237,31 @@ func (r *GitRepo) normalizeGitHubAPI() error {
 	if err := check("label", r.Labels, labelPattern); err != nil {
 		return err
 	}
-	return check("dispatch event", r.DispatchEvents, eventPattern)
+	if err := check("dispatch event", r.DispatchEvents, eventPattern); err != nil {
+		return err
+	}
+	if r.PoolOperations != nil && len(r.PoolOperations) == 0 {
+		return fmt.Errorf("repository %s: list a pool with its operations, or leave poolOperations out", r.Repo)
+	}
+	for pool, ops := range r.PoolOperations {
+		if !contains(pools, pool) {
+			return fmt.Errorf("repository %s: operations for pool %q, which the entry does not grant", r.Repo, pool)
+		}
+		if len(ops) == 0 {
+			return fmt.Errorf("repository %s: list at least one operation for pool %q, or leave the pool out", r.Repo, pool)
+		}
+		seen := map[string]bool{}
+		for _, op := range ops {
+			if _, ok := githubOperations[op]; !ok || seen[op] {
+				return fmt.Errorf("repository %s: unknown or duplicate operation %q for pool %q", r.Repo, op, pool)
+			}
+			if !r.Allows(op) {
+				return fmt.Errorf("repository %s: operation %q for pool %q is not one of the repository's operations", r.Repo, op, pool)
+			}
+			seen[op] = true
+		}
+	}
+	return nil
 }
 
 // GitRequest is a matched git smart-HTTP request.
@@ -1232,9 +1298,9 @@ type GitRequest struct {
 	Operation string
 	Method    string
 	// Target is the pull request a write acts on (comment, label, body edit,
-	// ready); the broker acts only when its head is under HeadPrefixes, which
-	// then also holds the repository's pull request prefixes, shared and the
-	// pool's own. CommentID is the comment an edit targets, which must be the
+	// ready, and a dispatch's, read from its body); the broker acts only when
+	// its head is under HeadPrefixes, which then also holds the repository's
+	// pull request prefixes, shared and the pool's own. CommentID is the comment an edit targets, which must be the
 	// App's own.
 	Target    int64
 	CommentID int64
@@ -1331,9 +1397,12 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 // restarts exist only where the repository grants them; a CI restart also
 // needs the git entry a push would use to grant the pool branch prefixes,
 // which then hold its target's head (HeadPrefixes), and authorizes the
-// requester against that entry too (CloneEntry). Reviews, merging a pull
-// request, pushes through the API other than a CI restart's branch update
-// (which merges the base into the head) and everything else are unlisted.
+// requester against that entry too (CloneEntry). A repository dispatch names
+// its pull request in the body, which must be in the same reach. Reviews,
+// merging a pull request, pushes through the API other than a CI restart's
+// branch update (which merges the base into the head) and everything else are
+// unlisted. A pool uses only its own operations there (forPool): a route
+// whose operation the pool lacks is ErrPool.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -1388,6 +1457,12 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
+			// The pool's own operations (forPool) decide from here, so every
+			// check made of the request's repository holds the pool to them.
+			if r = c.forPool(r, pool); !r.Allows(route.op) {
+				return matched, true, ErrPool
+			}
+			matched.Repo = r
 			if route.code {
 				// A file list or compare returns code: only for a pool whose git
 				// entry lets it clone the repository, and only for a requester
@@ -1416,6 +1491,10 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 				if route.name == "comment" {
 					matched.CommentsOn = route.target
 				}
+			case route.name == "dispatch":
+				// The target comes from the body (client_payload.pr_number) and is
+				// held to the same reach as any other write's.
+				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 			case route.comment > 0:
 				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 			}
@@ -1443,7 +1522,7 @@ func (c Catalog) GitHubAPIRepos(host string, port int, pool string) ([]GitReques
 			continue
 		}
 		for _, r := range e.Git.Repos {
-			out = append(out, GitRequest{Entry: e, Repo: r, Write: true, Route: "graphql", Method: http.MethodPost,
+			out = append(out, GitRequest{Entry: e, Repo: c.forPool(r, pool), Write: true, Route: "graphql", Method: http.MethodPost,
 				Permissions: "pull-requests", HeadPrefixes: append(c.pushBranchPrefixes(r.Repo, pool), r.pullRequestHeads(pool)...)})
 		}
 	}

@@ -295,6 +295,8 @@ func TestTolerantMirrorsEveryCrossEntryCheck(t *testing.T) {
 		"github-api":               apiEntry,
 		"pool prefixes git":        poolsGitEntry,
 		"pool prefixes github-api": poolsAPIEntry,
+		"pool operations github-api": strings.NewReplacer(`"pools":["pool-a"]`, `"pools":["pool-a","automations"]`,
+			`"access":"write"}`, `"access":"write","poolOperations":{"automations":["pr.read"]}}`).Replace(apiEntry),
 		"requester git": `{"name":"github","host":"github.com","kind":"git","pools":["people"],"git":{"appID":7,"installationID":42,
 			"repos":[{"repo":"example-org/example-app","access":"write","poolRefPrefixes":{"people":["refs/heads/cursor/people/{requester}/"]}}]}}`,
 		"browser session": browserEntryJSON(""),

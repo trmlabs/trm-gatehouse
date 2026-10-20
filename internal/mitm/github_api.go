@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,8 @@ const readyMutation = `mutation($id: ID!) { markPullRequestReadyForReview(input:
 // for that repository and only the scope the route needs. It can never
 // approve, review or merge a pull request, and it pushes only through a CI
 // restart's branch update: the rest are unlisted. A write to an existing
-// pull request (comment, label, body edit, ready) goes ahead only when its
+// pull request (comment, label, body edit, ready, and a repository dispatch,
+// which names its pull request in client_payload) goes ahead only when its
 // head is under the pool's push prefixes or the repository's pull request
 // prefixes, and a comment edit only on the App's own comment there. A CI
 // restart (a pull request's branch update, which merges the base into the
@@ -124,7 +126,7 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	case "label":
 		body, ok = labelsFrom(body, api.Repo.Labels)
 	case "dispatch":
-		body, ok = dispatchFrom(body, api.Repo.DispatchEvents)
+		body, api.Target, ok = dispatchFrom(body, api.Repo.DispatchEvents)
 	case "ready":
 		ok = len(bytes.TrimSpace(body)) == 0 || string(bytes.TrimSpace(body)) == "{}"
 	case "update-branch", "rerun", "rerun-failed":
@@ -488,27 +490,56 @@ func labelsFrom(data []byte, allowed []string) ([]byte, bool) {
 	return out, err == nil
 }
 
+// pullNumber is a pull request number as a dispatch payload may write it: a
+// positive whole number, no sign, fraction, exponent or leading zero.
+var pullNumber = regexp.MustCompile(`^[1-9][0-9]{0,11}$`)
+
 // dispatchFrom rebuilds a repository dispatch: an event type the repository
-// lists and an optional client_payload object.
-func dispatchFrom(data []byte, allowed []string) ([]byte, bool) {
+// lists and a client_payload naming the pull request the run acts on,
+// pr_number (a number, or the same digits as a string, kept as sent), with at
+// most expected_sha besides, a full commit ID. It returns that pull request's
+// number, which the broker then holds to the pool's reach as it holds any
+// other write's target. A dispatch with no payload, or with any other payload
+// field, names a target the broker cannot check, so it is refused.
+func dispatchFrom(data []byte, allowed []string) ([]byte, int64, bool) {
 	fields, ok := jsonFields(data, map[string]bool{"event_type": true, "client_payload": true})
-	if !ok {
-		return nil, false
+	if !ok || fields["client_payload"] == nil {
+		return nil, 0, false
 	}
 	var event string
 	if json.Unmarshal(fields["event_type"], &event) != nil || !containsString(allowed, event) {
-		return nil, false
+		return nil, 0, false
 	}
-	out := map[string]any{"event_type": event}
-	if raw, ok := fields["client_payload"]; ok {
-		var payload map[string]any
-		if json.Unmarshal(raw, &payload) != nil || payload == nil {
-			return nil, false
+	payload, ok := jsonFields(fields["client_payload"], map[string]bool{"pr_number": true, "expected_sha": true})
+	if !ok || payload["pr_number"] == nil {
+		return nil, 0, false
+	}
+	var number any
+	digits := string(payload["pr_number"])
+	var text string
+	if json.Unmarshal(payload["pr_number"], &text) == nil {
+		digits, number = text, text
+	}
+	if !pullNumber.MatchString(digits) {
+		return nil, 0, false
+	}
+	target, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return nil, 0, false
+	}
+	if number == nil {
+		number = target
+	}
+	out := map[string]any{"pr_number": number}
+	if raw, set := payload["expected_sha"]; set {
+		var sha string
+		if json.Unmarshal(raw, &sha) != nil || !headSHA.MatchString(sha) {
+			return nil, 0, false
 		}
-		out["client_payload"] = payload
+		out["expected_sha"] = sha
 	}
-	rebuilt, err := json.Marshal(out)
-	return rebuilt, err == nil
+	rebuilt, err := json.Marshal(map[string]any{"event_type": event, "client_payload": out})
+	return rebuilt, target, err == nil
 }
 
 // jsonFields reads one JSON object whose keys are all in allowed, each at
