@@ -3,6 +3,7 @@ package mitm
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -88,9 +89,20 @@ func (v *certVault) ReadWithDataWithContext(_ context.Context, path string, _ ma
 }
 
 // mtlsCall is one call an upstream that requires client certificates took:
-// the gRPC method or HTTP path, the client certificate's common name, and
-// any Authorization the broker sent with it.
-type mtlsCall struct{ method, client, auth string }
+// the gRPC method or HTTP path, the client certificate's common name, any
+// Authorization the broker sent with it, and (HTTP/1.1 side) the serials of
+// the intermediates presented after the leaf.
+type mtlsCall struct{ method, client, auth, chain string }
+
+// intermediates lists the serials of the certificates presented after the
+// leaf.
+func intermediates(presented []*x509.Certificate) string {
+	var serials []string
+	for _, c := range presented[1:] {
+		serials = append(serials, c.SerialNumber.String())
+	}
+	return strings.Join(serials, ",")
+}
 
 type mtlsUpstream struct {
 	mu    sync.Mutex
@@ -184,7 +196,8 @@ func newClientCertFixture(t *testing.T, options ...func(*HeaderAdapter)) *client
 	t.Cleanup(srv.Stop)
 
 	rest := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.restSide.record(mtlsCall{method: r.URL.Path, client: r.TLS.PeerCertificates[0].Subject.CommonName, auth: r.Header.Get("Authorization")})
+		f.restSide.record(mtlsCall{method: r.URL.Path, client: r.TLS.PeerCertificates[0].Subject.CommonName, auth: r.Header.Get("Authorization"),
+			chain: intermediates(r.TLS.PeerCertificates)})
 		_, _ = io.WriteString(w, "hello")
 	}))
 	rest.TLS = requireClientCert(serverCA.Server(t, "rest.example.com", "nocert.example.com"))
@@ -366,6 +379,41 @@ func TestClientCertificateRotatesWithoutRestart(t *testing.T) {
 	if out, err := f.call(t, cc, "CountWorkflowExecutions"); err != nil || out == "" {
 		t.Fatalf("after rotation: %v", err)
 	}
+}
+
+// A renewed intermediate under the same leaf and key is a rotation too: the
+// next connection after the cache's minute presents the new chain, with no
+// restart. Reading the same chain again keeps its transport.
+func TestClientCertificateChainRotatesUnderTheSameLeaf(t *testing.T) {
+	f := newClientCertFixture(t)
+	issuing := f.clientCA.Intermediate(t, "client-issuing-ca")
+	leaf, key := issuing.ValidClient(t, "chained-reader")
+	f.vault.at(restPath)(leaf+issuing.PEM(), key)
+	transport := func() *http.Transport {
+		f.proxy.certificatesMu.Lock()
+		defer f.proxy.certificatesMu.Unlock()
+		return f.proxy.certificateTransports[certificateTransportKey{ref: httpcatalog.ClientCertificateRef{Mount: "gatehouse", Path: "vendors/rest-read"}}].transport
+	}
+	presents := func(when, chain string) {
+		t.Helper()
+		if code, body := f.get(t, "rest.example.com"); code != http.StatusOK || body != "hello" {
+			t.Fatalf("%s: %d %q", when, code, body)
+		}
+		if last := f.restSide.last(); last.client != "chained-reader" || last.chain != chain {
+			t.Fatalf("%s: upstream saw client %q with intermediates %q, want %q", when, last.client, last.chain, chain)
+		}
+	}
+	presents("first", issuing.Cert.SerialNumber.String())
+	first := transport()
+	f.advance(61 * time.Second)
+	presents("same chain re-read", issuing.Cert.SerialNumber.String())
+	if transport() != first {
+		t.Fatal("an unchanged chain replaced its transport")
+	}
+	renewed := f.clientCA.Reissue(t, issuing)
+	f.vault.at(restPath)(leaf+renewed.PEM(), key)
+	f.advance(61 * time.Second)
+	presents("after the intermediate's renewal", renewed.Cert.SerialNumber.String())
 }
 
 // Certificates that cannot be presented are refused before the upstream is

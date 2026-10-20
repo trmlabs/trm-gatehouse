@@ -40,6 +40,36 @@ func NewCA(t testing.TB, name string) *CA {
 	return &CA{Cert: cert, key: key}
 }
 
+// Intermediate issues an intermediate CA named name under ca. A client
+// certificate it issues verifies against ca only when presented with it.
+func (ca *CA) Intermediate(t testing.TB, name string) *CA {
+	t.Helper()
+	return ca.issueCA(t, name, newKey(t))
+}
+
+// Reissue signs intermediate again under ca with a new serial, keeping its
+// name and key, as a renewal does: what it issued still verifies under it.
+func (ca *CA) Reissue(t testing.TB, intermediate *CA) *CA {
+	t.Helper()
+	return ca.issueCA(t, intermediate.Cert.Subject.CommonName, intermediate.key)
+}
+
+func (ca *CA) issueCA(t testing.TB, name string, key *ecdsa.PrivateKey) *CA {
+	t.Helper()
+	template := &x509.Certificate{SerialNumber: serial(t), Subject: pkix.Name{CommonName: name, Organization: []string{name}},
+		NotBefore: time.Now().Add(-24 * time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &CA{Cert: cert, key: key}
+}
+
 // Pool trusts this CA only.
 func (ca *CA) Pool() *x509.CertPool {
 	pool := x509.NewCertPool()

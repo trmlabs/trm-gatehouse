@@ -138,19 +138,19 @@ func TestClientCertificatesReadRotateAndRevoke(t *testing.T) {
 	// A new version is presented within the TTL, without a restart.
 	secondPEM, secondKey := ca.ValidClient(t, "second")
 	vault.put(certPath, secondPEM, secondKey)
-	if again, _ := certs.Get(ctx, certRef); again.Fingerprint != first.Fingerprint {
+	if again, _ := certs.Get(ctx, certRef); again.ChainFingerprint != first.ChainFingerprint {
 		t.Fatal("re-read inside the TTL")
 	}
 	now = now.Add(61 * time.Second)
 	second, err := certs.Get(ctx, certRef)
-	if err != nil || second.Version != 2 || second.Fingerprint == first.Fingerprint {
+	if err != nil || second.Version != 2 || second.ChainFingerprint == first.ChainFingerprint {
 		t.Fatalf("after the TTL: %v %v", second, err)
 	}
 
 	// Vault down: the cached certificate serves for MaxStale past its TTL.
 	vault.fail(errors.New("connection refused"))
 	now = now.Add(4 * time.Minute)
-	if stale, err := certs.Get(ctx, certRef); err != nil || stale.Fingerprint != second.Fingerprint {
+	if stale, err := certs.Get(ctx, certRef); err != nil || stale.ChainFingerprint != second.ChainFingerprint {
 		t.Fatalf("stale: %v", err)
 	}
 	now = now.Add(3 * time.Minute)
@@ -174,12 +174,12 @@ func TestClientCertificatesReadRotateAndRevoke(t *testing.T) {
 	// Invalidate re-reads at once, at most every 30 seconds.
 	vault.put(certPath, certPEM, keyPEM)
 	certs.Invalidate(certRef)
-	if back, err := certs.Get(ctx, certRef); err != nil || back.Fingerprint != first.Fingerprint {
+	if back, err := certs.Get(ctx, certRef); err != nil || back.ChainFingerprint != first.ChainFingerprint {
 		t.Fatalf("after Invalidate: %v", err)
 	}
 	vault.put(certPath, secondPEM, secondKey)
 	certs.Invalidate(certRef)
-	if same, _ := certs.Get(ctx, certRef); same.Fingerprint != first.Fingerprint {
+	if same, _ := certs.Get(ctx, certRef); same.ChainFingerprint != first.ChainFingerprint {
 		t.Fatal("a second Invalidate inside 30 seconds re-read")
 	}
 }
@@ -207,6 +207,20 @@ func TestClientCertificateValues(t *testing.T) {
 	cert, err := ParseClientCertificate(certPEM+ca.PEM(), keyPEM)
 	if err != nil || len(cert.TLSCertificate().Certificate) != 2 {
 		t.Fatalf("chain: %v", err)
+	}
+	// ChainFingerprint follows the whole chain: one leaf under a renewed
+	// intermediate is a new one, the same chain read again is not.
+	issuing := ca.Intermediate(t, "issuing-ca")
+	leafPEM, leafKey := issuing.ValidClient(t, "chained")
+	first, err := ParseClientCertificate(leafPEM+issuing.PEM(), leafKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := ParseClientCertificate(leafPEM+issuing.PEM(), leafKey)
+	renewed, err := ParseClientCertificate(leafPEM+ca.Reissue(t, issuing).PEM(), leafKey)
+	leafOnly, _ := ParseClientCertificate(leafPEM, leafKey)
+	if err != nil || again.ChainFingerprint != first.ChainFingerprint || renewed.ChainFingerprint == first.ChainFingerprint || leafOnly.ChainFingerprint == first.ChainFingerprint {
+		t.Fatalf("chain fingerprints: %v", err)
 	}
 	expired, expiredKey := ca.Client(t, "expired", now.Add(-2*time.Hour), now.Add(-time.Hour))
 	early, earlyKey := ca.Client(t, "early", now.Add(time.Hour), now.Add(2*time.Hour))

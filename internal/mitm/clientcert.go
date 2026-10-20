@@ -78,22 +78,23 @@ type certificateTransportKey struct {
 }
 
 type certificateTransport struct {
-	fingerprint [32]byte
-	transport   *http.Transport
+	chain     [32]byte // the ChainFingerprint it presents
+	transport *http.Transport
 }
 
 // certificateUpstream is the transport for a request that presents a client
 // certificate: one per certificate location and protocol, built from the
 // broker's own transport (dialer, egress checks, upstream verification) and
-// presenting that certificate whenever the upstream asks for one. When the
-// certificate at a location changes, a new transport replaces the old one:
-// calls in flight on the old one finish, and its idle connections close.
+// presenting that certificate whenever the upstream asks for one. When what a
+// location presents changes, its leaf or only an intermediate, a new
+// transport replaces the old one: calls in flight on the old one finish, and
+// its idle connections close.
 func (p *Proxy) certificateUpstream(presented presentedCertificate, h2 bool) *http.Transport {
 	key := certificateTransportKey{ref: presented.ref, h2: h2}
 	p.certificatesMu.Lock()
 	defer p.certificatesMu.Unlock()
 	current, ok := p.certificateTransports[key]
-	if ok && current.fingerprint == presented.cert.Fingerprint {
+	if ok && current.chain == presented.cert.ChainFingerprint {
 		return current.transport
 	}
 	if ok {
@@ -105,7 +106,7 @@ func (p *Proxy) certificateUpstream(presented presentedCertificate, h2 bool) *ht
 	if p.certificateTransports == nil {
 		p.certificateTransports = map[certificateTransportKey]certificateTransport{}
 	}
-	p.certificateTransports[key] = certificateTransport{fingerprint: presented.cert.Fingerprint, transport: t}
+	p.certificateTransports[key] = certificateTransport{chain: presented.cert.ChainFingerprint, transport: t}
 	return t
 }
 

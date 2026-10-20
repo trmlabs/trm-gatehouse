@@ -44,8 +44,12 @@ type ClientCertificate struct {
 	Version     int
 	NotBefore   time.Time
 	NotAfter    time.Time
-	// Fingerprint is the SHA-256 of the leaf, the certificate the upstream sees.
-	Fingerprint [sha256.Size]byte
+	// ChainFingerprint is the SHA-256 of everything the upstream sees: each
+	// certificate presented, leaf first, as DER, which delimits itself. The
+	// leaf fixes the key (tls.X509KeyPair checks that they match), so two
+	// certificates with one ChainFingerprint present the same thing, and a
+	// new intermediate under the same leaf is a new ChainFingerprint.
+	ChainFingerprint [sha256.Size]byte
 }
 
 // TLSCertificate is the certificate and key for a tls.Config.
@@ -242,5 +246,11 @@ func ParseClientCertificate(certPEM, keyPEM string) (*ClientCertificate, error) 
 		return nil, ErrClientCertificateInvalid
 	}
 	pair.Leaf = leaf
-	return &ClientCertificate{certificate: pair, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter, Fingerprint: sha256.Sum256(leaf.Raw)}, nil
+	c := &ClientCertificate{certificate: pair, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter}
+	chain := sha256.New()
+	for _, der := range pair.Certificate {
+		chain.Write(der)
+	}
+	chain.Sum(c.ChainFingerprint[:0])
+	return c, nil
 }
