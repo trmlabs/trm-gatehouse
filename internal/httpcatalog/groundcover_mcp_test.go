@@ -34,6 +34,14 @@ const (
 	mcpQueryMetric = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_metrics","arguments":{"mode":"query_range","envs":["production"],"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","promql":"sum(up)","step":"1m"}}}`
 )
 
+// mcpNested is k objects nested as the value of a query_logs call's period
+// argument. The message, params and arguments take three levels, so the
+// innermost value sits at depth k+3.
+func mcpNested(k int) string {
+	nested := strings.Repeat(`{"a":`, k) + `1` + strings.Repeat(`}`, k)
+	return strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":`+nested, 1)
+}
+
 func mcpCall(tool string) string {
 	return strings.Replace(mcpQueryLogs, `"query_logs"`, `"`+tool+`"`, 1)
 }
@@ -53,6 +61,7 @@ func TestMCPForwardsTheQueryClientsMessages(t *testing.T) {
 		"a log query window": {"POST", "application/json", strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z"`, 1), "groundcover.query_logs"},
 		"an escaped name":    {"POST", "application/json", strings.Replace(mcpQueryLogs, `"query_logs"`, `"query\u005flogs"`, 1), "groundcover.query_logs"},
 		"spaces around it":   {"POST", "application/json", " \n" + mcpQueryLogs + "\n ", "groundcover.query_logs"},
+		"as deep as allowed": {"POST", "application/json", mcpNested(groundcoverMCPDepth - 3), "groundcover.query_logs"},
 		"the event stream":   {"GET", "", "", ""},
 		"ending the session": {"DELETE", "", "", ""},
 	} {
@@ -125,7 +134,6 @@ func TestMCPRefusesOtherMethodsAndTools(t *testing.T) {
 // parser could cut, drop or give up on.
 func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 	e := groundcoverCatalog(t)
-	deep := strings.Repeat(`{"a":`, 40) + `1` + strings.Repeat(`}`, 40)
 	for name, tc := range map[string]struct {
 		method, path, query, body string
 		contentTypes              []string
@@ -161,7 +169,8 @@ func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 		"not JSON":                      {body: `method=tools/call&name=query_logs`},
 		"empty":                         {body: ``},
 		"only spaces":                   {body: "  \n"},
-		"too deep":                      {body: strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":`+deep, 1)},
+		"one level too deep":            {body: mcpNested(groundcoverMCPDepth - 2)},
+		"far too deep":                  {body: mcpNested(40)},
 		"a query string":                {query: "method=tools/call", body: mcpQueryLogs},
 		"another path":                  {path: "/api/mcp/", body: mcpQueryLogs},
 		"a longer path":                 {path: "/api/mcp/messages", body: mcpQueryLogs},

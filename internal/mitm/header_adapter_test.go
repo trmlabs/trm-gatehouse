@@ -836,8 +836,9 @@ func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 	tool := func(name string) string {
 		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":{"query":"* | limit 1","period":"PT1H"}}}`
 	}
-	// The three POSTs of one log query and one metric query, byte for byte as
-	// the client serializes them, then the event stream.
+	// The POSTs of one log query and one metric query (initialize, the
+	// notification and each tool call), byte for byte as the client
+	// serializes them, then the event stream.
 	calls := int32(0)
 	for _, tc := range []struct{ method, body, operation string }{
 		{"POST", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"example-query","version":"0.1.0"}}}`, "groundcover.initialize"},

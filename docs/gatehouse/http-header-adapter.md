@@ -101,7 +101,7 @@ A `GET` (the server's event stream) and a `DELETE` (ending the session) carry no
  "pools": ["<pool agent ID>"]}
 ```
 
-The message rules are keyed on the host and need no field. A broker without them loads no `requestHeaders` field, so it drops this entry rather than serve it unpinned. A client that lists tools first, as most MCP clients do, is refused; give it the two tool names instead.
+The message rules are keyed on the host and need no field. A broker without them does not know the `requestHeaders` field, so it never serves this entry unpinned: it drops the entry from a catalog read from Vault, and refuses a catalog file that lists it. A client that lists tools first, as most MCP clients do, is refused; give it the two tool names instead.
 
 ## HTTP/2 and gRPC
 
