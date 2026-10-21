@@ -1,9 +1,11 @@
 name: Keep upstream release tags
 
-# Copies every Infisical/agent-vault tag into this fork as upstream/<tag>,
-# with the commits it points to, so each upstream release stays available
-# here if the upstream repository goes away. Existing copies are never moved
-# or deleted. The first run copies every existing tag.
+# Copies every Infisical/agent-vault tag into this fork as upstream/<tag>, so
+# each upstream release stays available here if the upstream repository goes
+# away. Tags are created through the REST API, not pushed. Their commits come
+# from the upstream merges into main; a tag on a commit not merged yet is
+# listed as not copied and copies on the first run after the merge. Existing
+# copies are never moved or deleted. The first run copies every existing tag.
 
 on:
   schedule:
