@@ -47,18 +47,26 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+// gcpMinterLoader serves a catalog document and its version. They change
+// together: Watch takes the version as the document's identity, so a load that
+// pairs a new version with the previous document is applied and never
+// corrected.
 type gcpMinterLoader struct {
-	doc     atomic.Value
-	version atomic.Int32
+	mu      sync.Mutex
+	doc     string
+	version int
 }
 
 func (l *gcpMinterLoader) set(doc string, version int) {
-	l.doc.Store(doc)
-	l.version.Store(int32(version))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.doc, l.version = doc, version
 }
 
 func (l *gcpMinterLoader) load(context.Context) ([]byte, int, error) {
-	return []byte(l.doc.Load().(string)), int(l.version.Load()), nil
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return []byte(l.doc), l.version, nil
 }
 
 type tokenSourceFunc func() (*oauth2.Token, error)
