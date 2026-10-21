@@ -18,7 +18,6 @@ Thanks for helping. Issues, fixes and pull requests are welcome.
    go test -race -count=1 ./...   # the full test suite
    go vet -tags e2e ./...         # the end-to-end build
    python3 scripts/upstream-update-test.py
-   python3 scripts/upstream-tags-test.py
    ```
 
    For changes to the broker, the database path or the demo, also run the local demonstration:
