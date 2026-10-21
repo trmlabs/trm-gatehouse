@@ -211,7 +211,8 @@ never changes your Agent Vault home. `AV_VERIFY_PG_PORT` and
 
 The script runs the real SCRAM, dynamic-role/revocation, churn, saturation,
 renewal and abrupt-close tests, plus the PostgreSQL-backed store migration/CRUD
-check. Packages run sequentially so generated-role baseline measurements do not
+check and the check that broker replicas starting together create one agent and
+one vault per pool. Packages run sequentially so generated-role baseline measurements do not
 interfere with each other.
 
 It also exercises a controlled `pg_hba.conf` isolation fixture: the broker uses

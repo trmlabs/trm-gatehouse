@@ -446,6 +446,9 @@ type CAState struct {
 type Store interface {
 	// Vaults
 	CreateVault(ctx context.Context, name string) (*Vault, error)
+	// CreateVaultWithSetting creates a vault and one of its settings in a
+	// single transaction, so no reader sees the vault without the setting.
+	CreateVaultWithSetting(ctx context.Context, name, key, value string) (*Vault, error)
 	GetVault(ctx context.Context, name string) (*Vault, error)
 	GetVaultByID(ctx context.Context, id string) (*Vault, error)
 	ListVaults(ctx context.Context) ([]Vault, error)
@@ -485,6 +488,9 @@ type Store interface {
 
 	// Vault grants (unified: actor_id + actor_type)
 	GrantVaultRole(ctx context.Context, actorID, actorType, vaultID, role string) error
+	// GrantVaultRoleIfAbsent grants role only when the actor holds none on
+	// the vault, and reports whether it did. An existing role is never changed.
+	GrantVaultRoleIfAbsent(ctx context.Context, actorID, actorType, vaultID, role string) (bool, error)
 	RevokeVaultAccess(ctx context.Context, actorID, vaultID string) error
 	ListActorGrants(ctx context.Context, actorID string) ([]VaultGrant, error)
 	HasVaultAccess(ctx context.Context, actorID, vaultID string) (bool, error)

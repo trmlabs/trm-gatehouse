@@ -28,6 +28,7 @@ import (
 
 // Binding maps one account to existing broker authorization records. PodUID
 // optionally restricts admission to one pod; all pods are checked live by UID.
+// A pool binding may omit AgentID and VaultID; see ProvisionPools.
 type Binding struct {
 	Namespace         string `json:"namespace"`
 	ServiceAccount    string `json:"serviceAccount"`

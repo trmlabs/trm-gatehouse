@@ -156,6 +156,41 @@ func TestVaultDuplicateName(t *testing.T) {
 	}
 }
 
+func TestCreateVaultWithSettingAndGrantIfAbsent(t *testing.T) {
+	checkVaultSettingAndGrantIfAbsent(t, openTestDB(t), "marked")
+}
+
+// checkVaultSettingAndGrantIfAbsent runs on both dialects; name must be unused.
+func checkVaultSettingAndGrantIfAbsent(t *testing.T, s *SQLStore, name string) {
+	t.Helper()
+	ctx := context.Background()
+
+	v, err := s.CreateVaultWithSetting(ctx, name, "provisioned_by", "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetVaultSetting(ctx, v.ID, "provisioned_by"); err != nil || got != "example" {
+		t.Fatalf("setting %q %v", got, err)
+	}
+	// A failed create leaves neither the vault nor its setting.
+	if _, err := s.CreateVaultWithSetting(ctx, name, "provisioned_by", "other"); err == nil {
+		t.Fatal("expected error for duplicate vault name")
+	}
+	if got, _ := s.GetVaultSetting(ctx, v.ID, "provisioned_by"); got != "example" {
+		t.Fatalf("setting changed to %q", got)
+	}
+
+	if granted, err := s.GrantVaultRoleIfAbsent(ctx, "actor", "agent", v.ID, "member"); err != nil || !granted {
+		t.Fatalf("first grant %v %v", granted, err)
+	}
+	if granted, err := s.GrantVaultRoleIfAbsent(ctx, "actor", "agent", v.ID, "proxy"); err != nil || granted {
+		t.Fatalf("second grant %v %v", granted, err)
+	}
+	if role, _ := s.GetVaultRole(ctx, "actor", v.ID); role != "member" {
+		t.Fatalf("an existing role must stay, got %q", role)
+	}
+}
+
 func TestGetVaultNotFound(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
