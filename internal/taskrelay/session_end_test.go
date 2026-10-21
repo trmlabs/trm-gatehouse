@@ -113,7 +113,7 @@ func readFull(c net.Conn, b []byte) (int, error) {
 func TestUnreachableBrokerIsNamed(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
-	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: f.upstream(t, freeAddress(t)), Database: "canary", User: "workload", Placeholder: "public-placeholder"}
+	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: f.upstream(t, hangUpAddress(t)), Database: "canary", User: "workload", Placeholder: "public-placeholder"}
 	f.start(t)
 	c := f.dial(t, f.c.Postgres.Listen)
 	b, _ := (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber, Parameters: map[string]string{"user": "workload", "database": "canary"}}).Encode(nil)
@@ -195,7 +195,7 @@ func TestInSessionErrors(t *testing.T) {
 func TestUnreadableProofIsNamed(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
-	up := f.upstream(t, freeAddress(t))
+	up := f.upstream(t, hangUpAddress(t))
 	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: up, Database: "canary", User: "workload", Placeholder: "public-placeholder"}
 	f.start(t)
 	if e := os.Remove(up.ProofFile); e != nil {

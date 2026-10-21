@@ -64,7 +64,8 @@ func TestSelfModePostgresCarriesTheRunnerSession(t *testing.T) {
 			if e := c.Validate(time.Now()); e != nil {
 				t.Fatalf("config refused: %v", e)
 			}
-			go func() { _ = Run(t.Context(), c) }()
+			go func() { _ = runReserved(t.Context(), c) }()
+			mustBeBound(t, listen)
 			var conn net.Conn
 			for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 				if conn, e = net.Dial("tcp", listen); e == nil {
