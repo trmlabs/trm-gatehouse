@@ -347,19 +347,10 @@ func (b *Broker) handleBolt(conn net.Conn, stream io.Reader, session, attestatio
 		admissionLeft = time.Until(deadline)
 	}
 	if b.opts.Sessions != nil && scope.WorkloadID != "" {
-		id := newSessionID()
-		sessionID := "ledger-" + id
-		err := errors.New("session ID unavailable")
-		if id != "" {
-			release, ok := b.acquireAdmission(hsCtx)
-			if !ok {
-				refuse(boltBusy)
-				return
-			}
-			ledgerCtx, ledgerCancel := context.WithTimeout(hsCtx, b.opts.LedgerTimeout)
-			err = b.opts.Sessions.Add(ledgerCtx, sessionID, scope.WorkloadID, b.opts.MaxLeasesPerActor)
-			ledgerCancel()
-			release()
+		remove, err := b.addToLedger(hsCtx, scope.WorkloadID, b.opts.MaxLeasesPerActor)
+		if errors.Is(err, errAdmissionQueue) {
+			refuse(boltBusy)
+			return
 		}
 		if errors.Is(err, ErrSessionLimit) {
 			refuse(boltActorLimit)
@@ -370,13 +361,7 @@ func (b *Broker) handleBolt(conn net.Conn, stream io.Reader, session, attestatio
 			refuse(boltLedger)
 			return
 		}
-		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), b.removalTimeout())
-			defer cancel()
-			if err := b.opts.Sessions.Remove(ctx, sessionID); err != nil {
-				b.logger.Warn("pgproxy: session ledger removal failed", slog.String("error", err.Error()))
-			}
-		}()
+		defer remove()
 	}
 	expired := admissionLeft <= 0
 	serveCtx, serveCancel := context.WithTimeout(hsCtx, admissionLeft)

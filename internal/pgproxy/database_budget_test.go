@@ -118,3 +118,27 @@ func TestFailedLedgerRemovalIsRetried(t *testing.T) {
 	waitFor(t, 6*time.Second, func() bool { return ledger.count(databaseLedgerKey(svc)) == 0 }, "failed removal was not retried")
 	openAgentSession(t, addr, "agent-vault-token", "appdb").close()
 }
+
+// committedErrLedger writes the row and then reports an error, as a store
+// whose commit outlives the caller's deadline does.
+type committedErrLedger struct{ *fakeLedger }
+
+func (l committedErrLedger) Add(ctx context.Context, id, key string, limit int) error {
+	if err := l.fakeLedger.Add(ctx, id, key, limit); err != nil {
+		return err
+	}
+	return context.DeadlineExceeded
+}
+
+// An add that fails after writing its row refuses the session and takes the
+// row off, so it does not hold a place in the count.
+func TestFailedLedgerAddLeavesNoRow(t *testing.T) {
+	upstream := startFakeUpstream(t, authTrust, newLease().Password)
+	svc := &DatabaseService{Name: "analytics", Addr: upstream.addr(), SSLMode: "disable", MaxConns: 1}
+	ledger := committedErrLedger{&fakeLedger{sessions: map[string]string{}}}
+	addr := budgetBroker(t, ledger, svc)
+	if code := connectExpectCode(t, addr, "agent-vault-token", "appdb"); code != "08004" {
+		t.Fatalf("failed add: %q, want 08004", code)
+	}
+	waitFor(t, 2*time.Second, func() bool { return ledger.count(databaseLedgerKey(svc)) == 0 }, "row of a failed add still counted")
+}

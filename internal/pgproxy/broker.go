@@ -594,6 +594,12 @@ func (b *Broker) addToLedger(ctx context.Context, key string, limit int) (func()
 	defer cancel()
 	sessionID := "ledger-" + id
 	if err := b.opts.Sessions.Add(ledgerCtx, sessionID, key, limit); err != nil {
+		if !errors.Is(err, ErrSessionLimit) {
+			// The row may have been written before the error, as when the
+			// deadline passes after the commit: take it off, or it would
+			// hold a place in the count until this replica stops.
+			go b.ledgerRemover(sessionID)()
+		}
 		return nil, err
 	}
 	return b.ledgerRemover(sessionID), nil
