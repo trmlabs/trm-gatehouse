@@ -1,6 +1,7 @@
 package httpcatalog
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -34,20 +35,44 @@ type Automation struct {
 	// Entries are the catalog entries the Automation may use. Each must also
 	// be granted to the pool its runs land on, whose ceiling caps their tier.
 	Entries []string `json:"entries"`
-	// Write names the git and github-api entries, among Entries, where the
-	// Automation gets the pool's write grant: the push prefixes its git entry
-	// gives the pool, and the operations a github-api repository's
-	// poolOperations give it. On a git or github-api entry it lists but does
-	// not name here, the Automation fetches and reads only: no push, and no
-	// GitHub operation outside the reads (GitHubOperationWrites). The pool's
-	// own prefixes and operations stay the ceiling; Write decides which of the
-	// pool's Automations reach it, so one Automation's grant never widens
-	// another's. Optional, and refused for any other kind of entry.
-	Write []string `json:"write,omitempty"`
+	// Write sets where the Automation gets the pool's write grant: the push
+	// prefixes its git entry gives the pool, and the operations a github-api
+	// repository's poolOperations give it. A block without the key keeps the
+	// pool's grant on every entry, as a block did before the key existed. A
+	// block with it, an empty list included, gets exactly the git and
+	// github-api entries it names: on one it lists but does not name, the
+	// Automation fetches and reads only, with no push and no GitHub operation
+	// outside the reads (GitHubOperationWrites). The pool's own prefixes and
+	// operations stay the ceiling; Write decides which of the pool's
+	// Automations reach it, so one Automation's grant never widens another's.
+	// A name must be one of Entries and refers to a git or github-api entry.
+	Write WriteList `json:"write,omitzero"`
 }
 
+// WriteList is an Automation's write list, and whether its block has the key.
+// The zero value is a block without it. A key that is present is Set, an empty
+// list or null included, so no spelling of "write nothing" reads as "no key".
+type WriteList struct {
+	Set   bool
+	Names []string
+}
+
+func (w *WriteList) UnmarshalJSON(data []byte) error {
+	w.Set = true
+	return json.Unmarshal(data, &w.Names)
+}
+
+// MarshalJSON writes a set list as a list, [] when it names nothing, so a
+// block that is written out and read back keeps what it granted.
+func (w WriteList) MarshalJSON() ([]byte, error) {
+	return json.Marshal(append([]string{}, w.Names...))
+}
+
+// IsZero reports a block without the key, which omitzero then leaves out.
+func (w WriteList) IsZero() bool { return !w.Set }
+
 // ErrAutomationReadOnly is a push or a GitHub write by an Automation whose
-// block does not list the entry in write (Automation.Write).
+// block has a write list that does not name the entry (Automation.Write).
 var ErrAutomationReadOnly = errors.New("automation has no write grant for this destination")
 
 // automationContact is a plain lower-case email address: an owner as
@@ -81,9 +106,9 @@ func (a *Automation) validate() error {
 			return fmt.Errorf("entry %q is not a catalog entry name or is repeated", name)
 		}
 	}
-	slices.Sort(a.Write)
-	for i, name := range a.Write {
-		if !idPattern.MatchString(name) || (i > 0 && a.Write[i-1] == name) {
+	slices.Sort(a.Write.Names)
+	for i, name := range a.Write.Names {
+		if !idPattern.MatchString(name) || (i > 0 && a.Write.Names[i-1] == name) {
 			return fmt.Errorf("write entry %q is not a catalog entry name or is repeated", name)
 		}
 	}
@@ -95,7 +120,7 @@ func (a *Automation) validate() error {
 // have a write grant to give. kind returns an entry's kind, "" for none. It
 // runs after validate, which sorts Entries for Uses.
 func (a Automation) checkWrite(kind func(entry string) string) error {
-	for _, name := range a.Write {
+	for _, name := range a.Write.Names {
 		if !a.Uses(name) {
 			return fmt.Errorf("write names entry %q, which entries does not list", name)
 		}
@@ -113,9 +138,13 @@ func (a Automation) Uses(entry string) bool {
 }
 
 // Writes reports whether the Automation gets the pool's write grant on the
-// named git or github-api entry (Write).
+// named git or github-api entry: on every entry when its block has no write
+// key, and otherwise only on the entries the list names (Write).
 func (a Automation) Writes(entry string) bool {
-	_, ok := slices.BinarySearch(a.Write, entry)
+	if !a.Write.Set {
+		return true
+	}
+	_, ok := slices.BinarySearch(a.Write.Names, entry)
 	return ok
 }
 

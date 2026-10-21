@@ -9,8 +9,9 @@ import (
 )
 
 // writeCatalog has one pool deciding per Automation, a git entry, a github-api
-// entry and a header entry, and two Automations that list all three: auto-1
-// names the two GitHub entries in write, auto-2 names none.
+// entry and a header entry, and three Automations that list all three: auto-1
+// names the two GitHub entries in write, auto-2 has an empty write list, and
+// auto-3 has no write key.
 func writeCatalog(t *testing.T) httpcatalog.Catalog {
 	t.Helper()
 	c, err := httpcatalog.Parse([]byte(`{
@@ -24,24 +25,28 @@ func writeCatalog(t *testing.T) httpcatalog.Catalog {
 		  "placeholder":"__vault_KEY__","key":{"mount":"gatehouse","path":"vendors/x","field":"key"},"pools":["automations"]}],
 		"automations":[
 		 {"id":"auto-1","name":"explorer","owner":"platform-team","entries":["repo-git","repo-api","tracker"],"write":["repo-git","repo-api"]},
-		 {"id":"auto-2","name":"auditor","owner":"platform-team","entries":["repo-git","repo-api","tracker"]}]}`))
+		 {"id":"auto-2","name":"auditor","owner":"platform-team","entries":["repo-git","repo-api","tracker"],"write":[]},
+		 {"id":"auto-3","name":"unkeyed","owner":"platform-team","entries":["repo-git","repo-api","tracker"]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return c
 }
 
-// A listed Automation holds the pool's write grant only on the entries its
-// block names in write. Everyone else keeps the pool's grant, which is all
-// that limits a person's or a workload's push, so a person pool decides as it
-// did before the field existed. A requester that claims to be an Automation
-// and carries no block holds none.
+// A listed Automation whose block has a write list holds the pool's write
+// grant only on the entries the list names, none for an empty list. One whose
+// block has no write key, and everyone else, keep the pool's grant, which is
+// all that limits a person's or a workload's push, so a catalog that sets no
+// write list decides as it did before the field existed. A requester that
+// claims to be an Automation and carries no block holds none.
 func TestMayWriteFollowsTheAutomationsBlock(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := writeCatalog(t).Pool("automations")
 	for token, want := range map[string]map[string]bool{
 		"explorer": {"repo-git": true, "repo-api": true, "tracker": false, "unlisted": false},
 		"auditor":  {"repo-git": false, "repo-api": false, "tracker": false, "unlisted": false},
+		// No write key: the pool's grant, on every entry.
+		"reader": {"repo-git": true, "repo-api": true, "tracker": true, "unlisted": true},
 	} {
 		run := automationRuns[token]
 		who, refusal := Resolve(ctx, pool, token, Claims{Pod: "pod-" + token, ClaimedRun: run.Run}, automationRuns, &authorizetest.MemBinder{})

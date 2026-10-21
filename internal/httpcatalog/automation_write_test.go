@@ -1,6 +1,7 @@
 package httpcatalog
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -26,23 +27,30 @@ func writeGrantCatalog(automations string) string {
 }
 
 const (
-	readerBlock = `{"id":"auto-reader","name":"reader","owner":"platform-team","entries":["repo-git","repo-api","tracker"]}`
-	writerBlock = `{"id":"auto-writer","name":"writer","owner":"platform-team","entries":["repo-git","repo-api","tracker"],"write":["repo-git","repo-api"]}`
+	// readerBlock has an empty write list; unkeyedBlock has no write key.
+	readerBlock  = `{"id":"auto-reader","name":"reader","owner":"platform-team","entries":["repo-git","repo-api","tracker"],"write":[]}`
+	unkeyedBlock = `{"id":"auto-unkeyed","name":"unkeyed","owner":"platform-team","entries":["repo-git","repo-api","tracker"]}`
+	writerBlock  = `{"id":"auto-writer","name":"writer","owner":"platform-team","entries":["repo-git","repo-api","tracker"],"write":["repo-git","repo-api"]}`
 )
 
 // An Automation's write list names git and github-api entries among its own.
-// It is kept sorted, so a lookup is a binary search, and an Automation that
-// has none holds no write grant anywhere.
+// It is kept sorted, so a lookup is a binary search. An empty list holds no
+// write grant anywhere, and a block with no write key keeps the pool's grant
+// on every entry, as a block did before the key existed.
 func TestAutomationWriteGrantsLoad(t *testing.T) {
-	c, err := Parse([]byte(writeGrantCatalog(readerBlock + `,` + writerBlock)))
+	c, err := Parse([]byte(writeGrantCatalog(readerBlock + `,` + writerBlock + `,` + unkeyedBlock)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	reader, _ := c.Automation("auto-reader")
 	writer, _ := c.Automation("auto-writer")
+	unkeyed, _ := c.Automation("auto-unkeyed")
 	for _, entry := range []string{"repo-git", "repo-api", "tracker", "unknown"} {
 		if reader.Writes(entry) {
-			t.Errorf("an Automation with no write list writes %s", entry)
+			t.Errorf("an Automation with an empty write list writes %s", entry)
+		}
+		if !unkeyed.Writes(entry) {
+			t.Errorf("an Automation with no write key lost the pool's grant on %s", entry)
 		}
 		if want := entry == "repo-git" || entry == "repo-api"; writer.Writes(entry) != want {
 			t.Errorf("writer on %s: %v, want %v", entry, writer.Writes(entry), want)
@@ -54,8 +62,8 @@ func TestAutomationWriteGrantsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w, _ := c.Automation("auto-writer"); !w.Writes("repo-git") || !w.Writes("repo-api") || !slices.IsSorted(w.Write) {
-		t.Errorf("write %v not sorted or not found", w.Write)
+	if w, _ := c.Automation("auto-writer"); !w.Writes("repo-git") || !w.Writes("repo-api") || !slices.IsSorted(w.Write.Names) {
+		t.Errorf("write %v not sorted or not found", w.Write.Names)
 	}
 	// Only the Automation pool decides per Automation.
 	if a, ok := c.Automation("auto-writer"); !ok || !a.Writes("repo-git") {
@@ -88,11 +96,17 @@ func TestAutomationWriteRefusals(t *testing.T) {
 			t.Errorf("%s: the bad Automation is in force", name)
 		}
 	}
-	// An empty list and null name nothing.
+	// An empty list and null name nothing. Neither reads as a missing key,
+	// which would give the Automation the pool's grant.
 	for _, field := range []string{`,"write":[]`, `,"write":null`} {
-		block := strings.Replace(readerBlock, `}`, field+`}`, 1)
-		if _, err := Parse([]byte(writeGrantCatalog(block))); err != nil {
+		block := strings.Replace(unkeyedBlock, `}`, field+`}`, 1)
+		c, err := Parse([]byte(writeGrantCatalog(block)))
+		if err != nil {
 			t.Errorf("%s: %v", field, err)
+			continue
+		}
+		if a, _ := c.Automation("auto-unkeyed"); !a.Write.Set || a.Writes("repo-git") || a.Writes("repo-api") {
+			t.Errorf("%s: set %v, writes repo-git %v, repo-api %v; want a block that writes nothing", field, a.Write.Set, a.Writes("repo-git"), a.Writes("repo-api"))
 		}
 	}
 	// A write entry the catalog drops takes its Automation with it.
@@ -178,5 +192,40 @@ func TestWriteEntriesNameTheGrantsARequestNeeds(t *testing.T) {
 	}
 	if !errors.Is(ErrAutomationReadOnly, ErrAutomationReadOnly) || errors.Is(ErrAutomationReadOnly, ErrReadOnly) {
 		t.Error("ErrAutomationReadOnly is its own error")
+	}
+}
+
+// A block that is written out and read back keeps what it granted: no key
+// stays no key, and an empty list stays an empty list rather than being
+// dropped, which would hand the Automation the pool's grant.
+func TestAutomationWriteKeySurvivesJSON(t *testing.T) {
+	for name, tc := range map[string]struct {
+		block   string
+		wantKey bool
+		want    string
+	}{
+		"no key":     {unkeyedBlock, false, ""},
+		"empty list": {readerBlock, true, `"write":[]`},
+		"null":       {strings.Replace(unkeyedBlock, `}`, `,"write":null}`, 1), true, `"write":[]`},
+		"a list":     {writerBlock, true, `"write":["repo-git","repo-api"]`},
+	} {
+		var a Automation
+		if err := json.Unmarshal([]byte(tc.block), &a); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if a.Write.Set != tc.wantKey {
+			t.Errorf("%s: Set %v, want %v", name, a.Write.Set, tc.wantKey)
+		}
+		out, err := json.Marshal(a)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if has := strings.Contains(string(out), `"write"`); has != tc.wantKey || (tc.want != "" && !strings.Contains(string(out), tc.want)) {
+			t.Errorf("%s: written as %s, want key %v %s", name, out, tc.wantKey, tc.want)
+		}
+		var back Automation
+		if err := json.Unmarshal(out, &back); err != nil || back.Write.Set != a.Write.Set || !slices.Equal(back.Write.Names, a.Write.Names) {
+			t.Errorf("%s: read back %+v, %v", name, back.Write, err)
+		}
 	}
 }

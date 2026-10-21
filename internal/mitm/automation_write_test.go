@@ -26,13 +26,14 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// automationRunsFor names four Automations that run on one Pod, so one claimed
+// automationRunsFor names five Automations that run on one Pod, so one claimed
 // run serves them all: each token is one Automation's run.
 var automationRunsFor = cursorRunner{
 	"reader":   automationWriteRun("auto-reader"),
 	"writer":   automationWriteRun("auto-writer"),
 	"api-only": automationWriteRun("auto-api"),
 	"git-only": automationWriteRun("auto-git"),
+	"unkeyed":  automationWriteRun("auto-unkeyed"),
 }
 
 func automationWriteRun(automation string) runnerid.Session {
@@ -41,9 +42,9 @@ func automationWriteRun(automation string) runnerid.Session {
 
 // writeGrantCatalogFor is one Automation pool with a git entry and a github-api
 // entry on one repository, where the pool may push factory/ and open, read,
-// list, comment on and update the branch of pull requests. Four Automations
-// list both entries and differ only in write: none, both entries, the
-// github-api entry only, and the git entry only.
+// list, comment on and update the branch of pull requests. Five Automations
+// list both entries and differ only in write: an empty list, both entries, the
+// github-api entry only, the git entry only, and no write key at all.
 const writeGrantCatalogFor = `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],
  "entries":[
   {"name":"github-api","host":"api.example.com","kind":"github-api","pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[
@@ -52,10 +53,11 @@ const writeGrantCatalogFor = `{"pools":[{"name":"pool-agent","namespace":"n","se
   {"name":"github","host":"example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[
    {"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/factory/"]}]}}],
  "automations":[
-  {"id":"auto-reader","name":"reader","owner":"platform-team","entries":["github","github-api"]},
+  {"id":"auto-reader","name":"reader","owner":"platform-team","entries":["github","github-api"],"write":[]},
   {"id":"auto-writer","name":"writer","owner":"platform-team","entries":["github","github-api"],"write":["github","github-api"]},
   {"id":"auto-api","name":"api-only","owner":"platform-team","entries":["github","github-api"],"write":["github-api"]},
-  {"id":"auto-git","name":"git-only","owner":"platform-team","entries":["github","github-api"],"write":["github"]}]}`
+  {"id":"auto-git","name":"git-only","owner":"platform-team","entries":["github","github-api"],"write":["github"]},
+  {"id":"auto-unkeyed","name":"unkeyed","owner":"platform-team","entries":["github","github-api"]}]}`
 
 type automationWriteFixture struct {
 	proxyURL *url.URL
@@ -151,10 +153,12 @@ func (f *automationWriteFixture) counts() (minted, received int) {
 
 // What an Automation may do on GitHub follows its own block, not the pool's:
 // every Automation here lists the same two entries on the same pool, yet one
-// without write fetches and reads only, one with write on both entries pushes
-// and changes pull requests, and one with write on a single entry does only
-// what that entry carries. A CI restart is a branch update that reaches no
-// further than a push, so it needs both. A refused request is answered before
+// with an empty write list fetches and reads only, one with write on both
+// entries pushes and changes pull requests, and one with write on a single
+// entry does only what that entry carries. One whose block has no write key
+// keeps everything the pool gives, so a broker that reads write changes
+// nothing until a catalog sets it. A CI restart is a branch update that
+// reaches no further than a push, so it needs both. A refused request is answered before
 // a token is minted and never reaches GitHub, and its audit row names the
 // Automation and the entry.
 func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
@@ -186,9 +190,10 @@ func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 		"writer":   {open, comment, pushAdvert, push, restart},
 		"api-only": {open, comment},
 		"git-only": {pushAdvert, push},
+		"unkeyed":  {open, comment, pushAdvert, push, restart},
 	}
-	ids := map[string]string{"reader": "auto-reader", "writer": "auto-writer", "api-only": "auto-api", "git-only": "auto-git"}
-	for _, automation := range []string{"reader", "writer", "api-only", "git-only"} {
+	ids := map[string]string{"reader": "auto-reader", "writer": "auto-writer", "api-only": "auto-api", "git-only": "auto-git", "unkeyed": "auto-unkeyed"}
+	for _, automation := range []string{"reader", "writer", "api-only", "git-only", "unkeyed"} {
 		for _, r := range reads {
 			if code, refusal := f.send(t, automation, r.method, r.host, r.path, r.body); code != http.StatusOK || refusal != "" {
 				t.Errorf("%s: %s: %d %q, want it served", automation, r.name, code, refusal)
@@ -223,7 +228,7 @@ func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 			}
 		}
 		if automation == "reader" {
-			// The Automation with no write grant changed nothing: GitHub
+			// The Automation with an empty write list changed nothing: GitHub
 			// received its list and its fetch (the read of pull request 12
 			// is the fake's own answer) and nothing else.
 			f.mu.Lock()
@@ -242,12 +247,12 @@ func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 }
 
 // Over GraphQL, where gh reads and writes through one endpoint, an Automation
-// with no write grant on the github-api entry is served every recorded gh
+// whose write list leaves out the github-api entry is served every recorded gh
 // command that only reads (pr view, pr list, pr checks, pr diff, repo view)
 // and refused at the first mutation of the rest, or at a read that needs a
 // write operation, before any lookup or token; the same pool's Automation
-// with the grant is served all of them. GitHub receives no mutation from the
-// first.
+// with the grant, and one with no write key, are served all of them. GitHub
+// receives no mutation from the first.
 func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 	f := newGraphQLFixture(t)
 	ops := append([]string{"graphql"}, allPullRequestOps...)
@@ -261,8 +266,9 @@ func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 	  {"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
 	   "repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}],
 	 "automations":[
-	  {"id":"auto-reader","name":"reader","owner":"platform-team","entries":["github","github-api"]},
-	  {"id":"auto-writer","name":"writer","owner":"platform-team","entries":["github","github-api"],"write":["github-api"]}]}`)
+	  {"id":"auto-reader","name":"reader","owner":"platform-team","entries":["github","github-api"],"write":[]},
+	  {"id":"auto-writer","name":"writer","owner":"platform-team","entries":["github","github-api"],"write":["github-api"]},
+	  {"id":"auto-unkeyed","name":"unkeyed","owner":"platform-team","entries":["github","github-api"]}]}`)
 	f.proxy.sessions = validTokenResolver("workload-token", &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1", ClaimedRun: "bc-1"})
 	f.proxy.adapter.Runner = automationRunsFor
 	f.proxy.adapter.Entitlements = &entitlement.Cache{Source: directory{}}
@@ -306,19 +312,24 @@ func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 		t.Error("the reader's reads never reached GitHub")
 	}
 
-	f.as(t, "writer")
-	for _, c := range ghCommands {
-		if got := f.replay(t, c.fixture); got != "" {
-			t.Errorf("%s as the writer: refused %q", c.fixture, got)
+	mutations := func() (n int) {
+		for _, body := range f.relayed() {
+			if strings.Contains(body, "mutation") {
+				n++
+			}
 		}
+		return n
 	}
-	var mutations int
-	for _, body := range f.relayed() {
-		if strings.Contains(body, "mutation") {
-			mutations++
+	for _, who := range []string{"writer", "unkeyed"} {
+		before := mutations()
+		f.as(t, who)
+		for _, c := range ghCommands {
+			if got := f.replay(t, c.fixture); got != "" {
+				t.Errorf("%s as the %s: refused %q", c.fixture, who, got)
+			}
 		}
-	}
-	if mutations == 0 {
-		t.Error("the writer's mutations never reached GitHub")
+		if mutations() == before {
+			t.Errorf("the %s's mutations never reached GitHub", who)
+		}
 	}
 }
