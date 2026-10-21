@@ -430,9 +430,8 @@ func (b *Broker) handleBolt(conn net.Conn, stream io.Reader, session, attestatio
 		return
 	}
 	event.Binding = scope.VaultID + "/" + svc.Name
-	// A graph database's maxConns is a budget per replica, not the fleet's.
 	budget := &DatabaseService{Addr: svc.Addr, MaxConns: svc.MaxConns}
-	if !b.acquireUpstreamSlot(budget, 1) {
+	if !b.acquireUpstreamSlot(budget) {
 		refuse(boltDatabaseLimit)
 		return
 	}

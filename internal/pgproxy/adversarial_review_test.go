@@ -88,12 +88,12 @@ func TestAdversarial_ExpiryBeforeRenewFloor(t *testing.T) {
 func TestAdversarial_LiveBudgetReduction(t *testing.T) {
 	b := New("", Options{MaxConns: 10})
 	original := &DatabaseService{Addr: "db:5432", MaxConns: 3}
-	if !b.acquireUpstreamSlot(original, 1) {
+	if !b.acquireUpstreamSlot(original) {
 		t.Fatal("initial slot unavailable")
 	}
 	defer b.releaseUpstreamSlot(original)
 	updated := &DatabaseService{Addr: "db:5432", MaxConns: 1}
-	if b.acquireUpstreamSlot(updated, 1) {
+	if b.acquireUpstreamSlot(updated) {
 		b.releaseUpstreamSlot(updated)
 		t.Fatal("live max_conns reduction ignored: admitted 2 sessions with updated limit 1")
 	}
