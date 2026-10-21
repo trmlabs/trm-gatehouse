@@ -59,12 +59,33 @@ func Run(parent context.Context, c FixedConfig) error {
 	return RunWithListen(parent, c, net.Listen)
 }
 
+// loopbackOnly refuses, and closes, a socket that listen binds anywhere but
+// loopback. Validation holds a sidecar's configured addresses to loopback; this
+// holds the sockets a caller's listen returns to the same rule.
+func loopbackOnly(listen func(network, address string) (net.Listener, error)) func(network, address string) (net.Listener, error) {
+	return func(network, address string) (net.Listener, error) {
+		l, e := listen(network, address)
+		if e != nil {
+			return nil, e
+		}
+		if !loopbackAddress(l.Addr().String()) {
+			_ = l.Close()
+			return nil, errConfig
+		}
+		return l, nil
+	}
+}
+
 // RunWithListen is Run with the way it binds an address passed in. A test hands
 // it listeners it already holds, so it never has to choose a free port, release
-// it and hope nothing takes it before Run binds it.
+// it and hope nothing takes it before Run binds it. A sidecar's listeners must
+// still be on loopback, whichever socket listen returns.
 func RunWithListen(parent context.Context, c FixedConfig, listen func(network, address string) (net.Listener, error)) (result error) {
 	if e := c.Validate(time.Now()); e != nil {
 		return e
+	}
+	if c.Self {
+		listen = loopbackOnly(listen)
 	}
 	pair, e := newPairVerifier(c)
 	if e != nil {
