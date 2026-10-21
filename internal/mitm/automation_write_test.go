@@ -333,3 +333,48 @@ func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 		}
 	}
 }
+
+// An Automation lists two github-api entries on one host and names only the
+// first in write. A mutation by node ID on a pull request in the second entry's
+// repository passes the early check, since the first entry grants write, and is
+// refused only by the check made once the entry is chosen: the write grant is
+// the chosen entry's, not any entry's. GitHub receives the first mutation and
+// not the second.
+func TestAutomationWriteGrantIsThatOfTheEntryTheGraphQLRequestReaches(t *testing.T) {
+	const ops = `["graphql","pr.read","pr.comment"]`
+	repoA := `{"repo":"example-org/example-repo","access":"write","operations":` + ops + `,"pullRequestPrefixes":["factory/"],"poolOperations":{"pool-agent":` + ops + `}}`
+	repoB := `{"repo":"example-org/read-repo","access":"write","operations":` + ops + `,"pullRequestPrefixes":["factory/"],"poolOperations":{"pool-agent":` + ops + `}}`
+	f := newGraphQLFixture(t)
+	f.useRaw(t, `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],
+	 "entries":[
+	  {"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[`+repoA+`]}},
+	  {"name":"github-api-b","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[`+repoB+`]}},
+	  {"name":"github","host":"git.example.com","kind":"git","pools":["pool-agent"],"git":{"appID":7,"installationID":42,
+	   "repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]},
+	   {"repo":"example-org/read-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}],
+	 "automations":[{"id":"auto-writer","name":"writer","owner":"platform-team","entries":["github","github-api","github-api-b"],"write":["github-api"]}]}`)
+	f.proxy.sessions = validTokenResolver("workload-token", &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1", ClaimedRun: "bc-1"})
+	f.proxy.adapter.Runner = automationRunsFor
+	f.proxy.adapter.Entitlements = &entitlement.Cache{Source: directory{}}
+	f.as(t, "writer")
+
+	comment := func(subject string) (int, string) {
+		code, _ := f.send(t, http.MethodPost, "/graphql", nil, graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": subject, "body": "x"}))
+		return code, f.audit.last().Outcome
+	}
+	if code, outcome := comment(ownPR); code != http.StatusOK || outcome != "completed" {
+		t.Errorf("the named entry: %d %q, want it served", code, outcome)
+	}
+	if code, outcome := comment(readPR); code != http.StatusForbidden || outcome != "automation_read_only" {
+		t.Errorf("the unnamed entry: %d %q, want automation_read_only", code, outcome)
+	}
+	mutations := 0
+	for _, body := range f.relayed() {
+		if strings.Contains(body, "mutation") {
+			mutations++
+		}
+	}
+	if mutations != 1 {
+		t.Errorf("GitHub received %d mutations, want 1", mutations)
+	}
+}

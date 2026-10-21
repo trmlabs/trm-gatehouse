@@ -157,8 +157,10 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	}
 	// An Automation holds a write grant per entry (Requester.MayWrite). A
 	// request that writes, when none of the entries that could serve it gives
-	// the requester one, is refused before any lookup or token; the entry
-	// finally chosen is checked again below.
+	// the requester one, is refused before any lookup or token. When some do,
+	// the pull request a node ID names may be in an entry that does not, so the
+	// lookup (a read) can run first and the entry finally chosen is checked
+	// again below.
 	if slices.ContainsFunc(req.Operations, httpcatalog.GitHubOperationWrites) &&
 		!slices.ContainsFunc(authorized, func(g httpcatalog.GitRequest) bool { return who.MayWrite(g.Entry.Name) }) {
 		deny(http.StatusForbidden, "automation_read_only")
