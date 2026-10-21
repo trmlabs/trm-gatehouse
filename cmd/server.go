@@ -519,6 +519,12 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 		if err != nil {
 			return err
 		}
+		// Pool bindings without IDs get their pool's agent and vault here, so
+		// a deployment with no signed-in owner can still run its pools.
+		config, err = workloadidentity.ProvisionPools(context.Background(), config, db, logger)
+		if err != nil {
+			return err
+		}
 		resolver, err := workloadidentity.New(config, db)
 		if err != nil {
 			return err

@@ -59,6 +59,8 @@ Proof must contain exactly one audience, matching the configured broker audience
 
 One namespace/service-account binding maps to one agent and one vault. `serviceAccountUID` prevents a recreated account from inheriting access. An optional `podUID` further pins the binding to one pod. Without that optional field, replacement pods under the approved account may authenticate with their own new proof; the deleted pod's old proof remains invalid. The verified pod UID is carried as `WorkloadID` for auditing and ongoing PostgreSQL authorization checks.
 
+A pool binding (one that sets `pool`) may omit both `agentID` and `vaultID`. At startup the broker then uses the agent and the vault named after the pool, creating either when missing (the agent with instance role `no-access`), and grants the agent `proxy` on the vault when it holds no role there. Replicas starting together settle on one agent and one vault. A role an operator changed is kept and a revoked agent stays revoked, but a deleted grant returns at the next start: withdraw a pool by removing its binding or revoking its agent. The broker adopts an existing agent of the pool's name only if it created that agent itself and otherwise refuses to start, since the agent's tokens would gain the pool's vault. A binding that names only one of the two IDs is refused as before.
+
 ## Connect the two entry points
 
 - HTTP clients send the projected token in `Proxy-Authorization: Bearer <proof>`. Do not put it in the destination's `Authorization` header or a URL. The broker removes proxy authorization before forwarding.
