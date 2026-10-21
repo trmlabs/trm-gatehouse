@@ -30,8 +30,8 @@ import (
 const (
 	groundcoverMCPHost = "mcp.groundcover.com"
 	groundcoverMCPPath = "/api/mcp"
-	// groundcoverMCPDepth bounds how deeply a message nests, far above what
-	// a tool call's arguments need.
+	// groundcoverMCPDepth bounds how many levels below the message a value
+	// may sit, far deeper than a tool call's arguments need.
 	groundcoverMCPDepth = 32
 )
 
