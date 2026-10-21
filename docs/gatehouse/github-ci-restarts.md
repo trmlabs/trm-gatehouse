@@ -32,7 +32,7 @@ Without the opt-in, or without a `git` entry that lets the pool push to at least
 
 Every request is checked the same way, with nothing kept between requests:
 
-1. The route is listed for the repository and the pool, and the requester passes the `github-api` entry's authorization and also the `git` entry's (its tier and groups), as a push would.
+1. The route is listed for the repository and the pool, and the requester passes the `github-api` entry's authorization and also the `git` entry's (its tier and groups), as a push would. For a Cursor Automation whose block has a `write` list, the grant to restart is also a grant to push: the list must name both entries.
 2. The broker mints a token for that one repository with only the scope above, and reads the target with it:
    - **Branch update:** the pull request. Its head must be a branch of this repository (never a fork) under the pool's push prefixes in the `git` entry: the shared `refPrefixes` and the pool's own `poolRefPrefixes`, never another pool's, and a `{requester}` prefix only as the requester's own (see "Each requester's own branches" in `docs/gatehouse/git-adapter.md`). The repository's `pullRequestPrefixes` and `poolPullRequestPrefixes` do not count here: they let a pool comment on pull requests other agents or people opened, not write to their branches.
    - **Rerun:** the workflow run. GitHub must have started it for a `push` or a `pull_request` event, in this repository, from a head branch of this repository under the pool's push prefixes. A run of a branch outside the prefixes, such as the default branch (a deploy, for example), a scheduled or dispatched run, `pull_request_target`, `workflow_run`, and any run from a fork are refused.

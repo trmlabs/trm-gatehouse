@@ -246,6 +246,22 @@ var githubOperations = map[string]string{
 	"actions.rerun_failed": "actions-write", // POST /actions/runs/{id}/rerun-failed-jobs, likewise
 }
 
+// githubReadOperations are the githubOperations that change nothing on
+// GitHub: reads of pull requests, Actions and deployments, and graphql, which
+// only opens POST /graphql, where every mutation field still needs its own
+// operation. An Automation without a write grant on a github-api entry
+// (Automation.Write) uses these and no other.
+var githubReadOperations = map[string]bool{
+	"pr.read": true, "pr.list": true, "actions.read": true, "deployments.read": true, "graphql": true,
+}
+
+// GitHubOperationWrites reports whether a github-api operation can change
+// something on GitHub: every one outside githubReadOperations, so an operation
+// added later counts as a write until it is listed as a read. A GraphQL read
+// of a repository's labels is such a write: it needs pr.label, as the
+// mutation does.
+func GitHubOperationWrites(op string) bool { return !githubReadOperations[op] }
+
 // githubRouteScopes are the scopes an operation's routes need besides its own
 // (githubOperations): actions.read also reads a commit's check runs and
 // statuses, the CI results GitHub keeps outside Actions, each with a token
@@ -524,6 +540,7 @@ func Parse(data []byte) (Catalog, error) {
 		}
 	}
 	names := map[string]bool{}
+	entryKinds := map[string]string{} // entry name: its kind
 	users := map[KVRef]string{}
 	routes := map[string]string{}
 	kinds := map[string]string{}
@@ -539,6 +556,7 @@ func Parse(data []byte) (Catalog, error) {
 			return Catalog{}, fmt.Errorf("duplicate HTTP catalog entry %q", e.Name)
 		}
 		names[e.Name] = true
+		entryKinds[e.Name] = e.Kind
 		if err := e.validateTier(); err != nil {
 			return Catalog{}, fmt.Errorf("HTTP catalog entry %q: %w", e.Name, err)
 		}
@@ -606,7 +624,7 @@ func Parse(data []byte) (Catalog, error) {
 			return Catalog{}, fmt.Errorf("HTTP catalog entries %q and %q: %w", e.Name, crossings[0].git, crossings[0].err)
 		}
 	}
-	automations, err := indexAutomations(file.Automations, names)
+	automations, err := indexAutomations(file.Automations, entryKinds)
 	if err != nil {
 		return Catalog{}, err
 	}
@@ -1330,6 +1348,32 @@ type GitRequest struct {
 	// HeadPrefixes, here the push prefixes of CloneEntry, the git entry a push
 	// to the repository would use.
 	RestartOf int64
+}
+
+// WriteEntries returns the entries whose write grant a matched request needs,
+// which an Automation holds only for the entries its block lists in write
+// (Automation.Write): the git entry for a push (receive-pack, with or without a
+// body); the github-api entry for an operation that writes
+// (GitHubOperationWrites; one with no operation counts as a write, so a request
+// built outside the REST routes is held, not skipped); and, for a CI restart,
+// the git entry its branch relies on too, since a restart reaches no further
+// than a push. Nothing for a fetch or a read. A GraphQL request names its
+// operations only once parsed, so its caller asks GitHubOperationWrites for
+// each, not this.
+func (g GitRequest) WriteEntries() []string {
+	if g.Entry == nil {
+		return nil
+	}
+	switch {
+	case g.Entry.Kind == "git" && g.Write:
+		return []string{g.Entry.Name}
+	case g.Entry.Kind == "github-api" && GitHubOperationWrites(g.Operation):
+		if g.RestartOf > 0 && g.CloneEntry != nil {
+			return []string{g.Entry.Name, g.CloneEntry.Name}
+		}
+		return []string{g.Entry.Name}
+	}
+	return nil
 }
 
 // GitMatch routes a request to a git entry. ok is false when the host has no

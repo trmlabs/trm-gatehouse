@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,17 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		p.answerGitHubGraphQL(w, event, authorized[0].Entry, req.Answer)
 		return
 	}
+	// An Automation holds a write grant per entry (Requester.MayWrite). A
+	// request that writes, when none of the entries that could serve it gives
+	// the requester one, is refused before any lookup or token. When some do,
+	// the pull request a node ID names may be in an entry that does not, so the
+	// lookup (a read) can run first and the entry finally chosen is checked
+	// again below.
+	if slices.ContainsFunc(req.Operations, httpcatalog.GitHubOperationWrites) &&
+		!slices.ContainsFunc(authorized, func(g httpcatalog.GitRequest) bool { return who.MayWrite(g.Entry.Name) }) {
+		deny(http.StatusForbidden, "automation_read_only")
+		return
+	}
 
 	// The rate limit applies before any lookup too, per entry as for REST.
 	limited := map[string]bool{}
@@ -237,6 +249,12 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	for _, op := range append([]string{"graphql"}, req.Operations...) {
 		if !api.Repo.Allows(op) {
 			deny(http.StatusForbidden, "unlisted")
+			return
+		}
+		// An Automation with no write grant on the entry reads only: every
+		// mutation, and a read that needs a write operation, is refused.
+		if httpcatalog.GitHubOperationWrites(op) && !who.MayWrite(entry.Name) {
+			deny(http.StatusForbidden, "automation_read_only")
 			return
 		}
 	}

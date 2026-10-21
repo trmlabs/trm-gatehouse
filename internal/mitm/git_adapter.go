@@ -43,6 +43,9 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	case errors.Is(matchErr, httpcatalog.ErrReadOnly):
 		deny(http.StatusForbidden, "read_only")
 		return
+	case errors.Is(matchErr, httpcatalog.ErrAutomationReadOnly):
+		deny(http.StatusForbidden, "automation_read_only")
+		return
 	case matchErr != nil:
 		deny(http.StatusForbidden, "pool")
 		return

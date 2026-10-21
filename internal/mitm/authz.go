@@ -54,3 +54,21 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 	}
 	return who, ""
 }
+
+// withWriteGrant is the match error to forward with a matched git or github-api
+// request: err when the match failed, and otherwise ErrAutomationReadOnly when
+// the request needs the write grant of an entry (GitRequest.WriteEntries) that
+// the requester does not hold (Requester.MayWrite), which only an Automation
+// can lack. It runs after the entry's authorization, which names who the
+// requester is, and before any token is minted or GitHub asked.
+func withWriteGrant(who authorize.Requester, g httpcatalog.GitRequest, err error) error {
+	if err != nil {
+		return err
+	}
+	for _, entry := range g.WriteEntries() {
+		if !who.MayWrite(entry) {
+			return httpcatalog.ErrAutomationReadOnly
+		}
+	}
+	return nil
+}
