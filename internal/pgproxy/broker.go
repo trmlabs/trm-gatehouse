@@ -52,7 +52,8 @@ type Options struct {
 	MinRenewInterval      time.Duration // floor on the renew cadence (default 5s)
 	MaxConns              int           // cap on concurrent SERVING connections = upstream DB connections, all databases (default 10,000)
 	// DefaultDatabaseConns is a database's ceiling when its catalog entry
-	// sets no maxConns (default 50).
+	// sets no maxConns (default 50). Either budget is the whole fleet's: each
+	// replica takes its share (see databaseLimit).
 	DefaultDatabaseConns int
 	// MaxPendingConns bounds accepted-but-not-yet-serving connections
 	// (default the larger of 512 and MaxConns). Past it the broker stops
@@ -550,17 +551,40 @@ func (b *Broker) acquireAdmission(ctx context.Context) (func(), bool) {
 	}
 }
 
+// liveReplicas is the fleet size that divides each database's budget in
+// session mode, as PoolOptions.LiveReplicas does pooled: the durable cleanup
+// journal's count of live owner rows, or 1 without one.
+func (b *Broker) liveReplicas() int {
+	if live, ok := b.opts.Leases.(interface{ LiveReplicas() int }); ok {
+		if n := live.LiveReplicas(); n > 0 {
+			return n
+		}
+	}
+	return 1
+}
+
+// databaseLimit is this replica's ceiling for svc: the database's whole
+// budget (its catalog maxConns, or DefaultDatabaseConns without one) divided
+// by replicas, rounded down, and never above MaxConns. Rounding down keeps
+// the replicas together within the budget. With more replicas than the
+// budget every share is 0, so the database is refused rather than
+// oversubscribed; pooled mode keeps at least 1 per replica instead.
+func (b *Broker) databaseLimit(svc *DatabaseService, replicas int) int {
+	budget := svc.MaxConns
+	if budget <= 0 {
+		budget = b.opts.DefaultDatabaseConns
+	}
+	return min(budget/max(1, replicas), b.opts.MaxConns)
+}
+
 // Budgets are read on each admission; a lower live limit prevents new
 // connections until occupancy falls below it. Counters disappear when drained.
-func (b *Broker) acquireUpstreamSlot(svc *DatabaseService) bool {
+// A session already open is never closed for a smaller share, so after a
+// replica joins the fleet can sit above the budget until sessions end.
+func (b *Broker) acquireUpstreamSlot(svc *DatabaseService, replicas int) bool {
 	b.serveMu.Lock()
 	defer b.serveMu.Unlock()
-	limit := svc.MaxConns
-	if limit <= 0 {
-		limit = b.opts.DefaultDatabaseConns
-	}
-	limit = min(limit, b.opts.MaxConns)
-	if b.upstreamCounts[svc.Addr] >= limit {
+	if b.upstreamCounts[svc.Addr] >= b.databaseLimit(svc, replicas) {
 		return false
 	}
 	b.upstreamCounts[svc.Addr]++
@@ -953,13 +977,22 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	}
 
 	// Per-database budget: bound the connections to THIS upstream so a burst to
-	// one database cannot starve the others behind the same broker. Applied
+	// one database cannot starve the others behind the same broker. The budget
+	// is the whole fleet's, so this replica takes its share of it. Applied
 	// before minting so a rejected connection wastes no Vault role.
-	if !b.acquireUpstreamSlot(svc) {
-		b.logger.Warn("pgproxy: per-database connection limit reached",
+	replicas := b.liveReplicas()
+	if !b.acquireUpstreamSlot(svc, replicas) {
+		limit := b.databaseLimit(svc, replicas)
+		message := "pgproxy: per-database connection limit reached"
+		if limit == 0 {
+			message = "pgproxy: database budget is smaller than the live replica count; refusing session"
+		}
+		b.logger.Warn(message,
 			slog.String("vault", scope.VaultID),
 			slog.String("service", svc.Name),
-			slog.String("upstream", svc.Addr))
+			slog.String("upstream", svc.Addr),
+			slog.Int("limit", limit),
+			slog.Int("replicas", replicas))
 		refuse("database_limit", "53300", "Agent Vault: too many concurrent connections to this database")
 		return
 	}
