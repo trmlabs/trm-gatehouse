@@ -11,16 +11,14 @@ func TestRequestHeadersLoadRules(t *testing.T) {
 	groundcoverCatalog(t)
 	pin := `"requestHeaders":[{"name":"X-Backend-Id","values":["us-backend"]}]`
 	for name, doc := range map[string]string{
-		"groundcover without a pin":       strings.Replace(groundcoverEntry, pin+`,`, ``, 1),
-		"groundcover pinning another one": strings.Replace(groundcoverEntry, `"name":"X-Backend-Id"`, `"name":"X-Tenant-UUID"`, 1),
-		"a header the entry drops":        strings.Replace(groundcoverEntry, `"X-Backend-Id","X-Tenant-UUID"`, `"X-Tenant-UUID"`, 1),
-		"the credential header":           strings.Replace(groundcoverEntry, pin, pin[:len(pin)-1]+`,{"name":"Authorization","values":["x"]}]`, 1),
-		"a repeated header":               strings.Replace(groundcoverEntry, pin, pin[:len(pin)-1]+`,{"name":"x-backend-id","values":["eu-backend"]}]`, 1),
-		"not a header name":               strings.Replace(groundcoverEntry, pin, pin[:len(pin)-1]+`,{"name":"X_Tenant_UUID","values":["x"]}]`, 1),
-		"no values":                       strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":[]`, 1),
-		"a repeated value":                strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":["us-backend","us-backend"]`, 1),
-		"a value with a comma":            strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":["us-backend,eu-backend"]`, 1),
-		"a value with a space":            strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":["us backend"]`, 1),
+		"a header the entry drops": strings.Replace(groundcoverEntry, `"X-Backend-Id","X-Tenant-UUID"`, `"X-Tenant-UUID"`, 1),
+		"the credential header":    strings.Replace(groundcoverEntry, pin, pin[:len(pin)-1]+`,{"name":"Authorization","values":["x"]}]`, 1),
+		"a repeated header":        strings.Replace(groundcoverEntry, pin, pin[:len(pin)-1]+`,{"name":"x-backend-id","values":["eu-backend"]}]`, 1),
+		"not a header name":        strings.Replace(groundcoverEntry, pin, pin[:len(pin)-1]+`,{"name":"X_Tenant_UUID","values":["x"]}]`, 1),
+		"no values":                strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":[]`, 1),
+		"a repeated value":         strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":["us-backend","us-backend"]`, 1),
+		"a value with a comma":     strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":["us-backend,eu-backend"]`, 1),
+		"a value with a space":     strings.Replace(groundcoverEntry, `"values":["us-backend"]`, `"values":["us backend"]`, 1),
 		"on a non-header entry": `{"name":"g","kind":"git","host":"github.com","pools":["pool-a"],"requestHeaders":[{"name":"X-A","values":["y"]}],
 			"git":{"appID":1,"installationID":2,"repos":[{"repo":"example-org/example-app","access":"read"}]}}`,
 	} {
@@ -28,13 +26,17 @@ func TestRequestHeadersLoadRules(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// Another host may pin any header it forwards, or none.
+	// Any entry may pin any header it forwards, or none: groundcover's
+	// entry loads without its backend pin, which the catalog's own checks
+	// require, so a catalog written before the field keeps working.
 	other := strings.Replace(groundcoverEntry, `"mcp.groundcover.com"`, `"api.example.com"`, 1)
 	for name, doc := range map[string]string{
-		"a pin":       other,
-		"no pin":      strings.Replace(other, pin+`,`, ``, 1),
-		"Accept":      strings.Replace(other, `"name":"X-Backend-Id"`, `"name":"Accept"`, 1),
-		"two of them": strings.Replace(other, pin, pin[:len(pin)-1]+`,{"name":"X-Tenant-UUID","values":["00000000-0000-0000-0000-000000000000"]}]`, 1),
+		"groundcover without a pin":       strings.Replace(groundcoverEntry, pin+`,`, ``, 1),
+		"groundcover pinning another one": strings.Replace(groundcoverEntry, `"name":"X-Backend-Id"`, `"name":"X-Tenant-UUID"`, 1),
+		"a pin":                           other,
+		"no pin":                          strings.Replace(other, pin+`,`, ``, 1),
+		"Accept":                          strings.Replace(other, `"name":"X-Backend-Id"`, `"name":"Accept"`, 1),
+		"two of them":                     strings.Replace(other, pin, pin[:len(pin)-1]+`,{"name":"X-Tenant-UUID","values":["00000000-0000-0000-0000-000000000000"]}]`, 1),
 	} {
 		if _, err := Parse([]byte(`{"entries":[` + doc + `]}`)); err != nil {
 			t.Errorf("%s: %v", name, err)

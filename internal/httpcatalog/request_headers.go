@@ -10,8 +10,11 @@ import (
 // values. The header must appear exactly once on every request to the entry,
 // with a value equal to one of Values, and must be one the entry forwards, so
 // the value the broker checked is the one the vendor reads. A groundcover MCP
-// entry must limit X-Backend-Id, which picks the backend of the key's tenant
-// that a request reads, since the key alone may reach every backend.
+// entry should limit X-Backend-Id, which picks the backend of the key's tenant
+// that a request reads, since the key alone may reach every backend. The
+// broker still serves one without the limit, with only its message rules, so
+// a catalog written before the field existed keeps working; the catalog's own
+// checks are where the limit is required.
 type RequestHeader struct {
 	Name   string   `json:"name"`
 	Values []string `json:"values"`
@@ -40,9 +43,6 @@ func (e *Entry) normalizeRequestHeaders() error {
 			}
 			values[v] = true
 		}
-	}
-	if e.Host == groundcoverMCPHost && !seen["X-Backend-Id"] {
-		return errors.New("a groundcover MCP entry must limit X-Backend-Id to listed backends (requestHeaders)")
 	}
 	return nil
 }

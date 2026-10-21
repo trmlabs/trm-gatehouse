@@ -86,7 +86,7 @@ var refusals = map[string]refusalKind{
 	"request_field":          {next: "a limited request field is missing, repeated or not one the catalog lists; " + nextNotAllowed},
 	"request_header":         {next: "a limited request header is missing, repeated or not one the catalog lists; " + nextNotAllowed},
 	"mcp_tool":               {next: "the broker forwards only some of this MCP server's methods and tools, and not this one; " + nextNotAllowed},
-	"mcp_argument":           {next: "a tool argument picks a backend or tenant, or names a query feature the broker does not forward, such as gcQL's _from; " + nextNotAllowed},
+	"mcp_argument":           {next: "the tool does not take this argument or value, such as backend_id, a nested object, gcQL's _from or a subquery; " + nextNotAllowed},
 	"mcp_shape":              {next: "the broker forwards one JSON-RPC message per request, on the server's own path, with no repeated or unknown key; " + nextFixRequest},
 	"push_shape":             {next: nextFixRequest},
 	"read_only":              {next: "this repository is read-only for this pool; " + nextNotAllowed},

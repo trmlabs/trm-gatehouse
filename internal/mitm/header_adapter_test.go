@@ -782,7 +782,7 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 
 // A groundcover MCP entry forwards the query client's own requests, with the
 // headers it sends, and names the tool in the row. It refuses another tool,
-// a message it cannot read as one, a backend argument and a missing,
+// a message it cannot read as one, an unlisted argument and a missing,
 // repeated or other X-Backend-Id before anything reaches groundcover, with
 // the reason in the row and the refusal header.
 func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
@@ -878,6 +878,61 @@ func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 		code, refusal := call(tc.method, tc.body, tc.backends...)
 		if row := f.audit.last(); code != tc.status || refusal != tc.outcome || row.Outcome != tc.outcome || row.Operation != "" || f.calls.Load() != calls {
 			t.Errorf("%s: %d %q outcome=%q operation=%q, vendor calls %d", name, code, refusal, row.Outcome, row.Operation, f.calls.Load())
+		}
+	}
+}
+
+// A groundcover entry with no X-Backend-Id pin, as a catalog written before
+// requestHeaders has, still serves the query client, with any backend header
+// or none, and still refuses another tool, a backend argument and _from.
+func TestAdapterServesAnUnpinnedGroundcoverEntry(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"groundcover","host":"mcp.groundcover.com","port":%d,
+			"pathPrefixes":["/api/mcp"],"methods":["POST"],"header":"Authorization","scheme":"Bearer",
+			"placeholder":"__vault_LLM_KEY__","key":{"mount":"gatehouse","path":"vendors/groundcover","field":"key"},
+			"forwardHeaders":["Mcp-Session-Id","X-Backend-Id"],"pools":["pool-agent"]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	call := func(body string, backends ...string) (int, string) {
+		t.Helper()
+		r, err := http.NewRequest("POST", "https://mcp.groundcover.com:"+strconv.Itoa(f.port)+"/api/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		r.Header.Set("Content-Type", "application/json")
+		for _, b := range backends {
+			r.Header.Add("X-Backend-Id", b)
+		}
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get(RefusalHeader)
+	}
+	logs := func(args string) string {
+		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","arguments":{` + args + `}}}`
+	}
+	calls := int32(0)
+	for _, backends := range [][]string{nil, {"us-backend"}} {
+		calls++
+		if code, refusal := call(logs(`"query":"level:error | limit 10","period":"PT1H"`), backends...); code != http.StatusOK || refusal != "" || f.calls.Load() != calls || f.audit.last().Operation != "groundcover.query_logs" {
+			t.Errorf("backends %v: %d %q, vendor calls %d", backends, code, refusal, f.calls.Load())
+		}
+	}
+	for name, tc := range map[string]struct{ body, outcome string }{
+		"query_issues":       {`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_issues","arguments":{}}}`, "mcp_tool"},
+		"a backend argument": {logs(`"query":"*","backend_id":"eu-backend"`), "mcp_argument"},
+		"_from":              {logs(`"query":"_from:issues | limit 1"`), "mcp_argument"},
+	} {
+		if code, refusal := call(tc.body); code != http.StatusForbidden || refusal != tc.outcome || f.calls.Load() != calls {
+			t.Errorf("%s: %d %q, vendor calls %d", name, code, refusal, f.calls.Load())
 		}
 	}
 }

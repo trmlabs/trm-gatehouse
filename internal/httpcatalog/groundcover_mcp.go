@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -21,12 +22,10 @@ import (
 // to run the log and metric tools: initialize, the initialized notification
 // and a tools/call naming query_logs or query_metrics. Every other method or
 // tool is refused, tools/list included, as are a batch, a repeated or
-// unknown key, a body it cannot read as one message, a backend_id or
-// tenant_uuid argument, which would pick another backend or tenant than the
-// entry's X-Backend-Id (see RequestHeader), and an argument naming gcQL's
-// _from, through which a log query reads another signal. A GET (the
-// server's event stream) and a DELETE (ending the session) carry no message
-// and pass with no body.
+// unknown key, a body it cannot read as one message, and an argument the
+// tool does not list or one that could reach another signal (see
+// groundcoverMCPArguments). A GET (the server's event stream) and a DELETE
+// (ending the session) carry no message and pass with no body.
 const (
 	groundcoverMCPHost = "mcp.groundcover.com"
 	groundcoverMCPPath = "/api/mcp"
@@ -49,21 +48,54 @@ var groundcoverMCPTools = map[string]string{
 	"query_metrics": "groundcover.query_metrics",
 }
 
-// groundcoverCrossSignal matches gcQL's _from, in any case and not as part
-// of a longer name. A query_logs subquery (in join, union or in()) reads
-// another signal through it, monitor issues among them, which the key's data
-// scope does not hold. A client that never correlates signals never sends it.
-var groundcoverCrossSignal = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])_from(?:[^a-z0-9_]|$)`)
+// mcpKind is the JSON type a tool argument's value must have.
+type mcpKind int
 
-// groundcoverRoutingArguments are the tool arguments that pick a tenant or
-// backend, spelled without case, "_" or "-". The header pins the backend, so
-// a call may not name one.
-var groundcoverRoutingArguments = map[string]bool{"backendid": true, "tenantuuid": true}
+const (
+	mcpText  mcpKind = iota // a string
+	mcpCount                // a whole number from 0 to 2^32-1
+	mcpTexts                // a list of strings
+)
+
+// groundcoverMCPArguments lists the arguments each tool call may carry, with
+// the type of each: the ones groundcover documents for the tool, less
+// backend_id and tenant_uuid, which would pick another backend or tenant than
+// the entry's X-Backend-Id (see RequestHeader). Any other argument is
+// refused, as is a value of another type, so no object or list can sit where
+// a string belongs and hide a key groundcover reads.
+var groundcoverMCPArguments = map[string]map[string]mcpKind{
+	"query_logs": {"query": mcpText, "period": mcpText, "start": mcpText, "end": mcpText},
+	"query_metrics": {
+		"mode": mcpText, "promql": mcpText, "start": mcpText, "end": mcpText, "step": mcpText, "period": mcpText,
+		"envs": mcpTexts, "clusters": mcpTexts, "required": mcpTexts,
+		"filter": mcpText, "metricName": mcpText, "limit": mcpCount, "skip": mcpCount,
+	},
+}
+
+// groundcoverCrossSignal matches gcQL's _from, in any case and not as part
+// of a longer name, and a prefix of it ending in a wildcard, such as _fr*,
+// which can match it as a field name. A query_logs subquery reads another
+// signal through it, monitor issues among them, which the key's data scope
+// does not hold. A client that never correlates signals never sends it.
+var groundcoverCrossSignal = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:_from(?:[^a-z0-9_]|$)|_(?:f(?:r(?:o)?)?)?\*)`)
+
+// groundcoverSubqueryPipe matches the gcQL pipes that run a subquery, join
+// and union, in any case and not as part of a longer name.
+var groundcoverSubqueryPipe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:join|union)(?:[^a-z0-9_]|$)`)
+
+// groundcoverSubqueryFilter matches the start of a gcQL filter whose list can
+// be a subquery: in(), contains_any() or contains_all().
+var groundcoverSubqueryFilter = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:in|contains_any|contains_all)\s*\(`)
+
+// groundcoverAlerts matches the ALERTS series (ALERTS_FOR_STATE too) in any
+// case, and the names a PromQL selector could reach it by instead: __name__,
+// alertname and alertstate.
+var groundcoverAlerts = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_:])(?:alerts|(?:__name__|alertname|alertstate)(?:[^a-z0-9_:]|$))`)
 
 // The refusals CheckMCP returns: ErrMCPShape for a request it cannot read as
 // one message on the server's path, ErrMCPTool for a method or tool it does
-// not forward, ErrMCPArgument for a backend or tenant argument or one naming
-// _from.
+// not forward, ErrMCPArgument for an argument the tool does not list, of the
+// wrong type, or one that could reach another signal.
 var (
 	ErrMCPShape    = errors.New("not one MCP message the broker reads")
 	ErrMCPTool     = errors.New("MCP method or tool not forwarded")
@@ -157,36 +189,61 @@ func (e *Entry) CheckMCP(method, path, rawQuery string, contentTypes []string, b
 		return "", ErrMCPTool
 	}
 	args, _ := call["arguments"].(map[string]any)
-	for key := range args {
-		if groundcoverRoutingArguments[strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))] {
+	for key, value := range args {
+		kind, ok := groundcoverMCPArguments[tool][key]
+		if !ok || !mcpArgument(tool, kind, value) {
 			return "", ErrMCPArgument
 		}
-	}
-	if mcpMentions(call["arguments"], groundcoverCrossSignal) {
-		return "", ErrMCPArgument
 	}
 	return operation, nil
 }
 
-// mcpMentions reports whether any key or string anywhere in v matches re.
-func mcpMentions(v any, re *regexp.Regexp) bool {
-	switch t := v.(type) {
+// mcpArgument reports whether value has the type kind names and none of its
+// strings could reach another signal: no backslash, which gcQL and PromQL
+// read as an escape, and no _from in either tool; in query_logs no join or
+// union pipe and no pipe inside a subquery filter's list; in query_metrics no
+// way to the ALERTS series.
+func mcpArgument(tool string, kind mcpKind, value any) bool {
+	var texts []string
+	switch v := value.(type) {
 	case string:
-		return re.MatchString(t)
-	case map[string]any:
-		for key, value := range t {
-			if re.MatchString(key) || mcpMentions(value, re) {
-				return true
-			}
+		if kind != mcpText {
+			return false
 		}
+		texts = []string{v}
+	case json.Number:
+		_, err := strconv.ParseUint(string(v), 10, 32)
+		return kind == mcpCount && err == nil
 	case []any:
-		for _, value := range t {
-			if mcpMentions(value, re) {
-				return true
+		if kind != mcpTexts {
+			return false
+		}
+		for _, item := range v {
+			text, ok := item.(string)
+			if !ok {
+				return false
+			}
+			texts = append(texts, text)
+		}
+	default:
+		return false
+	}
+	for _, text := range texts {
+		if strings.Contains(text, `\`) || groundcoverCrossSignal.MatchString(text) {
+			return false
+		}
+		switch tool {
+		case "query_logs":
+			if groundcoverSubqueryPipe.MatchString(text) || mcpPipedFilter(text) {
+				return false
+			}
+		case "query_metrics":
+			if groundcoverAlerts.MatchString(text) {
+				return false
 			}
 		}
 	}
-	return false
+	return true
 }
 
 // mcpMessage decodes body as one JSON object in valid UTF-8 with no key
@@ -282,4 +339,46 @@ func mcpPlainString(s string) bool {
 		}
 	}
 	return true
+}
+
+// mcpPipedFilter reports whether a pipe sits inside the list of a gcQL filter
+// that can take a subquery. Where the list ends is found twice, once skipping
+// quoted text and once not, and the later end counts, so a quote read
+// differently from gcQL cannot close the list early.
+func mcpPipedFilter(s string) bool {
+	for _, loc := range groundcoverSubqueryFilter.FindAllStringIndex(s, -1) {
+		open := loc[1] - 1
+		end := max(mcpListEnd(s, open, true), mcpListEnd(s, open, false))
+		if strings.Contains(s[open:end], "|") {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpListEnd returns the index just past the parenthesis that closes the one
+// at open, or len(s) if none does. With quotes, a parenthesis between double,
+// single or back quotes is not counted.
+func mcpListEnd(s string, open int, quotes bool) int {
+	depth := 0
+	var quote byte
+	for i := open; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case quotes && (c == '"' || c == '\'' || c == '`'):
+			quote = c
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return len(s)
 }

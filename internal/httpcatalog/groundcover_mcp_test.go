@@ -2,6 +2,7 @@ package httpcatalog
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -34,12 +35,27 @@ const (
 	mcpQueryMetric = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_metrics","arguments":{"mode":"query_range","envs":["production"],"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","promql":"sum(up)","step":"1m"}}}`
 )
 
-// mcpNested is k objects nested as the value of a query_logs call's period
-// argument. The message, params and arguments take three levels, so the
-// innermost value sits at depth k+3.
+// mcpNested is k objects nested in initialize's capabilities, the one object
+// a forwarded message may fill as it likes. The message, params and
+// capabilities take three levels, so the innermost value sits at depth k+3.
 func mcpNested(k int) string {
 	nested := strings.Repeat(`{"a":`, k) + `1` + strings.Repeat(`}`, k)
-	return strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":`+nested, 1)
+	return strings.Replace(mcpInitialize, `"capabilities":{}`, `"capabilities":{"experimental":`+nested+`}`, 1)
+}
+
+// mcpLogs and mcpMetrics are the client's calls with one argument's value
+// replaced.
+func mcpLogs(query string) string {
+	return strings.Replace(mcpQueryLogs, `"level:error | limit 10"`, query, 1)
+}
+
+func mcpMetrics(promql string) string {
+	return strings.Replace(mcpQueryMetric, `"sum(up)"`, promql, 1)
+}
+
+// mcpArgs is a call with extra arguments added before the client's own.
+func mcpArgs(call, args string) string {
+	return strings.Replace(call, `"arguments":{`, `"arguments":{`+args+`,`, 1)
 }
 
 func mcpCall(tool string) string {
@@ -61,9 +77,13 @@ func TestMCPForwardsTheQueryClientsMessages(t *testing.T) {
 		"a log query window": {"POST", "application/json", strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z"`, 1), "groundcover.query_logs"},
 		"an escaped name":    {"POST", "application/json", strings.Replace(mcpQueryLogs, `"query_logs"`, `"query\u005flogs"`, 1), "groundcover.query_logs"},
 		"spaces around it":   {"POST", "application/json", " \n" + mcpQueryLogs + "\n ", "groundcover.query_logs"},
-		"as deep as allowed": {"POST", "application/json", mcpNested(groundcoverMCPDepth - 3), "groundcover.query_logs"},
-		"the event stream":   {"GET", "", "", ""},
-		"ending the session": {"DELETE", "", "", ""},
+		"as deep as allowed": {"POST", "application/json", mcpNested(groundcoverMCPDepth - 3), "groundcover.initialize"},
+		"every metric argument": {"POST", "application/json", mcpArgs(mcpQueryMetric,
+			`"period":"PT1H","clusters":["c"],"required":["up"],"filter":"up","metricName":"up","limit":4294967295,"skip":0`), "groundcover.query_metrics"},
+		"the client's memory query":    {"POST", "application/json", mcpMetrics(`"max by (workload, pod) (\n  groundcover_container_memory_working_set_bytes{\n    cluster=\"c\",\n    workload=~\"api-server|queue-worker\",\n    container=\"app\"\n  }\n)"`), "groundcover.query_metrics"},
+		"the client's discovery query": {"POST", "application/json", mcpLogs(`"workload:api-server env:staging | stats by (workload, pod_name) count(), min(timestamp) as first | limit 20"`), "groundcover.query_logs"},
+		"the event stream":             {"GET", "", "", ""},
+		"ending the session":           {"DELETE", "", "", ""},
 	} {
 		var contentTypes []string
 		if tc.contentType != "" {
@@ -196,7 +216,8 @@ func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 }
 
 // A tool call may not pick its own backend or tenant, however the argument is
-// spelled: the entry's X-Backend-Id pins the backend.
+// spelled: neither tool lists it, and the entry's X-Backend-Id pins the
+// backend.
 func TestMCPRefusesRoutingArguments(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for _, arg := range []string{
@@ -204,38 +225,66 @@ func TestMCPRefusesRoutingArguments(t *testing.T) {
 		`"Backend_Id":"eu-backend"`, `"backendId":"eu-backend"`, `"backend-id":"eu-backend"`, `"TENANT_UUID":"x"`, `"tenantUuid":"x"`,
 	} {
 		for _, call := range []string{mcpQueryLogs, mcpQueryMetric} {
-			body := strings.Replace(call, `"arguments":{`, `"arguments":{`+arg+`,`, 1)
-			if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
+			if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(mcpArgs(call, arg))); !errors.Is(err, ErrMCPArgument) || operation != "" {
 				t.Errorf("%s: operation %q, %v", arg, operation, err)
 			}
 		}
 	}
-	// A name that only contains one of them is an ordinary argument.
-	body := strings.Replace(mcpQueryLogs, `"arguments":{`, `"arguments":{"backend_ids_seen":"x",`, 1)
-	if _, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); err != nil {
-		t.Errorf("a longer name: %v", err)
+}
+
+// A tool call carries only the arguments its tool lists, each with its own
+// type: an unknown name, one only the other tool takes, another case, and an
+// object, list, number, null or boolean where a string belongs are refused,
+// so nothing can hide a backend_id below an argument.
+func TestMCPRefusesUnlistedArguments(t *testing.T) {
+	e := groundcoverCatalog(t)
+	for name, body := range map[string]string{
+		"an unknown name":           mcpArgs(mcpQueryLogs, `"source":"logs"`),
+		"a metric argument on logs": mcpArgs(mcpQueryLogs, `"promql":"sum(up)"`),
+		"a log argument on metrics": mcpArgs(mcpQueryMetric, `"query":"*"`),
+		"another case":              mcpArgs(mcpQueryLogs, `"Period":"PT1H"`),
+		"a nested backend":          strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":{"backend_id":"eu-backend"}`, 1),
+		"a list for the query":      mcpLogs(`["*"]`),
+		"a number for the query":    mcpLogs(`1`),
+		"null for the query":        mcpLogs(`null`),
+		"true for the query":        mcpLogs(`true`),
+		"an object in envs":         strings.Replace(mcpQueryMetric, `["production"]`, `["production",{"backend_id":"eu-backend"}]`, 1),
+		"a number in envs":          strings.Replace(mcpQueryMetric, `["production"]`, `[1]`, 1),
+		"a nested list in envs":     strings.Replace(mcpQueryMetric, `["production"]`, `[["production"]]`, 1),
+		"a string for envs":         strings.Replace(mcpQueryMetric, `["production"]`, `"production"`, 1),
+		"a string for the limit":    mcpArgs(mcpQueryMetric, `"limit":"10"`),
+		"a negative limit":          mcpArgs(mcpQueryMetric, `"limit":-1`),
+		"a fractional limit":        mcpArgs(mcpQueryMetric, `"limit":1.5`),
+		"an exponent limit":         mcpArgs(mcpQueryMetric, `"limit":1e3`),
+		"a limit past 2^32-1":       mcpArgs(mcpQueryMetric, `"limit":4294967296`),
+		"a number for the step":     strings.Replace(mcpQueryMetric, `"step":"1m"`, `"step":60`, 1),
+		"an object for the promql":  mcpMetrics(`{"promql":"sum(up)"}`),
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
 	}
 }
 
-// A log query that names gcQL's _from, which reads another signal (monitor
-// issues among them) inside a subquery, is refused wherever the arguments
-// carry it, while a longer name that only contains it passes.
+// A call that names gcQL's _from, which reads another signal (monitor
+// issues among them) inside a subquery, or a wildcard prefix of it, is
+// refused in any argument that carries a string, while a longer name that
+// only contains it passes.
 func TestMCPRefusesCrossSignalArguments(t *testing.T) {
 	e := groundcoverCatalog(t)
-	query := func(q string) string {
-		return strings.Replace(mcpQueryLogs, `"level:error | limit 10"`, q, 1)
-	}
 	for name, body := range map[string]string{
-		"a subquery":       query(`"* | join by (namespace) (_from:issues | fields namespace) | limit 10"`),
-		"an in() subquery": query(`"workload:in(_from:issues | fields workload) | limit 10"`),
-		"another case":     query(`"* | union (_FROM:issues) | limit 10"`),
-		"after a quote":    query(`"* | join (\"_from\":issues) | limit 10"`),
-		"escaped":          query(`"* | union (\u005ffrom:issues) | limit 10"`),
-		"at the start":     query(`"_from issues | limit 10"`),
-		"another argument": strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","source":"_from"`, 1),
-		"a key":            strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","_from":"issues"`, 1),
-		"in a list":        strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","fields":["x",{"y":"_from"}]`, 1),
-		"in query_metrics": strings.Replace(mcpQueryMetric, `"sum(up)"`, `"_from"`, 1),
+		"a filter":         mcpLogs(`"_from:issues | limit 10"`),
+		"another case":     mcpLogs(`"* | filter _FROM:issues | limit 10"`),
+		"after a quote":    mcpLogs(`"\"_from\":issues | limit 10"`),
+		"escaped":          mcpLogs(`"\u005ffrom:issues | limit 10"`),
+		"at the start":     mcpLogs(`"_from issues | limit 10"`),
+		"_fr*":             mcpLogs(`"_fr*:issues | limit 10"`),
+		"_FRO*":            mcpLogs(`"_FRO*:issues | limit 10"`),
+		"_f*":              mcpLogs(`"* | filter _f*:issues | limit 10"`),
+		"_*":               mcpLogs(`"_*:issues | limit 10"`),
+		"the period":       strings.Replace(mcpQueryLogs, `"PT1H"`, `"_from"`, 1),
+		"in query_metrics": mcpMetrics(`"_from"`),
+		"in a metric list": strings.Replace(mcpQueryMetric, `["production"]`, `["production","_from"]`, 1),
 	} {
 		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
 			t.Errorf("%s: operation %q, %v", name, operation, err)
@@ -246,8 +295,123 @@ func TestMCPRefusesCrossSignalArguments(t *testing.T) {
 		"a field suffix":   `"* | fields data_from_cache | limit 10"`,
 		"plain from":       `"from:issues | limit 10"`,
 		"a word inside it": `"\"rows_fromage\" | limit 10"`,
+		"a value prefix":   `"content:pre_fr* | limit 10"`,
 	} {
-		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(query(q))); err != nil || operation != "groundcover.query_logs" {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(mcpLogs(q))); err != nil || operation != "groundcover.query_logs" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+}
+
+// A log query may not run a subquery, through which it could read another
+// signal: no join or union pipe, no pipe inside the list of in(),
+// contains_any() or contains_all() wherever a quote ends it, and no
+// backslash, which could spell any of these escaped. The client's own
+// queries, an in() list, a regex alternative and a pipe after a list pass,
+// and the log rules do not apply to query_metrics.
+func TestMCPRefusesLogSubqueries(t *testing.T) {
+	e := groundcoverCatalog(t)
+	for name, q := range map[string]string{
+		"join":                    `"* | join by (namespace) (* | fields namespace) | limit 10"`,
+		"union":                   `"* | union (* | limit 5) | limit 10"`,
+		"JOIN":                    `"* | JOIN by (x) (*) | limit 10"`,
+		"an in() subquery":        `"workload:in(* | fields workload) | limit 10"`,
+		"in with a space":         `"workload:in (* | fields workload) | limit 10"`,
+		"IN":                      `"workload:IN(* | fields workload) | limit 10"`,
+		"contains_any":            `"x:contains_any(* | fields x) | limit 10"`,
+		"contains_all":            `"x:contains_all(* | fields x) | limit 10"`,
+		"a quoted parenthesis":    `"workload:in(\")\" | fields workload) | limit 10"`,
+		"a quote gcQL might skip": `"workload:in(a '(' b) | fields workload) | limit 10"`,
+		"an unclosed list":        `"workload:in(a, b | fields workload"`,
+		"the second of two lists": `"x:in(a, b) y:in(* | fields y) | limit 10"`,
+		"a backslash":             `"content:\"a\\\" | limit 10"`,
+		"an escaped _from":        `"\\x5ffrom:issues | limit 10"`,
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(mcpLogs(q))); !errors.Is(err, ErrMCPArgument) || operation != "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+	for name, body := range map[string]string{
+		"an in() list":          mcpLogs(`"workload:in(api-server, queue-worker) env:production | limit 50"`),
+		"a regex alternative":   mcpLogs(`"content:~\"timeout|refused\" | limit 50"`),
+		"longer words":          mcpLogs(`"rejoin:x unions:y joined | limit 10"`),
+		"a word ending in in":   mcpLogs(`"x:main(a | b) | limit 10"`),
+		"join in query_metrics": strings.Replace(mcpQueryMetric, `"step":"1m"`, `"step":"1m","filter":"join union in(a|b)"`, 1),
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); err != nil || operation == "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+}
+
+// A metric call may not reach the ALERTS series, which holds what monitors
+// found, by its name in any case or by the names a selector could use for it
+// instead; a longer name passes, and the rule does not apply to query_logs.
+func TestMCPRefusesMetricAlerts(t *testing.T) {
+	e := groundcoverCatalog(t)
+	for name, body := range map[string]string{
+		"ALERTS":           mcpMetrics(`"ALERTS"`),
+		"a selector":       mcpMetrics(`"sum(ALERTS{alertstate=\"firing\"})"`),
+		"another case":     mcpMetrics(`"alerts"`),
+		"ALERTS_FOR_STATE": mcpMetrics(`"ALERTS_FOR_STATE"`),
+		"__name__":         mcpMetrics(`"{__name__=~\"ALERT.+\"}"`),
+		"alertname":        mcpMetrics(`"count({alertname!=\"\"})"`),
+		"alertstate":       mcpMetrics(`"{alertstate=\"firing\"}"`),
+		"a quoted name":    mcpMetrics(`"{\"ALERTS\"}"`),
+		"an escaped name":  mcpMetrics(`"{\"\\x41LERTS\"}"`),
+		"the metric name":  mcpArgs(mcpQueryMetric, `"metricName":"ALERTS"`),
+		"a required name":  mcpArgs(mcpQueryMetric, `"required":["up","ALERTS"]`),
+		"the filter":       mcpArgs(mcpQueryMetric, `"filter":"ALERTS"`),
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+	for name, body := range map[string]string{
+		"a longer name":   mcpMetrics(`"sum(rate(my_alerts_total[5m]))"`),
+		"alerts in a log": mcpLogs(`"ALERTS firing | limit 10"`),
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); err != nil || operation == "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+}
+
+// An entry with no X-Backend-Id pin, as a catalog written before
+// requestHeaders has, loads from a file and from Vault and keeps every
+// message rule: the client's calls pass with any backend header, and another
+// tool, a backend argument and _from are refused.
+func TestMCPRulesApplyWithoutAPin(t *testing.T) {
+	doc := []byte(`{"entries":[` + strings.Replace(groundcoverEntry, `"requestHeaders":[{"name":"X-Backend-Id","values":["us-backend"]}],`, ``, 1) + `]}`)
+	c, err := Parse(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tolerant, dropped, err := ParseTolerant(doc); err != nil || len(dropped) != 0 || len(tolerant.Entries()) != 1 {
+		t.Fatalf("tolerant: %v, dropped %v", err, dropped)
+	}
+	e := c.Entries()[0]
+	if len(e.RequestHeaders) != 0 || e.CheckRequestHeaders(http.Header{}) != nil {
+		t.Fatalf("pin %v", e.RequestHeaders)
+	}
+	for _, body := range []string{mcpInitialize, mcpInitialized, mcpQueryLogs, mcpQueryMetric} {
+		if _, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); err != nil {
+			t.Errorf("%s: %v", body, err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		body string
+		want error
+	}{
+		"query_issues": {mcpCall("query_issues"), ErrMCPTool},
+		"tools/list":   {`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`, ErrMCPTool},
+		"backend_id":   {mcpArgs(mcpQueryLogs, `"backend_id":"eu-backend"`), ErrMCPArgument},
+		"tenant_uuid":  {mcpArgs(mcpQueryMetric, `"tenant_uuid":"x"`), ErrMCPArgument},
+		"_from":        {mcpLogs(`"_from:issues | limit 10"`), ErrMCPArgument},
+		"a join":       {mcpLogs(`"* | join by (x) (*) | limit 10"`), ErrMCPArgument},
+		"a batch":      {`[` + mcpQueryLogs + `]`, ErrMCPShape},
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(tc.body)); !errors.Is(err, tc.want) || operation != "" {
 			t.Errorf("%s: operation %q, %v", name, operation, err)
 		}
 	}
