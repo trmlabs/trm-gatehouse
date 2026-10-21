@@ -608,6 +608,19 @@ func (s *SQLStore) scanVaultCredentialStore(row rowScanner) (*VaultCredentialSto
 // --- Vaults ---
 
 func (s *SQLStore) CreateVault(ctx context.Context, name string) (*Vault, error) {
+	return s.createVault(ctx, name, "", "")
+}
+
+func (s *SQLStore) CreateVaultWithSetting(ctx context.Context, name, key, value string) (*Vault, error) {
+	if key == "" {
+		return nil, fmt.Errorf("vault setting key is required")
+	}
+	return s.createVault(ctx, name, key, value)
+}
+
+// createVault creates a vault, its default broker config and, when key is
+// set, that setting, all in one transaction.
+func (s *SQLStore) createVault(ctx context.Context, name, key, value string) (*Vault, error) {
 	nsID := newUUID()
 	bcID := newUUID()
 	now := time.Now().UTC()
@@ -633,6 +646,16 @@ func (s *SQLStore) CreateVault(ctx context.Context, name string) (*Vault, error)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating default broker config: %w", err)
+	}
+
+	if key != "" {
+		_, err = tx.ExecContext(ctx,
+			s.dialect.Rebind("INSERT INTO vault_settings (vault_id, key, value, updated_at) VALUES (?, ?, ?, ?)"),
+			nsID, key, value, nowStr,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("creating vault setting: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1266,6 +1289,22 @@ func (s *SQLStore) GrantVaultRole(ctx context.Context, actorID, actorType, vault
 		return fmt.Errorf("granting vault role: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLStore) GrantVaultRoleIfAbsent(ctx context.Context, actorID, actorType, vaultID, role string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`INSERT INTO vault_grants (actor_id, actor_type, vault_id, role, created_at) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(actor_id, vault_id) DO NOTHING`),
+		actorID, actorType, vaultID, role, s.now(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("granting vault role: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("granting vault role: %w", err)
+	}
+	return n == 1, nil
 }
 
 func (s *SQLStore) RevokeVaultAccess(ctx context.Context, actorID, vaultID string) error {

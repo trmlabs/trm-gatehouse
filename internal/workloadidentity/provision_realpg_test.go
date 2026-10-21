@@ -29,12 +29,13 @@ func TestRealPostgres_ProvisionPoolsReplicas(t *testing.T) {
 		t.Cleanup(func() { _ = s.Close() })
 		replicas[i] = s
 	}
+	config := poolConfig(t, poolBinding(pool))
 	var wg sync.WaitGroup
 	got := make([]Binding, len(replicas))
 	errs := make([]error, len(replicas))
 	for i, s := range replicas {
 		wg.Go(func() {
-			c, err := ProvisionPools(context.Background(), Config{Bindings: []Binding{unprovisioned(pool)}}, s, discard)
+			c, err := ProvisionPools(context.Background(), config, s, discard)
 			got[i], errs[i] = c.Bindings[0], err
 		})
 	}
