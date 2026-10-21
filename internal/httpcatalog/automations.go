@@ -34,7 +34,21 @@ type Automation struct {
 	// Entries are the catalog entries the Automation may use. Each must also
 	// be granted to the pool its runs land on, whose ceiling caps their tier.
 	Entries []string `json:"entries"`
+	// Write names the git and github-api entries, among Entries, where the
+	// Automation gets the pool's write grant: the push prefixes its git entry
+	// gives the pool, and the operations a github-api repository's
+	// poolOperations give it. On a git or github-api entry it lists but does
+	// not name here, the Automation fetches and reads only: no push, and no
+	// GitHub operation outside the reads (GitHubOperationWrites). The pool's
+	// own prefixes and operations stay the ceiling; Write decides which of the
+	// pool's Automations reach it, so one Automation's grant never widens
+	// another's. Optional, and refused for any other kind of entry.
+	Write []string `json:"write,omitempty"`
 }
+
+// ErrAutomationReadOnly is a push or a GitHub write by an Automation whose
+// block does not list the entry in write (Automation.Write).
+var ErrAutomationReadOnly = errors.New("automation has no write grant for this destination")
 
 // automationContact is a plain lower-case email address: an owner as
 // catalogs named it before owners named teams.
@@ -67,6 +81,28 @@ func (a *Automation) validate() error {
 			return fmt.Errorf("entry %q is not a catalog entry name or is repeated", name)
 		}
 	}
+	slices.Sort(a.Write)
+	for i, name := range a.Write {
+		if !idPattern.MatchString(name) || (i > 0 && a.Write[i-1] == name) {
+			return fmt.Errorf("write entry %q is not a catalog entry name or is repeated", name)
+		}
+	}
+	return nil
+}
+
+// checkWrite checks Write against the catalog: each name must be one of the
+// Automation's own entries, and a git or github-api entry, the only kinds that
+// have a write grant to give. kind returns an entry's kind, "" for none. It
+// runs after validate, which sorts Entries for Uses.
+func (a Automation) checkWrite(kind func(entry string) string) error {
+	for _, name := range a.Write {
+		if !a.Uses(name) {
+			return fmt.Errorf("write names entry %q, which entries does not list", name)
+		}
+		if k := kind(name); k != "git" && k != "github-api" {
+			return fmt.Errorf("write names entry %q, which is not a git or github-api entry", name)
+		}
+	}
 	return nil
 }
 
@@ -76,9 +112,17 @@ func (a Automation) Uses(entry string) bool {
 	return ok
 }
 
-// indexAutomations validates the Automations against the catalog's entry
-// names and indexes them by id, so a lookup costs the same at any count.
-func indexAutomations(list []Automation, entries map[string]bool) (map[string]Automation, error) {
+// Writes reports whether the Automation gets the pool's write grant on the
+// named git or github-api entry (Write).
+func (a Automation) Writes(entry string) bool {
+	_, ok := slices.BinarySearch(a.Write, entry)
+	return ok
+}
+
+// indexAutomations validates the Automations against the catalog's entries (by
+// name, each with its kind) and indexes them by id, so a lookup costs the same
+// at any count.
+func indexAutomations(list []Automation, entries map[string]string) (map[string]Automation, error) {
 	index := make(map[string]Automation, len(list))
 	for i := range list {
 		a := &list[i]
@@ -89,9 +133,12 @@ func indexAutomations(list []Automation, entries map[string]bool) (map[string]Au
 			return nil, fmt.Errorf("duplicate automation %q", a.ID)
 		}
 		for _, name := range a.Entries {
-			if !entries[name] {
+			if _, ok := entries[name]; !ok {
 				return nil, fmt.Errorf("automation %q names undefined entry %q", a.ID, name)
 			}
+		}
+		if err := a.checkWrite(func(entry string) string { return entries[entry] }); err != nil {
+			return nil, fmt.Errorf("automation %q: %w", a.ID, err)
 		}
 		index[a.ID] = *a
 	}

@@ -88,7 +88,8 @@ automations:
   - id: <automation_id from the run token>
     name: explorer                 # a label for audit rows
     owner: platform-team           # the accountable team: a group's name or object id
-    entries: [tracker, repo-read]  # entries it may use; each also granted to the pool
+    entries: [tracker, repo]       # entries it may use; each also granted to the pool
+    write: [repo]                  # git and github-api entries where it may push and change pull requests
 ```
 
 The run token is verified exactly as on a `cursor-session` pool (run, Pod and run-owner pins included). Then every request on the pool, T0 included, must come from an Automation the catalog lists and use an entry listed for it:
@@ -98,7 +99,12 @@ The run token is verified exactly as on a `cursor-session` pool (run, Pod and ru
 | `source` is `AUTOMATIONS` with an `automation_id`, so a person's run routed here gets nothing | `not_automation` |
 | The id is listed | `automation_unlisted` |
 | The entry is one the Automation lists, even when the pool is granted it | `automation_not_granted` |
+| A push, or a GitHub operation that changes something, on a `git` or `github-api` entry the Automation lists but does not name in `write` | `automation_read_only` |
 | The entry's tier is within the pool's `ceiling` (the catalog also refuses such a grant at load) | `pool_ceiling` |
+
+A `git` or `github-api` entry gives a pool one write grant, the same to every Automation that lists the entry: the push prefixes of a `git` repository and the `poolOperations` of a `github-api` repository. `write` says which Automations get it. On a `git` or `github-api` entry an Automation lists but does not name in `write`, it fetches and reads only: no push (the `git-receive-pack` advertisement included), and over REST and GraphQL only `pr.read`, `pr.list`, `actions.read`, `deployments.read` and `graphql`. Every other operation is a write and needs the grant, an operation added later included: `pr.open`, `pr.comment`, `pr.edit`, `pr.label`, `pr.ready`, `dispatch`, `pr.update_branch`, `actions.rerun` and `actions.rerun_failed`. A GraphQL read of a repository's labels needs `pr.label`, so it is a write too. A CI restart reaches no further than a push, so it needs `write` on the `git` entry that holds its branch as well as on the `github-api` entry. The refusal is made after the entry's authorization and before any token is minted or GitHub asked, and its audit row names the Automation. The pool's own prefixes and operations stay the ceiling: `write` never gives an Automation more than its pool has, and a pool that does not name an Automation's entry gives it nothing. Each name in `write` must be one of the Automation's `entries` and a `git` or `github-api` entry, or the catalog refuses the block (a tolerant load drops that Automation, so its runs are refused). A requester that is not an Automation, such as a person on a `cursor-session` pool, is unaffected.
+
+Deploy a broker that reads `write` to every replica before any block carries it: an older broker drops a block with a field it does not know, so that Automation is refused entirely. A broker with it serves an Automation that has no `write` fetch and reads only, so name `write` for every Automation that pushes or changes pull requests in the first catalog version that follows.
 
 Nothing about a person is checked, at any tier: no groups, no account, no directory lookup, so an automation pool needs no directory configured. The person the run token names, if any, is recorded and decides nothing: a run whose token names a service account (`sub` `service_account:`), or a user outside the configured domains, is served the same entries. A token that names neither a user nor a service account is refused (`session_token`). An entry's `requires` groups apply to the person and workload pools that share it, never to an Automation. An allowed request records `t0` at T0 and `automation_granted` above it.
 

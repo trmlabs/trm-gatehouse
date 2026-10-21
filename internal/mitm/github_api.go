@@ -62,6 +62,9 @@ func (p *Proxy) forwardGitHubAPI(w http.ResponseWriter, r *http.Request, target 
 	case errors.Is(matchErr, httpcatalog.ErrMethod):
 		deny(http.StatusMethodNotAllowed, "method")
 		return
+	case errors.Is(matchErr, httpcatalog.ErrAutomationReadOnly):
+		deny(http.StatusForbidden, "automation_read_only")
+		return
 	case matchErr != nil:
 		deny(http.StatusForbidden, "pool")
 		return

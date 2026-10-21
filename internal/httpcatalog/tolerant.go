@@ -201,8 +201,10 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	// Automations, each on its own against the kept entries. One naming a
 	// dropped entry goes too, as an entry granting a dropped pool does.
 	kept := make(map[string]bool, len(entries))
+	keptKind := make(map[string]string, len(entries))
 	for _, e := range entries {
 		kept[e.entry.Name] = true
+		keptKind[e.entry.Name] = e.entry.Kind
 	}
 	type keptAutomation struct {
 		raw json.RawMessage
@@ -219,6 +221,9 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 			if err == nil && !kept[name] {
 				err = fmt.Errorf("names undefined or dropped entry %q", name)
 			}
+		}
+		if err == nil {
+			err = a.checkWrite(func(entry string) string { return keptKind[entry] })
 		}
 		if err != nil {
 			drop("automation", automationName(a.ID, i), err)

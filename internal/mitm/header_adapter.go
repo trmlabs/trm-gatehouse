@@ -309,7 +309,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	if git, ok, err := catalog.GitMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
 		event.Operation = gitOperation(git)
 		if !refused(git.Entry, err) {
-			p.forwardGit(w, r, target, scope, event, git.ForRequester(who.BranchSegment()), err)
+			p.forwardGit(w, r, target, scope, event, git.ForRequester(who.BranchSegment()), withWriteGrant(who, git, err))
 		}
 		return
 	}
@@ -328,7 +328,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		// with the git entry's tier and groups. That is intended: both entries
 		// admitted the request, and the git entry is what guards the code.
 		if !refused(api.Entry, err) && (api.CloneEntry == nil || !refused(api.CloneEntry, nil)) {
-			p.forwardGitHubAPI(w, r, target, scope, event, api.ForRequester(who.BranchSegment()), err)
+			p.forwardGitHubAPI(w, r, target, scope, event, api.ForRequester(who.BranchSegment()), withWriteGrant(who, api, err))
 		}
 		return
 	}

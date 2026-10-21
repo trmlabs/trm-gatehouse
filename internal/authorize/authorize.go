@@ -69,6 +69,21 @@ type Requester struct {
 	AutomationName  string
 	AutomationOwner string
 	RunPerson       string
+	// grant is the catalog's block for a listed Automation, which decides
+	// MayWrite. A pointer, so a Requester stays comparable.
+	grant *httpcatalog.Automation
+}
+
+// MayWrite reports whether the requester gets the pool's write grant on a git
+// or github-api entry: a push, or a GitHub operation that writes. Anyone but
+// an Automation does, since the pool's own prefixes and operations are what
+// limit a person or a workload. An Automation does only on the entries its
+// block lists in write, so one that lists none fetches and reads only.
+func (r Requester) MayWrite(entry string) bool {
+	if r.Kind != "automation" {
+		return true
+	}
+	return r.grant != nil && r.grant.Writes(entry)
 }
 
 // Audited is the verified identity an audit row names as the requester: the
@@ -209,6 +224,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 					return who, "automation_unlisted"
 				}
 				who.Kind, who.Subject, who.AutomationName, who.AutomationOwner = "automation", a.ID, a.Name, a.Owner
+				who.grant = &a
 				if s.Kind == runnerid.KindPerson {
 					who.RunPerson = s.Subject
 				}

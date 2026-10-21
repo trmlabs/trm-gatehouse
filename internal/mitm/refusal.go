@@ -130,6 +130,7 @@ var refusals = map[string]refusalKind{
 	"automation_unlisted":       {next: "the catalog lists no Automation with this run's id; " + nextNotAllowed},
 	"automation_on_person_pool": {next: "a run a Cursor Automation started is not served on a pool for people's own runs; " + nextNotAllowed},
 	"automation_not_granted":    {next: "the catalog does not list this destination for this run's Automation; " + nextNotAllowed},
+	"automation_read_only":      {next: "the catalog gives this run's Automation fetch and reads only on this GitHub destination, not pushes or pull request changes; " + nextNotAllowed},
 }
 
 // refusalCode is the code an agent sees for an audit outcome: the outcome
