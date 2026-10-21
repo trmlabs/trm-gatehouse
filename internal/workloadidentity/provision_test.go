@@ -114,7 +114,8 @@ func TestProvisionPoolsKeepsOperatorChanges(t *testing.T) {
 	}
 }
 
-// Each refusal names why and writes nothing: no agent, and no new grant.
+// With no race, each refusal names why and writes nothing: no agent, and no
+// new grant.
 func TestProvisionPoolsRefusesWhatItCannotOwn(t *testing.T) {
 	ctx, s := context.Background(), storetest.Open(t)
 	if _, err := s.CreateAgent(ctx, "taken-pool", "user-id", "member"); err != nil {
@@ -139,6 +140,7 @@ func TestProvisionPoolsRefusesWhatItCannotOwn(t *testing.T) {
 		"agent made by a member": {[]Binding{poolBinding("taken-pool")}, "agent: one of that name exists that the broker did not create"},
 		"vault made by a member": {[]Binding{poolBinding("team-secrets")}, "vault: one of that name exists that the broker did not create"},
 		"default vault":          {[]Binding{poolBinding("default")}, "reserved name"},
+		"web interface route":    {[]Binding{poolBinding("users")}, "reserved name"},
 		"not an agent name":      {[]Binding{poolBinding("a.b")}, "lowercase letters"},
 		"one ID only":            {[]Binding{poolBinding("good-pool"), halfIDs}, "requires namespace, account, account UID, agent and vault"},
 		"invalid other binding":  {[]Binding{poolBinding("good-pool"), noImages}, "at least one image digest"},

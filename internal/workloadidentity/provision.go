@@ -101,9 +101,12 @@ func provision(ctx context.Context, b *Binding, s PoolStore, logger *slog.Logger
 		}
 		return mark == PoolCreator, err
 	}
-	// Both are read before either is made, so a refusal writes nothing. An
-	// agent someone else made would bring its tokens to the pool's vault, and
-	// proxy on a vault someone else made would reach their credentials.
+	// Both are read before either is made, so a refusal these reads find
+	// writes nothing. If someone makes the vault after this read and before
+	// the broker's create, the refusal comes after the agent is written; that
+	// agent has instance role no-access, no token and no grant. An agent
+	// someone else made would bring its tokens to the pool's vault, and proxy
+	// on a vault someone else made would reach their credentials.
 	agent, err := lookup(ctx, b.Pool, s.GetAgentByName, agentOurs)
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
