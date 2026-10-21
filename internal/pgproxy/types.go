@@ -162,12 +162,15 @@ const (
 	defaultPooledMaxLeasesPerActor = 1024
 )
 
-// ErrSessionLimit is returned by a SessionLedger when a Pod is at its cap.
+// ErrSessionLimit is returned by a SessionLedger when a Pod or a database is
+// at its cap.
 var ErrSessionLimit = errors.New("workload session limit reached")
 
-// SessionLedger records live sessions in shared storage so a Pod's cap holds
-// across broker replicas. Add must be atomic per Pod and return
-// ErrSessionLimit at the cap; any other error refuses the session.
+// SessionLedger records live sessions in shared storage so a Pod's cap, and a
+// database's connection budget, hold across broker replicas. Each is counted
+// under its own key: a workload ID, or databaseLedgerKey. Add must be atomic
+// per key and return ErrSessionLimit at the cap; any other error refuses the
+// session.
 type SessionLedger interface {
 	Add(ctx context.Context, sessionID, workload string, limit int) error
 	Remove(ctx context.Context, sessionID string) error

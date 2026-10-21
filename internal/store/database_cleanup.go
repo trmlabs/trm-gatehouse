@@ -352,7 +352,9 @@ func (s *SQLStore) DeleteDatabaseCleanup(ctx context.Context, accessor string) e
 }
 
 // AddBrokerSession records one client session against its Pod for a
-// fleet-wide cap. A limit of zero records without a cap. Rows count only while
+// fleet-wide cap; the broker also counts each database's connections here,
+// under a "database:" key in the pod column. A limit of zero records without
+// a cap. Rows count only while
 // their owner is live, so a dead replica's sessions drop out with it.
 func (s *SQLStore) AddBrokerSession(ctx context.Context, owner, id, pod string, limit int) error {
 	if owner == "" || id == "" || pod == "" {

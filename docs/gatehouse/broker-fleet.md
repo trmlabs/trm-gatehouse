@@ -22,8 +22,8 @@ A single replica on SQLite works as before.
 - **Claim.** A claim is one SQL statement that moves each record only from the owner it read. When two survivors race, each record moves once. Revocation is idempotent anyway.
 - **Drain.** On SIGTERM a replica starts no new issuance and lets one under way finish and journal its lease before it gives up ownership, so a restart does not leave an unknown issuance.
 - **Lost requests.** An issuance whose lease ID never arrived stays recorded without closing its database, and clears once Vault's lease list shows no credential from it remains (see [automatic reconciliation](database-recovery.md#automatic-reconciliation)). Only an orphan lease Vault cannot revoke closes that database, for every replica.
-- **Budgets.** Pooled server-connection budgets divide by the live replica count. When a replica joins, the others close idle connections down to their new share.
-- **Sessions.** The `broker_sessions` table counts a Pod's sessions fleet-wide. A session counts only while its replica is live.
+- **Budgets.** Pooled server-connection budgets divide by the live replica count. When a replica joins, the others close idle connections down to their new share. Unpooled, each session is a database connection, and the `broker_sessions` table counts a database's connections fleet-wide against its `maxConns`, so any replica can take one while the fleet is under it. When the store cannot record a session, the session is refused with SQLSTATE 08004. A graph database's `maxConns` stays a budget per replica.
+- **Sessions.** The `broker_sessions` table counts a Pod's sessions fleet-wide. A session counts only while its replica is live, so a crashed replica's connections stop counting when its owner row expires, about when survivors revoke its credentials. A removal that fails is retried until it succeeds or the replica stops, and an add that fails takes off any row it may have written.
 
 Evidence:
 
@@ -32,6 +32,7 @@ Evidence:
 | `TestDurableLeaseFencesBeforeTakeoverWhenPartitioned` | A replica cut off from the store closes its session while its owner row is still live; the survivor revokes only after the row expires |
 | `TestRealVault_FleetSurvivorRevokesCrashedReplica` | Real Vault and PostgreSQL with these timings: the survivor revoked a SIGKILLed replica's role and session 31 s after the kill |
 | `TestRealPostgres_DatabaseCleanupJournal` | Racing survivors claim each of 200 records exactly once, over 20 rounds |
+| `TestRealPostgres_DatabaseBudgetHoldsAcrossReplicas` | Two unpooled replicas on one store, loaded 3 and 1, hold exactly `maxConns` connections on a real database and refuse the next on either |
 | e2e scene `replica_crash` | Kills a replica mid-session in Kind |
 
 ## Moving a live SQLite broker to PostgreSQL

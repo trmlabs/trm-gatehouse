@@ -68,7 +68,8 @@ type Options struct {
 	// TrustProxyHeader reads a PROXY v1 header from the in-Pod loopback TLS
 	// terminator on every connection and uses its source as the peer address.
 	TrustProxyHeader bool
-	// Sessions, when set, caps live sessions per Pod across every broker replica.
+	// Sessions, when set, caps live sessions per Pod, and connections per
+	// database, across every broker replica.
 	Sessions SessionLedger
 	Pool     *PoolOptions // transaction-mode multiplexing; nil keeps one upstream connection per session
 	Audit    AuditTrail   // signed audit trail; nil disables it
@@ -555,16 +556,87 @@ func (b *Broker) acquireAdmission(ctx context.Context) (func(), bool) {
 func (b *Broker) acquireUpstreamSlot(svc *DatabaseService) bool {
 	b.serveMu.Lock()
 	defer b.serveMu.Unlock()
-	limit := svc.MaxConns
-	if limit <= 0 {
-		limit = b.opts.DefaultDatabaseConns
-	}
-	limit = min(limit, b.opts.MaxConns)
-	if b.upstreamCounts[svc.Addr] >= limit {
+	if b.upstreamCounts[svc.Addr] >= min(b.databaseBudget(svc), b.opts.MaxConns) {
 		return false
 	}
 	b.upstreamCounts[svc.Addr]++
 	return true
+}
+
+// databaseBudget is svc's whole connection budget: its catalog maxConns, or
+// DefaultDatabaseConns without one.
+func (b *Broker) databaseBudget(svc *DatabaseService) int {
+	if svc.MaxConns > 0 {
+		return svc.MaxConns
+	}
+	return b.opts.DefaultDatabaseConns
+}
+
+// databaseLedgerKey names a database's fleet-wide count in the session
+// ledger, beside the per-Pod counts kept under workload IDs.
+func databaseLedgerKey(svc *DatabaseService) string { return "database:" + svc.Addr }
+
+// addToLedger counts one session under key in the shared ledger, with an
+// admission slot for the store call and the ledger's own deadline, so a slow
+// ledger does not spend the wait for serving capacity. It returns the
+// session's removal, or errAdmissionQueue when no slot freed in time.
+func (b *Broker) addToLedger(ctx context.Context, key string, limit int) (func(), error) {
+	id := newSessionID()
+	if id == "" {
+		return nil, errors.New("session ID unavailable")
+	}
+	release, ok := b.acquireAdmission(ctx)
+	if !ok {
+		return nil, errAdmissionQueue
+	}
+	defer release()
+	ledgerCtx, cancel := context.WithTimeout(ctx, b.opts.LedgerTimeout)
+	defer cancel()
+	sessionID := "ledger-" + id
+	if err := b.opts.Sessions.Add(ledgerCtx, sessionID, key, limit); err != nil {
+		if !errors.Is(err, ErrSessionLimit) {
+			// The row may have been written before the error, as when the
+			// deadline passes after the commit: take it off, or it would
+			// hold a place in the count until this replica stops.
+			go b.ledgerRemover(sessionID)()
+		}
+		return nil, err
+	}
+	return b.ledgerRemover(sessionID), nil
+}
+
+// ledgerRemover takes a session off the ledger, once. The first attempt fits
+// the shutdown budget. A failed one is retried in the background until it
+// succeeds or the broker stops: until then the row holds a place in a
+// fleet-wide count, and once the broker stops this replica's owner row goes
+// and its rows stop counting.
+func (b *Broker) ledgerRemover(sessionID string) func() {
+	return sync.OnceFunc(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), b.removalTimeout())
+		err := b.opts.Sessions.Remove(ctx, sessionID)
+		cancel()
+		if err == nil {
+			return
+		}
+		b.logger.Warn("pgproxy: session ledger removal failed", slog.String("error", err.Error()))
+		go func() {
+			for wait := time.Second; ; wait = min(2*wait, 30*time.Second) {
+				timer := time.NewTimer(wait)
+				select {
+				case <-b.ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				ctx, cancel := context.WithTimeout(b.ctx, b.removalTimeout())
+				err := b.opts.Sessions.Remove(ctx, sessionID)
+				cancel()
+				if err == nil {
+					return
+				}
+			}
+		}()
+	})
 }
 
 func (b *Broker) releaseUpstreamSlot(svc *DatabaseService) {
@@ -823,21 +895,10 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 	// unpooled session runs it alongside the credential revoke.
 	removeSession := func() {}
 	if b.opts.Sessions != nil && scope.WorkloadID != "" {
-		id := newSessionID()
-		sessionID := "ledger-" + id
-		err := errors.New("session ID unavailable")
-		if id != "" {
-			release, ok := b.acquireAdmission(hsCtx)
-			if !ok {
-				refuseBusy("ledger_queue")
-				return
-			}
-			// Its own deadline: a slow ledger must not spend the wait for
-			// serving capacity below.
-			ledgerCtx, ledgerCancel := context.WithTimeout(hsCtx, b.opts.LedgerTimeout)
-			err = b.opts.Sessions.Add(ledgerCtx, sessionID, scope.WorkloadID, b.opts.MaxLeasesPerActor)
-			ledgerCancel()
-			release()
+		remove, err := b.addToLedger(hsCtx, scope.WorkloadID, b.opts.MaxLeasesPerActor)
+		if errors.Is(err, errAdmissionQueue) {
+			refuseBusy("ledger_queue")
+			return
 		}
 		if errors.Is(err, ErrSessionLimit) {
 			b.logger.Warn("pgproxy: per-workload live-credential limit reached across the fleet",
@@ -851,14 +912,7 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 			refuse("ledger_unavailable", "08004", "Agent Vault: session accounting unavailable")
 			return
 		}
-		removeSession = sync.OnceFunc(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), b.removalTimeout())
-			defer cancel()
-			if err := b.opts.Sessions.Remove(ctx, sessionID); err != nil {
-				// The row stops counting when this replica's owner row expires.
-				b.logger.Warn("pgproxy: session ledger removal failed", slog.String("error", err.Error()))
-			}
-		})
+		removeSession = remove
 		// Waits for a removal already started beside the revoke.
 		defer removeSession()
 	}
@@ -964,6 +1018,32 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 		return
 	}
 	defer b.releaseUpstreamSlot(svc)
+	// With a shared store the budget is the whole fleet's: the ledger counts
+	// this database's sessions on every live replica, so any replica may take
+	// a connection while the total is under the budget. The in-memory slot
+	// above only spares the store a call this replica can refuse alone.
+	removeDatabase := func() {}
+	if b.opts.Sessions != nil {
+		remove, err := b.addToLedger(hsCtx, databaseLedgerKey(svc), b.databaseBudget(svc))
+		if errors.Is(err, errAdmissionQueue) {
+			refuseBusy("database_ledger_queue")
+			return
+		}
+		if errors.Is(err, ErrSessionLimit) {
+			b.logger.Warn("pgproxy: per-database connection limit reached across the fleet",
+				slog.String("vault", scope.VaultID), slog.String("service", svc.Name),
+				slog.String("upstream", svc.Addr), slog.Int("limit", b.databaseBudget(svc)))
+			refuse("database_limit", "53300", "Agent Vault: too many concurrent connections to this database")
+			return
+		}
+		if err != nil {
+			b.logger.Error("pgproxy: session ledger unavailable; refusing session", slog.String("stage", "database_ledger_add"), slog.String("error", err.Error()))
+			refuse("ledger_unavailable", "08004", "Agent Vault: session accounting unavailable")
+			return
+		}
+		removeDatabase = remove
+		defer removeDatabase()
+	}
 
 	lease, err := b.opts.Leases.Mint(hsCtx, *scope, svc)
 	if err != nil {
@@ -980,10 +1060,11 @@ func (b *Broker) handleConn(conn net.Conn, releasePending func()) {
 		return
 	}
 	defer func() {
-		// Remove the ledger row while revoking, not after: run in turn, the
-		// two could take twice leaseRevokeTimeout and overrun the shutdown
+		// Remove the ledger rows while revoking, not after: run in turn, they
+		// could take twice leaseRevokeTimeout and overrun the shutdown
 		// budget. Any upstream connection on this credential is closed by now.
 		go removeSession()
+		go removeDatabase()
 		revokeCtx, revokeCancel := context.WithTimeout(context.Background(), leaseRevokeTimeout)
 		defer revokeCancel()
 		if err := b.opts.Leases.Revoke(revokeCtx, lease.ID); err != nil {

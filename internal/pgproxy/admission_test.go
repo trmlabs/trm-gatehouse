@@ -523,12 +523,15 @@ func TestSessionRemovalFitsTheShutdownBudget(t *testing.T) {
 			Databases: &fakeResolver{svc: &DatabaseService{Name: "db", Addr: up.addr()}}, Leases: &fakeMinter{lease: newLease()}})
 		s := openAgentSession(t, addr, "agent", "db")
 		s.close()
-		waitFor(t, 2*time.Second, func() bool { ledger.mu.Lock(); defer ledger.mu.Unlock(); return len(ledger.removed) == 1 }, "session not removed")
+		// One row for the Pod and one for the database.
+		waitFor(t, 2*time.Second, func() bool { ledger.mu.Lock(); defer ledger.mu.Unlock(); return len(ledger.removed) == 2 }, "session not removed")
 		ledger.mu.Lock()
-		got := ledger.removed[0]
+		removed := append([]time.Duration(nil), ledger.removed...)
 		ledger.mu.Unlock()
-		if got > tc.most || got < tc.most-time.Second {
-			t.Errorf("LedgerTimeout %s: removal deadline %s, want about %s", tc.setting, got, tc.most)
+		for _, got := range removed {
+			if got > tc.most || got < tc.most-time.Second {
+				t.Errorf("LedgerTimeout %s: removal deadline %s, want about %s", tc.setting, got, tc.most)
+			}
 		}
 	}
 }
