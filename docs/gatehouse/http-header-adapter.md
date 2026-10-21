@@ -49,6 +49,7 @@ Set `AGENT_VAULT_HTTP_CATALOG_FILE` to a JSON file. One entry per binding:
 | `maxRequestBytes`, `maxResponseBytes` | Default 1 MiB and 32 MiB. |
 | `transcript` | The entry is a model API: its request bodies carry the agent's conversation, which quotes whatever the agent read. A decoy credential found only in such a body is not refused; its headers and URL are still checked. See [decoy credentials](decoy-credentials.md). |
 | `requestFields` | Request parameters limited to listed values, as `[{"name": "channel", "values": ["C0123456789"]}]`. Each listed parameter must appear exactly once in the whole request (query string, JSON object body or form body) as a string equal to a listed value. A request with the parameter missing, repeated, in both the query and the body, a duplicate JSON key, a body that is not a JSON object or form, or two `Content-Type` headers is refused (403, `request_field` in the audit trail). So is any query, form or top-level JSON key holding whitespace, a control byte or a bracket, since a vendor's parser may read ` channel`, `channel%00` or `channel[]` as `channel`. An entry for `slack.com` (or a subdomain) must limit `channel` to channel IDs (`C...`) and list only the paths `/api/chat.postMessage`, `/api/chat.update`, `/api/reactions.add`, `/api/conversations.history` and `/api/conversations.replies`, each of which names its one conversation in `channel`; an ID not starting with `C` is refused at load, which keeps out direct message (`D`), group (`G`) and person (`U`, `W`) IDs. A Slack request may use only the parameters Slack documents for its method, spelled exactly, and never `token` (the key goes in the header); any other key, such as the `team_id` a client set up with a team ID adds, or a path that is not exactly a listed method, is refused. List the verbs your client sends: Python's `slack_sdk` `WebClient` sends every method, reads included, as a POST with a form body, while its `AsyncWebClient` and a raw HTTP caller may send a read as a GET with a query string. The checks are the same either way. Slack does not promise a conversation's type from its prefix, so list only channels you have checked. A Slack entry without both rules fails at load. Other Slack methods are not listable; some name a person or another conversation in a different parameter, which the `channel` rule would not see. Each audit row for a listed Slack method names it as the `operation`, such as `slack.conversations_history` or `slack.reactions_add`, so a channel read, a post and a reaction can be told apart. |
+| `requestHeaders` | Request headers limited to listed values, as `[{"name": "X-Backend-Id", "values": ["<backend ID>"]}]`. Each listed header must be one the entry forwards (`forwardHeaders`, `Accept`, `Accept-Language`, `Content-Type` or `User-Agent`, or `Grpc-Timeout` on an `http2` entry) and not its credential header, and must appear exactly once on every request with a value equal to a listed one; a request with it missing, repeated or holding any other value, a comma-joined pair included, is refused (403, `request_header` in the audit trail). Names are matched without case. An entry for `mcp.groundcover.com` should pin `X-Backend-Id` (see [groundcover](#groundcover)). |
 
 ### Langfuse
 
@@ -70,6 +71,37 @@ Store `pk-lf-...:sk-lf-...` in Vault and list the header:
 ```
 
 A Langfuse key can read and write its whole project, so the entry's methods and paths are the only limit: `GET` on `/api/public` reads; trace export needs `POST` on `/api/public/otel/v1/traces`. Clients that send only `Authorization`, such as the Langfuse CLI or a plain OpenTelemetry exporter with `Authorization=Basic <base64 of public key:placeholder>` in `OTEL_EXPORTER_OTLP_HEADERS`, work with the same entry. Node's OpenTelemetry exporter makes its own HTTP agent, which ignores `HTTPS_PROXY` even with `NODE_USE_ENV_PROXY=1`; give it the proxy with `httpAgentOptions: {proxyEnv: process.env}`, or export from Python.
+
+### groundcover
+
+groundcover's hosted MCP server (`mcp.groundcover.com`) takes every tool as a JSON-RPC message on one path, `/api/mcp`, with the key sent as `Authorization: Bearer`. One key reaches every backend of its tenant, and the `X-Backend-Id` header (or a tool's `backend_id` argument) picks the one a request reads. The key's data scope limits what most tools read, but groundcover does not apply it to every tool: monitor issues, for one, come back for every cluster and backend the tenant has. So for this host the broker reads each request's message itself, whatever paths and methods the entry lists, and holds it to a pinned backend.
+
+The entry should pin the backend with `requestHeaders` (and forward `X-Backend-Id`). Every request then needs `X-Backend-Id` exactly once with a listed value, or it is refused (403, `request_header`). An entry without the pin still loads and the message rules below still apply, but a request's header may then pick any backend, so a catalog's own checks should require the pin.
+
+The broker forwards only what a query client sends to run the log and metric tools, each as its own POST:
+
+- `initialize` and the `notifications/initialized` notification, which open a session;
+- a `tools/call` naming `query_logs` or `query_metrics`, with only `name` and `arguments` in its `params`.
+
+It refuses:
+
+- any other method or tool (403, `mcp_tool`), `tools/list`, `ping` and every other notification included;
+- a tool call with an argument its tool does not list, or a value of another type (403, `mcp_argument`). `query_logs` takes `query`, `period`, `start` and `end`, each a string. `query_metrics` takes `mode`, `promql`, `start`, `end`, `step`, `period`, `filter` and `metricName` as strings, `envs`, `clusters` and `required` as lists of strings, and `limit` and `skip` as whole numbers. `backend_id` and `tenant_uuid` are not listed, since the pinned header picks the backend, and no object can sit below an argument;
+- a tool call with a string argument that could reach another signal (403, `mcp_argument`). In either tool that is a backslash, which gcQL and PromQL read as an escape, or gcQL's `_from` in any case and not as part of a longer name, or a prefix of it ending in `*` such as `_fr*`: a `query_logs` subquery reads another signal through it, monitor issues among them. In `query_logs` it is also the `join` or `union` pipe as a word in any case, or a `|` inside the parentheses of `in()`, `contains_any()` or `contains_all()`, where a subquery goes. In `query_metrics` it is a name starting `ALERTS`, or `__name__`, `alertname` or `alertstate`, in any case. These are word and character matches, not a gcQL or PromQL parser, so a query that reaches another signal some other way would pass; the tool limit is the main control;
+- a request it cannot read as exactly one such message (400, `mcp_shape`): a batch, a key repeated at any depth (escaped or not), a key the message does not take (such as `Method` beside `method`, or `_meta` in a tool call), a value of the wrong type, a body that is not valid UTF-8, a string holding a control byte other than tab, newline or carriage return, or U+FFFD (what a lone surrogate escape decodes to), a value more than 32 levels below the message, a `Content-Type` other than one `application/json`, a query string, or a path under the entry's prefixes other than `/api/mcp`. As for any entry, a path outside its prefixes is refused as `unlisted` and a method it does not list as `method` before the message is read.
+
+A `GET` (the server's event stream) and a `DELETE` (ending the session) carry no message and pass with no body and the pinned header, if the entry lists them. Each forwarded message's row names it as the `operation`: `groundcover.initialize`, `groundcover.initialized`, `groundcover.query_logs` or `groundcover.query_metrics`.
+
+```json
+{"name": "groundcover", "host": "mcp.groundcover.com", "pathPrefixes": ["/api/mcp"], "methods": ["DELETE", "GET", "POST"],
+ "header": "Authorization", "scheme": "Bearer", "placeholder": "__vault_GROUNDCOVER_KEY__",
+ "key": {"mount": "gatehouse", "path": "vendors/groundcover", "field": "key"},
+ "forwardHeaders": ["Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id", "X-Backend-Id", "X-Tenant-UUID", "X-Timezone"],
+ "requestHeaders": [{"name": "X-Backend-Id", "values": ["<backend ID>"]}],
+ "pools": ["<pool agent ID>"]}
+```
+
+The message rules are keyed on the host and need no field, so an entry without the pin gets them as soon as the broker is updated. A broker without them does not know the `requestHeaders` field, so ship the broker before pinning: an older broker drops a pinned entry from a catalog read from Vault, and refuses a catalog file that lists it. A client that lists tools first, as most MCP clients do, is refused; give it the two tool names instead.
 
 ## HTTP/2 and gRPC
 

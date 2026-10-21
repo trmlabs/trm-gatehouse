@@ -404,6 +404,24 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		// twice or not listed, or a key the method does not take.
 		deny(http.StatusForbidden, "request_field")
 		return
+	case entry.CheckRequestHeaders(r.Header) != nil:
+		// A limited header (groundcover's X-Backend-Id) missing, repeated or
+		// not listed.
+		deny(http.StatusForbidden, "request_header")
+		return
+	}
+	// groundcover's MCP server takes every tool on one path, so the broker
+	// reads the message itself and forwards only the methods, tools and
+	// arguments it allows (httpcatalog.CheckMCP); the row names the tool.
+	if operation, mcpErr := entry.CheckMCP(r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Values("Content-Type"), body); mcpErr != nil {
+		status := http.StatusForbidden
+		if errors.Is(mcpErr, httpcatalog.ErrMCPShape) {
+			status = http.StatusBadRequest
+		}
+		deny(status, mcpOutcome(mcpErr))
+		return
+	} else if operation != "" {
+		event.Operation = operation
 	}
 	expectedCredential := entry.CallerCredential()
 	// A Basic pair's user name is not secret, so a client may hold the real

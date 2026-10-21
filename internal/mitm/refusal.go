@@ -84,6 +84,10 @@ var refusals = map[string]refusalKind{
 	"placeholder_misplaced":  {next: "a placeholder may appear only in the destination's credential header; remove it from the URL, body and other headers."},
 	"credential_header":      {next: "send the destination's credential header once, with the placeholder only, or leave it out."},
 	"request_field":          {next: "a limited request field is missing, repeated or not one the catalog lists; " + nextNotAllowed},
+	"request_header":         {next: "a limited request header is missing, repeated or not one the catalog lists; " + nextNotAllowed},
+	"mcp_tool":               {next: "the broker forwards only some of this MCP server's methods and tools, and not this one; " + nextNotAllowed},
+	"mcp_argument":           {next: "the tool does not take this argument or value, such as backend_id, a nested object, gcQL's _from or a subquery; " + nextNotAllowed},
+	"mcp_shape":              {next: "the broker forwards one JSON-RPC message per request, on the server's own path, with no repeated or unknown key; " + nextFixRequest},
 	"push_shape":             {next: nextFixRequest},
 	"read_only":              {next: "this repository is read-only for this pool; " + nextNotAllowed},
 	"read_only_path":         {next: "this path is read-only for this pool; " + nextNotAllowed},
@@ -224,6 +228,19 @@ func keyOutcome(err error) string {
 		return "key_deleted"
 	}
 	return "key_unavailable"
+}
+
+// mcpOutcome names an MCP message the broker does not forward: a method or
+// tool it does not list, or a tool argument it refuses, apart from a request
+// it cannot read as one message.
+func mcpOutcome(err error) string {
+	switch {
+	case errors.Is(err, httpcatalog.ErrMCPTool):
+		return "mcp_tool"
+	case errors.Is(err, httpcatalog.ErrMCPArgument):
+		return "mcp_argument"
+	}
+	return "mcp_shape"
 }
 
 // seedOutcome names a browser seed failure: a worker whose deadline is too

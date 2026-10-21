@@ -73,6 +73,10 @@ type Entry struct {
 	// RequestFields limit request parameters to listed values (see
 	// RequestField). Header entries only; a Slack entry must limit channel.
 	RequestFields []RequestField `json:"requestFields,omitempty"`
+	// RequestHeaders limit request headers to listed values (see
+	// RequestHeader). Header entries only; a groundcover MCP entry must
+	// limit X-Backend-Id.
+	RequestHeaders []RequestHeader `json:"requestHeaders,omitempty"`
 	// Transcript marks a model API: its request bodies carry an agent's
 	// conversation, which quotes whatever the agent read, so a decoy
 	// credential found only in one is not treated as presented. Headers and
@@ -638,6 +642,9 @@ func (e *Entry) normalize() error {
 	if e.Kind != "" && len(e.RequestFields) > 0 {
 		return errors.New("requestFields apply to header entries only")
 	}
+	if e.Kind != "" && len(e.RequestHeaders) > 0 {
+		return errors.New("requestHeaders apply to header entries only")
+	}
 	if e.Kind != "" && e.Transcript {
 		return errors.New("transcript applies to header entries only")
 	}
@@ -750,6 +757,9 @@ func (e *Entry) normalize() error {
 		return errors.New("size limits out of range")
 	}
 	if err := e.normalizeRequestFields(); err != nil {
+		return err
+	}
+	if err := e.normalizeRequestHeaders(); err != nil {
 		return err
 	}
 	sort.Strings(e.Methods)

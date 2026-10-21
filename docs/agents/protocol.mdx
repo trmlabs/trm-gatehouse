@@ -210,7 +210,7 @@ Lasting codes answered with 503 and no `Retry-After`, which waiting does not cle
 | `broker_misconfigured` | The broker is not set up to serve this kind of destination, for example it has no token minter for it. |
 | `seed_deadline` | The worker ends too soon for a browser session. Start a new run. |
 
-Other common lasting codes: `unlisted`, `method`, `not_entitled`, `not_in_directory` (the directory has no account for the person behind the run), `no_person`, `pool_ceiling`, `account_disabled`, `entitlement_config`, `request_shape`, `request_field`, `placeholder_misplaced`, `credential_header`, `request_too_large`, `read_only`, `identity` and the `session_*` codes other than `session_missing`.
+Other common lasting codes: `unlisted`, `method`, `not_entitled`, `not_in_directory` (the directory has no account for the person behind the run), `no_person`, `pool_ceiling`, `account_disabled`, `entitlement_config`, `request_shape`, `request_field`, `request_header`, `mcp_tool` (an MCP method or tool the broker does not forward), `mcp_argument` (a tool argument the broker does not forward), `mcp_shape` (not one JSON-RPC message the broker reads), `placeholder_misplaced`, `credential_header`, `request_too_large`, `read_only`, `identity` and the `session_*` codes other than `session_missing`.
 
 ## Security constraints
 

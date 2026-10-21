@@ -780,6 +780,163 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 	}
 }
 
+// A groundcover MCP entry forwards the query client's own requests, with the
+// headers it sends, and names the tool in the row. It refuses another tool,
+// a message it cannot read as one, an unlisted argument and a missing,
+// repeated or other X-Backend-Id before anything reaches groundcover, with
+// the reason in the row and the refusal header.
+func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"groundcover","host":"mcp.groundcover.com","port":%d,
+			"pathPrefixes":["/api/mcp"],"methods":["DELETE","GET","POST"],"header":"Authorization","scheme":"Bearer",
+			"placeholder":"__vault_LLM_KEY__","key":{"mount":"gatehouse","path":"vendors/groundcover","field":"key"},
+			"forwardHeaders":["Mcp-Session-Id","Mcp-Protocol-Version","Last-Event-Id","X-Backend-Id","X-Tenant-UUID","X-Timezone"],
+			"requestHeaders":[{"name":"X-Backend-Id","values":["us-backend"]}],"pools":["pool-agent"]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	// The test vendor's certificate names example.com, not groundcover's host.
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	// call sends what a Python query client sends: every header it sets, the
+	// session after initialize, and its body. backends replaces X-Backend-Id.
+	call := func(method, body string, backends ...string) (int, string) {
+		t.Helper()
+		r, err := http.NewRequest(method, "https://mcp.groundcover.com:"+strconv.Itoa(f.port)+"/api/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Accept", "application/json, text/event-stream")
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		r.Header.Set("MCP-Protocol-Version", "2024-11-05")
+		r.Header.Set("User-Agent", "example-query/0.1.0")
+		r.Header.Set("X-Tenant-UUID", "00000000-0000-0000-0000-000000000000")
+		r.Header.Set("X-Timezone", "UTC")
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		if !strings.Contains(body, `"initialize"`) {
+			r.Header.Set("Mcp-Session-Id", "session-1")
+		}
+		if backends == nil {
+			backends = []string{"us-backend"}
+		}
+		for _, b := range backends {
+			r.Header.Add("X-Backend-Id", b)
+		}
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get(RefusalHeader)
+	}
+	tool := func(name string) string {
+		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":{"query":"* | limit 1","period":"PT1H"}}}`
+	}
+	// The POSTs of one log query and one metric query (initialize, the
+	// notification and each tool call), byte for byte as the client
+	// serializes them, then the event stream.
+	calls := int32(0)
+	for _, tc := range []struct{ method, body, operation string }{
+		{"POST", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"example-query","version":"0.1.0"}}}`, "groundcover.initialize"},
+		{"POST", `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, "groundcover.initialized"},
+		{"POST", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","arguments":{"query":"level:error | limit 10","period":"PT1H"}}}`, "groundcover.query_logs"},
+		{"POST", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_metrics","arguments":{"mode":"query_range","envs":["production"],"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","promql":"sum(up)","step":"1m"}}}`, "groundcover.query_metrics"},
+		{"GET", "", ""},
+	} {
+		calls++
+		code, refusal := call(tc.method, tc.body)
+		seen, _ := f.seen.Load().(http.Header)
+		if code != http.StatusOK || refusal != "" || f.calls.Load() != calls || f.audit.last().Operation != tc.operation || seen.Get("X-Backend-Id") != "us-backend" {
+			t.Errorf("%s %s: %d %q operation=%q, vendor calls %d, backend %q", tc.method, tc.operation, code, refusal, f.audit.last().Operation, f.calls.Load(), seen.Get("X-Backend-Id"))
+			calls = f.calls.Load()
+		}
+	}
+	for name, tc := range map[string]struct {
+		method, body string
+		backends     []string
+		outcome      string
+		status       int
+	}{
+		"query_issues":        {"POST", tool("query_issues"), nil, "mcp_tool", http.StatusForbidden},
+		"an unknown tool":     {"POST", tool("not_a_tool"), nil, "mcp_tool", http.StatusForbidden},
+		"tools/list":          {"POST", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, nil, "mcp_tool", http.StatusForbidden},
+		"a batch":             {"POST", `[` + tool("query_logs") + `,` + tool("query_issues") + `]`, nil, "mcp_shape", http.StatusBadRequest},
+		"a repeated name":     {"POST", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","name":"query_issues"}}`, nil, "mcp_shape", http.StatusBadRequest},
+		"a backend argument":  {"POST", strings.Replace(tool("query_logs"), `"arguments":{`, `"arguments":{"backend_id":"eu-backend",`, 1), nil, "mcp_argument", http.StatusForbidden},
+		"a tenant argument":   {"POST", strings.Replace(tool("query_logs"), `"arguments":{`, `"arguments":{"tenant_uuid":"x",`, 1), nil, "mcp_argument", http.StatusForbidden},
+		"issues via _from":    {"POST", strings.Replace(tool("query_logs"), `"* | limit 1"`, `"* | join by (namespace) (_from:issues | fields namespace) | limit 1"`, 1), nil, "mcp_argument", http.StatusForbidden},
+		"no backend":          {"POST", tool("query_logs"), []string{}, "request_header", http.StatusForbidden},
+		"another backend":     {"POST", tool("query_logs"), []string{"eu-backend"}, "request_header", http.StatusForbidden},
+		"a repeated backend":  {"POST", tool("query_logs"), []string{"us-backend", "us-backend"}, "request_header", http.StatusForbidden},
+		"two backends":        {"POST", tool("query_logs"), []string{"us-backend", "eu-backend"}, "request_header", http.StatusForbidden},
+		"the stream, another": {"GET", "", []string{"eu-backend"}, "request_header", http.StatusForbidden},
+	} {
+		code, refusal := call(tc.method, tc.body, tc.backends...)
+		if row := f.audit.last(); code != tc.status || refusal != tc.outcome || row.Outcome != tc.outcome || row.Operation != "" || f.calls.Load() != calls {
+			t.Errorf("%s: %d %q outcome=%q operation=%q, vendor calls %d", name, code, refusal, row.Outcome, row.Operation, f.calls.Load())
+		}
+	}
+}
+
+// A groundcover entry with no X-Backend-Id pin, as a catalog written before
+// requestHeaders has, still serves the query client, with any backend header
+// or none, and still refuses another tool, a backend argument and _from.
+func TestAdapterServesAnUnpinnedGroundcoverEntry(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"groundcover","host":"mcp.groundcover.com","port":%d,
+			"pathPrefixes":["/api/mcp"],"methods":["POST"],"header":"Authorization","scheme":"Bearer",
+			"placeholder":"__vault_LLM_KEY__","key":{"mount":"gatehouse","path":"vendors/groundcover","field":"key"},
+			"forwardHeaders":["Mcp-Session-Id","X-Backend-Id"],"pools":["pool-agent"]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	call := func(body string, backends ...string) (int, string) {
+		t.Helper()
+		r, err := http.NewRequest("POST", "https://mcp.groundcover.com:"+strconv.Itoa(f.port)+"/api/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		r.Header.Set("Content-Type", "application/json")
+		for _, b := range backends {
+			r.Header.Add("X-Backend-Id", b)
+		}
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get(RefusalHeader)
+	}
+	logs := func(args string) string {
+		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","arguments":{` + args + `}}}`
+	}
+	calls := int32(0)
+	for _, backends := range [][]string{nil, {"us-backend"}} {
+		calls++
+		if code, refusal := call(logs(`"query":"level:error | limit 10","period":"PT1H"`), backends...); code != http.StatusOK || refusal != "" || f.calls.Load() != calls || f.audit.last().Operation != "groundcover.query_logs" {
+			t.Errorf("backends %v: %d %q, vendor calls %d", backends, code, refusal, f.calls.Load())
+		}
+	}
+	for name, tc := range map[string]struct{ body, outcome string }{
+		"query_issues":       {`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_issues","arguments":{}}}`, "mcp_tool"},
+		"a backend argument": {logs(`"query":"*","backend_id":"eu-backend"`), "mcp_argument"},
+		"_from":              {logs(`"query":"_from:issues | limit 1"`), "mcp_argument"},
+	} {
+		if code, refusal := call(tc.body); code != http.StatusForbidden || refusal != tc.outcome || f.calls.Load() != calls {
+			t.Errorf("%s: %d %q, vendor calls %d", name, code, refusal, f.calls.Load())
+		}
+	}
+}
+
 // Authorization refuses a call after its entry matched, which is where the
 // row for an unentitled requester is written. A Slack call refused there
 // names its method too, and the same call from a member goes through.
