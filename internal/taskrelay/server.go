@@ -56,13 +56,13 @@ type relay struct {
 // durable audit terminates the whole task. Supervisory detection is bounded by
 // the one-second polling interval plus the three-second Kubernetes timeout.
 func Run(parent context.Context, c FixedConfig) error {
-	return run(parent, c, net.Listen)
+	return RunWithListen(parent, c, net.Listen)
 }
 
-// run is Run with the way it binds an address passed in. A test hands it
-// listeners it already holds, so it never has to choose a free port, release it
-// and hope nothing takes it before Run binds it.
-func run(parent context.Context, c FixedConfig, listen func(network, address string) (net.Listener, error)) (result error) {
+// RunWithListen is Run with the way it binds an address passed in. A test hands
+// it listeners it already holds, so it never has to choose a free port, release
+// it and hope nothing takes it before Run binds it.
+func RunWithListen(parent context.Context, c FixedConfig, listen func(network, address string) (net.Listener, error)) (result error) {
 	if e := c.Validate(time.Now()); e != nil {
 		return e
 	}

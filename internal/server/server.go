@@ -76,6 +76,10 @@ type Server struct {
 	logger        *slog.Logger        // structured logger for per-request observability
 	rateLimit     *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
 	logSink       requestlog.Sink     // per-request persistence sink; never nil (Nop default)
+	// httpListener, when set, is the socket Start serves on instead of binding
+	// httpServer.Addr. A test sets it so it never has to choose a free port,
+	// release it and hope nothing takes it before Start binds it.
+	httpListener net.Listener
 	// touchCache short-circuits per-request session-touch writes. With
 	// db.SetMaxOpenConns(1), every UPDATE — even a no-op — opens the
 	// single WAL writer slot. Caching the last-touch wall-clock per
@@ -1194,9 +1198,12 @@ func (s *Server) Start() error {
 	// Bind synchronously so EADDRINUSE returns from Start() before any pidfile
 	// work happens. Keeps a foreground invocation against an already-running
 	// daemon from clobbering the daemon's PID file.
-	httpLn, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.httpServer.Addr, err)
+	httpLn := s.httpListener
+	var err error
+	if httpLn == nil {
+		if httpLn, err = net.Listen("tcp", s.httpServer.Addr); err != nil {
+			return fmt.Errorf("listen %s: %w", s.httpServer.Addr, err)
+		}
 	}
 
 	defer func() { _ = httpLn.Close() }()

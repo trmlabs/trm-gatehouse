@@ -79,13 +79,14 @@ func TestGracefulShutdownRevokesVaultLogins(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newTestServer()
-	free, err := net.Listen("tcp", "127.0.0.1:0")
+	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := free.Addr().String()
-	_ = free.Close()
+	t.Cleanup(func() { _ = held.Close() })
+	addr := held.Addr().String()
 	s.httpServer.Addr = addr
+	s.httpListener = held
 	s.AttachHashicorp(client)
 	probe := &vaultOrderProbe{vault: vault}
 	s.AttachDatabaseCleanup(probe)

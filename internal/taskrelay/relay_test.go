@@ -154,7 +154,9 @@ func listenReserved(network, address string) (net.Listener, error) {
 }
 
 // runReserved is Run for addresses freeAddress reserved.
-func runReserved(ctx context.Context, c FixedConfig) error { return run(ctx, c, listenReserved) }
+func runReserved(ctx context.Context, c FixedConfig) error {
+	return RunWithListen(ctx, c, listenReserved)
+}
 
 // awaitBound waits until the relay has taken over the listener reserved for
 // address. Until then a dial succeeds against the held socket although the
