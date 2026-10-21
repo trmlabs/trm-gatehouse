@@ -1,5 +1,5 @@
 # ---- Frontend build ----
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS frontend
+FROM --platform=$BUILDPLATFORM node:26.12.1-alpine@sha256:9bd229b644e391df00fb989efa732335aefc6170a05d8c163c5c8ca9870da401 AS frontend
 
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
