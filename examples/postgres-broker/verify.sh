@@ -92,7 +92,7 @@ export AV_TEST_PG_ADMIN="postgres://review_admin:$admin_pw@127.0.0.1:$pg_port/ap
 export AV_TEST_STORE_PG_URL="postgres://review_admin:$admin_pw@127.0.0.1:$pg_port/brokerstore?sslmode=disable"
 # Serial packages: generated-role baseline measurements must not overlap.
 # An optional first argument narrows test names for an affected-boundary rerun.
-go test -p 1 -tags 'realpg realvault loadpg' ./internal/pgproxy ./internal/hashicorp ./internal/server ./internal/store -run "${1:-RealPostgres|RealVault|TestLoadPG_}" -count=1 -v -timeout 5m
+go test -p 1 -tags 'realpg realvault loadpg' ./internal/pgproxy ./internal/hashicorp ./internal/server ./internal/store ./internal/workloadidentity -run "${1:-RealPostgres|RealVault|TestLoadPG_}" -count=1 -v -timeout 5m
 if [[ ${AV_VERIFY_COMBINED:-false} == true ]]; then
   go test -tags realcombined ./internal/mitm -run '^TestRealCombined(WorkloadProofVaultAndPostgres|ParentExpiryRecovery)$' -count=1 -v -timeout 2m
 fi
