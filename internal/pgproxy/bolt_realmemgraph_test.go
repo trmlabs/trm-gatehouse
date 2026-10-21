@@ -253,28 +253,40 @@ func startBoltSidecar(t *testing.T, broker string) string {
 	if err := os.WriteFile(proof, []byte(relayProof), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	listen := probe.Addr().String()
-	_ = probe.Close()
+	t.Cleanup(func() { _ = held.Close() })
+	listen := held.Addr().String()
 	c := taskrelay.FixedConfig{TaskID: "pool-worker", Deadline: time.Now().Add(time.Hour), AuditFile: filepath.Join(dir, "audit.jsonl"), Self: true,
 		BoltListeners: []taskrelay.BoltListenerConfig{{Listen: listen, Routes: "broker", Placeholder: "gatehouse-relay-placeholder",
 			Upstream: taskrelay.UpstreamConfig{Address: terminator.Addr().String(), ServerName: "127.0.0.1", CAFile: ca, ProofFile: proof, Audience: "gatehouse"}}}}
 	if err := c.Validate(time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = taskrelay.Run(t.Context(), c) }()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		if conn, err := net.Dial("tcp", listen); err == nil {
-			_ = conn.Close()
-			return listen
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the sidecar never listened")
-		}
+	// The sidecar takes over the socket held above, so no other process can
+	// bind the address in between. A dial succeeds against the held socket at
+	// once, so wait for the handover instead.
+	taken, stopped := make(chan struct{}), make(chan error, 1)
+	go func() {
+		stopped <- taskrelay.RunWithListen(t.Context(), c, func(network, address string) (net.Listener, error) {
+			if address != listen {
+				return net.Listen(network, address)
+			}
+			close(taken)
+			return held, nil
+		})
+	}()
+	select {
+	case <-taken:
+		return listen
+	case err := <-stopped:
+		t.Fatalf("the sidecar stopped before it listened: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sidecar never listened")
 	}
+	return ""
 }
 
 func (f *fakeAuth) token() string {

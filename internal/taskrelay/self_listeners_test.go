@@ -228,8 +228,9 @@ func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 	if e := c.Validate(time.Now()); e != nil {
 		t.Fatalf("config refused: %v", e)
 	}
-	go func() { _ = Run(t.Context(), c) }()
+	go func() { _ = runReserved(t.Context(), c) }()
 	startup := func(listen, database string, sslFirst bool) (byte, []byte) {
+		mustBeBound(t, listen)
 		var conn net.Conn
 		var e error
 		for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {

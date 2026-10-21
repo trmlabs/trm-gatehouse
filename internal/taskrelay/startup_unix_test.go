@@ -29,7 +29,8 @@ func TestStartupDoesNotAdmitBeforeBrowserPolicyValidation(t *testing.T) {
 	up.CAFile = fifo
 	f.c.Browser = &BrowserConfig{Listen: freeAddress(t), Upstream: up}
 	done := make(chan error, 1)
-	go func() { done <- Run(t.Context(), f.c) }()
+	go func() { done <- runReserved(t.Context(), f.c) }()
+	mustBeBound(t, f.c.PostgresBindings[0].Listen)
 	deadline := time.Now().Add(3 * time.Second)
 	var conn net.Conn
 	for time.Now().Before(deadline) {

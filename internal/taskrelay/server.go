@@ -55,9 +55,37 @@ type relay struct {
 // Run serves native TLS only. Failure of any listener, pairing, deadline or
 // durable audit terminates the whole task. Supervisory detection is bounded by
 // the one-second polling interval plus the three-second Kubernetes timeout.
-func Run(parent context.Context, c FixedConfig) (result error) {
+func Run(parent context.Context, c FixedConfig) error {
+	return RunWithListen(parent, c, net.Listen)
+}
+
+// loopbackOnly refuses, and closes, a socket that listen binds anywhere but
+// loopback. Validation holds a sidecar's configured addresses to loopback; this
+// holds the sockets a caller's listen returns to the same rule.
+func loopbackOnly(listen func(network, address string) (net.Listener, error)) func(network, address string) (net.Listener, error) {
+	return func(network, address string) (net.Listener, error) {
+		l, e := listen(network, address)
+		if e != nil {
+			return nil, e
+		}
+		if !loopbackAddress(l.Addr().String()) {
+			_ = l.Close()
+			return nil, errConfig
+		}
+		return l, nil
+	}
+}
+
+// RunWithListen is Run with the way it binds an address passed in. A test hands
+// it listeners it already holds, so it never has to choose a free port, release
+// it and hope nothing takes it before Run binds it. A sidecar's listeners must
+// still be on loopback, whichever socket listen returns.
+func RunWithListen(parent context.Context, c FixedConfig, listen func(network, address string) (net.Listener, error)) (result error) {
 	if e := c.Validate(time.Now()); e != nil {
 		return e
+	}
+	if c.Self {
+		listen = loopbackOnly(listen)
 	}
 	pair, e := newPairVerifier(c)
 	if e != nil {
@@ -155,7 +183,7 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 	}()
 	listenerSlots := make(chan struct{}, limit)
 	bindAs := func(address string, outer *tls.Config) (net.Listener, error) {
-		plain, e := net.Listen("tcp", address)
+		plain, e := listen("tcp", address)
 		if e != nil {
 			return nil, e
 		}
@@ -211,7 +239,7 @@ func Run(parent context.Context, c FixedConfig) (result error) {
 	if c.AdminListen != "" && pair.cache != nil {
 		// Plaintext and outside the connection slots: it serves one read-only
 		// report, and its network policy admits only the janitor.
-		l, e := net.Listen("tcp", c.AdminListen)
+		l, e := listen("tcp", c.AdminListen)
 		if e != nil {
 			return errConfig
 		}

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -91,15 +92,98 @@ func (f *relayFixture) upstream(t *testing.T, address string) UpstreamConfig {
 	writeTestFile(t, p, []byte(testProof(time.Now().Add(time.Hour), "gatehouse")))
 	return UpstreamConfig{Address: address, ServerName: "127.0.0.1", CAFile: f.c.TLSCertFile, ProofFile: p, Audience: "gatehouse"}
 }
+
+// reservations holds each address freeAddress chose until the relay under test
+// takes its listener over, keyed by that address.
+var reservations sync.Map
+
+type reservation struct {
+	listener net.Listener
+	taken    chan struct{} // closed when the relay has taken the listener
+}
+
+// freeAddress binds a loopback port and keeps it bound, so nothing else on the
+// machine can be handed the same port before the relay binds it. runReserved
+// hands the relay this listener in place of a second bind.
 func freeAddress(t *testing.T) string {
 	t.Helper()
 	l, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		t.Fatal(e)
 	}
-	a := l.Addr().String()
-	l.Close()
-	return a
+	address := l.Addr().String()
+	reservations.Store(address, &reservation{listener: l, taken: make(chan struct{})})
+	t.Cleanup(func() {
+		reservations.Delete(address)
+		l.Close()
+	})
+	return address
+}
+
+// hangUpAddress is the address of a broker that closes every connection at
+// once. A relay dialing it cannot reach its upstream, as when a connection is
+// refused, and the port is never released for something else to take.
+func hangUpAddress(t *testing.T) string {
+	t.Helper()
+	l, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	go func() {
+		for {
+			c, e := l.Accept()
+			if e != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	t.Cleanup(func() { l.Close() })
+	return l.Addr().String()
+}
+
+// listenReserved binds like net.Listen, except that an address freeAddress
+// reserved gets its already bound listener.
+func listenReserved(network, address string) (net.Listener, error) {
+	if v, ok := reservations.LoadAndDelete(address); ok {
+		r := v.(*reservation)
+		close(r.taken)
+		return r.listener, nil
+	}
+	return net.Listen(network, address)
+}
+
+// runReserved is Run for addresses freeAddress reserved.
+func runReserved(ctx context.Context, c FixedConfig) error {
+	return RunWithListen(ctx, c, listenReserved)
+}
+
+// awaitBound waits until the relay has taken over the listener reserved for
+// address. Until then a dial succeeds against the held socket although the
+// relay has bound nothing. It reports false if stop closes or 30 seconds pass
+// first; a nil stop never closes. An address nothing reserved, or one already
+// taken, counts as bound.
+func awaitBound(address string, stop <-chan struct{}) bool {
+	v, ok := reservations.Load(address)
+	if !ok {
+		return true
+	}
+	select {
+	case <-v.(*reservation).taken:
+		return true
+	case <-stop:
+		return false
+	case <-time.After(30 * time.Second):
+		return false
+	}
+}
+
+// mustBeBound fails the test unless the relay takes over address's listener.
+func mustBeBound(t *testing.T, address string) {
+	t.Helper()
+	if !awaitBound(address, nil) {
+		t.Fatalf("relay never bound %s", address)
+	}
 }
 func (f *relayFixture) start(t *testing.T) {
 	t.Helper()
@@ -107,7 +191,7 @@ func (f *relayFixture) start(t *testing.T) {
 	f.stop = stop
 	done := make(chan struct{})
 	f.done = done
-	go func() { f.runError = Run(ctx, f.c); close(done) }()
+	go func() { f.runError = runReserved(ctx, f.c); close(done) }()
 	t.Cleanup(func() {
 		select {
 		case <-done:
@@ -124,6 +208,14 @@ func (f *relayFixture) start(t *testing.T) {
 		address = f.c.postgresBindings()[0].Listen
 	default:
 		address = f.c.Browser.Listen
+	}
+	if !awaitBound(address, done) {
+		select {
+		case <-done:
+			t.Fatalf("relay failed: %v", f.runError)
+		default:
+			t.Fatal("relay did not bind")
+		}
 	}
 	// Polls until the listener answers; the bound only stops a broken start,
 	// so it is wide enough for a full -race suite on a loaded runner.

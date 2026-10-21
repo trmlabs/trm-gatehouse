@@ -311,6 +311,13 @@ func (c FixedConfig) Validate(now time.Time) error {
 	return nil
 }
 
+// loopbackAddress reports whether address is a loopback IP literal and a port.
+func loopbackAddress(address string) bool {
+	host, _, _ := net.SplitHostPort(address)
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // validateSelf allows only loopback listeners, no browser and no pairing input.
 func (c FixedConfig) validateSelf(now time.Time) error {
 	if c.Connect != nil && !c.Connect.Upstream.validSession() {
@@ -327,9 +334,7 @@ func (c FixedConfig) validateSelf(now time.Time) error {
 	}
 	used := map[string]bool{}
 	check := func(listen string, upstream UpstreamConfig) error {
-		host, _, _ := net.SplitHostPort(listen)
-		ip := net.ParseIP(host)
-		if !validAddress(listen) || ip == nil || !ip.IsLoopback() || used[listen] || !validAddress(upstream.Address) || upstream.ServerName == "" || upstream.CAFile == "" || upstream.ProofFile == "" || upstream.Audience == "" {
+		if !validAddress(listen) || !loopbackAddress(listen) || used[listen] || !validAddress(upstream.Address) || upstream.ServerName == "" || upstream.CAFile == "" || upstream.ProofFile == "" || upstream.Audience == "" {
 			return errConfig
 		}
 		used[listen] = true

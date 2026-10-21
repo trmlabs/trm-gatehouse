@@ -283,7 +283,7 @@ func TestPostgresBindingBindFailureClosesTask(t *testing.T) {
 		{Listen: freeAddress(t), Upstream: f.upstream(t, "127.0.0.1:25443"), Database: "first", User: "workload", Placeholder: "public-placeholder"},
 		{Listen: occupied.Addr().String(), Upstream: f.upstream(t, "127.0.0.1:25443"), Database: "second", User: "workload", Placeholder: "public-placeholder"},
 	}
-	if e := Run(t.Context(), f.c); e == nil {
+	if e := runReserved(t.Context(), f.c); e == nil {
 		t.Fatal("partial binding startup accepted")
 	}
 	if c, e := net.DialTimeout("tcp", f.c.PostgresBindings[0].Listen, time.Second); e == nil {

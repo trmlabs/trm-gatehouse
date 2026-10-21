@@ -225,7 +225,7 @@ func startBolt(t *testing.T, configure func(*boltBroker)) *boltFixture {
 		t.Fatalf("config refused: %v", e)
 	}
 	done := make(chan struct{})
-	go func() { _ = Run(t.Context(), c); close(done) }()
+	go func() { _ = runReserved(t.Context(), c); close(done) }()
 	t.Cleanup(func() {
 		select {
 		case <-done:
@@ -238,6 +238,7 @@ func startBolt(t *testing.T, configure func(*boltBroker)) *boltFixture {
 
 func (bf *boltFixture) dial(t *testing.T, listen string) net.Conn {
 	t.Helper()
+	mustBeBound(t, listen)
 	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		conn, e := net.Dial("tcp", listen)
 		if e == nil {
