@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"regexp"
 	"unicode/utf8"
 )
 
@@ -19,9 +20,10 @@ import (
 // to run the log and metric tools: initialize, the initialized notification
 // and a tools/call naming query_logs or query_metrics. Every other method or
 // tool is refused, tools/list included, as are a batch, a repeated or
-// unknown key and a body it cannot read as one message. A GET (the server's
-// event stream) and a DELETE (ending the session) carry no message and pass
-// with no body.
+// unknown key, a body it cannot read as one message, and an argument naming
+// gcQL's _from, through which a log query reads another signal. A GET (the
+// server's event stream) and a DELETE (ending the session) carry no message
+// and pass with no body.
 const (
 	groundcoverMCPHost = "mcp.groundcover.com"
 	groundcoverMCPPath = "/api/mcp"
@@ -44,12 +46,19 @@ var groundcoverMCPTools = map[string]string{
 	"query_metrics": "groundcover.query_metrics",
 }
 
+// groundcoverCrossSignal matches gcQL's _from, in any case and not as part
+// of a longer name. A query_logs subquery (in join, union or in()) reads
+// another signal through it, monitor issues among them, which the key's data
+// scope does not hold. A client that never correlates signals never sends it.
+var groundcoverCrossSignal = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])_from(?:[^a-z0-9_]|$)`)
+
 // The refusals CheckMCP returns: ErrMCPShape for a request it cannot read as
 // one message on the server's path, ErrMCPTool for a method or tool it does
-// not forward.
+// not forward, ErrMCPArgument for a tool argument naming _from.
 var (
-	ErrMCPShape = errors.New("not one MCP message the broker reads")
-	ErrMCPTool  = errors.New("MCP method or tool not forwarded")
+	ErrMCPShape    = errors.New("not one MCP message the broker reads")
+	ErrMCPTool     = errors.New("MCP method or tool not forwarded")
+	ErrMCPArgument = errors.New("MCP tool argument not forwarded")
 )
 
 // CheckMCP holds a request to groundcover's MCP server to the messages the
@@ -138,7 +147,31 @@ func (e *Entry) CheckMCP(method, path, rawQuery string, contentTypes []string, b
 	if operation, ok = groundcoverMCPTools[tool]; !ok {
 		return "", ErrMCPTool
 	}
+	if mcpMentions(call["arguments"], groundcoverCrossSignal) {
+		return "", ErrMCPArgument
+	}
 	return operation, nil
+}
+
+// mcpMentions reports whether any key or string anywhere in v matches re.
+func mcpMentions(v any, re *regexp.Regexp) bool {
+	switch t := v.(type) {
+	case string:
+		return re.MatchString(t)
+	case map[string]any:
+		for key, value := range t {
+			if re.MatchString(key) || mcpMentions(value, re) {
+				return true
+			}
+		}
+	case []any:
+		for _, value := range t {
+			if mcpMentions(value, re) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mcpMessage decodes body as one JSON object in valid UTF-8 with no key

@@ -406,8 +406,8 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	// groundcover's MCP server takes every tool on one path, so the broker
-	// reads the message itself and forwards only the methods and tools it
-	// lists (httpcatalog.CheckMCP); the row names the tool that ran.
+	// reads the message itself and forwards only the methods, tools and
+	// arguments it allows (httpcatalog.CheckMCP); the row names the tool.
 	if operation, mcpErr := entry.CheckMCP(r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Values("Content-Type"), body); mcpErr != nil {
 		status := http.StatusForbidden
 		if errors.Is(mcpErr, httpcatalog.ErrMCPShape) {

@@ -837,6 +837,8 @@ func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 	}{
 		"query_issues":    {tool("query_issues"), "mcp_tool", http.StatusForbidden},
 		"an unknown tool": {tool("not_a_tool"), "mcp_tool", http.StatusForbidden},
+		"issues via _from": {`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs",
+			"arguments":{"query":"* | join by (namespace) (_from:issues | fields namespace) | limit 1"}}}`, "mcp_argument", http.StatusForbidden},
 		"tools/list":      {`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, "mcp_tool", http.StatusForbidden},
 		"a batch":         {`[` + tool("query_logs") + `,` + tool("query_issues") + `]`, "mcp_shape", http.StatusBadRequest},
 		"a repeated name": {`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","name":"query_issues"}}`, "mcp_shape", http.StatusBadRequest},

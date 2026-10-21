@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Infisical/agent-vault/internal/auditchain"
 )
 
 const groundcoverEntry = `{"name":"groundcover","host":"mcp.groundcover.com","pathPrefixes":["/api/mcp"],"methods":["DELETE","GET","POST"],
@@ -57,6 +59,28 @@ func TestMCPForwardsTheQueryClientsMessages(t *testing.T) {
 		operation, err := e.CheckMCP(tc.method, "/api/mcp", "", contentTypes, []byte(tc.body))
 		if err != nil || operation != tc.operation {
 			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+}
+
+// Every operation a forwarded message names is in the audit chain's
+// vocabulary, so its row is accepted without a new row version.
+func TestMCPOperationsAreAuditable(t *testing.T) {
+	ops := []string{}
+	for _, op := range groundcoverMCPMethods {
+		if op != "" {
+			ops = append(ops, op)
+		}
+	}
+	for _, op := range groundcoverMCPTools {
+		ops = append(ops, op)
+	}
+	if len(ops) != 4 {
+		t.Fatalf("operations %v", ops)
+	}
+	for _, op := range ops {
+		if err := (auditchain.Event{Event: auditchain.EventHTTPResponse, Operation: op}).Validate(); err != nil {
+			t.Errorf("%s: %v", op, err)
 		}
 	}
 }
@@ -153,6 +177,42 @@ func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 			tc.contentTypes = []string{"application/json"}
 		}
 		if operation, err := e.CheckMCP(tc.method, tc.path, tc.query, tc.contentTypes, []byte(tc.body)); !errors.Is(err, ErrMCPShape) || operation != "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+}
+
+// A log query that names gcQL's _from, which reads another signal (monitor
+// issues among them) inside a subquery, is refused wherever the arguments
+// carry it, while a longer name that only contains it passes.
+func TestMCPRefusesCrossSignalArguments(t *testing.T) {
+	e := groundcoverCatalog(t)
+	query := func(q string) string {
+		return strings.Replace(mcpQueryLogs, `"level:error | limit 10"`, q, 1)
+	}
+	for name, body := range map[string]string{
+		"a subquery":       query(`"* | join by (namespace) (_from:issues | fields namespace) | limit 10"`),
+		"an in() subquery": query(`"workload:in(_from:issues | fields workload) | limit 10"`),
+		"another case":     query(`"* | union (_FROM:issues) | limit 10"`),
+		"after a quote":    query(`"* | join (\"_from\":issues) | limit 10"`),
+		"escaped":          query(`"* | union (_from:issues) | limit 10"`),
+		"at the start":     query(`"_from issues | limit 10"`),
+		"another argument": strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","source":"_from"`, 1),
+		"a key":            strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","_from":"issues"`, 1),
+		"in a list":        strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","fields":["x",{"y":"_from"}]`, 1),
+		"in query_metrics": strings.Replace(mcpQueryMetric, `"up"`, `"_from"`, 1),
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
+			t.Errorf("%s: operation %q, %v", name, operation, err)
+		}
+	}
+	for name, q := range map[string]string{
+		"a longer name":    `"transfer_from:x | limit 10"`,
+		"a field suffix":   `"* | fields data_from_cache | limit 10"`,
+		"plain from":       `"from:issues | limit 10"`,
+		"a word inside it": `"\"rows_fromage\" | limit 10"`,
+	} {
+		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(query(q))); err != nil || operation != "groundcover.query_logs" {
 			t.Errorf("%s: operation %q, %v", name, operation, err)
 		}
 	}
