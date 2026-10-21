@@ -10,7 +10,8 @@ import (
 
 const groundcoverEntry = `{"name":"groundcover","host":"mcp.groundcover.com","pathPrefixes":["/api/mcp"],"methods":["DELETE","GET","POST"],
 	"header":"Authorization","scheme":"Bearer","placeholder":"__vault_GROUNDCOVER__","key":{"mount":"gatehouse","path":"vendors/groundcover","field":"key"},
-	"pools":["pool-a"]}`
+	"forwardHeaders":["Mcp-Session-Id","Mcp-Protocol-Version","Last-Event-Id","X-Backend-Id","X-Tenant-UUID","X-Timezone"],
+	"requestHeaders":[{"name":"X-Backend-Id","values":["us-backend"]}],"pools":["pool-a"]}`
 
 func groundcoverCatalog(t *testing.T) *Entry {
 	t.Helper()
@@ -22,13 +23,15 @@ func groundcoverCatalog(t *testing.T) *Entry {
 	return &e
 }
 
-// The messages a query client sends to run a log or metric query: initialize,
-// the initialized notification and the tool call, each as one JSON object.
+// The messages a Python query client sends for one log or metric query,
+// byte for byte as it serializes them (json.dumps with compact separators):
+// initialize, the initialized notification and the tool call, each its own
+// POST with one JSON object. Only the client's name is made up.
 const (
-	mcpInitialize  = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"query-client","version":"1.0"}}}`
+	mcpInitialize  = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"example-query","version":"0.1.0"}}}`
 	mcpInitialized = `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
 	mcpQueryLogs   = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","arguments":{"query":"level:error | limit 10","period":"PT1H"}}}`
-	mcpQueryMetric = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_metrics","arguments":{"mode":"query_instant","promql":"up","end":"2026-01-01T00:00:00Z"}}}`
+	mcpQueryMetric = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_metrics","arguments":{"mode":"query_range","envs":["production"],"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","promql":"sum(up)","step":"1m"}}}`
 )
 
 func mcpCall(tool string) string {
@@ -47,6 +50,7 @@ func TestMCPForwardsTheQueryClientsMessages(t *testing.T) {
 		"a charset":          {"POST", "application/json; charset=utf-8", mcpQueryLogs, "groundcover.query_logs"},
 		"a string id":        {"POST", "application/json", strings.Replace(mcpQueryLogs, `"id":2`, `"id":"a2"`, 1), "groundcover.query_logs"},
 		"no arguments":       {"POST", "application/json", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"query_metrics"}}`, "groundcover.query_metrics"},
+		"a log query window": {"POST", "application/json", strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z"`, 1), "groundcover.query_logs"},
 		"an escaped name":    {"POST", "application/json", strings.Replace(mcpQueryLogs, `"query_logs"`, `"query_logs"`, 1), "groundcover.query_logs"},
 		"spaces around it":   {"POST", "application/json", " \n" + mcpQueryLogs + "\n ", "groundcover.query_logs"},
 		"the event stream":   {"GET", "", "", ""},
@@ -182,6 +186,28 @@ func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 	}
 }
 
+// A tool call may not pick its own backend or tenant, however the argument is
+// spelled: the entry's X-Backend-Id pins the backend.
+func TestMCPRefusesRoutingArguments(t *testing.T) {
+	e := groundcoverCatalog(t)
+	for _, arg := range []string{
+		`"backend_id":"us-backend"`, `"backend_id":"eu-backend"`, `"tenant_uuid":"00000000-0000-0000-0000-000000000000"`,
+		`"Backend_Id":"eu-backend"`, `"backendId":"eu-backend"`, `"backend-id":"eu-backend"`, `"TENANT_UUID":"x"`, `"tenantUuid":"x"`,
+	} {
+		for _, call := range []string{mcpQueryLogs, mcpQueryMetric} {
+			body := strings.Replace(call, `"arguments":{`, `"arguments":{`+arg+`,`, 1)
+			if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
+				t.Errorf("%s: operation %q, %v", arg, operation, err)
+			}
+		}
+	}
+	// A name that only contains one of them is an ordinary argument.
+	body := strings.Replace(mcpQueryLogs, `"arguments":{`, `"arguments":{"backend_ids_seen":"x",`, 1)
+	if _, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); err != nil {
+		t.Errorf("a longer name: %v", err)
+	}
+}
+
 // A log query that names gcQL's _from, which reads another signal (monitor
 // issues among them) inside a subquery, is refused wherever the arguments
 // carry it, while a longer name that only contains it passes.
@@ -200,7 +226,7 @@ func TestMCPRefusesCrossSignalArguments(t *testing.T) {
 		"another argument": strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","source":"_from"`, 1),
 		"a key":            strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","_from":"issues"`, 1),
 		"in a list":        strings.Replace(mcpQueryLogs, `"period":"PT1H"`, `"period":"PT1H","fields":["x",{"y":"_from"}]`, 1),
-		"in query_metrics": strings.Replace(mcpQueryMetric, `"up"`, `"_from"`, 1),
+		"in query_metrics": strings.Replace(mcpQueryMetric, `"sum(up)"`, `"_from"`, 1),
 	} {
 		if operation, err := e.CheckMCP("POST", "/api/mcp", "", []string{"application/json"}, []byte(body)); !errors.Is(err, ErrMCPArgument) || operation != "" {
 			t.Errorf("%s: operation %q, %v", name, operation, err)

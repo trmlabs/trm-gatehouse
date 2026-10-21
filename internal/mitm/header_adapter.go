@@ -404,6 +404,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		// twice or not listed, or a key the method does not take.
 		deny(http.StatusForbidden, "request_field")
 		return
+	case entry.CheckRequestHeaders(r.Header) != nil:
+		// A limited header (groundcover's X-Backend-Id) missing, repeated or
+		// not listed.
+		deny(http.StatusForbidden, "request_header")
+		return
 	}
 	// groundcover's MCP server takes every tool on one path, so the broker
 	// reads the message itself and forwards only the methods, tools and

@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -20,8 +21,10 @@ import (
 // to run the log and metric tools: initialize, the initialized notification
 // and a tools/call naming query_logs or query_metrics. Every other method or
 // tool is refused, tools/list included, as are a batch, a repeated or
-// unknown key, a body it cannot read as one message, and an argument naming
-// gcQL's _from, through which a log query reads another signal. A GET (the
+// unknown key, a body it cannot read as one message, a backend_id or
+// tenant_uuid argument, which would pick another backend or tenant than the
+// entry's X-Backend-Id (see RequestHeader), and an argument naming gcQL's
+// _from, through which a log query reads another signal. A GET (the
 // server's event stream) and a DELETE (ending the session) carry no message
 // and pass with no body.
 const (
@@ -52,9 +55,15 @@ var groundcoverMCPTools = map[string]string{
 // scope does not hold. A client that never correlates signals never sends it.
 var groundcoverCrossSignal = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])_from(?:[^a-z0-9_]|$)`)
 
+// groundcoverRoutingArguments are the tool arguments that pick a tenant or
+// backend, spelled without case, "_" or "-". The header pins the backend, so
+// a call may not name one.
+var groundcoverRoutingArguments = map[string]bool{"backendid": true, "tenantuuid": true}
+
 // The refusals CheckMCP returns: ErrMCPShape for a request it cannot read as
 // one message on the server's path, ErrMCPTool for a method or tool it does
-// not forward, ErrMCPArgument for a tool argument naming _from.
+// not forward, ErrMCPArgument for a backend or tenant argument or one naming
+// _from.
 var (
 	ErrMCPShape    = errors.New("not one MCP message the broker reads")
 	ErrMCPTool     = errors.New("MCP method or tool not forwarded")
@@ -146,6 +155,12 @@ func (e *Entry) CheckMCP(method, path, rawQuery string, contentTypes []string, b
 	}
 	if operation, ok = groundcoverMCPTools[tool]; !ok {
 		return "", ErrMCPTool
+	}
+	args, _ := call["arguments"].(map[string]any)
+	for key := range args {
+		if groundcoverRoutingArguments[strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))] {
+			return "", ErrMCPArgument
+		}
 	}
 	if mcpMentions(call["arguments"], groundcoverCrossSignal) {
 		return "", ErrMCPArgument
