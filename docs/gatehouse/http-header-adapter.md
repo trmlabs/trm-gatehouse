@@ -71,6 +71,25 @@ Store `pk-lf-...:sk-lf-...` in Vault and list the header:
 
 A Langfuse key can read and write its whole project, so the entry's methods and paths are the only limit: `GET` on `/api/public` reads; trace export needs `POST` on `/api/public/otel/v1/traces`. Clients that send only `Authorization`, such as the Langfuse CLI or a plain OpenTelemetry exporter with `Authorization=Basic <base64 of public key:placeholder>` in `OTEL_EXPORTER_OTLP_HEADERS`, work with the same entry. Node's OpenTelemetry exporter makes its own HTTP agent, which ignores `HTTPS_PROXY` even with `NODE_USE_ENV_PROXY=1`; give it the proxy with `httpAgentOptions: {proxyEnv: process.env}`, or export from Python.
 
+### groundcover
+
+groundcover's hosted MCP server (`mcp.groundcover.com`) takes every tool as a JSON-RPC message on one path, `/api/mcp`, with the key sent as `Authorization: Bearer`. A groundcover key's data scope limits what most tools read, but groundcover does not apply it to every tool: monitor issues, for one, come back for every cluster and backend the tenant has. So for this host the broker reads each request's message itself, whatever the entry lists, and forwards only what a query client sends to run the log and metric tools:
+
+- `initialize` and the `notifications/initialized` notification, which open a session;
+- a `tools/call` naming `query_logs` or `query_metrics`, with only `name` and `arguments` in its `params`.
+
+Every other method or tool is refused (403, `mcp_tool`), `tools/list`, `ping` and every other notification included. So is a request the broker cannot read as exactly one such message (400, `mcp_shape`): a batch, a key repeated at any depth, including through an escape, a key the message does not take (such as `Method` beside `method`, or `_meta` in a tool call), a value of the wrong type, a body that is not valid UTF-8, a string holding a control byte other than tab, newline or carriage return, or U+FFFD (what a lone surrogate escape decodes to), nesting deeper than 32, a `Content-Type` other than one `application/json`, a query string, or any path other than `/api/mcp`. A `GET` (the server's event stream) and a `DELETE` (ending the session) carry no message and pass with no body, if the entry lists them. Each forwarded message's row names it as the `operation`: `groundcover.initialize`, `groundcover.initialized`, `groundcover.query_logs` or `groundcover.query_metrics`.
+
+```json
+{"name": "groundcover", "host": "mcp.groundcover.com", "pathPrefixes": ["/api/mcp"], "methods": ["DELETE", "GET", "POST"],
+ "header": "Authorization", "scheme": "Bearer", "placeholder": "__vault_GROUNDCOVER_KEY__",
+ "key": {"mount": "gatehouse", "path": "vendors/groundcover", "field": "key"},
+ "forwardHeaders": ["Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id", "X-Backend-Id", "X-Tenant-UUID", "X-Timezone"],
+ "pools": ["<pool agent ID>"]}
+```
+
+The rule is keyed on the host, so the entry needs no field for it, and a broker without it forwards every tool. A client that lists tools first, as most MCP clients do, is refused; give it the two tool names instead.
+
 ## HTTP/2 and gRPC
 
 A tunnel offers HTTP/2 only to a host whose entries set `http2`; every other host keeps HTTP/1.1. A request that arrives over HTTP/2 goes upstream over HTTP/2 only, on connections the broker reuses; a vendor that does not offer HTTP/2 fails the call. Path prefixes scope a gRPC entry by service or method, since a call's path is `/package.Service/Method`:

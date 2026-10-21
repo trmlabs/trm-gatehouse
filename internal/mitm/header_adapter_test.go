@@ -780,6 +780,74 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 	}
 }
 
+// A groundcover MCP entry forwards the query client's messages and names the
+// tool in the row, and refuses any other tool or a message it cannot read as
+// one before anything reaches groundcover, with the reason in the row and the
+// refusal header.
+func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
+	f := newAdapterFixture(t, func(o *Options) {
+		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
+		catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"groundcover","host":"mcp.groundcover.com","port":%d,
+			"pathPrefixes":["/api/mcp"],"methods":["DELETE","GET","POST"],"header":"Authorization","scheme":"Bearer",
+			"placeholder":"__vault_LLM_KEY__","key":{"mount":"gatehouse","path":"vendors/groundcover","field":"key"},"pools":["pool-agent"]}]}`, port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.HeaderAdapter.Catalog = catalog
+	})
+	// The test vendor's certificate names example.com, not groundcover's host.
+	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
+	call := func(method, body string) (int, string) {
+		t.Helper()
+		r, err := http.NewRequest(method, "https://mcp.groundcover.com:"+strconv.Itoa(f.port)+"/api/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer __vault_LLM_KEY__")
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := f.client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get(RefusalHeader)
+	}
+	tool := func(name string) string {
+		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":{"query":"* | limit 1"}}}`
+	}
+	calls := int32(0)
+	for name, tc := range map[string]struct{ method, body, operation string }{
+		"initialize":    {"POST", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}`, "groundcover.initialize"},
+		"initialized":   {"POST", `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`, "groundcover.initialized"},
+		"query_logs":    {"POST", tool("query_logs"), "groundcover.query_logs"},
+		"query_metrics": {"POST", tool("query_metrics"), "groundcover.query_metrics"},
+		"the stream":    {"GET", "", ""},
+	} {
+		calls++
+		if code, refusal := call(tc.method, tc.body); code != http.StatusOK || refusal != "" || f.calls.Load() != calls || f.audit.last().Operation != tc.operation {
+			t.Errorf("%s: %d %q operation=%q, vendor calls %d", name, code, refusal, f.audit.last().Operation, f.calls.Load())
+			calls = f.calls.Load()
+		}
+	}
+	for name, tc := range map[string]struct {
+		body, outcome string
+		status        int
+	}{
+		"query_issues":    {tool("query_issues"), "mcp_tool", http.StatusForbidden},
+		"an unknown tool": {tool("not_a_tool"), "mcp_tool", http.StatusForbidden},
+		"tools/list":      {`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, "mcp_tool", http.StatusForbidden},
+		"a batch":         {`[` + tool("query_logs") + `,` + tool("query_issues") + `]`, "mcp_shape", http.StatusBadRequest},
+		"a repeated name": {`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_logs","name":"query_issues"}}`, "mcp_shape", http.StatusBadRequest},
+	} {
+		code, refusal := call("POST", tc.body)
+		if row := f.audit.last(); code != tc.status || refusal != tc.outcome || row.Outcome != tc.outcome || row.Operation != "" || f.calls.Load() != calls {
+			t.Errorf("%s: %d %q outcome=%q operation=%q, vendor calls %d", name, code, refusal, row.Outcome, row.Operation, f.calls.Load())
+		}
+	}
+}
+
 // Authorization refuses a call after its entry matched, which is where the
 // row for an unentitled requester is written. A Slack call refused there
 // names its method too, and the same call from a member goes through.

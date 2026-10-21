@@ -77,9 +77,11 @@ type Row struct {
 	// Operation is what an HTTP row asked to do, from the broker's fixed
 	// vocabulary: a github-api repository operation such as "pr.open",
 	// "git.fetch" or "git.push", "graphql" for a GitHub GraphQL request no
-	// route admits, or the Slack Web API method a Slack entry's listed path
-	// names, such as "slack.conversations_history". On a graph database
-	// row, "bolt.session" or "bolt.query". Never a path, body or query text.
+	// route admits, the Slack Web API method a Slack entry's listed path
+	// names, such as "slack.conversations_history", or the groundcover MCP
+	// message forwarded, such as "groundcover.query_logs". On a graph
+	// database row, "bolt.session" or "bolt.query". Never a path, body or
+	// query text.
 	Operation string `json:"operation,omitempty"`
 	// Branch is, on a git push row, the refs the push changes (comma-separated,
 	// "+N" for any that do not fit) or the one a refused push was refused
