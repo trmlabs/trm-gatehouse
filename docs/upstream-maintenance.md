@@ -83,8 +83,9 @@ for public review. Actual cluster configuration, service-account identifiers,
 Vault paths, private endpoints, credentials, operator evidence and deployment
 state belong in the deployment repository or protected evidence store.
 
-Inherited binary/container and SDK release jobs run only in the original
-upstream repository. A downstream release needs a separate reviewed change for
+The inherited SDK release job runs only in the original upstream repository.
+This repository publishes no binary or container release artifacts; deployments
+build from source. A downstream release needs a separate reviewed change for
 package ownership, registry destinations, signing identity and protected
 publication approval. Tagging the downstream repository must not publish to
 upstream namespaces. Keeping the upstream module name does not grant publishing

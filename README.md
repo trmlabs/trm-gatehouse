@@ -42,7 +42,8 @@ allow is refused.
 
 **Pre-release. Not yet recommended for production.** There is no tagged
 Gatehouse release, and no version is supported for security fixes yet
-([SECURITY.md](SECURITY.md)).
+([SECURITY.md](SECURITY.md)). This repository publishes no release artifacts;
+deployments build from source.
 
 ## Try it in 5 minutes
 
@@ -249,7 +250,7 @@ The binary, Go module path and environment variables keep the upstream
 | `examples/credential-proxy/` | The local demo, the strict profile, and the Kubernetes and task relay fixtures |
 | `docs/gatehouse/` | Gatehouse guides |
 | `docs/`, `web/`, `sdks/` | Inherited from Agent Vault |
-| `install.sh`, `fly.toml`, `.github/workflows/release*.yml` | Inherited from Agent Vault. `install.sh` installs upstream Agent Vault, not Gatehouse. The release workflows run only in the upstream repository |
+| `install.sh`, `fly.toml`, `.github/workflows/release-node-sdk.yml` | Inherited from Agent Vault. `install.sh` installs upstream Agent Vault, not Gatehouse. The SDK release workflow runs only in the upstream repository |
 
 ## Telemetry
 
