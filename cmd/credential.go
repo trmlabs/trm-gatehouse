@@ -1,0 +1,260 @@
+package cmd
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/spf13/cobra"
+)
+
+var credentialCmd = &cobra.Command{
+	Use:     "credential",
+	Aliases: []string{"creds"},
+	Short:   "Manage credentials in a vault",
+}
+
+// credTypeLabel renders the credential type column; an empty type means a
+// plain static credential.
+func credTypeLabel(t string) string {
+	if t == "" {
+		return "static"
+	}
+	return t
+}
+
+var credentialListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List credential keys in a vault",
+	Long: `List credential keys in a vault.
+
+In agent mode (AGENT_VAULT_TOKEN set), AGENT_VAULT_VAULT (or --vault) is
+required — there is no project-file or interactive-picker fallback.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sess, tokenSource, err := resolveSession()
+		if err != nil {
+			return err
+		}
+
+		vault, err := resolveVaultForCommand(cmd, tokenSource)
+		if err != nil {
+			return err
+		}
+		reveal, _ := cmd.Flags().GetBool("reveal")
+
+		reqURL := sess.Address + "/v1/credentials?vault=" + url.QueryEscape(vault)
+		if reveal {
+			reqURL += "&reveal=true"
+		}
+		respBody, err := doAdminRequestWithBody("GET", reqURL, sess.Token, nil)
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Keys        []string `json:"keys"`
+			Credentials []struct {
+				Key         string `json:"key"`
+				Type        string `json:"type"`
+				Value       string `json:"value"`
+				Unavailable bool   `json:"unavailable"`
+			} `json:"credentials"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+
+		if len(result.Keys) == 0 {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No credentials found in vault %q.\n", vault)
+			return nil
+		}
+
+		t := newTable(cmd.OutOrStdout())
+		// Type (static/oauth/dynamic) is only present with the credentials list,
+		// which the server returns to members+; key-only listings omit it.
+		switch {
+		case len(result.Credentials) == 0:
+			t.AppendHeader(table.Row{"KEY"})
+			for _, key := range result.Keys {
+				t.AppendRow(table.Row{key})
+			}
+		case reveal:
+			t.AppendHeader(table.Row{"KEY", "TYPE", "VALUE"})
+			for _, cred := range result.Credentials {
+				val := cred.Value
+				if cred.Unavailable {
+					val = "(unavailable: check lease permissions)"
+				}
+				t.AppendRow(table.Row{cred.Key, credTypeLabel(cred.Type), val})
+			}
+		default:
+			t.AppendHeader(table.Row{"KEY", "TYPE"})
+			for _, cred := range result.Credentials {
+				t.AppendRow(table.Row{cred.Key, credTypeLabel(cred.Type)})
+			}
+		}
+		t.Render()
+		return nil
+	},
+}
+
+var credentialGetCmd = &cobra.Command{
+	Use:   "get <key>",
+	Short: "Get the decrypted value of a credential",
+	Long: `Get the decrypted value of a credential.
+
+In agent mode (AGENT_VAULT_TOKEN set), AGENT_VAULT_VAULT (or --vault) is
+required — there is no project-file or interactive-picker fallback.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sess, tokenSource, err := resolveSession()
+		if err != nil {
+			return err
+		}
+
+		vault, err := resolveVaultForCommand(cmd, tokenSource)
+		if err != nil {
+			return err
+		}
+		key := args[0]
+
+		reqURL := sess.Address + "/v1/credentials?vault=" + url.QueryEscape(vault) + "&reveal=true&key=" + url.QueryEscape(key)
+		respBody, err := doAdminRequestWithBody("GET", reqURL, sess.Token, nil)
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Credentials []struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			} `json:"credentials"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+
+		if len(result.Credentials) == 0 {
+			return fmt.Errorf("credential %q not found in vault %q", key, vault)
+		}
+
+		// Print raw value (pipe-friendly).
+		fmt.Fprint(cmd.OutOrStdout(), result.Credentials[0].Value)
+		return nil
+	},
+}
+
+var credentialSetCmd = &cobra.Command{
+	Use:   "set <key=value> [key2=value2 ...]",
+	Short: "Set one or more credentials",
+	Long: `Set one or more credentials in a vault.
+
+In agent mode (AGENT_VAULT_TOKEN set), AGENT_VAULT_VAULT (or --vault) is
+required — there is no project-file or interactive-picker fallback.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sess, tokenSource, err := resolveSession()
+		if err != nil {
+			return err
+		}
+
+		vault, err := resolveVaultForCommand(cmd, tokenSource)
+		if err != nil {
+			return err
+		}
+
+		creds := make(map[string]string, len(args))
+		for _, arg := range args {
+			idx := strings.IndexByte(arg, '=')
+			if idx < 1 {
+				return fmt.Errorf("invalid format %q, expected KEY=VALUE", arg)
+			}
+			creds[arg[:idx]] = arg[idx+1:]
+		}
+
+		body, err := json.Marshal(map[string]interface{}{
+			"vault":       vault,
+			"credentials": creds,
+		})
+		if err != nil {
+			return err
+		}
+
+		url := sess.Address + "/v1/credentials"
+		respBody, err := doAdminRequestWithBody("POST", url, sess.Token, body)
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Set []string `json:"set"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+
+		for _, key := range result.Set {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s Set credential %q in vault %q\n", successText("✓"), key, vault)
+		}
+		return nil
+	},
+}
+
+var credentialDeleteCmd = &cobra.Command{
+	Use:   "delete <key> [key2 ...]",
+	Short: "Delete one or more credentials",
+	Long: `Delete one or more credentials from a vault.
+
+In agent mode (AGENT_VAULT_TOKEN set), AGENT_VAULT_VAULT (or --vault) is
+required — there is no project-file or interactive-picker fallback.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sess, tokenSource, err := resolveSession()
+		if err != nil {
+			return err
+		}
+
+		vault, err := resolveVaultForCommand(cmd, tokenSource)
+		if err != nil {
+			return err
+		}
+
+		body, err := json.Marshal(map[string]interface{}{
+			"vault": vault,
+			"keys":  args,
+		})
+		if err != nil {
+			return err
+		}
+
+		url := sess.Address + "/v1/credentials"
+		respBody, err := doAdminRequestWithBody("DELETE", url, sess.Token, body)
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Deleted []string `json:"deleted"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return fmt.Errorf("parsing response: %w", err)
+		}
+
+		for _, key := range result.Deleted {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s Deleted credential %q from vault %q\n", successText("✓"), key, vault)
+		}
+		return nil
+	},
+}
+
+func init() {
+	credentialListCmd.Flags().Bool("reveal", false, "Show decrypted credential values (requires member+ role)")
+	credentialCmd.AddCommand(credentialListCmd)
+	credentialCmd.AddCommand(credentialGetCmd)
+	credentialCmd.AddCommand(credentialSetCmd)
+	credentialCmd.AddCommand(credentialDeleteCmd)
+	vaultCmd.AddCommand(credentialCmd)
+}

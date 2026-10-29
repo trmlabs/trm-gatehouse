@@ -1,0 +1,5 @@
+sb
+.git
+.gitignore
+*.md
+!README.md

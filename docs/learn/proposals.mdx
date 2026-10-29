@@ -1,0 +1,206 @@
+---
+title: "Proposals"
+description: "Review, approve, and manage agent-initiated credential and service changes."
+---
+
+A `Proposal` is a request from an agent to add, update, or remove [credentials](/learn/credentials) and services within a specific [vault](/learn/vaults).
+Each `Proposal` must be approved by a member of the [vault](/learn/vaults) with sufficient [permissions](/learn/permissions#vault-roles) in order for changes to take effect.
+
+Each `Proposal` may include:
+
+- **Services**: Host access changes that define which services the [agent](/agents/overview) wants to reach and how Agent Vault should authenticate to them. These merge into the [vault's](/learn/vaults) [services](/learn/services) on approval. For example, a service entry might grant access to `api.stripe.com` using a bearer token.
+- **Credential slots**: [Credential](/learn/credentials) operations covering keys the agent needs a human to supply, values the agent wants to store back, or credentials to delete. For example, a credential slot might ask the human to provide a `STRIPE_KEY` at approval time.
+- **Messages**: A developer-facing `message` and a human-facing `user_message` shown on the browser approval page.
+
+When an agent needs access to a new service, it creates a proposal and shares an approval link in chat. If SMTP is configured, the link is also emailed to vault members. You click the link, provide any required [credentials](/learn/credentials), and approve or deny. Once approved, the agent picks up the new credentials and continues its work.
+
+## Lifecycle
+
+Every proposal moves through a simple state machine:
+
+```
+pending → applied    (approved by a privileged vault member)
+pending → rejected   (rejected by a privileged vault member)
+pending → expired    (7-day TTL elapsed)
+```
+
+Approval atomically merges services into the [vault's](/learn/vaults) [service configuration](/learn/services) and upserts/deletes [credentials](/learn/credentials) in a single transaction.
+
+## Approve proposals
+
+<Tabs>
+  <Tab title="Browser">
+    When an agent needs access to a service, it shares an approval link in chat (e.g. `http://localhost:14321/approve/3?token=av_appr_...`).
+
+    <Steps>
+      <Step title="Click the link">
+        The approval token grants read access to the proposal details: requested services, credential slots, and the agent's message. Token TTL: 24 hours.
+      </Step>
+      <Step title="Log in if needed">
+        Submitting the approval requires a valid Agent Vault session. If you're not logged in, the page shows an inline login form first.
+      </Step>
+      <Step title="Provide credentials and approve">
+        Fill in any credential values the agent requested, review the proposed services, and click **Allow**.
+      </Step>
+    </Steps>
+
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    # List pending proposals
+    agent-vault vault proposal list --vault my-vault --status pending
+
+    # Approve with interactive credential prompts
+    agent-vault vault proposal approve 3
+
+    # Approve with credentials inline
+    agent-vault vault proposal approve 3 STRIPE_KEY=sk_test_abc123
+
+    # Skip confirmation prompt
+    agent-vault vault proposal approve 3 --yes
+    ```
+
+    The CLI fetches the proposal, displays a summary, prompts for any missing [credential](/learn/credentials) values, and sends the approval to the running server.
+
+    For agent-provided values, the CLI asks whether to accept the agent's value or override it manually.
+
+  </Tab>
+</Tabs>
+
+<Tip>
+  Agents poll the proposal status automatically after creating one. Once you
+  approve, the agent retries its original request. No further action needed on
+  your part.
+</Tip>
+
+## Reject proposals
+
+<Tabs>
+  <Tab title="Browser">
+    The browser approval page includes a **Deny** option alongside the approval
+    form.
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    # Reject with a reason
+    agent-vault vault proposal reject 3 --reason "not needed"
+    ```
+
+    The `--reason` flag is optional but recommended so the agent understands why the request was denied.
+
+  </Tab>
+</Tabs>
+
+## List and inspect
+
+```bash
+# List all proposals
+agent-vault vault proposal list --vault my-vault
+
+# Filter by status
+agent-vault vault proposal list --vault my-vault --status pending
+
+# View full details
+agent-vault vault proposal show 3 --vault my-vault
+
+# Walk through all pending proposals interactively
+agent-vault vault proposal review --vault my-vault
+```
+
+The `review` command presents each pending proposal one by one. For each, choose **Approve**, **Reject**, **Skip**, or **Quit**. At the end, a summary shows the count and IDs of approved, rejected, and skipped proposals.
+
+## How agents raise proposals
+
+<Note>
+  Agents handle this flow automatically. This section describes what happens
+  under the hood.
+</Note>
+
+When an agent hits a 403 on a host not in `/discover`, the response includes a `proposal_hint` with the denied host and the endpoint to create a proposal. The agent then sends:
+
+```json
+POST /v1/proposals
+{
+  "services": [
+    {
+      "action": "set",
+      "name": "stripe",
+      "host": "api.stripe.com",
+      "auth": { "type": "bearer", "token": "STRIPE_KEY" }
+    }
+  ],
+  "credentials": [
+    {
+      "action": "set",
+      "key": "STRIPE_KEY",
+      "description": "Stripe API key",
+      "obtain": "https://dashboard.stripe.com/apikeys",
+      "obtain_instructions": "Developers → API Keys → Reveal test key"
+    }
+  ],
+  "message": "Need Stripe API access for billing feature",
+  "user_message": "I need access to your Stripe account to build the checkout page."
+}
+```
+
+The response includes an `approval_url` that the agent presents to the user in chat.
+
+### Actions
+
+Each service and credential slot carries an `action` field:
+
+- `set`: idempotent upsert (add or replace). Services require `name` + `host` + `auth` — pick the `name` deliberately, the server does not derive one from `host` — and credential slots require `key`. To layer two credentials on the same host, give each entry its own `name` and embed different inline path globs in `host` (e.g. `slack.com/api/*` vs `slack.com/api/apps.connections.*`).
+- `delete`: remove an existing entry. Services delete by `name` (canonical); when `name` is omitted, the server resolves uniquely against `host` — and returns 409 with the candidate names if multiple services share that host. Credential slots only need `key`.
+
+### Credential slots
+
+A credential slot can work in four ways:
+
+| Scenario                        | `type`  | `value` field | What happens                                               |
+| ------------------------------- | ------- | ------------- | ---------------------------------------------------------- |
+| Human supplies the credential   | `static` (default) | omitted       | Human enters the value at approval time                    |
+| Agent stores a credential back  | `static` | included      | Value is encrypted at creation; human confirms at approval |
+| OAuth credential                | `oauth` | omitted       | Human connects via OAuth or pastes tokens at approval time |
+| Delete a credential             | n/a     | n/a           | `action: "delete"` removes the key                         |
+
+For OAuth credential slots, include an `oauth` config object:
+
+```json
+{
+  "action": "set",
+  "key": "GITHUB",
+  "type": "oauth",
+  "oauth": {
+    "authorization_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "scopes": "repo user",
+    "client_id": "optional-pre-fill"
+  },
+  "description": "GitHub OAuth",
+  "obtain_instructions": "Register an OAuth app at github.com/settings/developers"
+}
+```
+
+OAuth config fields:
+- `authorization_url` (optional): if present, approval shows a Connect button for the browser consent flow. If omitted, approval shows token paste fields.
+- `token_url` (required): the provider's token endpoint, used for token exchange and refresh.
+- `scopes` (optional): space-separated permissions to request during the consent flow.
+- `client_id` (optional): pre-fill the client ID field on the approval page.
+
+The `value` field must not be set for OAuth slots -- tokens are obtained through the connect flow or pasted by the human.
+
+Every credential key referenced in a service's `auth` config must resolve to either a credential slot in the proposal or an existing [credential](/learn/credentials) in the [vault](/learn/vaults). Credential keys use `UPPER_SNAKE_CASE` format.
+
+### Limits
+
+| Constraint                      | Value       |
+| ------------------------------- | ----------- |
+| Max services per proposal       | 10          |
+| Max credential slots per proposal | 10        |
+| Max pending proposals per vault | 20          |
+| `message` length                | 2,000 chars |
+| `user_message` length           | 5,000 chars |
+| Credential `description` length | 500 chars   |
+| `obtain` length                 | 500 chars   |
+| `obtain_instructions` length    | 1,000 chars |
+| Proposal TTL                    | 7 days      |

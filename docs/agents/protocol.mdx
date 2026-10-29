@@ -1,0 +1,220 @@
+---
+title: "Agent protocol"
+description: "How agents authenticate, discover services, route requests through HTTPS_PROXY/HTTP_PROXY, and propose changes through Agent Vault."
+---
+
+Agent Vault agents follow a standard HTTP protocol to interact with the server. Agents handle this automatically — the canonical reference lives in the [agent skill file](https://github.com/Infisical/agent-vault/blob/main/cmd/skill_cli.md), also served at `/v1/skills/cli`. This page is a reference for understanding what happens under the hood.
+
+<Warning>
+Agents must never extract, log, or display credential values. They reference credentials by key name only.
+</Warning>
+
+## Bearer token
+
+Every request an agent makes to Agent Vault requires a bearer token. How the agent gets one depends on how it connects:
+
+| Method | How the agent gets a token |
+|---|---|
+| `agent-vault vault run` | Agent Vault sets `AGENT_VAULT_TOKEN` on the child process automatically |
+| `agent-vault agent create` | Operator runs the command, supplies the returned token via `AGENT_VAULT_TOKEN` |
+
+Both methods deliver the same core connection details:
+
+| Variable | Description |
+|---|---|
+| `AGENT_VAULT_ADDR` | Base URL of the Agent Vault server (e.g. `http://127.0.0.1:14321`) |
+| `AGENT_VAULT_TOKEN` | Bearer token for all Agent Vault requests. |
+
+### Session types
+
+There are two session types:
+
+- **Vault-scoped sessions** — created by `agent-vault vault run`. The vault is embedded in the session. No extra headers needed.
+- **Instance-level agent tokens** — created via `agent-vault agent create`. The agent must include an `X-Vault` header on `/discover` and `/v1/proposals` requests to select which vault to use.
+
+### The X-Vault header
+
+Instance-level agent tokens must include `X-Vault: {vault_name}` on `/discover` and `/v1/proposals` requests:
+
+```
+GET {AGENT_VAULT_ADDR}/discover
+Authorization: Bearer {AGENT_VAULT_TOKEN}
+X-Vault: my-vault
+```
+
+Agents created via `agent-vault vault run` do not need this header — the vault is embedded in the session token.
+
+## Discover services
+
+Before making any proxied request, the agent calls `/discover` to learn which hosts have [credentials](/learn/credentials) configured in the vault.
+
+```
+GET {AGENT_VAULT_ADDR}/discover
+Authorization: Bearer {AGENT_VAULT_TOKEN}
+X-Vault: my-vault
+```
+
+<Note>
+The `X-Vault` header is required for instance-level agent tokens. Vault-scoped sessions (from `vault run`) can omit it.
+</Note>
+
+```json Response
+{
+  "vault": "my-vault",
+  "services": [
+    { "name": "stripe", "host": "api.stripe.com" },
+    { "name": "github", "host": "*.github.com" },
+    { "name": "slack-bot", "host": "slack.com/api/*" },
+    { "name": "slack-conn", "host": "slack.com/api/apps.connections.*" }
+  ],
+  "available_credentials": ["GITHUB_TOKEN", "SLACK_BOT_TOKEN", "SLACK_CONNECTION_TOKEN", "STRIPE_KEY"]
+}
+```
+
+- **`services`** lists the services the agent can reach through Agent Vault (each entry has `name` and `host`; `host` carries the joined inline form, so a path-scoped service shows up as e.g. `slack.com/api/*`). Requests to any other host go direct. When two services share the same bare host but scope to different paths (e.g. Slack here), distinguish them by `name` in subsequent operations.
+- **`available_credentials`** lists [credential](/learn/credentials) key names in the vault (values are never exposed). Agents use these to avoid creating duplicate slots in [proposals](/learn/proposals).
+
+## Route requests through HTTPS_PROXY / HTTP_PROXY
+
+The canonical way for an agent to reach an upstream host is to call the real URL directly. `agent-vault vault run` pre-configures `HTTPS_PROXY`/`HTTP_PROXY` and the CA trust chain on the child process, so every standard HTTP client — `curl`, `fetch`, `requests`, `axios`, the Go stdlib, SDKs like `stripe-node`, CLIs like `gh` and `stripe` — transparently routes through the broker. Agent Vault intercepts the CONNECT (for `https://` upstreams) or the absolute-form forward-proxy request (for `http://` upstreams), matches the target host against the vault's [services](/learn/services), and injects the stored credential into the auth header for that service. Other client headers (vendor headers like `anthropic-version`, tracing IDs, etc.) flow through unchanged — see [Header forwarding](/learn/services#header-forwarding) for the precise rules.
+
+```
+GET https://api.stripe.com/v1/charges?limit=10
+```
+
+The agent writes this line unchanged. No URL rewriting. No `Authorization` header. No credential in the code.
+
+### Environment set by `vault run`
+
+| Variable | Purpose |
+|---|---|
+| `HTTPS_PROXY` | Points at the MITM listener (`http://{token}:{vault}@host:14322`) — plain HTTP, deploy on a trusted/private network |
+| `HTTP_PROXY` | Same URL as `HTTPS_PROXY` — plain `http://` upstreams route through the same listener via absolute-form forward-proxy requests |
+| `NO_PROXY` | `localhost,127.0.0.1` — so agent-to-vault traffic skips the proxy |
+| `NODE_USE_ENV_PROXY` | `1` — enables Node.js v22.21+ built-in proxy support for `fetch()` and `http.get()`/`https.get()` |
+| `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `DENO_CERT` | Point standard HTTP libraries at the Agent Vault root CA so the re-signed upstream TLS certificates validate |
+
+<Tip>
+The MITM listener accepts both `CONNECT host:port` (HTTPS upstreams) and absolute-form forward-proxy requests (`POST http://host/path HTTP/1.1`) on the same port. Plain-HTTP upstreams are intercepted, audited, and credential-injected just like HTTPS upstreams.
+</Tip>
+
+## Propose changes
+
+When an agent needs access to a service that is not in the vault's services, it creates a [proposal](/learn/proposals). Each proposal bundles services (host access) and credential slots (credentials the human provides at approval time).
+
+```json
+POST {AGENT_VAULT_ADDR}/v1/proposals
+Authorization: Bearer {AGENT_VAULT_TOKEN}
+Content-Type: application/json
+
+{
+  "services": [
+    {
+      "action": "set",
+      "name": "stripe",
+      "host": "api.stripe.com",
+      "auth": { "type": "bearer", "token": "STRIPE_KEY" }
+    }
+  ],
+  "credentials": [
+    {
+      "action": "set",
+      "key": "STRIPE_KEY",
+      "description": "Stripe API key",
+      "obtain": "https://dashboard.stripe.com/apikeys",
+      "obtain_instructions": "Developers > API Keys > Reveal test key"
+    }
+  ],
+  "message": "Need Stripe API key for billing feature",
+  "user_message": "I need access to your Stripe account to build the checkout page."
+}
+```
+
+The response includes an `approval_url` that the agent presents to the user:
+
+```json Response (201)
+{
+  "id": 1,
+  "status": "pending",
+  "vault": "default",
+  "approval_url": "http://localhost:14321/approve/1?token=av_appr_...",
+  "message": "Proposal created. Approve here: http://localhost:14321/approve/1?token=av_appr_..."
+}
+```
+
+The agent then polls `GET /v1/proposals/{id}` until the status changes from `pending` (every 3s for the first 30s, then every 10s). Once `applied`, the agent retries its original request.
+
+<Tip>
+Every credential key referenced in a service's `auth` config must resolve to either a credential slot in the same proposal or an existing credential in `available_credentials`. Otherwise the request returns 400.
+</Tip>
+
+See [Proposals](/learn/proposals) for the full proposal lifecycle, including storing credentials back and removing access.
+
+## Error handling
+
+| Status | Meaning | What the agent does |
+|---|---|---|
+| 401 | Invalid or expired token | Re-check `AGENT_VAULT_TOKEN`. Contact operator for a new token or [rotation](/agents/overview#rotating-an-agent-token). |
+| 403 `forbidden` | Host not allowed (only fires when the vault has `unmatched_host_policy=deny`; the default is passthrough) | Create a proposal to request access. The response includes a `proposal_hint`. |
+| 403 `service_disabled` | Host is configured but disabled | Surface to the user — don't create a duplicate proposal. |
+| 409 `multiple services match host …` | Service mutation (`PATCH`/`DELETE`) used a bare host that matches several path-scoped services | Retry with the canonical service `name` from `/discover`. The response body includes a `candidates` array. |
+| 429 | Rate limited | Respect the `Retry-After` header. |
+| 502 | Missing credential or upstream unreachable | Tell the user a credential may need to be added. |
+
+<Note>
+Path-based service matching changed how request log rows are filtered. The `matched_service` field in `GET /v1/vaults/{vault}/logs` rows holds the canonical service **name** for new rows; rows written before the upgrade still carry the matched **host**. Operators querying `?service=` should use the slug for new rows and the host for old rows. The matched service's `host` pattern is not returned in log rows — recover it by listing `GET /v1/vaults/{vault}/services` and filtering by `name`, or reading `/discover`.
+</Note>
+
+## Credential proxy refusals
+
+In the credential proxy profile with a broker catalog, every refusal from the broker carries an `X-Gatehouse-Refusal` header naming why, as a fixed code, and a one-line plain-text body of the form `<code>: <next step>`. The code is one of a fixed set and never contains request data. A request on an entry your pool is not granted is refused as `unlisted` (403), except that the method check runs first: a method that entry does not list is refused as `method` (405). The signed audit row records the refusal and the status sent; its outcome can be more specific than the code, such as `pool` where the agent sees `unlisted`, or an outcome with no code of its own where the agent sees `refused`.
+
+Decide by the header, not by the status alone. The broker strips `X-Gatehouse-Refusal` from every destination response, so only its own refusals carry it, while a destination's own status and `Retry-After` pass through unchanged.
+
+| Response | Meaning | What the agent does |
+|---|---|---|
+| `X-Gatehouse-Refusal` with `Retry-After` (503 or 429) | A passing refusal: the request was not sent upstream, and the same request can succeed shortly | Wait `Retry-After` seconds, then send the same request again. If the third retry is refused the same way, stop and report it. |
+| `X-Gatehouse-Refusal`, 503 without `Retry-After` | Waiting does not clear it: the broker cannot serve this destination until an operator acts, or, for `seed_deadline`, this worker ends too soon | Report it, or start a new run for `seed_deadline`. Do not retry in a loop. |
+| `X-Gatehouse-Refusal`, 403, 400, 405 or 413 | A lasting refusal: the catalog, the requester's access or the request's form does not allow it | Read the code and next step, then stop and report it, or change the request as the next step says. |
+| No `X-Gatehouse-Refusal` | The destination's own answer, or a 502 when the broker could not get or pass on that answer | The request may have been applied. Follow that service's retry rules; never assume it was not sent. |
+
+A refused CONNECT, before any request is sent, reaches the client as a failed tunnel, which HTTP clients report as a proxy or tunnel error rather than a response. The broker names its reason there too, but through the task relay the agent sees only a bare `403` (denied) or `503` (unavailable) with no reason code. Nothing was sent: report a 403, and retry a 503 after a pause.
+
+Passing codes answered with 503 and `Retry-After`, whatever check refused them:
+
+| Code | Cause |
+|---|---|
+| `session_missing` | The connection reached the broker without the runner session token its pool requires. The broker closes the connection, so the retry opens a new one, which carries a session that has arrived since. |
+| `entitlement_unavailable` | The directory did not answer the access check. |
+| `key_unavailable` | The destination key could not be read from Vault. |
+| `client_cert_unavailable` | The client certificate the broker presents to the destination could not be read from Vault. |
+| `token_unavailable` | A short-lived token for the destination could not be minted. |
+| `target_lookup` | GitHub could not be asked what a GraphQL request's pull request or label is, so the broker could not check it. |
+| `seed_unavailable` | The browser session could not be prepared. |
+| `audit_unavailable` | The audit trail is not recording, so nothing is sent. |
+| `broker_unavailable` | This broker replica cannot take the request now, for example while it shuts down. |
+
+Passing codes answered with 429 and `Retry-After`: `entitlement_rate_limited` (too many access checks for this person in the last minute), `busy` (the broker is at its connection limit, or this address has too many failed sign-ins, where `Retry-After` is the limiter's own wait and can be minutes) and `rate_limited` (over the workload's request rate for the destination, where `Retry-After` is the limiter's own wait, or 1 second when it gives none).
+
+Lasting codes answered with 503 and no `Retry-After`, which waiting does not clear:
+
+| Code | Cause |
+|---|---|
+| `key_deleted` | The destination key was deleted, destroyed or emptied in Vault, which revokes it. |
+| `key_not_header_safe` | The key stored for the destination holds a byte outside printable ASCII (0x21 to 0x7e), such as a trailing newline, or is longer than 8192 bytes. The operator must rewrite it. |
+| `key_not_basic_pair` | The destination takes its key as HTTP Basic credentials, and the key stored for it is not a `user:password` pair with both halves set. The operator must rewrite it. |
+| `client_cert_deleted` | The client certificate the broker presents to the destination, or its key, was deleted or emptied in Vault. |
+| `client_cert_invalid` | The stored client certificate is not an end-entity certificate with its matching key. The operator must replace it. |
+| `client_cert_expired` | The destination's client certificate has expired or is not yet valid. The operator must reissue it. |
+| `client_cert_rejected` | The destination refused the broker's client certificate. The operator must fix the certificate or the destination's trust. |
+| `broker_misconfigured` | The broker is not set up to serve this kind of destination, for example it has no token minter for it. |
+| `seed_deadline` | The worker ends too soon for a browser session. Start a new run. |
+
+Other common lasting codes: `unlisted`, `method`, `not_entitled`, `not_in_directory` (the directory has no account for the person behind the run), `no_person`, `pool_ceiling`, `account_disabled`, `entitlement_config`, `request_shape`, `request_field`, `request_header`, `mcp_tool` (an MCP method or tool the broker does not forward), `mcp_argument` (a tool argument the broker does not forward), `mcp_shape` (not one JSON-RPC message the broker reads), `placeholder_misplaced`, `credential_header`, `request_too_large`, `read_only`, `identity` and the `session_*` codes other than `session_missing`.
+
+## Security constraints
+
+- Never extract, log, or display credential values
+- Never hardcode tokens. Always read from `AGENT_VAULT_TOKEN`.
+- Only reach hosts returned by `/discover`. For unlisted hosts, create a proposal.
+- If a `credential_not_found` error occurs, inform the user which key is missing.

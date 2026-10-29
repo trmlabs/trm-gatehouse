@@ -1,0 +1,749 @@
+import { useState, useEffect, useMemo, useCallback, useRef, type ReactNode } from "react";
+import { useRouteContext } from "@tanstack/react-router";
+import { LoadingSpinner, ErrorBanner, StatusBadge, timeAgo, formatInstanceRole, INSTANCE_ROLE_OPTIONS, type InstanceRole } from "../../components/shared";
+import DataTable, { type Column } from "../../components/DataTable";
+import DropdownMenu from "../../components/DropdownMenu";
+import ConfirmDeleteModal from "../../components/ConfirmDeleteModal";
+import Modal from "../../components/Modal";
+import Button from "../../components/Button";
+import Input from "../../components/Input";
+import FormField from "../../components/FormField";
+import CopyButton from "../../components/CopyButton";
+import Select from "../../components/Select";
+import SegmentedTabs from "../../components/SegmentedTabs";
+import { apiFetch, isAbortError } from "../../lib/api";
+import type { AuthContext, InstanceStatus } from "../../router";
+
+interface AgentRow {
+  name: string;
+  role: string;
+  status: string;
+  created_at: string;
+  vaults: { vault_name: string; vault_role: string }[];
+}
+
+interface VaultOption {
+  id: string;
+  name: string;
+  role: string;
+}
+
+function RowActions({
+  agent,
+  isOwner,
+  onRotate,
+  onRevoke,
+  onDelete,
+  onDone,
+  onError,
+}: {
+  agent: AgentRow;
+  isOwner: boolean;
+  onRotate: (agent: AgentRow) => void;
+  onRevoke: (agent: AgentRow) => void;
+  onDelete: (agent: AgentRow) => void;
+  onDone: () => void;
+  onError: (msg: string) => void;
+}) {
+  async function setRoleTo(newRole: InstanceRole) {
+    const resp = await apiFetch(
+      `/v1/agents/${encodeURIComponent(agent.name)}/role`,
+      { method: "POST", body: JSON.stringify({ role: newRole }) }
+    );
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      onError(data.error || "Failed to change role");
+      return;
+    }
+    onDone();
+  }
+
+  const items: { label: string; onClick: () => void; variant?: "danger" }[] = [];
+
+  items.push({ label: "Rotate token", onClick: () => onRotate(agent) });
+
+  if (isOwner && agent.status === "active") {
+    for (const opt of INSTANCE_ROLE_OPTIONS) {
+      if (opt.role === agent.role) continue;
+      items.push({
+        label: `Set role: ${opt.label}`,
+        onClick: () => setRoleTo(opt.role),
+      });
+    }
+  }
+
+  if (agent.status === "active") {
+    items.push({ label: "Revoke agent", onClick: () => onRevoke(agent), variant: "danger" });
+  }
+  items.push({ label: "Delete agent", onClick: () => onDelete(agent), variant: "danger" });
+
+  return (
+    <DropdownMenu
+      width={192}
+      items={items}
+    />
+  );
+}
+
+export default function AllAgentsTab() {
+  const { auth, status } = useRouteContext({ from: "/_auth" }) as { auth: AuthContext; status: InstanceStatus };
+  const [rows, setRows] = useState<AgentRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [rotateTarget, setRotateTarget] = useState<AgentRow | null>(null);
+  const [rotatedToken, setRotatedToken] = useState<string | null>(null);
+  const [rotateError, setRotateError] = useState("");
+  const [rotating, setRotating] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<AgentRow | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AgentRow | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const agentsResp = await apiFetch("/v1/agents");
+
+      if (!agentsResp.ok) {
+        const data = await agentsResp.json();
+        setError(data.error || "Failed to load agents.");
+        return;
+      }
+
+      const agentsData = await agentsResp.json();
+      const nextRows: AgentRow[] = (agentsData.agents ?? []).map(
+        (a: { name: string; role: string; status: string; created_at: string; vaults?: { vault_name: string; vault_role: string }[] }) => ({
+          name: a.name,
+          role: a.role || "member",
+          status: a.status,
+          created_at: a.created_at,
+          vaults: a.vaults ?? [],
+        })
+      );
+
+      setRows(nextRows);
+    } catch {
+      setError("Network error.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  const columns = useMemo<Column<AgentRow>[]>(() => {
+    const cols: Column<AgentRow>[] = [
+      {
+        key: "name",
+        header: "Name",
+        render: (agent) => (
+          <span className="text-sm font-mono font-medium text-text">
+            {agent.name}
+          </span>
+        ),
+      },
+      {
+        key: "status",
+        header: "Status",
+        render: (agent) => <StatusBadge status={agent.status} />,
+      },
+      {
+        key: "role",
+        header: "Role",
+        render: (agent) => (
+          <span className="text-sm text-text-muted">{formatInstanceRole(agent.role)}</span>
+        ),
+      },
+      {
+        key: "vaults",
+        header: "Vaults",
+        render: (agent) => {
+          if (agent.vaults.length === 0) return <span className="text-sm text-text-dim">{"\u2014"}</span>;
+          return (
+            <div className="flex flex-wrap gap-1">
+              {agent.vaults.map((v) => (
+                <span
+                  key={v.vault_name}
+                  className="inline-block px-2 py-0.5 bg-primary/10 text-primary text-xs font-medium rounded-full"
+                >
+                  {v.vault_name}:{v.vault_role}
+                </span>
+              ))}
+            </div>
+          );
+        },
+      },
+      {
+        key: "created_at",
+        header: "Created",
+        render: (agent) => (
+          <span className="text-sm text-text-muted">{timeAgo(agent.created_at)}</span>
+        ),
+      },
+      {
+        key: "actions",
+        header: "",
+        align: "right" as const,
+        render: (agent: AgentRow) => (
+          <RowActions agent={agent} isOwner={auth.is_owner} onRotate={setRotateTarget} onRevoke={setRevokeTarget} onDelete={setDeleteTarget} onDone={fetchData} onError={setError} />
+        ),
+      },
+    ];
+    return cols;
+  }, [fetchData, auth.is_owner]);
+
+  return (
+    <div className="p-8 w-full max-w-[960px]">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-[22px] font-semibold text-text tracking-tight mb-1">
+            Agents
+          </h2>
+          <p className="text-sm text-text-muted">
+            All agents across the instance.
+          </p>
+        </div>
+        <AddAgentButton onCreated={fetchData} isOwner={auth.is_owner} baseURL={status.base_url} />
+      </div>
+
+      {loading ? (
+        <LoadingSpinner />
+      ) : error ? (
+        <ErrorBanner message={error} />
+      ) : (
+        <DataTable
+          columns={columns}
+          data={rows}
+          rowKey={(row) => row.name}
+          emptyTitle="No agents"
+          emptyDescription="Add an agent to give it access to your instance."
+        />
+      )}
+
+      <Modal
+        open={rotateTarget !== null}
+        onClose={() => { setRotateTarget(null); setRotatedToken(null); setRotateError(""); }}
+        title={rotatedToken ? "Token Rotated" : "Rotate Token"}
+        description={rotatedToken
+          ? `The agent "${rotateTarget?.name}" has a new token. The previous token is now invalid.`
+          : `This will invalidate the current token for "${rotateTarget?.name}" and generate a new one.${rotateTarget?.status === "revoked" ? " The agent will also be reactivated." : ""}`}
+        footer={
+          rotatedToken ? (
+            <Button onClick={() => { setRotateTarget(null); setRotatedToken(null); setRotateError(""); }}>Done</Button>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={() => { setRotateTarget(null); setRotateError(""); }}>Cancel</Button>
+              <Button
+                loading={rotating}
+                onClick={async () => {
+                  if (!rotateTarget) return;
+                  setRotating(true);
+                  setRotateError("");
+                  try {
+                    const resp = await apiFetch(
+                      `/v1/agents/${encodeURIComponent(rotateTarget.name)}/rotate`,
+                      { method: "POST" }
+                    );
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok) {
+                      setRotateError(data.error || "Failed to rotate token");
+                      return;
+                    }
+                    setRotatedToken(data.av_agent_token);
+                    fetchData();
+                  } catch {
+                    setRotateError("Network error.");
+                  } finally {
+                    setRotating(false);
+                  }
+                }}
+              >
+                Rotate
+              </Button>
+            </>
+          )
+        }
+      >
+        {rotatedToken ? (
+          <div className="space-y-3">
+            <FormField label="New agent token">
+              <div className="relative">
+                <pre className="pl-4 pr-20 py-3 bg-bg border border-border rounded-lg text-text text-sm font-mono overflow-x-auto whitespace-pre">{rotatedToken}</pre>
+                <CopyButton
+                  value={rotatedToken}
+                  className="absolute top-2 right-2 px-3 py-1.5 bg-primary text-primary-text rounded-md text-xs font-semibold hover:bg-primary-hover transition-colors"
+                />
+              </div>
+            </FormField>
+            <p className="text-xs text-text-muted">
+              Update <code className="text-text-muted">AGENT_VAULT_TOKEN</code> wherever the agent runs. This token will not be shown again.
+            </p>
+          </div>
+        ) : (
+          <>
+            {rotateError && <ErrorBanner message={rotateError} />}
+          </>
+        )}
+      </Modal>
+
+      <ConfirmDeleteModal
+        open={revokeTarget !== null}
+        onClose={() => setRevokeTarget(null)}
+        onConfirm={async () => {
+          if (!revokeTarget) return;
+          const resp = await apiFetch(
+            `/v1/agents/${encodeURIComponent(revokeTarget.name)}`,
+            { method: "DELETE" }
+          );
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            throw new Error(data.error || "Failed to revoke agent");
+          }
+          setRevokeTarget(null);
+          fetchData();
+        }}
+        title="Revoke agent"
+        description={`This will revoke the agent "${revokeTarget?.name}" and invalidate all its sessions. The agent will remain visible but inactive.`}
+        confirmLabel="Revoke agent"
+        confirmValue={revokeTarget?.name ?? ""}
+        inputLabel="Type the agent name to confirm"
+      />
+
+      <ConfirmDeleteModal
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          const resp = await apiFetch(
+            `/v1/agents/${encodeURIComponent(deleteTarget.name)}/delete`,
+            { method: "POST" }
+          );
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            throw new Error(data.error || "Failed to delete agent");
+          }
+          setDeleteTarget(null);
+          fetchData();
+        }}
+        title="Delete agent"
+        description={`This will permanently delete the agent "${deleteTarget?.name}", invalidate all its sessions, and remove it from all vaults. This action cannot be undone.`}
+        confirmLabel="Delete agent"
+        confirmValue={deleteTarget?.name ?? ""}
+        inputLabel="Type the agent name to confirm"
+      />
+    </div>
+  );
+}
+
+interface VaultAssignment {
+  vault_name: string;
+  vault_role: "proxy" | "member" | "admin";
+}
+
+function AddAgentButton({
+  onCreated,
+  isOwner,
+  baseURL,
+}: {
+  onCreated: () => void;
+  isOwner: boolean;
+  baseURL?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [agentRole, setAgentRole] = useState<InstanceRole>("no-access");
+  const [vaultAssignments, setVaultAssignments] = useState<VaultAssignment[]>([]);
+  const [availableVaults, setAvailableVaults] = useState<VaultOption[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [createResult, setCreateResult] = useState<{ agentToken: string; vaults: VaultAssignment[] } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    apiFetch("/v1/vaults")
+      .then((r) => r.json())
+      .then((data) => {
+        const vaults = (data.vaults ?? []).filter(
+          (v: VaultOption) => isOwner || v.role === "admin"
+        );
+        setAvailableVaults(vaults);
+      })
+      .catch(() => {});
+  }, [open, isOwner]);
+
+  // Unmount paths that bypass close() (browser back, programmatic redirect)
+  // would otherwise let an in-flight create land its token on an unmounted
+  // component and disappear.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  function close() {
+    abortRef.current?.abort();
+    setOpen(false);
+    setName("");
+    setAgentRole("no-access");
+    setVaultAssignments([]);
+    setError("");
+    setCreateResult(null);
+  }
+
+  function addVault() {
+    const assignedNames = new Set(vaultAssignments.map((a) => a.vault_name));
+    const next = availableVaults.find((v) => !assignedNames.has(v.name));
+    if (next) {
+      setVaultAssignments([...vaultAssignments, { vault_name: next.name, vault_role: "proxy" }]);
+    }
+  }
+
+  function removeVault(idx: number) {
+    setVaultAssignments(vaultAssignments.filter((_, i) => i !== idx));
+  }
+
+  function updateVault(idx: number, field: "vault_name" | "vault_role", value: string) {
+    const updated = [...vaultAssignments];
+    updated[idx] = { ...updated[idx], [field]: value };
+    setVaultAssignments(updated);
+  }
+
+  async function handleCreate() {
+    if (!name.trim()) return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setSubmitting(true);
+    setError("");
+    try {
+      const payload: Record<string, unknown> = {
+        name: name.trim(),
+        // Non-owners don't see the picker, so agentRole stays at "no-access".
+        role: agentRole,
+      };
+      if (vaultAssignments.length > 0) {
+        payload.vaults = vaultAssignments;
+      }
+      const createResp = await apiFetch("/v1/agents", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      const createData = await createResp.json().catch((err) => {
+        if (isAbortError(err)) throw err;
+        return {};
+      });
+      // Refresh regardless of outcome: the server may have committed the
+      // agent even if the response failed to deserialize, and the operator
+      // needs to see the resulting row.
+      onCreated();
+      if (!createResp.ok) {
+        setError(createData.error || "Failed to create agent.");
+        return;
+      }
+      if (!createData.av_agent_token) {
+        setError("Server returned no agent token. Try again.");
+        return;
+      }
+      setCreateResult({
+        agentToken: createData.av_agent_token,
+        vaults: createData.vaults ?? vaultAssignments,
+      });
+    } catch (err) {
+      // Server may have committed the create before the abort or drop, so
+      // refresh so any new agent shows up.
+      onCreated();
+      if (isAbortError(err)) return;
+      setError("Network error.");
+    } finally {
+      // Skip if a re-entrant handleCreate has taken over: that call already
+      // set submitting=true on entry and owns clearing it.
+      if (abortRef.current === controller) setSubmitting(false);
+    }
+  }
+
+  const assignedNames = new Set(vaultAssignments.map((a) => a.vault_name));
+  const canAddMore = availableVaults.some((v) => !assignedNames.has(v.name));
+
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>
+        <svg
+          className="w-4 h-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <rect x="4" y="4" width="16" height="16" rx="2" ry="2" />
+          <rect x="9" y="9" width="6" height="6" />
+          <line x1="9" y1="1" x2="9" y2="4" />
+          <line x1="15" y1="1" x2="15" y2="4" />
+          <line x1="9" y1="20" x2="9" y2="23" />
+          <line x1="15" y1="20" x2="15" y2="23" />
+          <line x1="20" y1="9" x2="23" y2="9" />
+          <line x1="20" y1="14" x2="23" y2="14" />
+          <line x1="1" y1="9" x2="4" y2="9" />
+          <line x1="1" y1="14" x2="4" y2="14" />
+        </svg>
+        Add agent
+      </Button>
+
+      <Modal
+        open={open}
+        onClose={close}
+        title={createResult ? "Connect Your Agent" : "Add Agent"}
+        description={createResult ? "The Agent Vault CLI runs alongside your agent and reads these env vars to bootstrap its environment, so every outbound API call routes through Agent Vault for credential injection." : "Connect an agent, app, or service to Agent Vault."}
+        footer={
+          createResult ? (
+            <Button onClick={close}>Done</Button>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={close}>Cancel</Button>
+              <Button onClick={handleCreate} disabled={!name.trim()} loading={submitting}>
+                Add
+              </Button>
+            </>
+          )
+        }
+      >
+        {createResult ? (
+          <ConnectAgentView agentToken={createResult.agentToken} vaults={createResult.vaults} baseURL={baseURL} />
+        ) : (
+          <div className="space-y-4">
+            <FormField
+              label="Agent name"
+              helperText="Lowercase letters, numbers, and hyphens (3-64 chars)."
+            >
+              <Input
+                type="text"
+                placeholder="my-agent"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+              />
+            </FormField>
+
+            {isOwner && (
+              <FormField
+                label="Instance role"
+                helperText={
+                  agentRole === "owner"
+                    ? "This agent will be able to manage users, vaults, and instance settings."
+                    : agentRole === "member"
+                    ? "This agent will have standard access, scoped to its assigned vaults."
+                    : "This agent has no instance-level access. It can only operate within vaults you grant it below."
+                }
+              >
+                <Select
+                  value={agentRole}
+                  onChange={(e) => setAgentRole(e.target.value as InstanceRole)}
+                >
+                  <option value="no-access">No Access</option>
+                  <option value="member">Member</option>
+                  <option value="owner">Owner</option>
+                </Select>
+              </FormField>
+            )}
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+                  Vault access (optional)
+                </label>
+                {canAddMore && (
+                  <button
+                    type="button"
+                    onClick={addVault}
+                    className="text-xs text-primary hover:underline"
+                  >
+                    + Add vault
+                  </button>
+                )}
+              </div>
+              {vaultAssignments.length === 0 ? (
+                <p className="text-sm text-text-muted">
+                  No vaults pre-assigned. The agent will join the instance without vault access.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {vaultAssignments.map((assignment, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <Select
+                          value={assignment.vault_name}
+                          onChange={(e) => updateVault(idx, "vault_name", e.target.value)}
+                        >
+                          {availableVaults.map((v) => (
+                            <option
+                              key={v.name}
+                              value={v.name}
+                              disabled={assignedNames.has(v.name) && v.name !== assignment.vault_name}
+                            >
+                              {v.name}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                      <Select
+                        value={assignment.vault_role}
+                        onChange={(e) => updateVault(idx, "vault_role", e.target.value)}
+                        className="w-28"
+                      >
+                        <option value="proxy">Proxy</option>
+                        <option value="member">Member</option>
+                        <option value="admin">Admin</option>
+                      </Select>
+                      <button
+                        type="button"
+                        onClick={() => removeVault(idx)}
+                        className="text-text-muted hover:text-danger p-1"
+                        title="Remove"
+                      >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {error && <ErrorBanner message={error} />}
+          </div>
+        )}
+      </Modal>
+    </>
+  );
+}
+
+type InstallTab = "shell" | "docker";
+
+const INSTALL_SNIPPETS: Record<InstallTab, string> = {
+  shell: "curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh",
+  docker: "COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault",
+};
+
+const RUN_SNIPPETS: Record<InstallTab, string> = {
+  shell: "agent-vault run -- claude",
+  docker: `ENTRYPOINT ["agent-vault", "run", "--", "claude"]`,
+};
+
+// Loopback and bind-wildcard values almost never reach a remote agent,
+// so treat them as unset and let the operator fill in the right hostname.
+function resolveAgentVaultAddr(baseURL?: string): string {
+  const placeholder = "<AGENT_VAULT_ADDR>";
+  if (!baseURL) return placeholder;
+  try {
+    const host = new URL(baseURL).hostname;
+    // URL.hostname preserves IPv6 brackets per WHATWG URL host serializer.
+    if (
+      host === "localhost" ||
+      host === "[::1]" ||
+      host === "[::]" ||
+      host === "0.0.0.0" ||
+      /^127\./.test(host)
+    ) {
+      return placeholder;
+    }
+  } catch {
+    return placeholder;
+  }
+  return baseURL;
+}
+
+function ConnectAgentView({
+  agentToken,
+  vaults,
+  baseURL,
+}: {
+  agentToken: string;
+  vaults: VaultAssignment[];
+  baseURL?: string;
+}) {
+  const [installTab, setInstallTab] = useState<InstallTab>("shell");
+
+  const addr = resolveAgentVaultAddr(baseURL);
+  const vaultHint = vaults.length > 0 ? vaults[0].vault_name : "<VAULT_NAME>";
+  const envSnippet = [
+    `export AGENT_VAULT_ADDR="${addr}"`,
+    `export AGENT_VAULT_TOKEN="${agentToken}"`,
+    `export AGENT_VAULT_VAULT="${vaultHint}"`,
+  ].join("\n");
+
+  return (
+    <div className="space-y-5">
+      <SegmentedTabs<InstallTab>
+        ariaLabel="Install method"
+        value={installTab}
+        onChange={setInstallTab}
+        options={[
+          { value: "shell", label: "Shell" },
+          { value: "docker", label: "Dockerfile" },
+        ]}
+      />
+
+      <ManualStep n={1} title="Install the Agent Vault CLI">
+        <p className="text-sm text-text-muted">
+          Add the <code className="text-text-muted">agent-vault</code> binary to the environment where your agent runs.
+        </p>
+        <Snippet value={INSTALL_SNIPPETS[installTab]} />
+      </ManualStep>
+
+      <ManualStep n={2} title="Set environment variables">
+        <p className="text-sm text-text-muted">
+          The CLI reads these on launch to authenticate with Agent Vault and scope its session to the right vault.
+        </p>
+        <Snippet value={envSnippet} />
+        {vaults.length > 1 && (
+          <p className="text-xs text-text-muted">
+            Multiple vaults were pre-assigned; this snippet uses <code className="text-text-muted">{vaults[0].vault_name}</code>. Edit <code className="text-text-muted">AGENT_VAULT_VAULT</code> to pick a different one for this run.
+          </p>
+        )}
+      </ManualStep>
+
+      <ManualStep n={3} title="Run your agent under agent-vault">
+        <p className="text-sm text-text-muted">
+          <code className="text-text-muted">agent-vault run</code> launches your agent with <code className="text-text-muted">HTTPS_PROXY</code> and <code className="text-text-muted">HTTP_PROXY</code> pre-set so both its HTTPS and plain HTTP calls route through Agent Vault for credential injection.
+        </p>
+        <Snippet value={RUN_SNIPPETS[installTab]} />
+      </ManualStep>
+    </div>
+  );
+}
+
+function ManualStep({
+  n,
+  title,
+  children,
+}: {
+  n: number;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-2">
+      <h4 className="text-sm font-semibold text-text">
+        <span className="text-text-dim mr-2">{n}.</span>
+        {title}
+      </h4>
+      {children}
+    </div>
+  );
+}
+
+function Snippet({ value }: { value: string }) {
+  return (
+    <div className="relative">
+      <pre className="pl-4 pr-20 py-3 bg-bg border border-border rounded-lg text-text text-sm font-mono overflow-x-auto whitespace-pre">{value}</pre>
+      <CopyButton
+        value={value}
+        className="absolute top-2 right-2 px-3 py-1.5 bg-primary text-primary-text rounded-md text-xs font-semibold hover:bg-primary-hover transition-colors"
+      />
+    </div>
+  );
+}

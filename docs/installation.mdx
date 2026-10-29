@@ -1,0 +1,75 @@
+---
+title: "Installation"
+description: "Get a server running in under a minute."
+---
+
+import InstallCommand from "/snippets/install-command.mdx";
+import EnterpriseCTA from "/snippets/enterprise-cta.mdx";
+
+Agent Vault ships as a single binary that acts as both a server and CLI client.
+
+<EnterpriseCTA />
+
+Each install method below configures a master password at startup. Store it somewhere safe. The password wraps the [data encryption key](/learn/security) and is held only in memory once the server is unlocked.
+
+<Tabs>
+  <Tab title="Script">
+    Auto-detects your OS and architecture (macOS on Intel or Apple Silicon, Linux on x86\_64 or ARM64), downloads the latest release, and installs.
+
+    <InstallCommand />
+
+    Start the Agent Vault server (pass `-d` to run in the background):
+
+    ```bash
+    export AGENT_VAULT_ADDR="http://<your-host>:14321"
+    agent-vault server
+    ```
+
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker run -it -p 14321:14321 -p 14322:14322 \
+      -e AGENT_VAULT_MASTER_PASSWORD=your-password \
+      -e AGENT_VAULT_ADDR="http://<your-host>:14321" \
+      -v agent-vault-data:/data infisical/agent-vault
+    ```
+
+    See [Docker deployment](/self-hosting/docker) for Compose, volumes, and full configuration.
+
+  </Tab>
+  <Tab title="From source">
+    **Prerequisites**: [Go 1.25+](https://go.dev/dl/), [Node.js 22+](https://nodejs.org/)
+
+    ```bash
+    git clone https://github.com/Infisical/agent-vault.git
+    cd agent-vault
+    make build
+    sudo mv agent-vault /usr/local/bin/
+    ```
+
+    Start the Agent Vault server (pass `-d` to run in the background):
+
+    ```bash
+    export AGENT_VAULT_ADDR="http://<your-host>:14321"
+    agent-vault server
+    ```
+
+  </Tab>
+</Tabs>
+
+Agent Vault exposes two listeners: the HTTP API on `14321` and the transparent MITM proxy on `14322` (the canonical ingress for agents).
+
+Open `http://<your-host>:14321/register` (the hostname or address where you deployed Agent Vault) to create your account. The first user becomes the instance [owner](/learn/permissions#instance-roles) with admin on the default [vault](/learn/vaults).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Connect an agent" icon="robot" href="/quickstart/claude-code">
+    Setup guides for Claude Code, Cursor, Codex, and more.
+  </Card>
+  <Card title="PostgreSQL for production" icon="database" href="/self-hosting/postgres">
+    Run multiple instances with a shared Postgres database.
+  </Card>
+</CardGroup>
+
+Need to verify the release signature or upgrade later? See [Maintenance](/self-hosting/maintenance).

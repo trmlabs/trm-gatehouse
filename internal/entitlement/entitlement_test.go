@@ -1,0 +1,222 @@
+package entitlement
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+const g1 = "11111111-1111-1111-1111-111111111111"
+
+type fakeSource struct {
+	person Person
+	err    error
+	calls  int
+}
+
+func (f *fakeSource) Lookup(_ context.Context, _ string, groups []string) (Person, error) {
+	f.calls++
+	if f.err != nil {
+		return Person{}, f.err
+	}
+	p := f.person
+	p.MemberOf = intersect(groups, f.person.MemberOf)
+	return p, nil
+}
+
+func TestDecide(t *testing.T) {
+	member := &fakeSource{person: Person{ObjectID: "oid", Enabled: true, MemberOf: []string{g1}, Department: "Engineering"}}
+	t1 := Entry{Tier: "T1", Requires: []string{g1}}
+	claude := Pool{Identity: "claude-session", Ceiling: "T1"}
+	alice := Requester{Kind: "person", Subject: "sso|alice"}
+	// The department rides along with the lookup for the audit trail; it
+	// never changes a decision.
+	if d := Decide(context.Background(), &Cache{Source: member}, claude, t1, alice); !d.Allowed || d.Department != "Engineering" {
+		t.Fatalf("member decision %+v; want allowed with the directory department", d)
+	}
+	automations := Pool{Identity: "cursor-automation", Ceiling: "T2"}
+	granted := Requester{Kind: "automation", Subject: "auto-1", Granted: true}
+	t2 := Entry{Tier: "T2", Requires: []string{g1}}
+	errSource := &fakeSource{err: errors.New("down")}
+	cases := []struct {
+		name    string
+		source  Source
+		pool    Pool
+		entry   Entry
+		who     Requester
+		allowed bool
+		outcome string
+	}{
+		{"T0 for anyone", nil, Pool{}, Entry{}, Requester{Kind: "none"}, true, "t0"},
+		{"over the ceiling", member, Pool{Identity: "claude-session", Ceiling: "T0"}, t1, alice, false, "pool_ceiling"},
+		{"Cursor pool, T1", member, Pool{Identity: "none", Ceiling: "T1"}, t1, alice, false, "no_identity"},
+		{"agent session", member, claude, t1, Requester{Kind: "agent", Subject: "agent:x"}, false, "no_person"},
+		{"member", member, claude, t1, alice, true, "entitled"},
+		{"Cursor person pool member", member, Pool{Identity: "cursor-session", Ceiling: "T1"}, t1, alice, true, "entitled"},
+		{"Cursor service account run", member, Pool{Identity: "cursor-session", Ceiling: "T1"}, t1, Requester{Kind: "agent", Subject: "service_account:9"}, false, "no_person"},
+		{"Cursor run without a person", member, Pool{Identity: "cursor-session", Ceiling: "T1"}, t1, Requester{Kind: "none"}, false, "no_person"},
+		{"non-member", &fakeSource{person: Person{ObjectID: "oid", Enabled: true}}, claude, t1, alice, false, "not_entitled"},
+		{"disabled", &fakeSource{person: Person{ObjectID: "oid", MemberOf: []string{g1}}}, claude, t1, alice, false, "account_disabled"},
+		{"lookup error", &fakeSource{err: errors.New("down")}, claude, t1, alice, false, "entitlement_unavailable"},
+		{"not in the directory", &fakeSource{err: ErrNotInDirectory}, claude, t1, alice, false, "not_in_directory"},
+		{"no directory configured", nil, claude, t1, alice, false, "entitlement_config"},
+		{"workload entitled", nil, Pool{Identity: "workload", Ceiling: "T1", Entitlements: []string{g1}}, t1, Requester{Kind: "workload"}, true, "workload_entitled"},
+		{"workload missing group", nil, Pool{Identity: "workload", Ceiling: "T1"}, t1, Requester{Kind: "workload"}, false, "workload_not_entitled"},
+		{"workload T2", nil, Pool{Identity: "workload", Ceiling: "T2", Entitlements: []string{g1}}, Entry{Tier: "T2", Requires: []string{g1}}, Requester{Kind: "workload"}, false, "workload_not_entitled"},
+		// An Automation is served only an entry the catalog lists for it, at
+		// every tier, and never asks the directory: a failing one is not read.
+		{"Automation granted T0", errSource, automations, Entry{}, granted, true, "t0"},
+		{"Automation granted T2", errSource, automations, t2, granted, true, "automation_granted"},
+		{"Automation not granted T0", errSource, automations, Entry{}, Requester{Kind: "automation", Subject: "auto-1"}, false, "automation_not_granted"},
+		{"Automation not granted T2", errSource, automations, t2, Requester{Kind: "automation", Subject: "auto-1"}, false, "automation_not_granted"},
+		{"person on an automation pool", errSource, automations, Entry{}, Requester{Kind: "person", Subject: "sso|alice", Granted: true}, false, "automation_not_granted"},
+		{"Automation over the ceiling", errSource, Pool{Identity: "cursor-automation", Ceiling: "T1"}, t2, granted, false, "pool_ceiling"},
+	}
+	for _, c := range cases {
+		cache := &Cache{Source: c.source}
+		d := Decide(context.Background(), cache, c.pool, c.entry, c.who)
+		if d.Allowed != c.allowed || d.Outcome != c.outcome {
+			t.Errorf("%s: got %v %q", c.name, d.Allowed, d.Outcome)
+		}
+		if c.pool.Identity == "cursor-automation" && len(d.Groups) != 0 {
+			t.Errorf("%s: an Automation's decision names groups %v", c.name, d.Groups)
+		}
+	}
+	if errSource.calls != 0 {
+		t.Errorf("an Automation's decision asked the directory %d times", errSource.calls)
+	}
+	// A broker started without a directory refuses as a configuration fault,
+	// which waiting never clears, not as a directory outage.
+	if d := Decide(context.Background(), nil, claude, t1, alice); d.Allowed || d.Outcome != "entitlement_config" {
+		t.Errorf("no cache: got %v %q", d.Allowed, d.Outcome)
+	}
+}
+
+func TestCacheBoundsOffboardingAndNeverCachesErrors(t *testing.T) {
+	now := time.Now()
+	source := &fakeSource{person: Person{ObjectID: "oid", Enabled: true, MemberOf: []string{g1}}}
+	cache := &Cache{Source: source, TTL: time.Minute, Now: func() time.Time { return now }}
+	claude := Pool{Identity: "claude-session", Ceiling: "T1"}
+	t1 := Entry{Tier: "T1", Requires: []string{g1}}
+	alice := Requester{Kind: "person", Subject: "sso|alice"}
+	if !Decide(context.Background(), cache, claude, t1, alice).Allowed {
+		t.Fatal("member refused")
+	}
+	source.person.MemberOf = nil // removed from the group
+	now = now.Add(30 * time.Second)
+	if d := Decide(context.Background(), cache, claude, t1, alice); !d.Allowed || d.CacheAge != 30*time.Second {
+		t.Fatalf("within the TTL the cached answer stands: %+v", d)
+	}
+	now = now.Add(31 * time.Second)
+	if Decide(context.Background(), cache, claude, t1, alice).Allowed {
+		t.Fatal("offboarding did not take effect after the TTL")
+	}
+	source.err = errors.New("down")
+	now = now.Add(2 * time.Minute)
+	calls := source.calls
+	_ = Decide(context.Background(), cache, claude, t1, alice)
+	_ = Decide(context.Background(), cache, claude, t1, alice)
+	if source.calls != calls+2 {
+		t.Fatal("a lookup error was cached")
+	}
+	if (&Cache{Source: source, TTL: time.Hour}).TTL > 0 {
+		capped := &Cache{Source: &fakeSource{person: Person{Enabled: true}}, TTL: time.Hour, Now: func() time.Time { return now }}
+		_, _, _ = capped.Lookup(context.Background(), "s", nil)
+		now = now.Add(MaxCacheTTL + time.Second)
+		if _, age, _ := capped.Lookup(context.Background(), "s", nil); age != 0 {
+			t.Fatal("cache TTL above five minutes was honored")
+		}
+	}
+}
+
+func TestFileSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dir.json")
+	_ = os.WriteFile(path, []byte(`{"subjects":{"sso|alice":{"objectID":"oid","enabled":true,"groups":["`+g1+`"],"department":"Security"}}}`), 0o600)
+	p, err := FileSource{Path: path}.Lookup(context.Background(), "sso|alice", []string{g1, "other"})
+	if err != nil || !p.Enabled || len(p.MemberOf) != 1 || p.Department != "Security" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if _, err := (FileSource{Path: path}).Lookup(context.Background(), "sso|bob", nil); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("unknown subject: %v, want ErrNotInDirectory", err)
+	}
+}
+
+func TestGraphSource(t *testing.T) {
+	user := "22222222-2222-2222-2222-222222222222"
+	var batches []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer app-token" {
+			w.WriteHeader(401)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/users/alice@example.test":
+			if r.URL.Query().Get("$select") != "id,userPrincipalName,accountEnabled,department" {
+				w.WriteHeader(400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": user, "userPrincipalName": "Alice@example.test", "accountEnabled": true, "department": "Security"})
+		case r.Method == http.MethodGet && r.URL.Path == "/users/"+user:
+			// Graph resolves an object ID too; its UPN is not the subject.
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": user, "userPrincipalName": "alice@example.test", "accountEnabled": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/users/down@example.test":
+			w.WriteHeader(503)
+		case r.Method == http.MethodPost && r.URL.Path == "/users/"+user+"/checkMemberGroups":
+			var in struct {
+				GroupIDs []string `json:"groupIds"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if len(in.GroupIDs) > 20 {
+				w.WriteHeader(400)
+				return
+			}
+			batches = append(batches, len(in.GroupIDs))
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": []string{g1}})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	g := GraphSource{Endpoint: srv.URL, Client: srv.Client(), Token: func(context.Context) (string, error) { return "app-token", nil }}
+	p, err := g.Lookup(context.Background(), "alice@example.test", []string{g1})
+	if err != nil || p.ObjectID != user || len(p.MemberOf) != 1 || p.Department != "Security" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	// The directory's own answer that it has no such account lasts; a
+	// directory that did not answer does not.
+	if _, err := g.Lookup(context.Background(), "bob@example.test", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("missing user: %v, want ErrNotInDirectory", err)
+	}
+	if _, err := g.Lookup(context.Background(), user, []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("a subject that is not the user's UPN: %v, want ErrNotInDirectory", err)
+	}
+	if _, err := g.Lookup(context.Background(), "down@example.test", []string{g1}); err == nil || errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("directory 503: %v, want a passing error", err)
+	}
+	byID := g
+	byID.SubjectIsObjectID = true
+	if _, err := byID.Lookup(context.Background(), "alice@example.test", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("a subject that is not an object ID: %v, want ErrNotInDirectory", err)
+	}
+	if _, err := g.Lookup(context.Background(), "alice@example.test", []string{"not-an-id"}); err == nil {
+		t.Fatal("non-ID group accepted")
+	}
+	many := []string{g1}
+	for i := 0; i < 44; i++ {
+		many = append(many, fmt.Sprintf("33333333-3333-3333-3333-%012d", i))
+	}
+	batches = nil
+	if p, err := g.Lookup(context.Background(), "alice@example.test", many); err != nil || len(p.MemberOf) != 1 || p.MemberOf[0] != g1 {
+		t.Fatalf("many groups: %+v %v", p, err)
+	}
+	if len(batches) != 3 || batches[0] != 20 || batches[2] != 5 {
+		t.Fatalf("groups asked in batches %v, want 20, 20, 5", batches)
+	}
+}

@@ -1,0 +1,90 @@
+---
+title: "Custom Agent"
+description: "Wire up any custom agent, harness, or application so its outbound API calls route through Agent Vault for credential injection."
+---
+
+import InstallCommand from "/snippets/install-command.mdx";
+
+## Prerequisites
+
+- A running Agent Vault instance on a separate host from where your workload runs ([see installation guide](/installation)).
+- A custom agent, harness, or application that makes HTTP requests.
+- An agent token from Agent Vault (create one under **Agents → Add agent**).
+
+Unlike prebuilt agents (Claude Code, OpenClaw, Hermes Agent), this quickstart covers any custom environment you build yourself: an agent loop, a harness orchestrating multiple models, a CI job, or even a traditional deterministic application.
+
+You can use the Agent Vault CLI to scaffold any agent or application environment, so every outbound API call routes through Agent Vault for credential injection.
+
+<Tabs>
+  <Tab title="Shell">
+    ### 1. Install the Agent Vault CLI
+
+    Add the `agent-vault` binary to the environment where your workload runs.
+
+    <InstallCommand />
+
+    ### 2. Set environment variables
+
+    The CLI reads these on launch to authenticate with Agent Vault and scope its session to the right vault.
+
+    ```bash
+    export AGENT_VAULT_ADDR="http://<your-host>:14321"
+    export AGENT_VAULT_TOKEN="av_agt_xxx"
+    export AGENT_VAULT_VAULT="<VAULT_NAME>"
+    ```
+
+    ### 3. Run your workload under agent-vault
+
+    `agent-vault run` launches your process with `HTTPS_PROXY` and `HTTP_PROXY` pre-set so both its HTTPS and plain HTTP calls route through Agent Vault for credential injection.
+
+    ```bash
+    agent-vault run -- your-agent
+    ```
+
+  </Tab>
+  <Tab title="Dockerfile">
+    ### 1. Install the Agent Vault CLI
+
+    Add the `agent-vault` binary to the image where your workload runs.
+
+    ```dockerfile
+    COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+    ```
+
+    ### 2. Set the entrypoint
+
+    `agent-vault run` launches your process with `HTTPS_PROXY` and `HTTP_PROXY` pre-set so both its HTTPS and plain HTTP calls route through Agent Vault for credential injection.
+
+    ```dockerfile
+    ENTRYPOINT ["agent-vault", "run", "--", "your-agent"]
+    ```
+
+    ### 3. Pass environment variables at runtime
+
+    Inject the env vars when you run the container so the token never gets baked into the image. The CLI reads them on launch to authenticate with Agent Vault and scope its session to the right vault.
+
+    ```bash
+    docker run --rm -it \
+      -e AGENT_VAULT_ADDR="http://<your-host>:14321" \
+      -e AGENT_VAULT_TOKEN="av_agt_xxx" \
+      -e AGENT_VAULT_VAULT="<VAULT_NAME>" \
+      your-image
+    ```
+
+  </Tab>
+</Tabs>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Connect a custom agent"
+    icon="plug"
+    href="/guides/connect-custom-agent"
+  >
+    Manual proxy setup, error handling, and proposals.
+  </Card>
+  <Card title="Agent protocol" icon="code" href="/agents/protocol">
+    Full request lifecycle end-to-end.
+  </Card>
+</CardGroup>

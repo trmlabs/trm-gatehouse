@@ -1,0 +1,477 @@
+package httpcatalog
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+const (
+	digestA = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	digestB = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+// harnessCatalog is the three harnesses Gatehouse serves: Cursor workers, Claude
+// sessions and agent-sandbox, each with its pool and one entry granted to all.
+func harnessCatalog() map[string]any {
+	inCluster := map[string]any{"issuer": "https://container.googleapis.com/v1/projects/p/locations/l/clusters/example-cluster", "keys": "in-cluster", "audience": "gatehouse"}
+	return map[string]any{
+		"harnesses": []any{
+			map[string]any{"name": "cursor", "trustDomain": inCluster,
+				"identity":      map[string]any{"kind": "pod-token", "ownerKind": "ReplicaSet", "namespaces": []any{"cursor"}, "imageDigests": []any{digestA, digestB}},
+				"path":          map[string]any{"kind": "sidecar"},
+				"authorization": map[string]any{"mode": "pool", "poolName": "example-workers"},
+				"client":        map[string]any{"proxyEnv": "GATEHOUSE_HTTPS_PROXY", "caFileEnv": "GATEHOUSE_CA_FILE", "caSpkiEnv": "GATEHOUSE_CA_SPKI"}},
+			map[string]any{"name": "claude", "trustDomain": inCluster,
+				"identity":      map[string]any{"kind": "session-jwt", "ownerKind": "Job", "namespaces": []any{"claude"}, "imageDigests": []any{digestA}, "requester": map[string]any{"kind": "session-jwt"}},
+				"path":          map[string]any{"kind": "sidecar"},
+				"authorization": map[string]any{"mode": "person", "poolName": "claude-sessions"},
+				"client":        map[string]any{"proxyEnv": "HTTPS_PROXY", "caFileEnv": "SSL_CERT_FILE", "caSpkiEnv": "GATEHOUSE_CA_SPKI"}},
+			map[string]any{"name": "agent-sandbox", "trustDomain": map[string]any{"issuer": "https://container.googleapis.com/v1/projects/s/locations/l/clusters/sandbox", "keys": "remote", "audience": "gatehouse"},
+				"identity":      map[string]any{"kind": "proxy-attested", "ownerKind": "Sandbox", "namespaces": []any{"agent-sandboxes"}, "imageDigests": []any{digestB}},
+				"path":          map[string]any{"kind": "shared-proxy", "crossCluster": true},
+				"authorization": map[string]any{"mode": "pool", "poolName": "sandboxes"},
+				"client":        map[string]any{"proxyEnv": "HTTPS_PROXY", "caFileEnv": "SSL_CERT_FILE", "caSpkiEnv": "GATEHOUSE_CA_SPKI"}},
+		},
+		"pools": []any{
+			map[string]any{"name": "example-workers", "namespace": "cursor", "serviceAccount": "worker"},
+			map[string]any{"name": "claude-sessions", "namespace": "claude", "serviceAccount": "session", "identity": "claude-session", "ccpoolID": "ccpool_abc", "ceiling": "T1"},
+			map[string]any{"name": "sandboxes", "namespace": "agent-sandboxes", "serviceAccount": "sandbox"},
+		},
+		"entries": []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["example-workers","claude-sessions","sandboxes"]`, 1) + `}`)},
+	}
+}
+
+func parseCatalog(t *testing.T, c map[string]any) (Catalog, error) {
+	t.Helper()
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Parse(data)
+}
+
+func harnessAt(c map[string]any, i int) map[string]any {
+	return c["harnesses"].([]any)[i].(map[string]any)
+}
+
+func TestHarnessProfilesLoad(t *testing.T) {
+	catalog, err := parseCatalog(t, harnessCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(catalog.Harnesses()); n != 3 {
+		t.Fatalf("%d harnesses", n)
+	}
+	for pool, want := range map[string]struct{ kind, mode, requester string }{
+		"example-workers": {IdentityPodToken, AuthorizePool, ""},
+		"claude-sessions": {IdentitySessionJWT, AuthorizePerson, RequesterSessionJWT},
+		"sandboxes":       {IdentityProxyAttested, AuthorizePool, ""},
+	} {
+		p, ok := catalog.Pool(pool)
+		profile := p.Profile()
+		if !ok || !profile.Explicit || profile.Identity.Kind != want.kind || profile.Authorization.Mode != want.mode || profile.RequesterKind() != want.requester {
+			t.Errorf("%s: %+v", pool, profile)
+		}
+	}
+}
+
+// A catalog with no harnesses keeps working: each pool's profile is derived
+// from its identity, as the broker behaved before profiles.
+func TestPoolsWithoutHarnessesDeriveTheirProfile(t *testing.T) {
+	c := harnessCatalog()
+	delete(c, "harnesses")
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, _ := catalog.Pool("example-workers")
+	claude, _ := catalog.Pool("claude-sessions")
+	if p := cursor.Profile(); p.Explicit || p.Identity.Kind != IdentityPodToken || p.Path.Kind != PathSidecar || p.Authorization.Mode != AuthorizePool || p.RequesterKind() != "" {
+		t.Errorf("cursor: %+v", p)
+	}
+	if p := claude.Profile(); p.Explicit || p.Identity.Kind != IdentitySessionJWT || p.Authorization.Mode != AuthorizePerson || p.RequesterKind() != RequesterSessionJWT {
+		t.Errorf("claude: %+v", p)
+	}
+	if p := (Pool{}).Profile(); p.Identity.Kind != IdentityPodToken || p.Authorization.Mode != AuthorizePool {
+		t.Errorf("undefined pool: %+v", p)
+	}
+}
+
+// Every missing or contradictory field refuses the whole catalog.
+func TestIncompleteOrContradictoryHarnessIsRefused(t *testing.T) {
+	cases := map[string]func(c map[string]any){
+		"no name":         func(c map[string]any) { delete(harnessAt(c, 0), "name") },
+		"duplicate name":  func(c map[string]any) { harnessAt(c, 1)["name"] = "cursor" },
+		"no trust domain": func(c map[string]any) { delete(harnessAt(c, 0), "trustDomain") },
+		"no issuer": func(c map[string]any) {
+			harnessAt(c, 0)["trustDomain"] = map[string]any{"keys": "in-cluster", "audience": "gatehouse"}
+		},
+		"plain HTTP issuer": func(c map[string]any) {
+			harnessAt(c, 0)["trustDomain"].(map[string]any)["issuer"] = "http://issuer.example"
+		},
+		"issuer with a query": func(c map[string]any) {
+			harnessAt(c, 0)["trustDomain"].(map[string]any)["issuer"] = "https://issuer.example/?x=1"
+		},
+		"unknown keys source":   func(c map[string]any) { harnessAt(c, 0)["trustDomain"].(map[string]any)["keys"] = "static" },
+		"no audience":           func(c map[string]any) { delete(harnessAt(c, 0)["trustDomain"].(map[string]any), "audience") },
+		"no identity kind":      func(c map[string]any) { delete(harnessAt(c, 0)["identity"].(map[string]any), "kind") },
+		"unknown identity kind": func(c map[string]any) { harnessAt(c, 0)["identity"].(map[string]any)["kind"] = "api-key" },
+		"no owner kind":         func(c map[string]any) { delete(harnessAt(c, 0)["identity"].(map[string]any), "ownerKind") },
+		"lower-case owner kind": func(c map[string]any) { harnessAt(c, 0)["identity"].(map[string]any)["ownerKind"] = "sandbox" },
+		"no namespaces":         func(c map[string]any) { harnessAt(c, 0)["identity"].(map[string]any)["namespaces"] = []any{} },
+		"repeated namespace": func(c map[string]any) {
+			harnessAt(c, 0)["identity"].(map[string]any)["namespaces"] = []any{"cursor", "cursor"}
+		},
+		"no image digests": func(c map[string]any) { delete(harnessAt(c, 0)["identity"].(map[string]any), "imageDigests") },
+		"image tag, not a digest": func(c map[string]any) {
+			harnessAt(c, 0)["identity"].(map[string]any)["imageDigests"] = []any{"worker:latest"}
+		},
+		"unknown requester": func(c map[string]any) {
+			harnessAt(c, 1)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "header"}
+		},
+		"no path":          func(c map[string]any) { delete(harnessAt(c, 0), "path") },
+		"unknown path":     func(c map[string]any) { harnessAt(c, 0)["path"] = map[string]any{"kind": "direct"} },
+		"no authorization": func(c map[string]any) { delete(harnessAt(c, 0), "authorization") },
+		"unknown mode":     func(c map[string]any) { harnessAt(c, 0)["authorization"].(map[string]any)["mode"] = "anyone" },
+		"no pool name":     func(c map[string]any) { delete(harnessAt(c, 0)["authorization"].(map[string]any), "poolName") },
+		"undefined pool":   func(c map[string]any) { harnessAt(c, 0)["authorization"].(map[string]any)["poolName"] = "nobody" },
+		"pool in two harnesses": func(c map[string]any) {
+			harnessAt(c, 2)["authorization"].(map[string]any)["poolName"] = "example-workers"
+		},
+		"pool without a harness": func(c map[string]any) { c["harnesses"] = c["harnesses"].([]any)[:2] },
+		"namespace not listed":   func(c map[string]any) { harnessAt(c, 0)["identity"].(map[string]any)["namespaces"] = []any{"other"} },
+		"unknown field":          func(c map[string]any) { harnessAt(c, 0)["identity"].(map[string]any)["trustEveryone"] = true },
+		"pod token on a shared proxy": func(c map[string]any) {
+			harnessAt(c, 0)["path"] = map[string]any{"kind": "shared-proxy"}
+		},
+		"pod token deciding per person": func(c map[string]any) {
+			harnessAt(c, 0)["authorization"].(map[string]any)["mode"] = "person"
+		},
+		"pod token with a requester": func(c map[string]any) {
+			harnessAt(c, 0)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "session-jwt"}
+		},
+		"session deciding for the pool": func(c map[string]any) {
+			harnessAt(c, 1)["authorization"].(map[string]any)["mode"] = "pool"
+		},
+		"session with a signed assertion": func(c map[string]any) {
+			harnessAt(c, 1)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "signed-assertion"}
+		},
+		"proxy-attested behind a sidecar": func(c map[string]any) {
+			harnessAt(c, 2)["path"] = map[string]any{"kind": "sidecar", "crossCluster": true}
+		},
+		"proxy-attested with a session token": func(c map[string]any) {
+			harnessAt(c, 2)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "session-jwt"}
+		},
+		"signed assertion before the broker verifies one": func(c map[string]any) {
+			harnessAt(c, 2)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "signed-assertion"}
+		},
+		"person without a requester": func(c map[string]any) {
+			harnessAt(c, 2)["authorization"].(map[string]any)["mode"] = "person"
+		},
+		"cross cluster with in-cluster keys": func(c map[string]any) {
+			harnessAt(c, 2)["trustDomain"].(map[string]any)["keys"] = "in-cluster"
+		},
+		"proxy-attested over two namespaces": func(c map[string]any) {
+			harnessAt(c, 2)["identity"].(map[string]any)["namespaces"] = []any{"agent-sandboxes", "other"}
+		},
+		"one namespace in two proxy-attested harnesses": func(c map[string]any) {
+			second := map[string]any{}
+			b, _ := json.Marshal(harnessAt(c, 2))
+			_ = json.Unmarshal(b, &second)
+			second["name"] = "agent-sandbox-2"
+			second["authorization"] = map[string]any{"mode": "pool", "poolName": "sandboxes-2"}
+			c["harnesses"] = append(c["harnesses"].([]any), second)
+			c["pools"] = append(c["pools"].([]any), map[string]any{"name": "sandboxes-2", "namespace": "agent-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})
+		},
+		"remote keys on one cluster": func(c map[string]any) {
+			harnessAt(c, 2)["path"].(map[string]any)["crossCluster"] = false
+		},
+		"pod token across clusters on in-cluster keys": func(c map[string]any) {
+			harnessAt(c, 0)["path"].(map[string]any)["crossCluster"] = true
+		},
+		"pool identity disagrees with mode": func(c map[string]any) {
+			c["pools"].([]any)[1].(map[string]any)["identity"] = "workload"
+			delete(c["pools"].([]any)[1].(map[string]any), "ccpoolID")
+		},
+	}
+	for name, mutate := range cases {
+		c := harnessCatalog()
+		mutate(c)
+		if _, err := parseCatalog(t, c); err == nil {
+			t.Errorf("%s: accepted", name)
+		} else {
+			t.Logf("%s: %v", name, err)
+		}
+	}
+}
+
+// A Cursor pool decides per person when its sidecar mints the run's identity
+// token; each vendor's requester serves only its own vendor's pools.
+func TestCursorPersonProfile(t *testing.T) {
+	person := func(c map[string]any) {
+		h := harnessAt(c, 0)
+		h["identity"].(map[string]any)["kind"] = "session-jwt"
+		h["identity"].(map[string]any)["requester"] = map[string]any{"kind": "cursor-oidc"}
+		h["authorization"].(map[string]any)["mode"] = "person"
+		pool := c["pools"].([]any)[0].(map[string]any)
+		pool["identity"], pool["ceiling"] = "cursor-session", "T2"
+	}
+	c := harnessCatalog()
+	person(c)
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := catalog.Pool("example-workers")
+	if profile := p.Profile(); profile.Identity.Kind != IdentitySessionJWT || profile.Authorization.Mode != AuthorizePerson || profile.RequesterKind() != RequesterCursorOIDC {
+		t.Fatalf("%+v", profile)
+	}
+	delete(c, "harnesses")
+	derived, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := derived.Pool("example-workers"); p.Profile().RequesterKind() != RequesterCursorOIDC || p.Profile().Authorization.Mode != AuthorizePerson {
+		t.Fatalf("derived: %+v", p.Profile())
+	}
+	for name, mutate := range map[string]func(c map[string]any){
+		"Cursor requester on a Claude pool": func(c map[string]any) {
+			harnessAt(c, 1)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "cursor-oidc"}
+		},
+		"Claude requester on a Cursor pool": func(c map[string]any) {
+			harnessAt(c, 0)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "session-jwt"}
+		},
+		"Cursor pool with no requester": func(c map[string]any) {
+			delete(harnessAt(c, 0)["identity"].(map[string]any), "requester")
+		},
+		"Cursor requester on a pod token": func(c map[string]any) {
+			harnessAt(c, 0)["identity"].(map[string]any)["kind"] = "pod-token"
+		},
+		"Cursor requester behind a shared proxy": func(c map[string]any) {
+			harnessAt(c, 2)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "cursor-oidc"}
+		},
+		"Cursor person pool decided for the pool": func(c map[string]any) {
+			harnessAt(c, 0)["authorization"].(map[string]any)["mode"] = "pool"
+		},
+	} {
+		c := harnessCatalog()
+		person(c)
+		mutate(c)
+		if _, err := parseCatalog(t, c); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// One shared proxy serves customer and developer sandboxes as two profiles:
+// the customer one at the external ceiling with no entries, the developer
+// one with its own pool and grants.
+func TestCustomerAndDeveloperSandboxProfiles(t *testing.T) {
+	c := harnessCatalog()
+	teamA := map[string]any{}
+	b, _ := json.Marshal(harnessAt(c, 2))
+	_ = json.Unmarshal(b, &teamA)
+	teamA["name"] = "agent-sandbox-team-a"
+	teamA["identity"].(map[string]any)["namespaces"] = []any{"team-a-sandboxes"}
+	teamA["authorization"] = map[string]any{"mode": "pool", "poolName": "team-a"}
+	c["harnesses"] = append(c["harnesses"].([]any), teamA)
+	c["pools"] = append(c["pools"].([]any), map[string]any{"name": "team-a", "namespace": "team-a-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, _ := catalog.Pool("team-a")
+	if pool.Ceiling != CeilingExternal || pool.Profile().Name != "agent-sandbox-team-a" {
+		t.Fatalf("team-a: %+v", pool)
+	}
+	// Granting the customer pool anything refuses the catalog.
+	c["entries"] = []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["sandboxes","team-a"]`, 1) + `}`)}
+	if _, err := parseCatalog(t, c); err == nil {
+		t.Fatal("an entry granted to the customer sandboxes' external pool was accepted")
+	}
+}
+
+// A proxy-attested harness may admit images by an agent-sandbox repository
+// path instead of digests; two harnesses may never claim overlapping paths.
+func TestHarnessImagePrefixes(t *testing.T) {
+	const teamA = "registry.example.com/example-project/example-images/team-a/"
+	c := harnessCatalog()
+	id := harnessAt(c, 2)["identity"].(map[string]any)
+	id["imagePrefix"] = teamA
+	delete(id, "imageDigests")
+	if _, err := parseCatalog(t, c); err != nil {
+		t.Fatalf("prefix without digests refused: %v", err)
+	}
+	for name, mutate := range map[string]func(c map[string]any){
+		"prefix on a pod-token harness": func(c map[string]any) {
+			harnessAt(c, 0)["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/example-project/cursor/"
+		},
+		"another project": func(c map[string]any) {
+			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/other/example-images/team-a/"
+		},
+		"the whole project": func(c map[string]any) {
+			harnessAt(c, 2)["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/example-project/"
+		},
+		"overlapping prefixes": func(c map[string]any) {
+			second := map[string]any{}
+			b, _ := json.Marshal(harnessAt(c, 2))
+			_ = json.Unmarshal(b, &second)
+			second["name"] = "agent-sandbox-2"
+			second["identity"].(map[string]any)["namespaces"] = []any{"other-sandboxes"}
+			second["identity"].(map[string]any)["imagePrefix"] = "registry.example.com/example-project/example-images/"
+			second["authorization"] = map[string]any{"mode": "pool", "poolName": "sandboxes-2"}
+			c["harnesses"] = append(c["harnesses"].([]any), second)
+			c["pools"] = append(c["pools"].([]any), map[string]any{"name": "sandboxes-2", "namespace": "other-sandboxes", "serviceAccount": "sandbox", "ceiling": "external"})
+		},
+	} {
+		cc := harnessCatalog()
+		ccid := harnessAt(cc, 2)["identity"].(map[string]any)
+		ccid["imagePrefix"] = teamA
+		delete(ccid, "imageDigests")
+		mutate(cc)
+		if _, err := parseCatalog(t, cc); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// A sidecar harness may serve agents in another cluster, on that cluster's
+// keys: the broker's identity configuration decides whether it can read
+// their Pods (a trust domain's pods), and refuses the binding otherwise.
+func TestHarnessSidecarAcrossClusters(t *testing.T) {
+	c := harnessCatalog()
+	for _, i := range []int{0, 1} {
+		harnessAt(c, i)["trustDomain"] = map[string]any{"issuer": "https://container.googleapis.com/v1/projects/s/locations/l/clusters/workers", "keys": "remote", "audience": "gatehouse"}
+		harnessAt(c, i)["path"].(map[string]any)["crossCluster"] = true
+	}
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatalf("cross-cluster sidecar harnesses refused: %v", err)
+	}
+	if p, _ := catalog.Pool("example-workers"); p.Profile().TrustDomain.Keys != KeysRemote {
+		t.Fatalf("profile %+v", p.Profile())
+	}
+}
+
+// Pinned keys are another cluster's keys, as remote ones are.
+func TestHarnessPinnedKeys(t *testing.T) {
+	c := harnessCatalog()
+	harnessAt(c, 2)["trustDomain"].(map[string]any)["keys"] = "pinned"
+	if _, err := parseCatalog(t, c); err != nil {
+		t.Fatalf("pinned cross-cluster harness refused: %v", err)
+	}
+	harnessAt(c, 2)["path"].(map[string]any)["crossCluster"] = false
+	if _, err := parseCatalog(t, c); err == nil {
+		t.Fatal("pinned keys on a same-cluster path accepted")
+	}
+}
+
+// One harness may serve a namespace per tenant: 10,000 load, one more is
+// refused as malformed.
+func TestHarnessServesTenThousandNamespaces(t *testing.T) {
+	for n, ok := range map[int]bool{10000: true, 10001: false} {
+		c := harnessCatalog()
+		namespaces := []any{"cursor"}
+		for i := 1; i < n; i++ {
+			namespaces = append(namespaces, fmt.Sprintf("tenant-%d", i))
+		}
+		harnessAt(c, 0)["identity"].(map[string]any)["namespaces"] = namespaces
+		if _, err := parseCatalog(t, c); (err == nil) != ok {
+			t.Errorf("%d namespaces: %v", n, err)
+		}
+	}
+}
+
+// An agent-sandbox pool decides per person when its proxy attests the Pod's
+// requester; the requester counts only there, and only on such a pool.
+func TestAttestedPersonProfile(t *testing.T) {
+	person := func(c map[string]any) {
+		h := harnessAt(c, 2)
+		h["identity"].(map[string]any)["requester"] = map[string]any{"kind": "pod-annotation"}
+		h["authorization"].(map[string]any)["mode"] = "person"
+		pool := c["pools"].([]any)[2].(map[string]any)
+		pool["identity"], pool["ceiling"] = "attested-person", "T2"
+	}
+	c := harnessCatalog()
+	person(c)
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := catalog.Pool("sandboxes")
+	if profile := p.Profile(); profile.Authorization.Mode != AuthorizePerson || profile.RequesterKind() != RequesterPodAnnotation {
+		t.Fatalf("%+v", profile)
+	}
+	for name, mutate := range map[string]func(c map[string]any){
+		"requester on a pool-mode proxy": func(c map[string]any) {
+			harnessAt(c, 2)["authorization"].(map[string]any)["mode"] = "pool"
+			c["pools"].([]any)[2].(map[string]any)["identity"] = "none"
+			c["pools"].([]any)[2].(map[string]any)["ceiling"] = "T0"
+		},
+		"attested person behind a sidecar session": func(c map[string]any) {
+			harnessAt(c, 1)["identity"].(map[string]any)["requester"] = map[string]any{"kind": "pod-annotation"}
+		},
+		"attested requester on a Claude pool": func(c map[string]any) {
+			c["pools"].([]any)[2].(map[string]any)["identity"] = "claude-session"
+			c["pools"].([]any)[2].(map[string]any)["ccpoolID"] = "ccpool_xyz"
+		},
+		"Claude session on an attested pool": func(c map[string]any) {
+			c["pools"].([]any)[1].(map[string]any)["identity"] = "attested-person"
+			delete(c["pools"].([]any)[1].(map[string]any), "ccpoolID")
+		},
+		"attested pool with fixed groups": func(c map[string]any) {
+			c["pools"].([]any)[2].(map[string]any)["entitlements"] = []any{"11111111-2222-3333-4444-555555555555"}
+		},
+	} {
+		c := harnessCatalog()
+		person(c)
+		mutate(c)
+		if _, err := parseCatalog(t, c); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// A proxy binding that reads the catalog finds each sandbox pool by namespace and trust domain, and no other harness's.
+func TestAttestedPoolByNamespace(t *testing.T) {
+	catalog, err := parseCatalog(t, harnessCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := "https://container.googleapis.com/v1/projects/s/locations/l/clusters/sandbox"
+	if pool, ok := catalog.AttestedPool("agent-sandboxes", issuer); !ok || pool != "sandboxes" {
+		t.Errorf("sandbox namespace: %q %v", pool, ok)
+	}
+	for name, args := range map[string][2]string{
+		"another trust domain": {"agent-sandboxes", "https://container.googleapis.com/v1/projects/p/locations/l/clusters/example-cluster"},
+		"a pod-token harness":  {"cursor", "https://container.googleapis.com/v1/projects/p/locations/l/clusters/example-cluster"},
+		"unclaimed":            {"other-sandboxes", issuer},
+	} {
+		if pool, ok := catalog.AttestedPool(args[0], args[1]); ok {
+			t.Errorf("%s: %q", name, pool)
+		}
+	}
+	if got := catalog.AttestedNamespaces(issuer); len(got) != 1 || got[0] != "agent-sandboxes" {
+		t.Errorf("namespaces: %v", got)
+	}
+}
+
+// A customer pool (external ceiling) is not served by a catalog-reading binding.
+func TestAttestedPoolSkipsExternalPools(t *testing.T) {
+	c := harnessCatalog()
+	c["pools"].([]any)[2].(map[string]any)["ceiling"] = "external"
+	c["entries"] = []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["example-workers","claude-sessions"]`, 1) + `}`)}
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := "https://container.googleapis.com/v1/projects/s/locations/l/clusters/sandbox"
+	if pool, ok := catalog.AttestedPool("agent-sandboxes", issuer); ok {
+		t.Errorf("external pool served: %q", pool)
+	}
+	if got := catalog.AttestedNamespaces(issuer); len(got) != 0 {
+		t.Errorf("namespaces: %v", got)
+	}
+}

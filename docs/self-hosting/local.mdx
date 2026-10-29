@@ -1,0 +1,118 @@
+---
+title: "Linux & macOS"
+description: "Install and run Agent Vault on Linux or macOS using the install script"
+---
+
+import InstallCommand from "/snippets/install-command.mdx";
+
+## Install
+
+Auto-detects your OS and architecture, downloads the latest release, and installs. Works for both fresh installs and upgrades.
+
+<InstallCommand />
+
+Supports macOS (Intel + Apple Silicon) and Linux (x86\_64 + ARM64).
+
+<Note>
+  The install script sends an anonymous beacon (OS, architecture, version). Set `AGENT_VAULT_NO_TELEMETRY=1` in front of `sh` to opt out.
+</Note>
+
+Verify the installation:
+
+```bash
+agent-vault --help
+```
+
+### Build from source
+
+**Prerequisites**: [Go 1.25+](https://go.dev/dl/), [Node.js 22+](https://nodejs.org/)
+
+```bash
+git clone https://github.com/Infisical/agent-vault.git
+cd agent-vault
+make build
+sudo mv agent-vault /usr/local/bin/
+```
+
+## Start the server
+
+```bash
+agent-vault server
+```
+
+On first run, Agent Vault generates a random **data encryption key (DEK)** that encrypts all [credentials](/learn/credentials) at rest with AES-256-GCM. You can optionally set a **master password** to wrap the DEK (leave it empty for passwordless mode). The master password is never stored on disk.
+
+For non-interactive or automated environments, set the `AGENT_VAULT_MASTER_PASSWORD` environment variable or pass `--password-stdin` instead. Omit it entirely for passwordless mode. See [environment variables](/self-hosting/environment-variables) for all options.
+
+To run in the background:
+
+```bash
+agent-vault server -d
+```
+
+To stop a background server:
+
+```bash
+agent-vault server stop
+```
+
+## Register and log in
+
+The first user to register becomes the instance [owner](/learn/permissions#instance-roles) with full admin privileges and is automatically granted [admin](/learn/permissions#vault-roles) on the default [vault](/learn/vaults).
+
+Any CLI command that needs authentication will walk you through registration and login automatically — just run the command you want and follow the prompts. You can also register explicitly:
+
+<Tabs>
+  <Tab title="CLI">
+    ```bash
+    agent-vault auth register
+    agent-vault auth login
+    ```
+  </Tab>
+  <Tab title="Web UI">
+    Open [http://localhost:14321/register](http://localhost:14321/register) (or the address you configured with `AGENT_VAULT_ADDR`) and create your account from the browser.
+  </Tab>
+</Tabs>
+
+Subsequent users can self-register via `agent-vault auth register`, the web registration page, or be [invited to a vault](/learn/vaults#invite-users-to-a-vault) by a vault admin.
+
+## Transparent proxy
+
+Agent Vault exposes a transparent HTTP/HTTPS proxy listener on port `14322` — the canonical ingress agents use. Any standard HTTP client that honors `HTTPS_PROXY`/`HTTP_PROXY` (curl, fetch, requests, axios, the Go stdlib, SDKs, CLIs) transparently routes through the broker. The listener is plain HTTP, handling both CONNECT (for `https://` upstreams) and absolute-form forward-proxy requests (for `http://` upstreams) on the same port.
+
+```bash
+agent-vault server               # transparent proxy on 14322 (default)
+agent-vault server --mitm-port 0 # disable
+```
+
+<Warning>
+HTTP/1.1 at the ingress (WebSocket upgrades over HTTP/1.1 are transparently brokered — useful for voice/realtime APIs like OpenAI Realtime). The terminator advertises only `http/1.1` in ALPN, so clients offering both `h2` and `http/1.1` fall back to `http/1.1` and have credentials injected normally; clients that strictly require `h2` fail the TLS handshake with a `no_application_protocol` alert.
+</Warning>
+
+A software-backed root CA is created on first launch under `~/.agent-vault/ca/` (private key encrypted with the DEK). Clients must trust this root before the proxied TLS handshake will succeed. `agent-vault vault run` handles this automatically for child processes — only fetch the CA manually when configuring agents outside of `vault run` (containers, CI, invited agents).
+
+Fetch the root certificate from any machine that can reach the server:
+
+```bash
+# From stdout (pipe into a trust-store installer)
+agent-vault ca fetch > agent-vault-ca.pem
+
+# Save to a file
+agent-vault ca fetch -o /etc/ssl/certs/agent-vault-ca.pem
+
+# Or with curl — the endpoint is public
+curl -O http://localhost:14321/v1/mitm/ca.pem
+```
+
+Then install into the relevant trust store. For example, on macOS:
+
+```bash
+agent-vault ca fetch | sudo security add-trusted-cert -d -r trustRoot \
+    -k /Library/Keychains/System.keychain /dev/stdin
+```
+
+See the [CLI reference](/reference/cli#ca) for all `agent-vault ca fetch` flags.
+
+## Upgrade and verify
+
+See [Maintenance](/self-hosting/maintenance) for upgrading an existing installation and verifying release signatures.

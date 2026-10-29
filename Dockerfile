@@ -1,0 +1,61 @@
+# ---- Frontend build ----
+FROM --platform=$BUILDPLATFORM node:26.12.1-alpine@sha256:9bd229b644e391df00fb989efa732335aefc6170a05d8c163c5c8ca9870da401 AS frontend
+
+WORKDIR /app
+COPY web/package.json web/package-lock.json ./
+# Optional build-only trust for dependency registries behind a private CA.
+RUN --mount=type=secret,id=build_ca \
+    if [ -s /run/secrets/build_ca ]; then \
+      NODE_EXTRA_CA_CERTS=/run/secrets/build_ca npm ci; \
+    else npm ci; fi
+COPY web/ .
+RUN npm run build
+
+# ---- Go build stage ----
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+ARG POSTHOG_API_KEY=
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=secret,id=build_ca \
+    if [ -s /run/secrets/build_ca ]; then \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/build_ca > /tmp/build-ca.pem \
+      && SSL_CERT_FILE=/tmp/build-ca.pem go mod download \
+      && rm /tmp/build-ca.pem; \
+    else go mod download; fi
+COPY . .
+COPY --from=frontend /internal/server/webdist /src/internal/server/webdist
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w \
+    -X github.com/Infisical/agent-vault/cmd.version=${VERSION} \
+    -X github.com/Infisical/agent-vault/cmd.commit=${COMMIT} \
+    -X github.com/Infisical/agent-vault/cmd.date=${BUILD_DATE} \
+    -X github.com/Infisical/agent-vault/cmd.posthogAPIKey=${POSTHOG_API_KEY}" \
+    -o /agent-vault .
+
+# ---- Runtime stage ----
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+
+RUN apk add --no-cache ca-certificates "libcrypto3>=3.5.8-r0" "libssl3>=3.5.8-r0" \
+    && addgroup -S agentvault && adduser -S -G agentvault -u 65532 agentvault \
+    && mkdir -p /data/.agent-vault && chown -R agentvault:agentvault /data
+
+COPY --from=builder /agent-vault /usr/local/bin/agent-vault
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENV HOME=/data
+VOLUME /data
+EXPOSE 14321
+USER agentvault
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -qO- http://localhost:14321/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["server", "--host", "0.0.0.0", "--port", "14321"]

@@ -1,0 +1,46 @@
+// Clients
+export { AgentVault } from "./client.js";
+export { VaultClient } from "./vault.js";
+
+// Errors
+export { AgentVaultError, ApiError } from "./errors.js";
+
+// Config types
+export type { AgentVaultConfig, VaultClientConfig, ClientConfig } from "./types.js";
+
+// Session resource types
+export type { CreateSessionOptions, Session, ContainerConfig } from "./resources/sessions.js";
+export { buildProxyEnv } from "./resources/sessions.js";
+
+// Vault types (instance-level operations)
+export type { CreateVaultOptions, Vault, DeleteVaultResult } from "./client.js";
+
+// Credential resource types
+export type {
+  ListCredentialsOptions,
+  Credential,
+  ListCredentialsResult,
+  SetCredentialsResult,
+  DeleteCredentialsResult,
+} from "./resources/credentials.js";
+
+// Service resource types
+export type {
+  BearerAuth,
+  BasicAuth,
+  ApiKeyAuth,
+  CustomAuth,
+  PassthroughAuth,
+  ServiceAuth,
+  Substitution,
+  SubstitutionSurface,
+  ServiceInput,
+  Service,
+  ListServicesResult,
+  SetServicesResult,
+  ReplaceAllServicesResult,
+  ClearServicesResult,
+  RemoveServiceResult,
+  CredentialUsageEntry,
+  CredentialUsageResult,
+} from "./resources/services.js";

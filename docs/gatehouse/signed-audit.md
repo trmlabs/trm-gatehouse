@@ -1,0 +1,71 @@
+# Signed broker audit
+
+The PostgreSQL broker can record every session in a tamper-evident trail. Each row names the worker pool, the worker's Pod, the database binding and the outcome. Rows go to stdout as JSON, so the cluster's logging agent ships them as they are written. A verifier detects a missing, moved or edited row. Rows never contain a credential, token, query or upstream error text.
+
+## How it works
+
+- **One row per event.** `session_open` before the first query can run, `session_close` when it ends, and `denied` for every refusal, with a fixed outcome code such as `authentication`, `capacity` or `credential`. An identity refusal also names the check in `decision` (`identity_<reason>`); one at the token's signing key (`token_signature`, `token_keys_pinned_mismatch`, `token_keys_unavailable`, `token_keys_in_cluster_unknown`) adds the token's `kid` and the connection's `peer` address, which on the cross-cluster listener is the PROXY header's source. The kid is chosen by whoever made the token, so one that is not a plain identifier (`[A-Za-z0-9._-]`, 1 to 128 characters) is recorded as `invalid` with `kidSHA256`, the first 12 hex characters of its SHA-256. A refusal on the HTTP path also records `target`, the host and port the caller asked for, in canonical lower-case form, or `invalid` when it is not a DNS name or IP address. A refused CONNECT records `method` `CONNECT`. HTTP rows record `path`, the request path as the worker sent it, never the query: a gRPC call's path names its service and method, such as `/example.v1.Reads/ReadRows`. A path that does not start with `/`, or is not printable ASCII without spaces, quotes or backslashes, is recorded as `invalid`, and one past 8192 bytes is cut to end in `...`. Rows for a browser-session host, a decoy refusal or a refusal before the caller is authenticated record no path. A refusal before any catalog entry is authorized, such as an unlisted host, path or method, still names the Cursor run's `source` and `automation` when its token verifies, listed or not, and `automationName` and `automationOwner` when the pool lists that Automation, as an authorized row does. GitHub answers a GraphQL query it refuses in part with status 200 and a top-level `errors` array, and `gh` then fails. The broker reads each such answer as it streams, holding none of it, and records the response row with outcome `graphql_error` and `graphqlErrors`: each error's type and path as `TYPE@path` (field names and list indexes joined by dots, `-` for no path), up to eight, then `+N`. A type or path segment that is not 1 to 40 of letters, digits and `_` is recorded as `INVALID` or `*`. Never an error message or any data. A REST answer of 400 or more is already apart by its `status`. Each `http_response` row records `durationMs`, the milliseconds from admission to the end of the response, as `transaction` rows already do; the row for a browser sign-in's refresh-token revocation records how long the revocation took, retries included. A `session_open` row records `durationMs` too: the milliseconds from authentication to admission, queues, the credential mint and the upstream connect included. A GitHub REST row also names the `route` it matched (such as `read-pull`), the `pullRequest` number its path names, and, for a code read, the `gitEntry` that authorized it, and the `branch` its path or query names, and, when GitHub answers 400 to 499, `upstreamMessage`: the `message` of its JSON error body as printable ASCII, cut to 200 characters, never any other part of the body (a branch, a branch's rules, a compare's head, a contents `ref` or a run list's `branch`); a GraphQL row names route `graphql` and, for a code read, the `gitEntry`. An `injection_flagged` row (see `AGENT_VAULT_INJECTION_SCREEN`) names the `route` the text came from, the matching rule in `decision` and, in `match`, the SHA-256 of the matched text, never the text. HTTP rows name their `operation` from the broker's fixed vocabulary: the github-api repository operation (such as `pr.open`), `git.fetch` or `git.push`, `graphql` for a GitHub GraphQL request no route admits, for a Slack entry, the Web API method its listed path names (such as `slack.conversations_history` or `slack.chat_post_message`), or, for groundcover's MCP server, the message forwarded (`groundcover.initialize`, `groundcover.initialized`, `groundcover.query_logs` or `groundcover.query_metrics`); an operation is never a path or body. A database refusal made before the catalog resolves the database records `database`, the name the client asked for, or `invalid` when it is not a plain name (letters, digits, `_`, `-` and `.`, at most 63 bytes). When an entry needed a directory lookup, the row records `requesterDepartment`, the person's Entra department, trimmed, or `invalid` when it holds a control character, a quote or a backslash. On a row from a Cursor Automation's run (`requesterKind: automation`), `requester` is the person the run's token names, absent when it names none, and `automationOwner` is the team accountable for the Automation. Neither decides access: the Automation is decided on the entries the catalog lists for it, so the row records `tier` and `decision` (such as `t0`, `automation_granted`, `automation_not_granted` or `pool_ceiling`) and no `groups`, `cacheAgeSec`, `requesterOID` or `requesterDepartment`. An `automation_settings` row records a sidecar being served its run's Automation settings: the Automation, `operation` `automation.settings`, and `settings`, the names served, comma-separated in order, never a value (empty for a run with none). A refused settings request is a `denied` row with the same operation and the refusing check in `decision`. Identity comes only from the verified workload proof. Refusals before authentication are capped at 10 rows a second, after a burst of 20; the operational log counts the rest.
+- **A chain per replica boot.** Each row carries a sequence number, the previous row's MAC and its own MAC: HMAC-SHA256 over every field, under a key version read from Vault. Rows carry `macVersion: 13`, whose MAC covers every field: the authorization decision; on an identity refusal at the token's signing key, `kid` and `peer`; on a `proxy_certificate` row, the issued certificate's `serial` and `notAfter`; on a refusal, `target`; `operation`, `database` and `requesterDepartment`; `branch`: on a git push row the refs the push changes, comma-separated with `+N` for any that do not fit, or the ref a refused push was refused for, and on a GitHub pull request write or CI restart row the head branch the request named or GitHub reported for the pull request or run (or `invalid` when it is not a plain name); for a Cursor run, `source`, `automation`, `automationName` and `automationOwner`; on an HTTP row, `path`; on a GitHub GraphQL response row, `graphqlErrors`; on a GitHub request, `pullRequest`, `route` and `gitEntry`; on an `upstream_error` row, `cause`, one of `dial_timeout`, `tls_handshake`, `conn_refused`, `conn_reset`, `dns`, `tls_certificate`, `response_timeout` or `other`, never error text; on an `injection_flagged` row, `match`; on a GitHub route row answered at 4xx, `upstreamMessage`; and, on an `automation_settings` row, `settings`. A test fails if a new field is left out. Version 12 rows (written before `upstreamMessage`), version 11 rows (written before `match`), Version 10 rows (written before `cause`), version 9 rows (written before `settings`, `graphqlErrors`, `pullRequest`, `route` and `gitEntry`), version 8 rows (written before `path`), version 7 rows (written before the run's source and Automation), version 6 rows (written before `branch`), version 5 rows (written before `operation`, `database` and `requesterDepartment`), version 4 rows (written before `target`), version 3 rows (written before `serial` and `notAfter`), version 2 rows (before `kid` and `peer`) and rows without a version (before the authorization fields) verify under their older input; the verifier rejects such a row if it carries a field its version does not cover, and rejects a chain that steps down a version.
+- **Boots link to each other.** The store keeps a counter per replica name and the last checkpoint row each boot persisted. A restart takes the next boot number, and its `chain_start` row names the previous boot and that boot's last checkpoint row. Deleting a whole boot, or cutting a boot's tail back past that checkpoint, breaks the link. A boot never starts under an older key than its predecessor ended on.
+- **The store holds each replica's head.** The newest boot has no successor to link to it, so `audit verify --heads` checks it against the store: the boot must be in the export and reach the checkpoint the store persisted for it. This needs a stable replica name, so `AGENT_VAULT_REPLICA` (or the older `AGENT_VAULT_AUDIT_REPLICA`) is required; set it from the Pod name.
+- **A signed checkpoint every minute.** The broker asks Vault Transit to sign the chain head with an ed25519 key that never leaves Vault, writes the signature as a `checkpoint` row and persists that row in the store. A broker that holds the HMAC key can rewrite rows only after its last checkpoint; anything older fails verification.
+- **Key rotation.** Writing a new version of the KV secret rotates the HMAC key. The broker picks it up within five minutes and records a `key_rotated` row; the verifier rejects any later row under an older key. Rotate the Transit key with `transit/keys/<name>/rotate`.
+
+## Failure behavior
+
+| Failure | Behavior |
+| --- | --- |
+| HMAC key or store unreadable at start | The broker does not start. |
+| stdout write fails | The chain stops, every open session ends and every new session is refused. |
+| `AGENT_VAULT_AUDIT_CHAIN` unset | The broker starts unaudited and logs a warning saying so. |
+| Transit or store unavailable | Each missed checkpoint is recorded as `checkpoint_failed`. Sessions continue for five minutes after the last signed and persisted checkpoint, then new sessions are refused until one succeeds. |
+| Session row cannot be written | That session is refused before any query, and its credential is revoked. |
+
+## Configure
+
+1. Keep the HMAC key on the `gatehouse` KV version 2 mount. Create it without the value touching a file, an argument or shell history: `openssl rand -base64 32 | vault kv put gatehouse/example-audit-hmac key=-`.
+2. Create the signing key: `vault write transit/keys/example-audit-signing type=ed25519`.
+3. Give the broker's Vault role a sign-only Transit policy for that one key, plus read on the HMAC key:
+
+   ```hcl
+   path "transit/sign/example-audit-signing" { capabilities = ["update"] }
+   path "gatehouse/data/example-audit-hmac"   { capabilities = ["read"] }
+   ```
+
+   The broker gets no `transit/keys`, `export` or `rotate` access. Grant the verifier `read` on `gatehouse/data/example-audit-hmac` (including versions) and on `transit/keys/example-audit-signing`.
+4. Set `AGENT_VAULT_AUDIT_CHAIN=1`, `AGENT_VAULT_AUDIT_HMAC_PATH=example-audit-hmac`, `AGENT_VAULT_AUDIT_TRANSIT_KEY=example-audit-signing` and `AGENT_VAULT_AUDIT_REPLICA` to the Pod name (from the downward API). The HMAC mount is `AGENT_VAULT_AUDIT_HMAC_MOUNT`, else `AGENT_VAULT_KV_MOUNT`, else `gatehouse`.
+5. Route rows with the Cloud Logging filter `jsonPayload.type="gatehouse.audit.v1"` to a bucket with locked retention.
+
+## Verify
+
+```
+agent-vault audit heads > heads.jsonl
+agent-vault audit verify --hmac-path example-audit-hmac --transit-key example-audit-signing --heads heads.jsonl --input export.jsonl
+```
+
+`audit heads` reads the store (`DATABASE_URL`) and prints each replica's current boot and newest persisted checkpoint; it prints no secrets. Take it after the export so the export can reach every head. The input is newline-delimited rows, bare or as exported Cloud Logging entries. Rows are checked in input order per replica chain. If the export does not preserve order, add `--sort-by-seq`: a moved row then cannot be reported as a reorder, but it still cannot hide an edit, because sequence numbers and links are inside the MAC. The command prints each finding and exits 1 on any finding or an empty input:
+
+Verify with an `agent-vault` at least as new as the broker that wrote the rows. A verifier older than a row's `macVersion` cannot compute that version's MAC and reports the row as `edit`, since an unknown version is never trusted. Upgrade the verifier with the broker, and after rolling a broker back, keep the newer verifier until rows of the newer version are outside the range you check.
+
+| Finding | Meaning |
+| --- | --- |
+| `edit` | A row's MAC does not match its contents. |
+| `gap` | A sequence number is missing. |
+| `reorder` | A row appears before one it follows. |
+| `duplicate` | A sequence number appears twice. |
+| `broken_link` | A row does not link to the row before it. |
+| `no_chain_start` | A chain is missing its first row. |
+| `bad_checkpoint` | A checkpoint signature or the head it signs does not verify. |
+| `key_change` | The key version changed without a `key_rotated` row. |
+| `missing_boot` | A boot that a later boot links to is absent. |
+| `truncated_tail` | A boot ends before the checkpoint row its successor recorded for it. |
+| `boot_link` | A boot's link to its predecessor does not match. |
+| `missing_head` | A replica's newest boot, or the checkpoint the store holds for it, is not in the export. |
+| `unknown_boot` | A boot newer than the store's head, or a replica the store never saw. |
+| `key_downgrade` | A boot starts under an older key than its predecessor ended on. |
+| `unsigned_tail` | A boot has no valid checkpoint at all, or more than `--max-unsigned` (default five minutes) of rows follow its last checkpoint. |
+| `key_unavailable`, `malformed` | A row cannot be checked. |
+
+An export that starts partway through a replica's history needs `--partial-history`, which lets each replica's earliest boot link outside the export. Boots inside the export must still link.
+
+Rows written after the last persisted checkpoint, at most one minute of them, are protected by the chain alone until the next checkpoint; with `--heads`, that is the only window a cut can hide in. Run `audit heads` and the verifier on a schedule and alert on any finding.

@@ -1,0 +1,131 @@
+# Agent Vault — Agent Protocol
+
+Agent Vault is an HTTP proxy that attaches credentials to your outbound requests. You never see or handle credentials directly — route authenticated requests through Agent Vault and it authenticates on your behalf.
+
+## Managed credential-proxy profile
+
+When the managed runner selects this profile, use its approved destinations, public placeholder mappings and verified encrypted connection to the assigned task relay. The sandbox must not hold an identity token or projected proof; the separate trusted relay authenticates to the broker. The legacy token, discovery and proposal instructions below do not apply. Never request a standing token, invent a mapping or fall back to a direct connection.
+
+HTTP supports approved HTTPS GET/HEAD requests without a caller query or body, with configured placeholders only in `Authorization` or `X-Api-Key`. HTTP Basic supports a configured placeholder as the username with an empty password; never supply a real username or password. An operator may configure a fixed non-secret query for an exact GET destination; send its URL without parameters and let the proxy add them. HEAD is denied for that mapping. Send no `Proxy-Authorization` or other identity header. PostgreSQL uses only the operator-provided public placeholder password and fixed database/user. The relay also preserves supported application-name, positive statement-timeout and UTF8 encoding settings; see the task relay guide for bounds. Reconnect when a connection expires; never retrieve a proof or bypass the relay. Browser access, when configured, uses only the assigned create/check/close routes with an empty JSON object; no login credentials or session handles belong in the sandbox.
+
+Every refusal from the catalog broker carries an `X-Gatehouse-Refusal` header with a fixed reason code, and a one-line body naming the code and the next step. The one exception is a refused CONNECT through the task relay, covered last below. Decide by that header, not by the status alone: the broker strips it from every destination response, while a destination's own status and `Retry-After` pass through unchanged.
+
+- `X-Gatehouse-Refusal` with `Retry-After` (a `503` or `429`): a passing refusal, such as `session_missing`, `entitlement_unavailable`, `key_unavailable` or `audit_unavailable`. The request was not sent upstream. Wait that many seconds, then send it again. After `session_missing` the broker closes the connection, so the retry opens a new one. If the third retry is refused the same way, stop and report it with the reason code.
+- `X-Gatehouse-Refusal` without `Retry-After`: a lasting refusal of identity, mapping, destination or request format (`403`, `400`, `405`, `413`), or a `503` that waiting does not clear, such as `key_deleted`, `key_not_header_safe`, `key_not_basic_pair` or `seed_deadline`. Stop and report it with the reason code, or change the request as the next step says; resending it unchanged is refused again.
+- No `X-Gatehouse-Refusal`: the destination's own answer, or a `502` when the broker could not get or pass on that answer. The request may have been applied. Follow that service's retry rules and never assume it was not sent.
+- A refused CONNECT, which your client reports as a proxy or tunnel error rather than a response: nothing was sent. Through the task relay it is a bare `403` (denied; report it) or `503` (unavailable; retry after a pause) with no reason code.
+
+## Legacy token workflow
+
+The remaining instructions apply only when the runner uses legacy session tokens.
+
+### When to use
+
+1. Check that `AGENT_VAULT_TOKEN` is set — if not, Agent Vault is not available
+2. Call `/discover` to get the list of brokerable services
+3. For requests to hosts listed in the discover response, route through Agent Vault
+4. For all other requests, make them directly
+
+## Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_VAULT_ADDR` | Base URL of the Agent Vault server (e.g. `http://127.0.0.1:14321`) |
+| `AGENT_VAULT_TOKEN` | Bearer token for authenticating with Agent Vault. Either a vault-scoped session token or a long-lived agent token. |
+| `AGENT_VAULT_VAULT` | Vault the session is scoped to |
+
+## The X-Vault header
+
+If your token is an instance-level agent token (created via `agent-vault agent create`), you must include `X-Vault: {vault_name}` on all control-plane requests (`/discover`, `/v1/proposals`). If `AGENT_VAULT_VAULT` is set, use that value. Vault-scoped sessions (from `vault run`) do not need this header. Proxied requests don't use `X-Vault` either — vault for proxy traffic is communicated via the `Proxy-Authorization` userinfo (`token:vault`) baked into `HTTPS_PROXY`/`HTTP_PROXY`, which `vault run` configures for you.
+
+## Discover available services
+
+Always call this first to learn which services have credentials configured:
+
+```
+GET {AGENT_VAULT_ADDR}/discover
+Authorization: Bearer {AGENT_VAULT_TOKEN}
+X-Vault: {vault_name}
+```
+
+Response includes `vault`, `services` (each entry has `name` and `host`, where `host` is the joined inline form — `slack.com/api/*` for path-scoped rules), and `available_credentials` (key names only — values are never exposed). Before creating a proposal, check `available_credentials` to avoid requesting credentials that already exist in the vault. When two services share a bare host (e.g. one service at `slack.com/api/*` and another at `slack.com/api/apps.connections.*`), distinguish them by `name` in subsequent operations.
+
+## Route requests through the proxy
+
+For services returned by `/discover`, just call the real upstream URL — `agent-vault vault run` configures `HTTPS_PROXY` and the Agent Vault root CA on the child process so standard HTTP clients transparently route through the broker. Agent Vault strips broker-scoped headers, attaches the real credential, and forwards to the upstream over HTTPS.
+
+```
+GET https://api.stripe.com/v1/charges
+```
+
+## Manage services directly (admin only)
+
+If you have vault admin role, you can add or remove services without proposals:
+
+```
+POST {AGENT_VAULT_ADDR}/v1/vaults/{vault_name}/services    -- upsert services by name (body: {"services": [...]}). Each entry must include `host` (accepts inline path form like `slack.com/api/*`) and `name` (canonical slug) — `name` may be omitted only when `host` uniquely matches an existing service in the vault, in which case the server adopts that entry's name.
+DELETE {AGENT_VAULT_ADDR}/v1/vaults/{vault_name}/services/{name}  -- remove a service. The slot also accepts a host as a back-compat shim, returning 409 with the candidate names when more than one service shares that host.
+```
+
+Use these when you already have credentials stored. Use proposals when the human needs to provide new credentials.
+
+## Request access to new services via proposals
+
+When you get a `403` for a host not in `/discover`, create a proposal to request access. The 403 response includes a `proposal_hint` with the denied host.
+
+**Before proposing a proposal, look up how the target service authenticates API requests** to choose the correct auth type.
+
+```json
+POST {AGENT_VAULT_ADDR}/v1/proposals
+Authorization: Bearer {AGENT_VAULT_TOKEN}
+Content-Type: application/json
+
+{
+  "services": [{
+    "action": "set",
+    "name": "stripe",
+    "host": "api.stripe.com",
+    "auth": {"type": "bearer", "token": "STRIPE_KEY"}
+  }],
+  "credentials": [{
+    "action": "set",
+    "key": "STRIPE_KEY",
+    "description": "Stripe API key",
+    "obtain": "https://dashboard.stripe.com/apikeys",
+    "obtain_instructions": "Developers > API Keys > Reveal test key"
+  }],
+  "message": "Need Stripe API key for billing feature",
+  "user_message": "I need access to your Stripe account to build the checkout page."
+}
+```
+
+### Auth types
+
+| Type | Config | Common services |
+|------|--------|----------------|
+| `bearer` | `{"type": "bearer", "token": "SECRET_KEY"}` | Stripe, GitHub, OpenAI |
+| `basic` | `{"type": "basic", "username": "API_KEY"}` | Ashby, Jira (email + token) |
+| `api-key` | `{"type": "api-key", "key": "SECRET", "header": "x-api-key"}` | Anthropic |
+| `custom` | `{"type": "custom", "headers": {"X-Key": "{{ SECRET }}"}}` | Anything else |
+
+### After creating a proposal
+
+1. Present the `approval_url` to the user conversationally
+2. Poll `GET {AGENT_VAULT_ADDR}/v1/proposals/{id}` every 3 seconds for the first 30 seconds, then every 10 seconds, up to 10 minutes — until status is `applied`
+3. Retry your original request
+
+## Error handling
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| 401 | Invalid or expired token | Check `AGENT_VAULT_TOKEN` |
+| 403 | Host not allowed | Propose a proposal |
+| 429 | Too many pending proposals | Wait for review |
+| 502 | Missing credential or upstream unreachable | Tell user a credential may need to be added |
+
+## Rules
+
+- **Never** extract, log, or display credential values
+- **Never** hardcode tokens — always read from `AGENT_VAULT_TOKEN`
+- **Only** request services returned by `/discover` — if not listed, propose a proposal
+- Do not modify or forge the `Authorization` header beyond using your token

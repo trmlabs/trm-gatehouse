@@ -1,0 +1,158 @@
+---
+title: "Vaults"
+description: "Create vaults and manage team access with invites and roles."
+---
+
+A `Vault` is a secure logical container for credentials with services that define how agents can proxy requests through it.
+
+Each vault contains:
+
+- **[Credentials](/learn/credentials)**: API keys, database credentials, and other sensitive material that cannot be extracted from the vault.
+- **[Services](/learn/services)**: Definitions of which upstreams (scoped by a single `host` pattern that may carry an inline path glob, e.g. `api.stripe.com` or `slack.com/api/apps.connections.*`) can be accessed through the vault along with which and how credential(s) must be attached onto each proxy request.
+- **Members**: Users and agents that can access the vault under specific [roles](/learn/permissions#vault-roles) (`admin`, `member`, `proxy`).
+- **[Proposals](/learn/proposals)**: Requests from agents to set credential(s) and/or add service(s) that use those credentials.
+
+<Tip>
+  Note that a **default** vault is created automatically for the first user of
+  Agent Vault (called the instance [`owner`](/learn/permissions#instance-roles)).
+</Tip>
+
+## Create a vault
+
+```bash
+agent-vault vault create my-vault
+agent-vault vault list
+```
+
+Vault names must be **unique** across the Agent Vault instance and use **slug format**: lowercase letters, numbers, and hyphens only.
+
+## Bind a project to a vault
+
+Run `vault init` inside your project directory to create an `agent-vault.json` file that binds the project to a specific vault:
+
+```bash
+agent-vault vault init
+```
+
+This file is meant to be committed to version control. When present, all team members and agents running in that directory will automatically target the bound vault without needing `--vault` flags or per-user context.
+
+Vault resolution priority: `--vault` flag > `AGENT_VAULT_VAULT` env var > `agent-vault.json` > user context > `"default"`.
+
+## Add an agent to a vault
+
+For any agent that lives outside `vault run` (cloud-hosted, CI pipelines, always-on assistants), create a named agent and supply its token via `AGENT_VAULT_TOKEN`.
+
+<Steps>
+  <Step title="Create the agent">
+    ```bash
+    agent-vault agent create my-agent --vault my-vault:proxy
+    ```
+    Prints the agent token (and copies it to your clipboard). The `--vault` flag pre-assigns
+    vault access (format: `name:role`).
+  </Step>
+  <Step title="Supply the token to the agent's runtime">
+    Set `AGENT_VAULT_TOKEN` and `AGENT_VAULT_ADDR` wherever the agent runs (env vars,
+    secrets store, container config).
+  </Step>
+</Steps>
+
+If the agent already exists, grant it access to additional vaults with:
+
+```bash
+agent-vault vault agent add my-agent --vault my-vault --role proxy
+```
+
+## Invite users to a vault
+
+<Steps>
+  <Step title="Send the invite">
+    ```bash
+    agent-vault user invite alice@example.com --vault my-vault:admin
+    ```
+
+    If SMTP is configured, the invitee receives an HTML email with a browser
+    acceptance link. The invite link is also printed to CLI output.
+
+  </Step>
+  <Step title="Invitee accepts">
+    The invitee clicks the link and lands on a browser acceptance page.
+
+    - **New users** set their password on acceptance and their account is created
+      automatically.
+    - **Existing users** get the vault grant applied immediately.
+
+  </Step>
+  <Step title="Verify membership">
+    ```bash
+    agent-vault vault user list --vault my-vault
+    ```
+  </Step>
+</Steps>
+
+## Manage members and agents
+
+```bash
+# List vault members
+agent-vault vault user list --vault my-vault
+
+# Remove a member
+agent-vault vault user remove alice@example.com --vault my-vault
+
+# Change vault role
+agent-vault vault user set-role alice@example.com --role member --vault my-vault
+
+# List agents in a vault
+agent-vault vault agent list --vault my-vault
+
+# View agent details (instance-level)
+agent-vault agent info my-agent
+
+# Rotate an agent's session (instance-level)
+agent-vault agent rotate my-agent
+
+# Rename an agent (instance-level)
+agent-vault agent rename my-agent new-name
+
+# Remove an agent from this vault
+agent-vault vault agent remove my-agent
+```
+
+## Delete a vault
+
+[Vault admins](/learn/permissions#vault-roles) can delete the vaults they manage. Instance [owners](/learn/permissions#instance-roles) can also delete any vault.
+
+```bash
+agent-vault vault delete my-vault
+```
+
+The default vault cannot be deleted. Use `--yes` to skip the confirmation prompt.
+
+<Warning>
+  Deleting a vault permanently removes all its [services](/learn/services),
+  [credentials](/learn/credentials), agents, and [proposals](/learn/proposals).
+  This cannot be undone.
+</Warning>
+
+## Owner-level vault management
+
+Instance [owners](/learn/permissions#instance-roles) can see and manage all vaults across the instance, regardless of vault membership.
+
+```bash
+# List ALL vaults (owner only)
+agent-vault owner vault list
+
+# Join a vault as admin (owner only)
+agent-vault owner vault join my-vault
+
+# Delete a vault (owner only)
+agent-vault owner vault delete my-vault
+```
+
+Owners see every vault in their vault list. Vaults they have not joined appear in a separate "Other Vaults" section with a **Join** button. Joining grants the owner admin access, letting them manage credentials, approve proposals, and configure services.
+
+<Tip>
+  If a user is deleted and their vaults become orphaned (no remaining members),
+  an instance owner can always join those vaults to recover access. User deletion
+  only removes the user and their vault grants — vaults and their data stay
+  intact.
+</Tip>

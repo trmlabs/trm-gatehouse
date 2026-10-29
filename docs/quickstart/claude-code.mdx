@@ -1,0 +1,88 @@
+---
+title: "Claude Code"
+description: "Learn how to connect Claude Code to Agent Vault so it can make authenticated API requests without ever seeing your credentials."
+---
+
+import InstallCommand from "/snippets/install-command.mdx";
+
+## Prerequisites
+
+- A running Agent Vault instance on a separate host from where Claude Code runs ([see installation guide](/installation)).
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) installed.
+- An agent token from Agent Vault (create one under **Agents → Add agent**).
+
+Install the Agent Vault CLI on the host or in the container image where Claude Code runs, and point it at your Agent Vault instance. The CLI bootstraps Claude Code's environment so every outbound API call routes through Agent Vault for credential injection.
+
+<Tabs>
+  <Tab title="Shell">
+    ### 1. Install the Agent Vault CLI
+
+    Add the `agent-vault` binary to the environment where Claude Code runs.
+
+    <InstallCommand />
+
+    ### 2. Set environment variables
+
+    The CLI reads these on launch to authenticate with Agent Vault and scope its session to the right vault.
+
+    ```bash
+    export AGENT_VAULT_ADDR="http://<your-host>:14321"
+    export AGENT_VAULT_TOKEN="av_agt_xxx"
+    export AGENT_VAULT_VAULT="<VAULT_NAME>"
+    ```
+
+    ### 3. Run Claude Code under agent-vault
+
+    `agent-vault run` launches Claude Code with `HTTPS_PROXY` and `HTTP_PROXY` pre-set so both its HTTPS and plain HTTP calls route through Agent Vault for credential injection.
+
+    ```bash
+    agent-vault run -- claude
+    ```
+
+  </Tab>
+  <Tab title="Dockerfile">
+    ### 1. Install the Agent Vault CLI
+
+    Add the `agent-vault` binary to the image where Claude Code runs.
+
+    ```dockerfile
+    COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+    ```
+
+    ### 2. Set the entrypoint
+
+    `agent-vault run` launches Claude Code with `HTTPS_PROXY` and `HTTP_PROXY` pre-set so both its HTTPS and plain HTTP calls route through Agent Vault for credential injection.
+
+    ```dockerfile
+    ENTRYPOINT ["agent-vault", "run", "--", "claude"]
+    ```
+
+    ### 3. Pass environment variables at runtime
+
+    Inject the env vars when you run the container so the token never gets baked into the image. The CLI reads them on launch to authenticate with Agent Vault and scope its session to the right vault.
+
+    ```bash
+    docker run --rm -it \
+      -e AGENT_VAULT_ADDR="http://<your-host>:14321" \
+      -e AGENT_VAULT_TOKEN="av_agt_xxx" \
+      -e AGENT_VAULT_VAULT="<VAULT_NAME>" \
+      your-image
+    ```
+
+  </Tab>
+</Tabs>
+
+<Tip>
+`agent-vault run` also installs a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) at `~/.claude/skills/agent-vault-cli/SKILL.md` that teaches Claude Code how to raise proposals when API access is needed. The skill persists across sessions.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Agent protocol" icon="code" href="/agents/protocol">
+    Full request lifecycle end-to-end.
+  </Card>
+  <Card title="Services" icon="shield" href="/learn/services">
+    Pre-configure services you know the agent will need.
+  </Card>
+</CardGroup>

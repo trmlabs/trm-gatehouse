@@ -1,0 +1,178 @@
+# Comments: one line, only what the code can't say. No history, ticket numbers, names or restated code.
+name: CI
+
+# pull_request, never pull_request_target: forks run with no secrets and a read-only token.
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.4'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend (tsc + vite)
+        run: cd web && npm ci && npm run build
+
+  go-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # go:embed all:webdist needs the directory at compile time; frontend-build checks the real output.
+      - name: Stub webdist for go:embed
+        run: |
+          mkdir -p internal/server/webdist
+          printf '<!doctype html><title>ci-stub</title>' > internal/server/webdist/index.html
+
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+      - name: Vet and test the e2e build
+        run: |
+          set -euo pipefail
+          go vet -tags e2e ./...
+          mapfile -t packages < <(grep -rlE --include='*.go' '^//go:build e2e' cmd internal | xargs -n1 dirname | sort -u | sed 's|^|./|')
+          if [ "${#packages[@]}" -gt 0 ]; then go test -race -count=1 -tags e2e "${packages[@]}"; fi
+
+  go-lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Stub webdist for go:embed
+        run: |
+          mkdir -p internal/server/webdist
+          printf '<!doctype html><title>ci-stub</title>' > internal/server/webdist/index.html
+
+      - name: Validate GitHub workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.11.0
+
+  go-mod-tidy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check go mod tidy
+        run: go mod tidy && git diff --exit-code go.mod go.sum
+
+  sdk-ts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: sdks/sdk-typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.4'
+          cache: npm
+          cache-dependency-path: sdks/sdk-typescript/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  credential-proxy-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build disposable Vault and PostgreSQL fixture
+        run: docker build -f examples/credential-proxy/Dockerfile -t credential-proxy-verification .
+
+      - name: Verify credential proxy workflows
+        run: docker run --rm --network none credential-proxy-verification
+
+  # The one required check; if: always() keeps a skipped job from reading as a pass.
+  ci-summary:
+    if: always()
+    needs: [frontend-build, go-test, go-lint, go-mod-tidy, sdk-ts, credential-proxy-integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "A required job finished as $result"
+              exit 1
+            fi
+          done

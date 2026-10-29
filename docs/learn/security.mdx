@@ -1,0 +1,201 @@
+---
+title: "Security"
+description: "How Agent Vault protects credentials at rest, in transit, and across the network."
+---
+
+import EnterpriseCTA from "/snippets/enterprise-cta.mdx";
+
+<EnterpriseCTA />
+
+Agent Vault is designed around a single principle: **Agent Vault never reveals vault-stored credentials to agents**. Credentials are encrypted at rest, decrypted only in memory at proxy time, and injected into outbound requests server-side. No credential value stored in the vault is ever returned in an API response or written to a log.
+
+This page covers the cryptographic primitives, token model, network protections, and operational safeguards that make this possible.
+
+<Note>
+  [Passthrough services](/learn/services#passthrough) are an operator-chosen
+  exception: they allowlist a host without storing or injecting any credential.
+  The guarantees below apply to credentials *stored in the vault* — a
+  credential the client holds outside the vault is not protected by Agent
+  Vault, but the host allowlist, [netguard](#network-security), TLS
+  interception, and audit logging still apply.
+</Note>
+
+## Encryption at rest
+
+All [credentials](/learn/credentials) stored in a [vault](/learn/vaults) are encrypted using **AES-256-GCM**, an authenticated encryption scheme that provides both confidentiality and tamper detection.
+
+Agent Vault uses a **KEK/DEK key-wrapping architecture**:
+
+1. A random 256-bit **DEK** (Data Encryption Key) is generated on first boot. This key encrypts all credentials and the CA private key.
+2. If a **master password** is set, Argon2id derives a **KEK** (Key Encryption Key) that wraps the DEK. The KEK is never stored — it is derived in memory, used to unwrap the DEK, then wiped.
+3. If no master password is set (**passwordless mode**), the DEK is stored in plaintext in the database. Security depends on filesystem access controls — suitable for PaaS platforms where the platform manages volume isolation.
+
+| Parameter | Value |
+| --------- | ----- |
+| Data encryption | AES-256-GCM |
+| Key wrapping | AES-256-GCM |
+| KDF (for KEK) | Argon2id |
+| Time cost | 3 iterations |
+| Memory cost | 64 MiB |
+| Parallelism | 4 threads |
+| DEK length | 256 bits (random, `crypto/rand`) |
+| KEK length | 256 bits (Argon2id output) |
+| Salt length | 128 bits (random per setup) |
+
+Each encryption operation uses a fresh random nonce generated from `crypto/rand`. Credential values are decrypted in memory only at proxy time to resolve auth headers, then discarded.
+
+**Password changes are lightweight**: changing the master password re-wraps the DEK under a new KEK — a single database update with zero credential re-encryption. For single-instance (SQLite) deployments, you can add, change, or remove the password using `agent-vault master-password set|change|remove`. When using PostgreSQL with multiple instances, these CLI commands require `--force` after stopping all instances. See the [PostgreSQL guide](/self-hosting/postgres) for detailed rotation steps.
+
+<Note>
+  The master password is **never stored on disk**. If set via the
+  `AGENT_VAULT_MASTER_PASSWORD` environment variable, Agent Vault unsets it from the process
+  immediately after reading. The KEK derived from the password is wiped from
+  memory after unwrapping the DEK.
+</Note>
+
+## Password hashing
+
+User passwords are hashed with **Argon2id** using the same parameters as master key derivation. Each user gets an independent random salt. Password verification uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
+
+KDF parameters are stored per user, so Agent Vault can upgrade hashing parameters in the future without invalidating existing accounts.
+
+Changing a password (`agent-vault account change-password` or `POST /v1/auth/change-password`) invalidates all existing sessions and issues a fresh token.
+
+User sessions are **long-lived but idle-expired**. A login is good for up to a year of activity; if a session goes 30 days without making a request, it is automatically rejected as expired. Active operators effectively never have to log in again, while a stolen `~/.agent-vault/session.json` that goes unused loses access in 30 days. Operators can view and revoke individual sessions with `agent-vault auth sessions list / revoke`, or invalidate every session at once via `account change-password`.
+
+## Token model
+
+All tokens are generated from `crypto/rand` (256 bits of entropy) and hashed before storage. The raw token is returned to the caller exactly once; Agent Vault only stores the hash.
+
+| Token | Prefix | Storage hash | TTL | Notes |
+| ----- | ------ | ------------ | --- | ----- |
+| User session | `av_sess_` | SHA-256 | 1 year absolute, 30-day idle | Bumped on each authenticated request |
+| Scoped session | `av_sess_` | SHA-256 | Configurable (5 min – 7 days, default 24h) | Vault-bound, minted by `vault run` |
+| Agent token | `av_agt_` | SHA-256 | No expiry | Instance-level agent identity |
+| Approval | `av_appr_` | SHA-256 | 24 hours | Grants read-only access to a [proposal](/learn/proposals) |
+| Vault invite | `av_uinv_` | SHA-256 | 48 hours | For onboarding human users |
+
+All tokens use SHA-256 for fast lookup.
+
+The proxy revalidates the original session before every forwarded HTTP request, including requests on an existing HTTPS CONNECT tunnel. An agent token's revocation, expiry or removed vault grant blocks the next request. This check does not stop an already-running request or upgraded WebSocket. Scoped sessions still use their stored vault role; this is not a replacement for live task authorization.
+
+The local `internal/actionref` acceptance handler demonstrates fixed read operations, output filtering and cancellation through the proxy. It is not mounted in the server, and its test identity and policy callbacks do not validate real workload identity. The real-Vault fixture tests policy loss, policy lookup failure and deadlines against slow HTTP and HTTPS upstreams. Deployments still need a trusted identity verifier, persistent policy, audit records and enforced isolation.
+
+## Network security
+
+Agent Vault includes a network guard that validates every outbound proxy connection at the IP level, preventing agents from using the proxy to reach internal infrastructure.
+
+### Policy
+
+Outbound proxy connections are validated against the resolved IP. By default, every RFC-1918, loopback, link-local, IPv6 ULA, and CGN range is blocked, plus cloud metadata endpoints. Set `AGENT_VAULT_ALLOW_PRIVATE_RANGES=true` for local/trusted deployments where the proxy needs to reach internal services on private IPs. To keep the block on but punch narrow holes for known internal services, set `AGENT_VAULT_NETWORK_ALLOWLIST=10.163.0.0/16,192.168.1.1` (CIDRs or bare IPs, comma-separated). Cloud metadata endpoints stay blocked regardless.
+
+### Always blocked
+
+Cloud provider metadata endpoints are blocked unconditionally — including when allowlisted — to prevent credential theft via SSRF:
+
+- `169.254.169.254/32` (AWS, GCP, Azure instance metadata)
+- `fd00:ec2::254/128` (AWS IMDSv2 IPv6)
+
+### Blocked when `AGENT_VAULT_ALLOW_PRIVATE_RANGES=false`
+
+RFC-1918 and other reserved ranges are additionally blocked under the default policy, unless explicitly allowlisted:
+
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (private)
+- `127.0.0.0/8`, `::1/128` (loopback)
+- `169.254.0.0/16`, `fe80::/10` (link-local)
+- `fc00::/7` (IPv6 unique local)
+- `100.64.0.0/10` (carrier-grade NAT)
+- `0.0.0.0/32`, `::/128` (unspecified addresses, which connect to localhost)
+
+### DNS rebinding protection
+
+Agent Vault checks the exact IP of every outbound connection attempt against the block list, right before connecting. If a hostname resolves to several addresses, blocked ones are skipped and never contacted. Because the check runs on the address actually being dialed, DNS rebinding (a hostname resolving to a safe IP during validation but an internal one at connection time) can't bypass it.
+
+## Transport security
+
+All proxied requests are forwarded over **HTTPS**. The agent's session token never reaches the target service: it travels in `Proxy-Authorization` (which is hop-by-hop and never forwarded). Real credentials are injected server-side based on the vault's [services](/learn/services).
+
+Other client request headers — vendor headers like `anthropic-version`, conditional request headers, tracing IDs — flow through to the upstream unchanged. The broker only takes over the headers it is responsible for injecting (the auth slot for the configured auth type) plus hop-by-hop and broker-scoped headers; see [Header forwarding](/learn/services#header-forwarding) for the precise rules.
+
+This means:
+- Agents authenticate to Agent Vault with a token that grants no direct access to credentials.
+- The agent's token never reaches the target service.
+- Credential values only exist in the outbound request headers, never in the agent's address space.
+
+### Transparent proxy transport
+
+The MITM listener that backs `HTTPS_PROXY` and `HTTP_PROXY` is a plain HTTP forward proxy. The `Proxy-Authorization` header carrying the session token travels in cleartext between agent and broker. Deploy Agent Vault on a trusted or private network (localhost, VPN, private subnet). CONNECT tunnels to upstream HTTPS destinations are end-to-end encrypted inside the proxy connection.
+
+- **Root CA private key** is encrypted at rest with the DEK (same key that wraps credentials). See [Encryption at rest](#encryption-at-rest).
+- **DNS rebinding protection** and **[netguard](#network-security)** — every outbound connection is resolved and validated against the IP blocklist before Agent Vault dials the upstream.
+- **Rate limiting** is enforced per `(actor, vault)` budget.
+
+## Access control
+
+Agent Vault enforces access at two independent layers. For full details, see [Permissions](/learn/permissions).
+
+- **Instance roles** (`owner`, `member`, `no-access`) control who can manage users, vaults, and server settings. Both users and agents have instance-level roles. Owners can see and join any vault, but must explicitly join to access vault contents. The `no-access` role grants zero instance-scoped capabilities and is used for actors whose only authority is a per-vault grant.
+- **Vault roles** (`admin`, `member`, `proxy`) control who can approve [proposals](/learn/proposals), manage agents, and use the proxy within a specific [vault](/learn/vaults).
+- **Agents** are instance-level entities that can access multiple vaults via the `X-Vault` header. Vault-scoped sessions (from `vault run`) are limited to a single vault.
+- **Proposal approval** requires a valid user session. Read-only approval tokens let you view the proposal, but submitting an approval (providing credentials, clicking "Allow") requires logging in.
+- **Email domain restrictions** -- Owners can restrict signups to specific email domains (e.g., `@acme.com`). This applies to email/password registration and vault invite acceptance. The first user (owner) is exempt. Configure via **Manage > Settings** in the web UI or `agent-vault owner settings set --allowed-domains`.
+
+## Rate limits
+
+### Request rate limiting
+
+Agent Vault enforces a tiered, in-memory rate limiter on every HTTP ingress. Each tier is keyed on the principal appropriate for that endpoint, so one noisy client cannot drown out another:
+
+| Tier | Keyed on | Covers |
+| ---- | -------- | ------ |
+| `AUTH` | Client IP | Anonymous endpoints (login, registration, password reset) and proxy auth failures |
+| `AUTHED` | Session token hash | Proposal approval, authenticated CRUD |
+| `PROXY` | `(actor, vault)` scope | Proxy path and MITM ingress |
+| `GLOBAL` | Server-wide | In-flight request ceiling and RPS backstop |
+
+Requests that exceed a tier return `429 Too Many Requests` with a `Retry-After` header so clients can back off.
+
+Operators pick a profile via `AGENT_VAULT_RATELIMIT_PROFILE` (`default`, `strict`, `loose`, `off`) or tune individual tiers in **Manage Instance → Settings → Rate Limiting**. The default proxy tier is sized for normal agent fan-out while anonymous auth remains tighter. Setting `AGENT_VAULT_RATELIMIT_LOCK=true` pins limits to env vars and makes the UI read-only, which is recommended on PaaS deployments. See [environment variables](/self-hosting/environment-variables) for the full knob list.
+
+### Resource caps
+
+Hard caps prevent unbounded growth in vault state:
+
+| Resource | Limit |
+| -------- | ----- |
+| Pending [proposals](/learn/proposals) per vault | 20 |
+| Pending user invites per vault | 50 |
+| Active sessions per agent | 10 |
+| Rules per proposal | 10 |
+| Credential slots per proposal | 10 |
+
+## Database security
+
+**SQLite** (default, single-instance):
+
+- **File permissions**: Database file is created with mode `0600` (owner read/write only).
+- **Parameterized queries**: All queries use prepared statements, preventing SQL injection.
+- **WAL mode**: Write-ahead logging for crash resilience.
+- **Foreign key cascades**: Deleting a vault automatically cleans up all associated credentials, proposals, agents, and sessions.
+
+**PostgreSQL** (production, multi-instance):
+
+- **Parameterized queries**: Same prepared-statement approach as SQLite, preventing SQL injection.
+- **Foreign key cascades**: Same cascade behavior as SQLite.
+- **TLS**: Use `?sslmode=require` or `?sslmode=verify-full` in your connection URL for encrypted connections to the database.
+- **Access controls**: The database user should have access only to the Agent Vault database. Credentials are encrypted at rest by the DEK regardless of database-level access, but limiting access reduces attack surface.
+- **Advisory locks**: Service-config writes use `pg_advisory_lock` to prevent concurrent conflicting updates across instances.
+
+## Sensitive data handling
+
+A summary of how each category of sensitive data is stored:
+
+| Data | Storage format | Readable after storage? |
+| ---- | -------------- | ----------------------- |
+| Credentials | AES-256-GCM ciphertext + nonce | Yes, by vault members and admins via CLI (`credential get`, `credential list --reveal`). Proxy-role agents cannot read values. |
+| User passwords | Argon2id hash + salt + params | No |
+| Session tokens | SHA-256 hash | No (raw returned once at creation) |
+| DEK (data encryption key) | Wrapped by KEK (password mode) or plaintext (passwordless mode) in `master_key` table | Yes, in memory while server runs |
+| Master password | Not stored | N/A (KEK derived in memory, wiped after DEK unwrap) |
+
+Key material is zeroed after use via `WipeBytes()` on a best-effort basis. Sensitive byte slices are never converted to strings (Go strings are immutable and cannot be wiped from memory).

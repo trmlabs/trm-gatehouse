@@ -1,0 +1,507 @@
+import { useState, useEffect, useMemo } from "react";
+import { Link, useNavigate, useRouteContext } from "@tanstack/react-router";
+import type { AuthContext } from "../../router";
+import Sheet from "../../components/Sheet";
+import VaultForm, {
+  emptyVaultForm,
+  infisicalFieldsValid,
+  buildInfisicalConfig,
+  hashicorpFieldsValid,
+  buildHashicorpConfig,
+  type VaultFormValues,
+} from "../../components/VaultForm";
+import Button from "../../components/Button";
+import Modal from "../../components/Modal";
+import ConfirmDeleteModal from "../../components/ConfirmDeleteModal";
+import { ErrorBanner, LoadingSpinner, timeAgo } from "../../components/shared";
+import { apiFetch } from "../../lib/api";
+
+interface Vault {
+  id: string;
+  name: string;
+  role: string;
+  membership: "explicit" | "implicit";
+  is_default?: boolean;
+  created_at: string;
+  pending_proposals: number;
+}
+
+export default function VaultsListTab() {
+  const { auth } = useRouteContext({ from: "/_auth" }) as { auth: AuthContext };
+  const navigate = useNavigate();
+  const [vaults, setVaults] = useState<Vault[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Vault | null>(null);
+  const [leaveTarget, setLeaveTarget] = useState<Vault | null>(null);
+  const [leaveError, setLeaveError] = useState("");
+
+  useEffect(() => {
+    fetchVaults();
+  }, []);
+
+  async function fetchVaults() {
+    try {
+      const resp = await apiFetch("/v1/vaults");
+      if (resp.ok) {
+        const data = await resp.json();
+        setVaults(data.vaults || []);
+      } else {
+        const data = await resp.json();
+        setError(data.error || "Failed to load vaults.");
+      }
+    } catch {
+      setError("Network error. Please check your connection.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDeleteVault() {
+    if (!deleteTarget) return;
+    const resp = await apiFetch(
+      `/v1/vaults/${encodeURIComponent(deleteTarget.name)}`,
+      { method: "DELETE" }
+    );
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || "Failed to delete vault");
+    }
+    setDeleteTarget(null);
+    fetchVaults();
+  }
+
+  async function handleLeaveVault() {
+    if (!leaveTarget) return;
+    setLeaveError("");
+    const resp = await apiFetch(
+      `/v1/vaults/${encodeURIComponent(leaveTarget.name)}/leave`,
+      { method: "POST" }
+    );
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      setLeaveError(data.error || "Failed to leave vault");
+      return;
+    }
+    setLeaveTarget(null);
+    fetchVaults();
+  }
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return vaults;
+    const q = search.toLowerCase();
+    return vaults.filter((v) => v.name.toLowerCase().includes(q));
+  }, [vaults, search]);
+
+  const myVaults = useMemo(() => filtered.filter((v) => v.membership === "explicit"), [filtered]);
+  const otherVaults = useMemo(() => filtered.filter((v) => v.membership === "implicit"), [filtered]);
+
+  return (
+    <div className="p-8 w-full max-w-[960px]">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-[22px] font-semibold text-text tracking-tight mb-1">
+            Vaults
+          </h2>
+          <p className="text-sm text-text-muted">
+            {auth.is_owner ? "All vaults across the instance." : "Vaults you have access to."}
+          </p>
+        </div>
+        <CreateVaultButton onCreated={(name) => navigate({ to: "/vaults/$name", params: { name } })} />
+      </div>
+
+      {/* Search */}
+      <div className="relative mb-6">
+        <svg
+          className="absolute left-4 top-1/2 -translate-y-1/2 w-[18px] h-[18px] text-text-dim"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        <input
+          type="text"
+          placeholder="Search vaults..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full pl-12 pr-4 py-3.5 bg-surface border border-border rounded-xl text-text text-sm outline-none transition-colors focus:border-border-focus focus:shadow-[0_0_0_3px_var(--color-primary-ring)]"
+        />
+      </div>
+
+      {/* Content */}
+      {loading ? (
+        <LoadingSpinner />
+      ) : error ? (
+        <ErrorBanner message={error} />
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-20 text-text-muted text-sm">
+          {search ? "No vaults match your search." : "No vaults yet."}
+        </div>
+      ) : (
+        <>
+          {myVaults.length > 0 && (
+            <div className={otherVaults.length > 0 ? "mb-10" : ""}>
+              {otherVaults.length > 0 && (
+                <h2 className="text-sm font-medium text-text-muted uppercase tracking-wide mb-3">My Vaults</h2>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {myVaults.map((vault) => (
+                  <VaultCard
+                    key={vault.id}
+                    vault={vault}
+                    isOwner={auth.is_owner}
+                    onLeave={setLeaveTarget}
+                    onDelete={setDeleteTarget}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+          {otherVaults.length > 0 && (
+            <div>
+              <h2 className="text-sm font-medium text-text-muted uppercase tracking-wide mb-3">Other Vaults</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {otherVaults.map((vault) => (
+                  <VaultCard
+                    key={vault.id}
+                    vault={vault}
+                    isOwner={auth.is_owner}
+                    onJoined={fetchVaults}
+                    onDelete={setDeleteTarget}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      <ConfirmDeleteModal
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteVault}
+        title="Delete vault"
+        description={`This will permanently delete the vault "${deleteTarget?.name}" and all its data including rules, credentials, agents, and proposals. Type the vault name to confirm.`}
+        confirmLabel="Delete permanently"
+        confirmValue={deleteTarget?.name ?? ""}
+        inputLabel="Vault name"
+      />
+
+      <Modal
+        open={leaveTarget !== null}
+        onClose={() => { setLeaveTarget(null); setLeaveError(""); }}
+        title="Leave vault"
+        description={`You will lose access to "${leaveTarget?.name}" and its credentials. A vault admin can re-add you later.`}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => { setLeaveTarget(null); setLeaveError(""); }}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleLeaveVault}
+              className="!bg-danger !text-white hover:!bg-danger/90"
+            >
+              Leave vault
+            </Button>
+          </>
+        }
+      >
+        {leaveError && <ErrorBanner message={leaveError} />}
+      </Modal>
+    </div>
+  );
+}
+
+function VaultCard({
+  vault,
+  isOwner,
+  onJoined,
+  onLeave,
+  onDelete,
+}: {
+  vault: Vault;
+  isOwner: boolean;
+  onJoined?: () => void;
+  onLeave?: (vault: Vault) => void;
+  onDelete: (vault: Vault) => void;
+}) {
+  const [joining, setJoining] = useState(false);
+  const [joinError, setJoinError] = useState("");
+
+  async function handleJoin(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setJoining(true);
+    setJoinError("");
+    try {
+      const resp = await apiFetch(`/v1/vaults/${vault.name}/join`, { method: "POST" });
+      if (resp.ok) {
+        onJoined?.();
+      } else {
+        const data = await resp.json();
+        setJoinError(data.error || "Failed to join vault.");
+      }
+    } catch {
+      setJoinError("Network error.");
+    } finally {
+      setJoining(false);
+    }
+  }
+
+  function handleLeave(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    onLeave?.(vault);
+  }
+
+  function handleDelete(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    onDelete(vault);
+  }
+
+  const isImplicit = vault.membership === "implicit";
+  const canLeave = !isImplicit && !vault.is_default;
+  const canDelete = isOwner && !vault.is_default;
+
+  const card = (
+    <div
+      className={`bg-surface border border-border rounded-xl p-5 transition-colors ${isImplicit ? "" : "hover:border-border-focus/40 cursor-pointer"}`}
+    >
+      <div className="flex items-start justify-between mb-3">
+        <h3 className="text-base font-semibold text-text tracking-tight">
+          {vault.name}
+        </h3>
+        <div className="flex items-center gap-2">
+          {isImplicit ? (
+            <button
+              onClick={handleJoin}
+              disabled={joining}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium bg-primary text-primary-text hover:bg-primary-hover transition-colors disabled:opacity-50"
+            >
+              {joining ? "Joining..." : "Join"}
+            </button>
+          ) : vault.pending_proposals > 0 ? (
+            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-warning-bg text-warning border border-warning/20">
+              {vault.pending_proposals}{" "}
+              {vault.pending_proposals === 1 ? "review needed" : "reviews needed"}
+            </span>
+          ) : null}
+          {canLeave && (
+            <button
+              onClick={handleLeave}
+              className="p-1 rounded text-text-dim hover:text-danger transition-colors"
+              title="Leave vault"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
+          )}
+          {canDelete && (
+            <button
+              onClick={handleDelete}
+              className="p-1 rounded text-text-dim hover:text-danger transition-colors"
+              title="Delete vault"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+      {joinError && (
+        <div className="text-xs text-danger mb-2">{joinError}</div>
+      )}
+      <div className="flex items-center gap-3 text-xs text-text-muted">
+        <span className="flex items-center gap-1.5">
+          <svg
+            className="w-3.5 h-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+          {timeAgo(vault.created_at)}
+        </span>
+        {vault.role && (
+          <span className="text-text-dim">
+            {vault.role}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+
+  if (isImplicit) return card;
+
+  return (
+    <Link to="/vaults/$name" params={{ name: vault.name }} className="block no-underline">
+      {card}
+    </Link>
+  );
+}
+
+function CreateVaultButton({ onCreated }: { onCreated: (name: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [values, setValues] = useState<VaultFormValues>(emptyVaultForm);
+  const [availableStores, setAvailableStores] = useState<string[]>(["builtin"]);
+
+  useEffect(() => {
+    apiFetch("/v1/instance/credential-stores")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.available) setAvailableStores(data.available);
+      })
+      .catch(() => {/* fall back to builtin only */});
+  }, []);
+
+  function close() {
+    setOpen(false);
+    setValues(emptyVaultForm);
+    setError("");
+  }
+
+  async function handleCreate() {
+    const trimmed = values.name.trim();
+    if (!trimmed) return;
+    setSubmitting(true);
+    setError("");
+    const body: Record<string, unknown> = { name: trimmed };
+    if (values.kind === "infisical") {
+      if (!infisicalFieldsValid(values)) {
+        setError("Project ID and environment are required for Infisical.");
+        setSubmitting(false);
+        return;
+      }
+      try {
+        body.credential_store = { kind: "infisical", config: buildInfisicalConfig(values) };
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Invalid Infisical config.");
+        setSubmitting(false);
+        return;
+      }
+    } else if (values.kind === "hashicorp") {
+      if (!hashicorpFieldsValid(values)) {
+        setError("Mount and secret path are required for HashiCorp Vault.");
+        setSubmitting(false);
+        return;
+      }
+      body.credential_store = { kind: "hashicorp", config: buildHashicorpConfig(values) };
+    }
+
+    try {
+      const resp = await apiFetch("/v1/vaults", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) {
+        close();
+        onCreated(trimmed);
+      } else {
+        const data = await resp.json();
+        setError(data.error || "Failed to create vault.");
+      }
+    } catch {
+      setError("Network error.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const infisicalAvailable = availableStores.includes("infisical");
+  const hashicorpAvailable = availableStores.includes("hashicorp");
+
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>
+        <svg
+          className="w-4 h-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        New vault
+      </Button>
+
+      <Sheet
+        open={open}
+        onClose={close}
+        eyebrow="Vault"
+        title="New vault"
+        footer={
+          <>
+            <Button variant="secondary" onClick={close}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreate}
+              loading={submitting}
+              disabled={
+                !values.name.trim() ||
+                !infisicalFieldsValid(values) ||
+                !hashicorpFieldsValid(values)
+              }
+            >
+              Create
+            </Button>
+          </>
+        }
+      >
+        <VaultForm
+          values={values}
+          onChange={(patch) => {
+            setValues((v) => ({ ...v, ...patch }));
+            setError("");
+          }}
+          infisicalOptionDisabled={!infisicalAvailable}
+          hashicorpOptionDisabled={!hashicorpAvailable}
+          namePlaceholder="e.g. my-project"
+          autoFocusName
+          onEnter={handleCreate}
+          error={error}
+          storeTooltip={
+            <>
+              Built-in keeps credentials in Agent Vault. Infisical and HashiCorp Vault sync read-only from your external instance.
+              {!infisicalAvailable && (
+                <> Set <code>INFISICAL_URL</code> on the server to enable Infisical-backed vaults.</>
+              )}
+              {!hashicorpAvailable && (
+                <> Set <code>VAULT_ADDR</code> on the server to enable HashiCorp-backed vaults.</>
+              )}
+            </>
+          }
+          header={
+            <p className="text-sm text-text-muted">
+              Create an isolated environment with its own credentials and proxy rules.
+            </p>
+          }
+        />
+      </Sheet>
+    </>
+  );
+}

@@ -1,0 +1,1105 @@
+package netguard
+
+import (
+	"bytes"
+	"context"
+	"log"
+	"log/slog"
+	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
+)
+
+func TestIsBlockedIP_AlwaysBlocked(t *testing.T) {
+	// IMDS endpoints are blocked regardless of policy (allowlist does NOT bypass).
+	imds := net.ParseIP("169.254.169.254")
+
+	if !isBlockedIP(imds, false, nil) {
+		t.Error("169.254.169.254 should be blocked when private ranges are blocked")
+	}
+	if !isBlockedIP(imds, true, nil) {
+		t.Error("169.254.169.254 should be blocked even when private ranges are allowed")
+	}
+
+	// Even with allowlist containing the IMDS IP, it should still be blocked.
+	allowlist := []net.IPNet{parseCIDR("169.254.169.254/32")}
+	if !isBlockedIP(imds, false, allowlist) {
+		t.Error("169.254.169.254 should be blocked even when allowlisted (always-blocked takes precedence)")
+	}
+
+	// AWS IMDSv2 IPv6
+	imdsV6 := net.ParseIP("fd00:ec2::254")
+	if !isBlockedIP(imdsV6, true, nil) {
+		t.Error("fd00:ec2::254 should be blocked even when private ranges are allowed")
+	}
+}
+
+func TestIsBlockedIP_AllowPrivate(t *testing.T) {
+	// When private ranges are allowed, RFC-1918 etc. should NOT be blocked.
+	cases := []string{
+		"10.0.0.1",
+		"172.16.0.1",
+		"192.168.0.1",
+		"fe80::1",
+		"127.0.0.1",
+	}
+	for _, ip := range cases {
+		if isBlockedIP(net.ParseIP(ip), true, nil) {
+			t.Errorf("%s should NOT be blocked when private ranges are allowed", ip)
+		}
+	}
+}
+
+func TestIsBlockedIP_BlockPrivate(t *testing.T) {
+	// When private ranges are blocked, RFC-1918, loopback, link-local, CGN should be blocked.
+	blocked := []string{
+		"10.0.0.1",
+		"172.16.0.1",
+		"192.168.0.1",
+		"127.0.0.1",
+		"169.254.0.1",
+		"100.64.0.1",
+		"0.0.0.0",
+		"::",
+	}
+	for _, ip := range blocked {
+		if !isBlockedIP(net.ParseIP(ip), false, nil) {
+			t.Errorf("%s should be blocked when private ranges are blocked", ip)
+		}
+	}
+
+	// Public IPs should NOT be blocked.
+	allowed := []string{
+		"8.8.8.8",
+		"1.1.1.1",
+		"104.18.0.1",
+	}
+	for _, ip := range allowed {
+		if isBlockedIP(net.ParseIP(ip), false, nil) {
+			t.Errorf("%s should NOT be blocked (public IP)", ip)
+		}
+	}
+}
+
+func TestIsBlockedIP_Allowlist(t *testing.T) {
+	allowlist := []net.IPNet{
+		parseCIDR("10.163.0.0/16"),
+		parseCIDR("192.168.1.1/32"),
+	}
+
+	// IPs in allowlist should NOT be blocked.
+	allowlisted := []string{
+		"10.163.0.1",
+		"10.163.255.254",
+		"192.168.1.1",
+	}
+	for _, ip := range allowlisted {
+		if isBlockedIP(net.ParseIP(ip), false, allowlist) {
+			t.Errorf("%s should NOT be blocked when allowlisted", ip)
+		}
+	}
+
+	// Private IPs not in allowlist should be blocked.
+	blocked := []string{
+		"10.0.0.1",
+		"192.168.1.2",
+		"172.16.0.1",
+	}
+	for _, ip := range blocked {
+		if !isBlockedIP(net.ParseIP(ip), false, allowlist) {
+			t.Errorf("%s should be blocked (not allowlisted)", ip)
+		}
+	}
+}
+
+func TestAllowPrivateFromEnv(t *testing.T) {
+	cases := []struct {
+		env  string
+		want bool
+	}{
+		{"", false},
+		{"true", true},
+		{"TRUE", true},
+		{"True", true},
+		{"1", true},
+		{"t", true},
+		{"false", false},
+		{"FALSE", false},
+		{"0", false},
+		{"f", false},
+		{"garbage", false}, // unparseable falls back to safe default
+	}
+	for _, c := range cases {
+		t.Setenv("AGENT_VAULT_ALLOW_PRIVATE_RANGES", c.env)
+		if got := AllowPrivateFromEnv(); got != c.want {
+			t.Errorf("AllowPrivateFromEnv() with env=%q = %v, want %v", c.env, got, c.want)
+		}
+	}
+}
+
+func TestAllowlistFromEnv(t *testing.T) {
+	// Empty env var returns nil.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	if ranges := AllowlistFromEnv(); ranges != nil {
+		t.Error("empty AGENT_VAULT_NETWORK_ALLOWLIST should return nil")
+	}
+
+	// Single CIDR.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "10.163.0.0/16")
+	ranges := AllowlistFromEnv()
+	if len(ranges) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(ranges))
+	}
+	if !ranges[0].Contains(net.ParseIP("10.163.0.38")) {
+		t.Error("10.163.0.0/16 should contain 10.163.0.38")
+	}
+
+	// Multiple CIDRs.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "10.163.0.0/16,192.168.1.0/24")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 2 {
+		t.Fatalf("expected 2 ranges, got %d", len(ranges))
+	}
+
+	// Bare IPv4 → /32.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "192.168.1.1")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(ranges))
+	}
+	if !ranges[0].Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("bare IPv4 192.168.1.1 should be /32 and contain itself")
+	}
+	if ranges[0].Contains(net.ParseIP("192.168.1.2")) {
+		t.Error("192.168.1.1/32 should NOT contain 192.168.1.2")
+	}
+
+	// Bare IPv6 → /128, NOT /32 (regression for IPv6 sizing bug).
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "fd00::1")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(ranges))
+	}
+	if !ranges[0].Contains(net.ParseIP("fd00::1")) {
+		t.Error("bare IPv6 fd00::1 should be /128 and contain itself")
+	}
+	if ranges[0].Contains(net.ParseIP("fd00::2")) {
+		t.Error("bare IPv6 fd00::1 must NOT expand to a /32 prefix (IPv6 sizing regression)")
+	}
+
+	// Mixed CIDR and bare IP.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "10.163.0.0/16,192.168.1.1")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 2 {
+		t.Fatalf("expected 2 ranges, got %d", len(ranges))
+	}
+
+	// Whitespace is trimmed.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "  10.163.0.0/16  ,  192.168.1.1  ")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 2 {
+		t.Fatalf("expected 2 ranges after trimming, got %d", len(ranges))
+	}
+
+	// Invalid entries are skipped.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "10.163.0.0/16,invalid,192.168.1.0/24")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 2 {
+		t.Fatalf("expected 2 valid ranges (invalid skipped), got %d", len(ranges))
+	}
+
+	// Whole-family entries are accepted (operator escape hatch) — startup warns separately.
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "0.0.0.0/0")
+	ranges = AllowlistFromEnv()
+	if len(ranges) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(ranges))
+	}
+}
+
+func TestParseCIDRList(t *testing.T) {
+	// Empty input returns nil.
+	if got := ParseCIDRList("", "TEST"); got != nil {
+		t.Errorf("empty input should return nil, got %v", got)
+	}
+
+	// Mixed valid and invalid entries: bad-IP, valid CIDR, malformed CIDR,
+	// bare IPv4, bare IPv6. Only the three valid forms should survive.
+	got := ParseCIDRList("invalid,10.0.0.0/8,bad/x,192.168.1.1,fd00::1", "TEST")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 valid ranges, got %d: %v", len(got), got)
+	}
+	if !got[0].Contains(net.ParseIP("10.255.255.1")) {
+		t.Error("range[0] should be 10.0.0.0/8")
+	}
+	if !got[1].Contains(net.ParseIP("192.168.1.1")) || got[1].Contains(net.ParseIP("192.168.1.2")) {
+		t.Error("range[1] should be 192.168.1.1/32")
+	}
+	if !got[2].Contains(net.ParseIP("fd00::1")) || got[2].Contains(net.ParseIP("fd00::2")) {
+		t.Error("range[2] should be fd00::1/128, not a wider IPv6 prefix")
+	}
+}
+
+func TestEgressRangesConfineEveryDestination(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	dial := func(ranges string) error {
+		t.Setenv("AGENT_VAULT_EGRESS_RANGES", ranges)
+		conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	if err := dial(""); err != nil {
+		t.Fatalf("no ranges must keep the previous behavior: %v", err)
+	}
+	if err := dial("127.0.0.0/8"); err != nil {
+		t.Fatalf("destination inside the ranges refused: %v", err)
+	}
+	if err := dial("10.0.0.0/8,203.0.113.0/24"); err == nil {
+		t.Fatal("destination outside the ranges allowed")
+	}
+	if err := dial("not-a-cidr"); err == nil {
+		t.Fatal("unparseable ranges allowed everything")
+	}
+}
+
+// Names are checked by the addresses they resolve to, and the connection goes
+// to the checked address, so a name cannot be rebound past the ranges.
+func TestEgressRangesCheckResolvedAddressesOfNames(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	// localhost may resolve to ::1 first; serve the same port there too.
+	if v6, err := net.Listen("tcp", net.JoinHostPort("::1", port)); err == nil {
+		defer v6.Close()
+		go func() {
+			for {
+				c, err := v6.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+	}
+	dial := func(ranges string) (net.Conn, error) {
+		t.Setenv("AGENT_VAULT_EGRESS_RANGES", ranges)
+		return SafeDialContext(true)(context.Background(), "tcp", net.JoinHostPort("localhost", port))
+	}
+	if conn, err := dial("10.0.0.0/8"); err == nil {
+		_ = conn.Close()
+		t.Fatal("a name resolving outside the ranges was dialed")
+	}
+	conn, err := dial("127.0.0.0/8,::1/128")
+	if err != nil {
+		t.Fatalf("a name resolving inside the ranges was refused: %v", err)
+	}
+	defer conn.Close()
+	remote, _ := net.ResolveTCPAddr("tcp", conn.RemoteAddr().String())
+	if !remote.IP.IsLoopback() {
+		t.Fatalf("connected to %v, not the checked address", remote.IP)
+	}
+}
+
+func TestCheckDialAddress(t *testing.T) {
+	allowlist := ParseCIDRList("10.1.2.0/24", "test")
+	tests := []struct {
+		name         string
+		address      string
+		allowPrivate bool
+		wantBlocked  bool
+	}{
+		{"public IPv4", "203.0.113.10:443", false, false},
+		{"public IPv6", "[2001:db8::10]:443", false, false},
+		{"IMDS", "169.254.169.254:80", true, true},
+		{"IMDS IPv6", "[fd00:ec2::254]:80", true, true},
+		{"IMDS IPv6 with zone", "[fd00:ec2::254%eth0]:80", true, true},
+		{"IPv4-mapped IMDS", "[::ffff:169.254.169.254]:80", true, true},
+		{"link-local with zone", "[fe80::1%eth0]:443", false, true},
+		{"loopback blocked by default", "127.0.0.1:443", false, true},
+		{"loopback allowed with private ranges", "127.0.0.1:443", true, false},
+		{"IPv6 unspecified reaches loopback", "[::]:443", false, true},
+		{"allowlisted private", "10.1.2.3:443", false, false},
+		{"private outside allowlist", "10.9.9.9:443", false, true},
+		{"hostname fails closed", "example.com:443", true, true},
+		{"missing port fails closed", "203.0.113.10", true, true},
+		{"empty fails closed", "", true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var allowed []net.IPNet
+			if !tt.allowPrivate {
+				allowed = allowlist
+			}
+			err := checkDialAddress(tt.address, tt.allowPrivate, allowed)
+			if blocked := err != nil; blocked != tt.wantBlocked {
+				t.Fatalf("checkDialAddress(%q) error = %v, want blocked = %v", tt.address, err, tt.wantBlocked)
+			}
+		})
+	}
+}
+
+func TestSafeDialContext_BlocksBeforeConnecting(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+
+	_, err := SafeDialContext(false)(context.Background(), "tcp", listener.Addr().String())
+	if err == nil || !strings.Contains(err.Error(), "blocked by network policy") {
+		t.Fatalf("error = %v, want network policy error", err)
+	}
+	if !strings.Contains(err.Error(), listener.Addr().String()) {
+		t.Errorf("error %q does not name the requested address", err)
+	}
+
+	// A completed connect would already be queued on the listener.
+	_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
+	if conn, err := listener.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("blocked address was connected to")
+	}
+}
+
+func TestSafeDialContext_ConnectsToAllowedAddress(t *testing.T) {
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+
+	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestSafeDialer_FallsBackToOtherAddressFamily(t *testing.T) {
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	d := newSafeDialer(true, nil)
+	d.Resolver = fakeResolver(t, map[string][]netip.Addr{
+		"dual.test.": {netip.MustParseAddr("::1"), netip.MustParseAddr("127.0.0.1")},
+	})
+	policy := d.ControlContext
+	d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		if network == "tcp6" {
+			// Simulate an IPv6 path that is refused outright, without relying
+			// on nothing else listening on [::1]:port.
+			return syscall.ECONNREFUSED
+		}
+		return policy(ctx, network, address, c)
+	}
+
+	// Whichever family is tried first, the dial has to end up on IPv4.
+	conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort("dual.test", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if got := conn.RemoteAddr().String(); got != listener.Addr().String() {
+		t.Fatalf("connected to %s, want %s", got, listener.Addr())
+	}
+}
+
+func TestSafeDialer_SilentlyDroppedFamilyDoesNotStall(t *testing.T) {
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	d := newSafeDialer(true, nil)
+	d.Resolver = fakeResolver(t, map[string][]netip.Addr{
+		"dual.test.": {netip.MustParseAddr("::1"), netip.MustParseAddr("127.0.0.1")},
+	})
+	policy := d.ControlContext
+	var ipv6Attempted atomic.Bool
+	d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		if network == "tcp6" {
+			// Simulate a path that drops packets without replying: the
+			// attempt only ends when the dialer gives up on it.
+			ipv6Attempted.Store(true)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return policy(ctx, network, address, c)
+	}
+
+	started := time.Now()
+	conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort("dual.test", port))
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if !ipv6Attempted.Load() {
+		t.Skip("resolver ordered IPv4 first on this host; the fallback race was not exercised")
+	}
+	// The IPv4 attempt starts after the 300ms fallback delay. Waiting for
+	// the dropped IPv6 attempt instead would take most of the 10s timeout.
+	if elapsed > 3*time.Second {
+		t.Fatalf("dial took %v; IPv4 fallback should not wait for the dropped IPv6 attempt", elapsed)
+	}
+}
+
+func TestSafeDialer_SkipsBlockedAddresses(t *testing.T) {
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	// Loopback is blocked except for the allowlisted 127.0.0.1, so ::1 (tried
+	// first on hosts with IPv6) must be refused and 127.0.0.1 used instead.
+	d := newSafeDialer(false, ParseCIDRList("127.0.0.1", "test"))
+	d.Resolver = fakeResolver(t, map[string][]netip.Addr{
+		"mixed.test.": {netip.MustParseAddr("::1"), netip.MustParseAddr("127.0.0.1")},
+	})
+	policy := d.ControlContext
+	var mu sync.Mutex
+	var attempts, refused []string
+	d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		err := policy(ctx, network, address, c)
+		mu.Lock()
+		attempts = append(attempts, address)
+		if err != nil {
+			refused = append(refused, address)
+		}
+		mu.Unlock()
+		return err
+	}
+
+	conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort("mixed.test", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if got := conn.RemoteAddr().String(); got != listener.Addr().String() {
+		t.Fatalf("connected to %s, want %s", got, listener.Addr())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) == 0 || !strings.HasPrefix(attempts[0], "[::1]:") {
+		t.Skipf("resolver ordered IPv4 first on this host (attempts %v); the skip was not exercised", attempts)
+	}
+	if len(refused) != 1 || refused[0] != attempts[0] {
+		t.Fatalf("refused = %v, want exactly the blocked %s", refused, attempts[0])
+	}
+}
+
+func TestSafeDialer_AllAddressesBlocked(t *testing.T) {
+	d := newSafeDialer(false, nil)
+	d.Resolver = fakeResolver(t, map[string][]netip.Addr{
+		"blocked.test.": {
+			netip.MustParseAddr("169.254.169.254"),
+			netip.MustParseAddr("10.1.2.3"),
+			netip.MustParseAddr("::1"),
+		},
+	})
+
+	_, err := d.DialContext(context.Background(), "tcp", "blocked.test:443")
+	if err == nil || !strings.Contains(err.Error(), "blocked by network policy") {
+		t.Fatalf("error = %v, want network policy error", err)
+	}
+}
+
+func listenTCP(t *testing.T, network, address string) net.Listener {
+	t.Helper()
+	listener, err := net.Listen(network, address)
+	if err != nil {
+		t.Fatalf("listen %s %s: %v", network, address, err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener
+}
+
+// acceptAndClose listens on 127.0.0.1 and closes every connection it accepts.
+func acceptAndClose(t *testing.T) net.Listener {
+	t.Helper()
+	listener := listenTCP(t, "tcp", "127.0.0.1:0")
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return listener
+}
+
+// fakeResolver returns a resolver backed by an in-process DNS server that
+// answers A and AAAA queries from records (keyed by FQDN) and NXDOMAIN for
+// anything else, so dial tests control exactly what net.Dialer resolves.
+func fakeResolver(t *testing.T, records map[string][]netip.Addr) *net.Resolver {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen dns: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if resp, err := fakeDNSAnswer(buf[:n], records); err == nil {
+				_, _ = pc.WriteTo(resp, from)
+			}
+		}
+	}()
+
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", pc.LocalAddr().String())
+		},
+	}
+}
+
+func fakeDNSAnswer(query []byte, records map[string][]netip.Addr) ([]byte, error) {
+	var p dnsmessage.Parser
+	hdr, err := p.Start(query)
+	if err != nil {
+		return nil, err
+	}
+	q, err := p.Question()
+	if err != nil {
+		return nil, err
+	}
+
+	addrs, ok := records[strings.ToLower(q.Name.String())]
+	rcode := dnsmessage.RCodeSuccess
+	if !ok {
+		rcode = dnsmessage.RCodeNameError
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: hdr.ID, Response: true, Authoritative: true, RCode: rcode})
+	if err := b.StartQuestions(); err != nil {
+		return nil, err
+	}
+	if err := b.Question(q); err != nil {
+		return nil, err
+	}
+	if err := b.StartAnswers(); err != nil {
+		return nil, err
+	}
+	rh := dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 60}
+	for _, addr := range addrs {
+		switch {
+		case q.Type == dnsmessage.TypeA && addr.Is4():
+			err = b.AResource(rh, dnsmessage.AResource{A: addr.As4()})
+		case q.Type == dnsmessage.TypeAAAA && addr.Is6():
+			err = b.AAAAResource(rh, dnsmessage.AAAAResource{AAAA: addr.As16()})
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return b.Finish()
+}
+
+// A name whose every answer is blocked fails, and no answer is connected to,
+// even one with a live listener behind it. The check runs on each address
+// right before connect, so a hostile DNS answer can only offer addresses that
+// the policy would refuse if dialed directly.
+func TestSafeDialer_AllAnswersBlockedNeverConnect(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		dialer func() *net.Dialer
+	}{
+		{"network policy", func() *net.Dialer { return newSafeDialer(false, nil) }},
+		{"egress ranges", func() *net.Dialer { return withEgressRanges(newSafeDialer(true, nil), "203.0.113.0/24", "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+			_, port, _ := net.SplitHostPort(listener.Addr().String())
+			d := tc.dialer()
+			d.Resolver = fakeResolver(t, map[string][]netip.Addr{
+				"blocked.test.": {
+					netip.MustParseAddr("127.0.0.1"),
+					netip.MustParseAddr("::1"),
+					netip.MustParseAddr("169.254.169.254"),
+					netip.MustParseAddr("10.1.2.3"),
+				},
+			})
+			policy := d.ControlContext
+			var mu sync.Mutex
+			var attempts, refused int
+			d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+				err := policy(ctx, network, address, c)
+				mu.Lock()
+				attempts++
+				if err != nil {
+					refused++
+				}
+				mu.Unlock()
+				return err
+			}
+
+			conn, err := d.DialContext(context.Background(), "tcp", net.JoinHostPort("blocked.test", port))
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("a name with only blocked answers was dialed")
+			}
+			if !strings.Contains(err.Error(), "blocked by network policy") {
+				t.Fatalf("error = %v, want network policy error", err)
+			}
+			mu.Lock()
+			if attempts == 0 || refused != attempts {
+				t.Fatalf("refused %d of %d attempts, want every attempt refused", refused, attempts)
+			}
+			mu.Unlock()
+			_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(50 * time.Millisecond))
+			if c, err := listener.Accept(); err == nil {
+				_ = c.Close()
+				t.Fatal("a blocked answer was connected to")
+			}
+		})
+	}
+}
+
+func TestParseHostAddresses(t *testing.T) {
+	nets, err := parseHostAddresses("# resolved for api.example.com\n203.0.113.7, 203.0.113.8/32\n2001:db8::1 2001:db8::2/128\n\n")
+	if err != nil || len(nets) != 4 {
+		t.Fatalf("valid file: %v %v", nets, err)
+	}
+	for _, bad := range []string{"203.0.113.0/24", "0.0.0.0/0", "example.com", "203.0.113.7:443", "fe80::1%eth0", "2001:db8::/64"} {
+		if _, err := parseHostAddresses("203.0.113.9\n" + bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	// A refusal names the line, never the entry, so a path set to the wrong
+	// file (a token, say) never copies it into the log.
+	if _, err := parseHostAddresses("203.0.113.9\nnot-an-address-secret\n"); err == nil || strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("refusal: %v", err)
+	}
+	// A file that lists no address is refused, so a writer that resolved nothing cuts nothing.
+	for _, empty := range []string{"", "\n", "# resolved nothing\n"} {
+		if _, err := parseHostAddresses(empty); err == nil {
+			t.Errorf("%q accepted", empty)
+		}
+	}
+}
+
+// The egress ranges file adds single addresses while the process runs: a
+// new address works after the next read, a bad file keeps the last good set
+// and never widens it, and a missing file adds nothing.
+func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := acceptAndClose(t)
+	path := filepath.Join(t.TempDir(), "egress")
+	now := time.Now()
+	f := &fileRanges{path: path, now: func() time.Time { return now }}
+	fileRangesByPath.Store(path, f)
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "203.0.113.0/24")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	dial := func() error {
+		conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	write := func(content string) {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(fileRangesInterval) // the next dial reads the file again
+	}
+	if err := dial(); err == nil {
+		t.Fatal("dialed with no file and the address outside the static ranges")
+	}
+	write("127.0.0.1\n")
+	if err := dial(); err != nil {
+		t.Fatalf("address listed in the file refused: %v", err)
+	}
+	write("127.0.0.0/8\n") // a range: refused whole, the last good set stays
+	if err := dial(); err != nil {
+		t.Fatalf("a bad file dropped the last good set: %v", err)
+	}
+	write("") // empty: refused, the last good set stays
+	if err := dial(); err != nil {
+		t.Fatalf("an empty file dropped the last good set: %v", err)
+	}
+	write("# resolved nothing\n")
+	if err := dial(); err != nil {
+		t.Fatalf("a file with no address dropped the last good set: %v", err)
+	}
+	write("127.0.0.2\n") // a good file without the address
+	if err := dial(); err == nil {
+		t.Fatal("address dropped from the file still allowed")
+	}
+	write("127.0.0.1\n")
+	if err := dial(); err != nil {
+		t.Fatalf("address listed again refused: %v", err)
+	}
+	// Inside the interval the last read is reused: a file that drops the
+	// address takes effect only once the interval has passed.
+	if err := os.WriteFile(path, []byte("127.0.0.2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := dial(); err != nil {
+		t.Fatalf("file read again inside the interval: %v", err)
+	}
+	now = now.Add(fileRangesInterval)
+	if err := dial(); err == nil {
+		t.Fatal("address dropped from the file still allowed after the interval")
+	}
+	write("127.0.0.1\n")
+	if err := dial(); err != nil {
+		t.Fatalf("address listed again refused: %v", err)
+	}
+	// A file that cannot be read (here a directory) keeps the last good set.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(fileRangesInterval)
+	if err := dial(); err != nil {
+		t.Fatalf("an unreadable file dropped the last good set: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(fileRangesInterval) // a file that disappears keeps the last good set
+	if err := dial(); err != nil {
+		t.Fatalf("a missing file dropped the last good set: %v", err)
+	}
+}
+
+// A file that is not there before its first good read is logged once, with
+// its path, so a mistyped path or a mount that never arrives shows; each
+// refused dial names the file too.
+func TestEgressRangesFileLogsAMissingFile(t *testing.T) {
+	var logs bytes.Buffer
+	// slog.SetDefault also redirects the log package, which restoring the
+	// slog default alone does not undo.
+	previous, out, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(out); log.SetFlags(flags) })
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := acceptAndClose(t)
+	path := filepath.Join(t.TempDir(), "egress")
+	now := time.Now()
+	fileRangesByPath.Store(path, &fileRanges{path: path, now: func() time.Time { return now }})
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	for range 3 {
+		if conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String()); err == nil {
+			_ = conn.Close()
+			t.Fatal("dialed with no file")
+		}
+		now = now.Add(fileRangesInterval) // the next dial reads the file again
+	}
+	if n := strings.Count(logs.String(), "egress ranges file not there yet"); n != 1 || !strings.Contains(logs.String(), "path="+path) {
+		t.Fatalf("missing-file warnings %d, want 1 naming the path:\n%s", n, logs.String())
+	}
+	if n := strings.Count(logs.String(), "egress_file="+path); n != 3 {
+		t.Fatalf("refusals naming the file %d, want 3:\n%s", n, logs.String())
+	}
+}
+
+// A refused file is logged by line number only: no entry text, a range or a
+// name alike, reaches the error or the log, so a path set to the wrong file
+// does not copy that file into the log every few seconds.
+func TestEgressRangesFileNeverLogsItsEntries(t *testing.T) {
+	var logs bytes.Buffer
+	previous, out, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(out); log.SetFlags(flags) })
+	path := filepath.Join(t.TempDir(), "egress")
+	now := time.Now()
+	f := &fileRanges{path: path, now: func() time.Time { return now }}
+	for _, tc := range []struct{ content, entry, line string }{
+		{"10.0.0.0/8\n", "10.0.0.0/8", "line 1: an entry is a range"},
+		{"127.0.0.1\n198.51.100.0/24, 127.0.0.2\n", "198.51.100.0/24", "line 2: an entry is a range"},
+		{"2001:db8::/64\n", "2001:db8::/64", "line 1: an entry is a range"},
+		{"secret-host.example\n", "secret-host", "line 1: an entry is not an address"},
+		{"127.0.0.1\nfe80::1%eth0\n", "eth0", "line 2: an entry is not an address"},
+	} {
+		logs.Reset()
+		_, err := parseHostAddresses(tc.content)
+		if err == nil || !strings.Contains(err.Error(), tc.line) || strings.Contains(err.Error(), tc.entry) {
+			t.Errorf("%q: %v, want %q without the entry", tc.content, err, tc.line)
+		}
+		if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(fileRangesInterval)
+		f.current()
+		if strings.Contains(logs.String(), tc.entry) || !strings.Contains(logs.String(), tc.line) {
+			t.Errorf("%q: log names the entry or not the line:\n%s", tc.content, logs.String())
+		}
+	}
+}
+
+// The file adds to AGENT_VAULT_EGRESS_RANGES rather than replacing it: an
+// address in the static ranges still dials when the file is set and does not
+// list it.
+func TestEgressRangesFileAddsToStaticRanges(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := acceptAndClose(t)
+	path := filepath.Join(t.TempDir(), "egress")
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	if err := os.WriteFile(path, []byte("127.0.0.2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "127.0.0.1/32")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("address in the static ranges refused once the file is set: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// Setting only the file confines egress to it: nothing before the file is
+// written, and only what it lists after.
+func TestEgressRangesFileAloneConfines(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := acceptAndClose(t)
+	path := filepath.Join(t.TempDir(), "egress")
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	if conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String()); err == nil {
+		_ = conn.Close()
+		t.Fatal("dialed before the file was written")
+	}
+	if err := os.WriteFile(path, []byte("127.0.0.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileRangesByPath.Delete(path) // read the file now, not after the interval
+	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("address listed in the file refused: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// The private and metadata blocks run before the egress ranges, so listing a
+// blocked address in the file never opens it.
+func TestEgressRangesFileNeverOpensBlockedAddresses(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	listener := acceptAndClose(t)
+	path := filepath.Join(t.TempDir(), "egress")
+	t.Cleanup(func() { fileRangesByPath.Delete(path) })
+	if err := os.WriteFile(path, []byte("127.0.0.1\n169.254.169.254\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", path)
+	for _, tc := range []struct {
+		name         string
+		allowPrivate bool
+		address      string
+	}{
+		{"private address without allowPrivate", false, listener.Addr().String()},
+		{"metadata address even with allowPrivate", true, "169.254.169.254:80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			conn, err := SafeDialContext(tc.allowPrivate)(ctx, "tcp", tc.address)
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("a blocked address listed in the file was dialed")
+			}
+			if !strings.Contains(err.Error(), "blocked by network policy") {
+				t.Fatalf("refused for another reason: %v", err)
+			}
+		})
+	}
+}
+
+func TestParsePrivateHosts(t *testing.T) {
+	h := ParsePrivateHosts(" Vault.Example.Internal. ,*.db.example.internal, localhost,"+
+		"10.0.0.1,10.0.0.0/8,::1,https://vault.example.internal,*,*.internal,*.*.example.internal,db.*.example.internal,-bad.example,a..b,"+
+		"1.2.3.4.5,0x7f.1,1.0x7f,127.1,"+strings.Repeat("a", 64)+".example", "test")
+	for host, want := range map[string]bool{
+		"vault.example.internal":        true,
+		"VAULT.example.internal.":       true,
+		"localhost":                     true,
+		"orders.db.example.internal":    true,
+		"a.b.db.example.internal":       true,
+		"db.example.internal":           false, // the suffix itself is not under it
+		"xdb.example.internal":          false,
+		"orders.db.example.internal.io": false,
+		"other.example.internal":        false,
+		"vault.example.internal.evil":   false,
+		"10.0.0.1":                      false,
+		"::1":                           false,
+		"fe80::1%eth0":                  false,
+		"anything.internal":             false,
+		"1.2.3.4.5":                     false,
+		"0x7f.1":                        false,
+		"127.1":                         false,
+		"":                              false,
+	} {
+		if got := h.Match(host); got != want {
+			t.Errorf("Match(%q) = %v, want %v", host, got, want)
+		}
+	}
+	if len(h.exact) != 2 || len(h.suffixes) != 1 {
+		t.Fatalf("parsed %v exact and %v suffixes; every other entry must be skipped", h.exact, h.suffixes)
+	}
+	if !ParsePrivateHosts("", "test").empty() || !ParsePrivateHosts(" , ,", "test").empty() {
+		t.Fatal("an empty list names a host")
+	}
+}
+
+// A listed private host reaches the private address DNS gives it. An IP
+// literal, an unlisted name that resolves to the same address, and a listed
+// name that resolves to a metadata address are all refused, and none of them
+// is connected to.
+func TestPrivateHostsAllowOnlyListedNames(t *testing.T) {
+	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
+	accepted := make(chan struct{}, 8)
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- struct{}{}
+			_ = c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	resolver := fakeResolver(t, map[string][]netip.Addr{
+		"vault.example.internal.":     {netip.MustParseAddr("127.0.0.1")},
+		"orders.db.example.internal.": {netip.MustParseAddr("127.0.0.1")},
+		"vendor.example.com.":         {netip.MustParseAddr("127.0.0.1")},
+		"imds.db.example.internal.":   {netip.MustParseAddr("169.254.169.254")},
+	})
+	public, internal := newSafeDialer(false, nil), newSafeDialer(true, nil)
+	public.Resolver, internal.Resolver = resolver, resolver
+	dial := withPrivateHosts(public, internal, ParsePrivateHosts("vault.example.internal,*.db.example.internal", "test"))
+	for _, host := range []string{"vault.example.internal", "orders.db.example.internal", "ORDERS.db.example.internal."} {
+		conn, err := dial(context.Background(), "tcp", net.JoinHostPort(host, port))
+		if err != nil {
+			t.Fatalf("%s: listed private host refused: %v", host, err)
+		}
+		_ = conn.Close()
+		<-accepted
+	}
+	for _, host := range []string{"127.0.0.1", "vendor.example.com", "imds.db.example.internal", "db.example.internal"} {
+		conn, err := dial(context.Background(), "tcp", net.JoinHostPort(host, port))
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("%s: dialed", host)
+		}
+	}
+	select {
+	case <-accepted:
+		t.Fatal("a refused dial was connected")
+	case <-time.After(50 * time.Millisecond):
+	}
+	// With no host listed the private block is unchanged.
+	if conn, err := withPrivateHosts(public, internal, PrivateHosts{})(context.Background(), "tcp", net.JoinHostPort("vault.example.internal", port)); err == nil {
+		_ = conn.Close()
+		t.Fatal("private address dialed with no private hosts listed")
+	}
+}
+
+// The egress ranges still confine a listed private host, and a private
+// address in the egress file opens nothing for a name that is not listed.
+func TestPrivateHostsStayInsideEgressRanges(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", "")
+	listener := acceptAndClose(t)
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	dial := func(hosts, ranges, target string) error {
+		t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", hosts)
+		t.Setenv("AGENT_VAULT_EGRESS_RANGES", ranges)
+		conn, err := SafeDialContext(false)(context.Background(), "tcp", net.JoinHostPort(target, port))
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	if err := dial("", "127.0.0.0/8,::1/128", "localhost"); err == nil {
+		t.Fatal("private address dialed with no private hosts listed")
+	}
+	if err := dial("localhost", "127.0.0.0/8,::1/128", "localhost"); err != nil {
+		t.Fatalf("listed private host inside the egress ranges refused: %v", err)
+	}
+	if err := dial("localhost", "", "localhost"); err != nil {
+		t.Fatalf("listed private host with no egress ranges refused: %v", err)
+	}
+	if err := dial("localhost", "203.0.113.0/24", "localhost"); err == nil {
+		t.Fatal("listed private host outside the egress ranges dialed")
+	}
+	if err := dial("localhost", "127.0.0.0/8,::1/128", "127.0.0.1"); err == nil {
+		t.Fatal("an address literal dialed because a private host is listed")
+	}
+	// Globally allowed private ranges are unchanged by the list.
+	t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("allowPrivate dial refused: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// A private address the egress file lists is reachable only by a listed
+// private host's name: a stolen writer of the file cannot open an internal
+// address to any other name.
+func TestEgressFilePrivateAddressServesOnlyListedHosts(t *testing.T) {
+	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
+	listener := acceptAndClose(t)
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	file := filepath.Join(t.TempDir(), "addresses")
+	if err := os.WriteFile(file, []byte("127.0.0.1\n::1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", file)
+	t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", "localhost")
+	dial := SafeDialContext(false)
+	conn, err := dial(context.Background(), "tcp", net.JoinHostPort("localhost", port))
+	if err != nil {
+		t.Fatalf("listed private host refused: %v", err)
+	}
+	_ = conn.Close()
+	if conn, err := dial(context.Background(), "tcp", listener.Addr().String()); err == nil {
+		_ = conn.Close()
+		t.Fatal("the file's private address dialed by literal")
+	}
+}

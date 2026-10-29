@@ -1,0 +1,127 @@
+---
+title: "Fly.io"
+description: "Deploy Agent Vault to Fly.io with persistent storage"
+---
+
+## Deploy
+
+<Steps>
+  <Step title="Install the Fly CLI and authenticate">
+    Install `flyctl` using the [official instructions](https://fly.io/docs/flyctl/install/), then log in:
+
+    ```bash
+    fly auth login
+    ```
+  </Step>
+
+  <Step title="Clone the repo and create the app">
+    ```bash
+    git clone https://github.com/infisical/agent-vault.git
+    cd agent-vault
+    fly launch --no-deploy
+    ```
+
+    When prompted, keep the existing `fly.toml` configuration. The `--no-deploy` flag prevents deploying before secrets are set.
+  </Step>
+
+  <Step title="Set secrets">
+    ```bash
+    # Optional — omit for passwordless mode (DEK stored unwrapped on volume)
+    fly secrets set AGENT_VAULT_MASTER_PASSWORD=your-password
+    fly secrets set AGENT_VAULT_ADDR=https://your-app.fly.dev
+    ```
+
+    | Variable | Required | Description |
+    |----------|----------|-------------|
+    | `AGENT_VAULT_MASTER_PASSWORD` | No | Derives a KEK that wraps the data encryption key. Omit for passwordless mode. |
+    | `AGENT_VAULT_ADDR` | Recommended | Externally-reachable base URL. Used for generating links in emails, invites, and discovery responses. |
+
+    <Tip>
+      Agent Vault supports additional configuration for SMTP email notifications, domain restrictions, and more. See [Environment variables](/self-hosting/environment-variables) for the full reference.
+    </Tip>
+  </Step>
+
+  <Step title="Deploy">
+    ```bash
+    fly deploy
+    ```
+
+    On first deploy, Fly will prompt you to create the persistent volume. If it doesn't, create one manually:
+
+    ```bash
+    fly volumes create agent_vault_data --region sjc --size 1
+    fly deploy
+    ```
+  </Step>
+
+  <Step title="Register the owner">
+    ```bash
+    agent-vault auth register --address https://your-app.fly.dev
+    ```
+
+    The first user to register becomes the instance owner with full admin privileges, auto-granted admin on the default vault.
+  </Step>
+
+  <Step title="Verify">
+    ```bash
+    fly status
+    curl https://your-app.fly.dev/health
+    ```
+  </Step>
+</Steps>
+
+## Key details
+
+- **Config**: `fly.toml` exposes port 14321 via Fly's HTTP service (force HTTPS, auto-stop/auto-start). The MITM proxy on port 14322 is only reachable via [Fly's private networking](https://fly.io/docs/networking/private-networking/) (`.internal` DNS over IPv6) — it is not exposed to the public internet. The server must bind to `::` (all interfaces) so the proxy is reachable via Fly's 6PN IPv6 mesh — pass `--host ::` instead of `--host 0.0.0.0`.
+- **Agent connectivity**: agents connect to the proxy via the private network. Agents running on Fly (same org) use `http://<token>:<vault>@your-app.internal:14322`. Agents outside Fly connect via [WireGuard](https://fly.io/docs/networking/private-networking/#flyctl-wireguard) (`fly wireguard create`).
+- **Entrypoint**: `scripts/docker-entrypoint.sh` forwards arguments to the `agent-vault` binary, which natively reads `AGENT_VAULT_MASTER_PASSWORD` from the environment
+- **Storage**: Persistent volume `agent_vault_data` mounted at `/data` -- all state is in a single SQLite file
+- **Cold starts**: `min_machines_running` defaults to `0`, so the app scales to zero when idle. The first request after sleep incurs a few seconds of cold-start latency. Set it to `1` in `fly.toml` if you need always-on availability.
+
+## PostgreSQL with Fly Postgres
+
+For production deployments or to run multiple Agent Vault machines, switch from SQLite to PostgreSQL:
+
+```bash
+fly postgres create        # create a Fly Postgres cluster
+fly postgres attach         # attach it to your Agent Vault app
+```
+
+Fly sets `DATABASE_URL` automatically. Agent Vault detects it and uses Postgres on the next deploy. See the [PostgreSQL guide](/self-hosting/postgres) for full setup, migration steps, and configuration details.
+
+## Connecting agents
+
+<Tabs>
+  <Tab title="Agent on Fly (same org)">
+    Agents running as Fly apps in the same organization reach the proxy via `.internal` DNS — no public internet involved.
+
+    ```bash
+    export HTTPS_PROXY="http://<token>:<vault>@your-app.internal:14322"
+    export HTTP_PROXY="$HTTPS_PROXY"
+    ```
+  </Tab>
+  <Tab title="Agent outside Fly">
+    Create a WireGuard tunnel to join your Fly org's private network:
+
+    ```bash
+    fly wireguard create my-org sjc agent-peer
+    ```
+
+    Import the generated `.conf` file into WireGuard on the agent machine, activate the tunnel, then set the proxy:
+
+    ```bash
+    export HTTPS_PROXY="http://<token>:<vault>@your-app.internal:14322"
+    export HTTP_PROXY="$HTTPS_PROXY"
+    ```
+  </Tab>
+</Tabs>
+
+Fetch the root CA so the agent trusts MITM-signed upstream certificates:
+
+```bash
+agent-vault ca fetch --address https://your-app.fly.dev -o /path/to/ca.pem
+```
+
+<Tip>
+  Changing the master password re-wraps the data encryption key without re-encrypting credentials. For single-instance (SQLite) deployments, use `agent-vault master-password change` while the server is stopped. When using Fly Postgres, scale to zero (`fly scale count 0`), run `agent-vault master-password change --force` with `DATABASE_URL` set, then update the secret with `fly secrets set AGENT_VAULT_MASTER_PASSWORD=...` and scale back up.
+</Tip>

@@ -1,0 +1,111 @@
+---
+title: "Docker"
+description: "Run Agent Vault in a Docker container"
+---
+
+For the basic `docker run` command and first-time setup, see [Installation](/installation). This page covers Docker-specific configuration, Compose, and image details.
+
+## Build from source
+
+```bash
+make docker
+```
+
+This runs a multi-stage build:
+
+1. **`node:22-alpine`** -- builds the React/Vite frontend
+2. **`golang:1.25-alpine`** -- compiles the Go binary with the embedded frontend
+3. **`alpine:3.21`** -- minimal runtime image
+
+The final image runs as non-root user `agentvault` (UID 65532) and includes a built-in health check at `GET /health`.
+
+## Configuration
+
+Expose both the HTTP API (`14321`) and the transparent HTTP/HTTPS proxy (`14322`) so agents' `HTTPS_PROXY`/`HTTP_PROXY` can reach the broker. Pass the master password via environment variable to wrap the data encryption key (DEK):
+
+```bash
+docker run -it -p 14321:14321 -p 14322:14322 \
+  -v agent-vault-data:/data \
+  -e AGENT_VAULT_MASTER_PASSWORD=your-password \
+  -e AGENT_VAULT_ADDR=https://agent-vault.example.com \
+  infisical/agent-vault
+```
+
+Omit `AGENT_VAULT_MASTER_PASSWORD` for **passwordless mode** — the DEK is stored unwrapped, relying on volume access controls for security.
+
+Fetch the root CA from the running container so agents outside Docker trust the proxied TLS handshake:
+
+```bash
+# The /v1/mitm/ca.pem endpoint is public — no auth required
+curl -O http://localhost:14321/v1/mitm/ca.pem
+```
+
+See [transparent proxy setup](/self-hosting/local#transparent-proxy) for installing the CA into client trust stores.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AGENT_VAULT_MASTER_PASSWORD` | No | Derives a KEK that wraps the data encryption key. If omitted, runs in passwordless mode. |
+| `AGENT_VAULT_ADDR` | Recommended | Externally-reachable base URL. Defaults to `http://localhost:14321`. Used for generating links in emails, invites, and discovery responses. |
+
+<Warning>
+  Never put `AGENT_VAULT_MASTER_PASSWORD` in your Dockerfile or a committed `.env` file. Use Docker secrets or your orchestrator's secret management instead.
+</Warning>
+
+<Tip>
+  Agent Vault supports additional configuration for SMTP email notifications, domain restrictions, and more. See [Environment variables](/self-hosting/environment-variables) for the full reference.
+</Tip>
+
+## Docker Compose
+
+```yaml docker-compose.yml
+services:
+  agent-vault:
+    image: infisical/agent-vault
+    ports:
+      - "14321:14321"
+      - "14322:14322"
+    volumes:
+      - agent-vault-data:/data
+    environment:
+      - AGENT_VAULT_MASTER_PASSWORD=${AGENT_VAULT_MASTER_PASSWORD}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:14321/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  agent-vault-data:
+```
+
+Start it:
+
+```bash
+export AGENT_VAULT_MASTER_PASSWORD=your-password
+docker compose up -d
+```
+
+<Tip>
+  The health check uses `wget` because the minimal Alpine image does not include `curl`. If you swap to a different base image, adjust accordingly.
+</Tip>
+
+## Volume and persistence
+
+All state lives in a single SQLite database at `/data/.agent-vault/agent-vault.db`. The Docker image declares `VOLUME /data`, so data survives container restarts as long as you mount a named volume or host path.
+
+<Tip>
+  Changing the master password re-wraps the data encryption key without re-encrypting credentials. For single-instance (SQLite) deployments, use `agent-vault master-password change` while the server is stopped. When using PostgreSQL, stop all instances and use `--force` (see the [PostgreSQL guide](/self-hosting/postgres)).
+</Tip>
+
+## PostgreSQL for production
+
+For production deployments, or when running multiple instances behind a load balancer, set `DATABASE_URL` to a shared PostgreSQL instance instead of using the built-in SQLite database. All instances read from and write to the same Postgres database, so state is shared automatically.
+
+```bash
+docker run -it -p 14321:14321 -p 14322:14322 \
+  -e DATABASE_URL=postgres://user:password@db:5432/agentvault \
+  -e AGENT_VAULT_MASTER_PASSWORD=your-password \
+  infisical/agent-vault
+```
+
+See the [PostgreSQL guide](/self-hosting/postgres) for a full Docker Compose example with multiple replicas, migration steps, and architecture notes.

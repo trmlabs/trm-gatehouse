@@ -1,0 +1,682 @@
+package auditchain
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/Infisical/agent-vault/internal/store"
+)
+
+// Key is one version of the chain's HMAC key. Its bytes never leave this
+// package: Key prints and logs as its version only.
+type Key struct {
+	Version int
+	secret  []byte
+}
+
+// NewKey copies secret. Keys shorter than 32 bytes are rejected.
+func NewKey(version int, secret []byte) (Key, error) {
+	if version < 1 || len(secret) < 32 {
+		return Key{}, errors.New("audit HMAC key must have a positive version and at least 32 bytes")
+	}
+	return Key{Version: version, secret: append([]byte(nil), secret...)}, nil
+}
+
+func (k Key) String() string   { return fmt.Sprintf("audit-hmac-key(v%d)", k.Version) }
+func (k Key) GoString() string { return k.String() }
+
+// KeySource returns the newest HMAC key version.
+type KeySource interface {
+	Current(context.Context) (Key, error)
+}
+
+// Signer signs a checkpoint input with a key that never leaves the signer
+// and returns a Transit-format "vault:vN:<base64>" signature.
+type Signer interface {
+	Sign(context.Context, []byte) (string, error)
+}
+
+// BootStore persists each replica's boot counter and newest checkpoint row.
+// *store.SQLStore implements it.
+type BootStore interface {
+	BeginAuditBoot(ctx context.Context, replica string) (uint64, store.AuditBoot, error)
+	RecordAuditCheckpoint(ctx context.Context, replica string, boot, seq uint64, mac string) error
+}
+
+// Event is what a caller records; the chain fills in everything else.
+type Event struct {
+	Event     string
+	Pool      string
+	Agent     string
+	PodUID    string
+	Binding   string
+	Session   string
+	Outcome   string
+	Requester string
+	// Authorization decision: who stood behind the request and why it was
+	// allowed or refused. TokenSHA256 identifies a runner session token
+	// without storing it.
+	RequesterKind string
+	RequesterOID  string
+	TokenSHA256   string
+	Tier          string
+	Decision      string
+	Groups        string
+	CacheAgeSec   int64
+	// Signing-key refusals: see Row.
+	Kid       string
+	KidSHA256 string
+	Peer      string
+	// Proxy certificate issuance: see Row.
+	Serial   string
+	NotAfter string
+	DNSNames string // comma-separated lower-case DNS names the certificate holds
+	Target   string // refusals: see Row; set it with TargetField
+	Branch   string // pushes, pull request writes and CI restarts: see Row; set it with BranchField
+	// Operation, Database and RequesterDepartment: see Row. Set Database with
+	// DatabaseField and RequesterDepartment with DepartmentField.
+	Operation           string
+	Database            string
+	RequesterDepartment string
+	// Source, Automation, AutomationName and AutomationOwner: see Row.
+	Source          string
+	Automation      string
+	AutomationName  string
+	AutomationOwner string
+	Path            string // HTTP rows: see Row; set it with PathField
+	Settings        string // automation_settings rows: see Row; set it with SettingsField
+	GraphQLErrors   string // GitHub GraphQL response rows: see Row; set it with GraphQLErrorsField
+	Cause           string // upstream_error rows: one of Causes
+	Match           string // injection_flagged rows: see Row
+	UpstreamMessage string // GitHub route rows answered at 4xx: see Row; set it with MessageField
+	PullRequest     int64  // GitHub REST rows: see Row
+	Route           string // GitHub REST rows: see Row
+	GitEntry        string // GitHub code reads: see Row
+	Method          string
+	Status          int
+	Duration        int64 // milliseconds
+}
+
+var (
+	ErrAuditFailed       = errors.New("audit trail unavailable")
+	ErrCheckpointOverdue = errors.New("audit checkpoint overdue")
+	ErrInvalidEvent      = errors.New("invalid audit event")
+)
+
+type Options struct {
+	Out     io.Writer // one JSON row per line; os.Stdout in production
+	Replica string    // stable replica name, such as the Pod name
+	Keys    KeySource
+	Signer  Signer
+	Boots   BootStore
+	// Grace is how long the chain may go without a signed checkpoint before
+	// Admit refuses new sessions. Default 5 minutes.
+	Grace time.Duration
+	Now   func() time.Time
+}
+
+// Chain is one replica boot's audit chain. All methods are safe for
+// concurrent use; rows are written whole and in sequence order.
+type Chain struct {
+	opts Options
+	boot uint64
+
+	mu             sync.Mutex
+	seq            uint64
+	prev           string
+	key            Key
+	lastCheckpoint time.Time
+	failed         bool
+	done           chan struct{} // closed when the chain fails
+}
+
+// New fetches the current key and writes the chain_start row. Without a key
+// or a writable output there is no chain, and the caller must not serve.
+func New(ctx context.Context, opts Options) (*Chain, error) {
+	if opts.Out == nil || opts.Keys == nil || opts.Signer == nil || opts.Boots == nil || !identifier(opts.Replica, false) {
+		return nil, errors.New("audit chain requires output, replica name, key source, signer and boot store")
+	}
+	if opts.Grace <= 0 {
+		opts.Grace = 5 * time.Minute
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	key, err := opts.Keys.Current(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("audit HMAC key unavailable: %w", err)
+	}
+	boot, previous, err := opts.Boots.BeginAuditBoot(ctx, opts.Replica)
+	if err != nil {
+		return nil, fmt.Errorf("audit boot unavailable: %w", err)
+	}
+	c := &Chain{opts: opts, boot: boot, key: key, lastCheckpoint: opts.Now(), done: make(chan struct{})}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	start := Row{Event: EventChainStart, PrevBoot: previous.Boot, PrevCheckpointSeq: previous.CheckpointSeq, PrevCheckpointMAC: previous.CheckpointMAC}
+	if _, err := c.appendLocked(start); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// Admit reports whether a new session may start: the output is writable and
+// a checkpoint has been signed within the grace period.
+func (c *Chain) Admit() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failed {
+		return ErrAuditFailed
+	}
+	if c.opts.Now().Sub(c.lastCheckpoint) > c.opts.Grace {
+		return ErrCheckpointOverdue
+	}
+	return nil
+}
+
+// Validate reports whether Record would accept the event: a known event and
+// method, and every text field a bounded identifier.
+func (e Event) Validate() error {
+	switch e.Event {
+	case EventSessionOpen, EventSessionClose, EventDenied, EventHTTPRequest, EventHTTPResponse, EventTransaction, EventStateLeak, EventCertificate, EventSettings, EventInjection:
+	default:
+		return ErrInvalidEvent
+	}
+	switch e.Method {
+	case "", "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE":
+	default:
+		return ErrInvalidEvent
+	}
+	if e.Status != 0 && (e.Status < 100 || e.Status > 599) || e.Duration < 0 {
+		return ErrInvalidEvent
+	}
+	if e.CacheAgeSec < 0 || e.PullRequest < 0 {
+		return ErrInvalidEvent
+	}
+	for _, v := range []string{e.Pool, e.Agent, e.PodUID, e.Binding, e.Session, e.Outcome, e.Requester, e.RequesterKind, e.RequesterOID, e.TokenSHA256, e.Tier, e.Decision, e.Kid, e.KidSHA256, e.Peer,
+		e.Source, e.Automation, e.AutomationName, e.AutomationOwner, e.GraphQLErrors, e.Route, e.GitEntry} {
+		if !identifier(v, true) {
+			return ErrInvalidEvent
+		}
+	}
+	if !groupList(e.Groups) {
+		return ErrInvalidEvent
+	}
+	if !dnsNameList(e.DNSNames) {
+		return ErrInvalidEvent
+	}
+	if e.Target != "" && TargetField(e.Target) != e.Target {
+		return ErrInvalidEvent
+	}
+	if e.Branch != "" && BranchField(e.Branch) != e.Branch {
+		return ErrInvalidEvent
+	}
+	if e.Path != "" && PathField(e.Path) != e.Path {
+		return ErrInvalidEvent
+	}
+	if !settingNameList(e.Settings) {
+		return ErrInvalidEvent
+	}
+	if e.Operation != "" && !operationName.MatchString(e.Operation) {
+		return ErrInvalidEvent
+	}
+	if e.Database != "" && DatabaseField(e.Database) != e.Database {
+		return ErrInvalidEvent
+	}
+	if e.RequesterDepartment != "" && DepartmentField(e.RequesterDepartment) != e.RequesterDepartment {
+		return ErrInvalidEvent
+	}
+	if e.Cause != "" && !slices.Contains(Causes, e.Cause) {
+		return ErrInvalidEvent
+	}
+	if e.UpstreamMessage != MessageField(e.UpstreamMessage) {
+		return ErrInvalidEvent
+	}
+	if e.Match != "" && !matchHex.MatchString(e.Match) {
+		return ErrInvalidEvent
+	}
+	if e.Serial != "" && !serialHex.MatchString(e.Serial) {
+		return ErrInvalidEvent
+	}
+	if e.NotAfter != "" {
+		if t, err := time.Parse(time.RFC3339, e.NotAfter); err != nil || t.UTC().Format(time.RFC3339) != e.NotAfter {
+			return ErrInvalidEvent
+		}
+	}
+	return nil
+}
+
+// settingName is an environment variable name, as the catalog admits one for
+// an Automation's settings.
+var settingName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
+// settingNameList admits comma-separated setting names, any number, so a row
+// names settings and never holds a value.
+func settingNameList(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, n := range strings.Split(s, ",") {
+		if !settingName.MatchString(n) {
+			return false
+		}
+	}
+	return true
+}
+
+// SettingsField returns setting names for a row: comma-separated, in the
+// order given.
+func SettingsField(names []string) string { return strings.Join(names, ",") }
+
+// serialHex is a certificate serial number: at most 20 octets (RFC 5280), in
+// lower-case hex with no leading zeros.
+var matchHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// maxMessageBytes bounds an upstream error message on a row.
+const maxMessageBytes = 200
+
+// MessageField bounds an upstream error message for a row: printable ASCII, trimmed, cut at maxMessageBytes with "...".
+func MessageField(s string) string {
+	b := make([]byte, 0, len(s))
+	for _, r := range s {
+		switch {
+		case r >= 0x20 && r <= 0x7e:
+			b = append(b, byte(r))
+		case r < 0x20 || r == 0x7f:
+			b = append(b, ' ')
+		default:
+			b = append(b, '?')
+		}
+	}
+	out := strings.TrimSpace(string(b))
+	if len(out) > maxMessageBytes {
+		out = out[:maxMessageBytes-3] + "..."
+	}
+	return out
+}
+
+var serialHex = regexp.MustCompile(`^(0|[1-9a-f][0-9a-f]{0,39})$`)
+
+var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// dnsNameList admits comma-separated lower-case DNS names, any number, so no
+// free text can enter the row.
+func dnsNameList(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, n := range strings.Split(s, ",") {
+		if len(n) > 253 || !dnsName.MatchString(n) {
+			return false
+		}
+	}
+	return true
+}
+
+// operationName is an operation from the broker's own vocabulary: lower-case
+// words joined by dots, such as "pr.open" or "git.fetch".
+var operationName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,3}$`)
+
+// databaseName is a PostgreSQL database name an agent may ask for and a row
+// may carry: at most 63 bytes (NAMEDATALEN - 1) of letters, digits, "_", "-"
+// and ".".
+var databaseName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
+
+// DatabaseField returns a requested database name for a row's database: the
+// name itself when it is a plain name, or "invalid". The client chooses it,
+// so nothing else enters the row.
+func DatabaseField(name string) string {
+	if name == "" {
+		return ""
+	}
+	if !databaseName.MatchString(name) {
+		return "invalid"
+	}
+	return name
+}
+
+// maxDepartmentBytes bounds a department; Entra's limit is 64 characters.
+const maxDepartmentBytes = 256
+
+// DepartmentField returns a directory department for a row: trimmed, with
+// runs of white space as one space, or "invalid" when it is too long or holds
+// a control character, a quote or a backslash. Canonical input comes back
+// unchanged.
+func DepartmentField(department string) string {
+	department = strings.Join(strings.Fields(department), " ")
+	if department == "" {
+		return ""
+	}
+	if len(department) > maxDepartmentBytes || !utf8.ValidString(department) {
+		return "invalid"
+	}
+	for _, r := range department {
+		if unicode.IsControl(r) || r == '"' || r == '\\' || !unicode.IsPrint(r) {
+			return "invalid"
+		}
+	}
+	return department
+}
+
+// maxBranchBytes bounds the branch name a row may carry.
+const maxBranchBytes = 255
+
+// BranchField returns a git branch name GitHub reported for a row's branch:
+// the name itself when it is at most 255 bytes of printable ASCII other than
+// a space, a quote or a backslash, or "invalid". GitHub chooses it from what a
+// pusher named, so nothing else enters the row.
+func BranchField(name string) string {
+	if name == "" {
+		return ""
+	}
+	if len(name) > maxBranchBytes || !identifier(name, false) {
+		return "invalid"
+	}
+	return name
+}
+
+// maxGraphQLErrorEntries and maxGraphQLErrorsBytes bound the GraphQL error
+// summary a row may carry; entries past either are counted, not named.
+const (
+	maxGraphQLErrorEntries = 8
+	maxGraphQLErrorsBytes  = 400
+)
+
+// GraphQLErrorsField summarizes GraphQL errors for a row: one TYPE@path entry
+// per error (the error's type and its path, "-" for no path), comma-separated,
+// then "+N" for the rest. GitHub chooses both strings, so a type that is not
+// 1 to 40 of A-Z, a-z, 0-9 and "_" becomes "INVALID", and a path segment that
+// is not 1 to 40 of those characters becomes "*". The message and the data
+// never enter the row.
+func GraphQLErrorsField(types []string, paths [][]string) string {
+	var parts []string
+	size, extra := 0, 0
+	for i, t := range types {
+		if !safeSegment(t) {
+			t = "INVALID"
+		}
+		if t == "" {
+			t = "UNKNOWN"
+		}
+		var p []string
+		if i < len(paths) {
+			p = paths[i]
+		}
+		segs := make([]string, 0, len(p))
+		for _, s := range p {
+			if !safeSegment(s) || s == "" {
+				s = "*"
+			}
+			segs = append(segs, s)
+		}
+		path := strings.Join(segs, ".")
+		if path == "" {
+			path = "-"
+		}
+		entry := t + "@" + path
+		if len(parts) >= maxGraphQLErrorEntries || size+len(entry)+1 > maxGraphQLErrorsBytes {
+			extra++
+			continue
+		}
+		parts = append(parts, entry)
+		size += len(entry) + 1
+	}
+	out := strings.Join(parts, ",")
+	if extra > 0 {
+		out += fmt.Sprintf(",+%d", extra)
+	}
+	return out
+}
+
+// safeSegment reports whether s is at most 40 of A-Z, a-z, 0-9 and "_" (empty
+// is allowed; callers decide what it means).
+func safeSegment(s string) bool {
+	if len(s) > 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && (b < '0' || b > '9') && b != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// maxPathBytes bounds the request path a row may carry, longer than the
+// paths HTTP servers commonly accept, so a real path is never cut.
+const maxPathBytes = 8192
+
+// PathField returns a request path for a row's path: the path itself when it
+// starts with "/" and is printable ASCII other than a space, a quote or a
+// backslash (percent-encoding kept as sent), cut to maxPathBytes with "..."
+// when longer, or "invalid". The worker chooses it, so nothing else enters
+// the row. Canonical input comes back unchanged.
+func PathField(path string) string {
+	if path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "invalid"
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] <= ' ' || path[i] > '~' || path[i] == '"' || path[i] == '\\' {
+			return "invalid"
+		}
+	}
+	if len(path) > maxPathBytes {
+		return path[:maxPathBytes-3] + "..."
+	}
+	return path
+}
+
+// TargetField returns the canonical form of a requested host or host:port
+// for a row's target: a lower-case DNS name or IP address, with the port when
+// one was given, or "invalid" when the input is anything else. Its result is
+// always a valid target, and canonical input comes back unchanged.
+func TargetField(hostport string) string {
+	if hostport == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host, port = strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]"), ""
+	}
+	host = strings.ToLower(host)
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	} else if len(host) > 253 || !dnsName.MatchString(host) {
+		return "invalid"
+	}
+	if port == "" {
+		return host
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return "invalid"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+var groupID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// groupList admits the comma-separated Entra object IDs of the groups a
+// decision checked. It has no length limit: an entry may require any number
+// of groups, the full list is recorded, and the row's MAC covers it. Every
+// element must still be an object ID, so no free text can enter the row.
+func groupList(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, g := range strings.Split(s, ",") {
+		if !groupID.MatchString(g) {
+			return false
+		}
+	}
+	return true
+}
+
+// Record appends a caller event. An error means the row may not exist, so the
+// caller must not start or continue the action it describes.
+func (c *Chain) Record(e Event) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.appendLocked(Row{Event: e.Event, Pool: e.Pool, Agent: e.Agent, PodUID: e.PodUID, Binding: e.Binding, Session: e.Session, Outcome: e.Outcome, Requester: e.Requester,
+		RequesterKind: e.RequesterKind, RequesterOID: e.RequesterOID, TokenSHA256: e.TokenSHA256, Tier: e.Tier, Decision: e.Decision, Groups: e.Groups, CacheAgeSec: e.CacheAgeSec,
+		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
+		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment, Branch: e.Branch,
+		Source: e.Source, Automation: e.Automation, AutomationName: e.AutomationName, AutomationOwner: e.AutomationOwner,
+		Path: e.Path, Settings: e.Settings, GraphQLErrors: e.GraphQLErrors, Cause: e.Cause, Match: e.Match, UpstreamMessage: e.UpstreamMessage, PullRequest: e.PullRequest, Route: e.Route, GitEntry: e.GitEntry, Method: e.Method, Status: e.Status, Duration: e.Duration})
+	return err
+}
+
+// Checkpoint signs the current head outside the lock, appends the signature
+// as a row and persists that row as the boot's newest checkpoint. A signing
+// or persistence failure is itself recorded in the chain, and the grace
+// period keeps running until both succeed.
+func (c *Chain) Checkpoint(ctx context.Context) error {
+	c.mu.Lock()
+	if c.failed {
+		c.mu.Unlock()
+		return ErrAuditFailed
+	}
+	seq, mac := c.seq-1, c.prev
+	c.mu.Unlock()
+	signature, err := c.opts.Signer.Sign(ctx, checkpointInput(c.opts.Replica, c.boot, seq, mac))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil || !identifier(signature, false) {
+		if _, appendErr := c.appendLocked(Row{Event: EventCheckpointFailed, Outcome: "signer_unavailable"}); appendErr != nil {
+			return appendErr
+		}
+		return fmt.Errorf("audit checkpoint not signed: %w", ErrCheckpointOverdue)
+	}
+	row, err := c.appendLocked(Row{Event: EventCheckpoint, SignedSeq: seq, SignedMAC: mac, Signature: signature})
+	if err != nil {
+		return err
+	}
+	// Persist outside the lock so a slow store never stalls session rows.
+	c.mu.Unlock()
+	err = c.opts.Boots.RecordAuditCheckpoint(ctx, c.opts.Replica, c.boot, row.Seq, row.MAC)
+	c.mu.Lock()
+	if err != nil {
+		if _, appendErr := c.appendLocked(Row{Event: EventCheckpointFailed, Outcome: "store_unavailable"}); appendErr != nil {
+			return appendErr
+		}
+		return fmt.Errorf("audit checkpoint not persisted: %w", ErrCheckpointOverdue)
+	}
+	c.lastCheckpoint = c.opts.Now()
+	return nil
+}
+
+// RefreshKey switches to a newer key version and records the rotation. The
+// rotation row is the first row under the new key.
+func (c *Chain) RefreshKey(ctx context.Context) error {
+	key, err := c.opts.Keys.Current(ctx)
+	if err != nil {
+		return fmt.Errorf("audit HMAC key unavailable: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if key.Version <= c.key.Version {
+		return nil
+	}
+	previous := c.key.Version
+	c.key = key
+	_, err = c.appendLocked(Row{Event: EventKeyRotated, PrevKey: previous})
+	return err
+}
+
+// Run checkpoints every interval and polls for a rotated key every refresh
+// until ctx ends. Failures are recorded in the chain and enforced by Admit.
+func (c *Chain) Run(ctx context.Context, interval, refresh time.Duration) {
+	checkpoint := time.NewTicker(interval)
+	defer checkpoint.Stop()
+	rotate := time.NewTicker(refresh)
+	defer rotate.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-checkpoint.C:
+			signCtx, cancel := context.WithTimeout(ctx, interval/2)
+			_ = c.Checkpoint(signCtx)
+			cancel()
+		case <-rotate.C:
+			keyCtx, cancel := context.WithTimeout(ctx, refresh/2)
+			_ = c.RefreshKey(keyCtx)
+			cancel()
+		}
+	}
+}
+
+// writeMACVersion is the MAC version new rows use; tests lower it to write
+// the rows an older broker wrote.
+var writeMACVersion = MACVersionCurrent
+
+func (c *Chain) appendLocked(r Row) (Row, error) {
+	if c.failed {
+		return Row{}, ErrAuditFailed
+	}
+	r.Type, r.Replica, r.Boot, r.Seq = RowType, c.opts.Replica, c.boot, c.seq
+	r.Time = c.opts.Now().UTC().Format(time.RFC3339Nano)
+	r.KeyVersion, r.Prev, r.MACVersion = c.key.Version, c.prev, writeMACVersion
+	r.MAC = r.computeMAC(c.key.secret)
+	line, err := json.Marshal(r)
+	if err != nil {
+		c.failLocked()
+		return Row{}, ErrAuditFailed
+	}
+	if _, err := c.opts.Out.Write(append(line, '\n')); err != nil {
+		// A partial line may exist. Stop the chain rather than continue past
+		// a row whose presence is unknown.
+		c.failLocked()
+		return Row{}, ErrAuditFailed
+	}
+	c.seq++
+	c.prev = r.MAC
+	return r, nil
+}
+
+// Failed is closed when the chain stops for good. Admit then refuses new
+// sessions; sessions already open must end too, since nothing they do can be
+// recorded any more.
+func (c *Chain) Failed() <-chan struct{} { return c.done }
+
+func (c *Chain) failLocked() {
+	if !c.failed {
+		c.failed = true
+		close(c.done)
+	}
+}
+
+// identifier admits bounded printable ASCII without spaces or quotes, which
+// keeps rows free of free-form text that could carry a secret or forge a line.
+func identifier(s string, optional bool) bool {
+	if s == "" {
+		return optional
+	}
+	if len(s) > 512 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] <= ' ' || s[i] > '~' || s[i] == '"' || s[i] == '\\' {
+			return false
+		}
+	}
+	return true
+}

@@ -1,0 +1,390 @@
+package hashicorp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestDatabaseSessionPolicyAndAccessorCustody(t *testing.T) {
+	policy := DatabaseCredentialPolicyName("database", "reader")
+	var minted, revoked atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/token/create":
+			body := decodeBody(t, r)
+			policies := body["policies"].([]interface{})
+			if len(policies) != 1 || policies[0] != policy || body["no_default_policy"] != true || body["renewable"] != false || body["type"] != "service" || body["ttl"] != "1m0s" || body["explicit_max_ttl"] != "1m0s" {
+				t.Error("child token was not constrained")
+			}
+			writeJSON(w, map[string]any{"auth": map[string]any{"client_token": "child-secret", "accessor": "cleanup-ref", "policies": []string{policy}, "lease_duration": 60, "renewable": false}})
+		case "/v1/database/creds/reader":
+			if r.Header.Get("X-Vault-Token") != "child-secret" {
+				t.Error("issued under parent token")
+			}
+			minted.Add(1)
+			writeJSON(w, map[string]any{"lease_id": "db/lease", "lease_duration": 30, "renewable": true, "data": map[string]any{"username": "user", "password": "synthetic-password"}})
+		case "/v1/auth/token/revoke-accessor":
+			if body := decodeBody(t, r); body["accessor"] != "cleanup-ref" {
+				t.Error("wrong cleanup reference")
+			}
+			revoked.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Error("unexpected API path", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := newClientForServer(t, srv.URL)
+	session, err := c.NewDatabaseSession(context.Background(), "database", "reader", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minted.Load() != 0 || session.Accessor != "cleanup-ref" {
+		t.Fatal("credential issued before accessor was returned")
+	}
+	if _, err = session.ReadCredential(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.RevokeDatabaseSession(context.Background(), session.Accessor); err != nil {
+		t.Fatal(err)
+	}
+	if minted.Load() != 1 || revoked.Load() != 1 {
+		t.Fatal("wrong lifecycle counts")
+	}
+}
+
+func TestDatabaseSessionRejectsBroaderPolicy(t *testing.T) {
+	var minted atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/revoke-accessor" {
+			w.WriteHeader(204)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/creds/") {
+			minted.Store(true)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"auth": map[string]any{"client_token": "child", "accessor": "ref", "policies": []string{"root"}, "lease_duration": 60}})
+	}))
+	defer srv.Close()
+	c := newClientForServer(t, srv.URL)
+	if _, err := c.NewDatabaseSession(context.Background(), "database", "reader", time.Minute); err == nil {
+		t.Fatal("broader child policy accepted")
+	}
+	if minted.Load() {
+		t.Fatal("database credential minted on rejected policy")
+	}
+}
+
+func TestDatabaseSessionAccessorRetryOnlyAcceptsMissingAccessor(t *testing.T) {
+	for _, test := range []struct {
+		message string
+		ok      bool
+	}{{"invalid accessor", true}, {"permission denied", false}, {"database unavailable", false}} {
+		t.Run(test.message, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(400)
+				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []string{test.message}})
+			}))
+			defer srv.Close()
+			c := newClientForServer(t, srv.URL)
+			c.AdoptSession("ref")
+			err := c.RevokeDatabaseSession(context.Background(), "ref")
+			if (err == nil) != test.ok {
+				t.Fatalf("cleanup result %v", err)
+			}
+		})
+	}
+}
+
+func TestDatabaseProviderErrorsDoNotExposeResponseBody(t *testing.T) {
+	t.Parallel()
+	const canary = "synthetic-provider-error-credential-canary"
+	for _, phase := range []string{"create", "read", "child-read", "revoke-accessor", "revoke-lease", "confirm-lease", "renew", "legacy-revoke"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if phase == "confirm-lease" && strings.Contains(r.URL.Path, "/revoke/") {
+					w.WriteHeader(204)
+					return
+				}
+				// 503, not 403: a refused accessor revoke counts as done.
+				w.WriteHeader(503)
+				errs := []string{canary}
+				if phase == "read" || phase == "child-read" {
+					// A credential read reports Vault's messages, so the canary
+					// stands where a database error could echo a password.
+					errs = []string{
+						`failed to execute query: ERROR: syntax error at or near "'` + canary + `'" (SQLSTATE 42601)`,
+						`CREATE ROLE "v-x" WITH LOGIN PASSWORD '` + canary + `' VALID UNTIL 'soon';`,
+						"cannot connect to postgres://vault_admin:" + canary + "@db:5432/postgres",
+						"dial failed: host=db password=" + canary + " user=vault_admin",
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"errors": errs})
+			}))
+			defer srv.Close()
+			c := newClientForServer(t, srv.URL)
+			ctx := context.Background()
+			var err error
+			switch phase {
+			case "create":
+				_, err = c.NewDatabaseSession(ctx, "database", "reader", time.Minute)
+			case "read":
+				_, err = c.ReadDatabaseCredential(ctx, "database", "reader")
+			case "child-read":
+				session := DatabaseSession{client: c, ExpiresAt: time.Now().Add(time.Minute), mount: "database", role: "reader"}
+				_, err = session.ReadCredential(ctx)
+			case "revoke-accessor":
+				err = c.RevokeDatabaseSession(ctx, "ref")
+			case "revoke-lease", "confirm-lease":
+				err = c.RevokeDatabaseLeaseConfirmed(ctx, "database/creds/reader/lease")
+			case "renew":
+				_, err = c.RenewLease(ctx, "lease", time.Minute)
+			case "legacy-revoke":
+				err = c.RevokeLease(ctx, "lease")
+			}
+			if err == nil || strings.Contains(err.Error(), canary) {
+				t.Fatalf("phase %s did not return a scrubbed failure: %v", phase, err)
+			}
+			if (phase == "read" || phase == "child-read") && !strings.Contains(err.Error(), "Vault answered 503: failed to execute query") {
+				t.Fatalf("phase %s dropped Vault's answer: %v", phase, err)
+			}
+		})
+	}
+}
+
+// A live session revokes itself with its own child token, so the broker needs
+// no right over other tokens. It never falls back to the accessor.
+func TestDatabaseSessionRevokesItself(t *testing.T) {
+	policy := DatabaseCredentialPolicyName("database", "reader")
+	for _, selfFails := range []bool{false, true} {
+		var selfRevoked, accessorRevoked atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/auth/token/create":
+				writeJSON(w, map[string]any{"auth": map[string]any{"client_token": "child-secret", "accessor": "cleanup-ref", "policies": []string{policy}, "lease_duration": 60, "renewable": false}})
+			case "/v1/auth/token/revoke-self":
+				if r.Header.Get("X-Vault-Token") != "child-secret" {
+					t.Error("revoke-self sent without the child token")
+				}
+				if selfFails {
+					w.WriteHeader(503)
+					return
+				}
+				selfRevoked.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			case "/v1/auth/token/revoke-accessor":
+				accessorRevoked.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Error("unexpected API path", r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		c := newClientForServer(t, srv.URL)
+		session, err := c.NewDatabaseSession(context.Background(), "database", "reader", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := session.Revoke(context.Background()); (err != nil) != selfFails {
+			t.Fatalf("selfFails=%v: %v", selfFails, err)
+		}
+		want := [2]int32{1, 0}
+		if selfFails {
+			want = [2]int32{0, 0}
+		}
+		if got := [2]int32{selfRevoked.Load(), accessorRevoked.Load()}; got != want {
+			t.Errorf("selfFails=%v: self and accessor revokes %v, want %v", selfFails, got, want)
+		}
+		srv.Close()
+	}
+}
+
+// Without revoke-accessor in its policy, Vault refuses the accessor revoke.
+// That counts as done: the token's value died with its process, and it expires
+// at its TTL. Any other failure is still an error.
+func TestDatabaseSessionAccessorRevokeToleratesRefusal(t *testing.T) {
+	t.Parallel()
+	for status, ok := range map[int]bool{403: true, 503: false, 500: false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []string{"permission denied"}})
+		}))
+		c := newClientForServer(t, srv.URL)
+		c.AdoptSession("ref")
+		err := c.RevokeDatabaseSession(context.Background(), "ref")
+		if (err == nil) != ok {
+			t.Errorf("status %d: cleanup result %v", status, err)
+		}
+		srv.Close()
+	}
+}
+
+// The lease list is what clears an unknown issuance, so only Vault's own
+// empty-list answer reads as "no leases"; every other reply is an error.
+func TestListDatabaseLeasesTrustsOnlyVaultsAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   []string
+		ok     bool
+	}{
+		{"leases", 200, `{"data":{"keys":["a1","b2"]}}`, []string{"database/creds/reader/a1", "database/creds/reader/b2"}, true},
+		{"vault empty list", 404, `{"errors":[]}`, []string{}, true},
+		{"404 from something else", 404, `<html>not found</html>`, nil, false},
+		{"404 without errors", 404, `{}`, nil, false},
+		{"404 with an error", 404, `{"errors":["no handler for route"]}`, nil, false},
+		{"refused", 403, `{"errors":["permission denied"]}`, nil, false},
+		{"nested key", 200, `{"data":{"keys":["sub/"]}}`, nil, false},
+		{"no keys", 200, `{"data":{}}`, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The client drops the trailing slash; Vault adds it back to every list.
+				if strings.TrimSuffix(r.URL.Path, "/") != "/v1/sys/leases/lookup/database/creds/reader" || r.URL.Query().Get("list") != "true" {
+					t.Error("unexpected lease list request", r.Method, r.URL.String())
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := newClientForServer(t, srv.URL).ListDatabaseLeases(context.Background(), "/database/", "reader")
+			if (err == nil) != tc.ok {
+				t.Fatalf("error %v, want ok=%v", err, tc.ok)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") || (tc.ok && got == nil) {
+				t.Fatalf("leases %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if _, err := newClientForServer(t, "http://127.0.0.1:1").ListDatabaseLeases(context.Background(), "database", "../sys"); err == nil {
+		t.Fatal("a traversing role was listed")
+	}
+}
+
+func TestDatabaseLeaseIssued(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		gone   bool
+		ok     bool
+	}{
+		{"held", 200, `{"data":{"id":"database/creds/reader/a1","issue_time":"2026-10-10T01:11:17.123456Z"}}`, false, true},
+		{"gone", 400, `{"errors":["invalid lease"]}`, true, false},
+		{"refused", 403, `{"errors":["permission denied"]}`, false, false},
+		{"no issue time", 200, `{"data":{"id":"database/creds/reader/a1"}}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/sys/leases/lookup" || decodeBody(t, r)["lease_id"] != "database/creds/reader/a1" {
+					t.Error("unexpected lease lookup", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			issued, err := newClientForServer(t, srv.URL).DatabaseLeaseIssued(context.Background(), "database/creds/reader/a1")
+			if errors.Is(err, ErrLeaseGone) != tc.gone || (err == nil) != tc.ok {
+				t.Fatalf("err %v", err)
+			}
+			if tc.ok && !issued.Equal(time.Date(2026, 10, 10, 1, 11, 17, 123456000, time.UTC)) {
+				t.Fatalf("issued %v", issued)
+			}
+		})
+	}
+}
+
+// A revocation Vault answers and refuses, or confirms while still listing the
+// lease, is a fault a retry meets again. A timeout, a lost connection or an
+// overloaded Vault is a blip and must not read as one.
+func TestRevokeDatabaseLeaseConfirmedTellsRefusalFromBlip(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		revoke        int
+		lookup        int
+		cancel, close bool
+		refused       bool
+	}{
+		{name: "refused by policy", revoke: 403, refused: true},
+		{name: "database refuses to drop the role", revoke: 500, refused: true},
+		{name: "still listed after revoke", revoke: 204, lookup: 200, refused: true},
+		{name: "overloaded", revoke: 503},
+		{name: "rate limited", revoke: 429},
+		{name: "gateway timeout", revoke: 504},
+		{name: "lookup unavailable", revoke: 204, lookup: 502},
+		{name: "caller gone", revoke: 204, cancel: true},
+		{name: "connection refused", close: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := tc.revoke
+				if r.URL.Path == "/v1/sys/leases/lookup" {
+					status = tc.lookup
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if status == 200 {
+					_, _ = w.Write([]byte(`{"data":{"id":"database/creds/reader/a1"}}`))
+				} else if status != 204 {
+					_, _ = w.Write([]byte(`{"errors":["synthetic"]}`))
+				}
+			}))
+			c := newClientForServer(t, srv.URL)
+			c.api.SetMaxRetries(0)
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				cancel()
+			}
+			defer cancel()
+			if tc.close {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+			c.AdoptLease("database/creds/reader/a1")
+			err := c.RevokeDatabaseLeaseConfirmed(ctx, "database/creds/reader/a1")
+			if err == nil || errors.Is(err, ErrLeaseRevokeRefused) != tc.refused {
+				t.Fatalf("err %v, refused %v", err, tc.refused)
+			}
+		})
+	}
+}
+
+type childVaultRecord struct{ revoked atomic.Int32 }
+
+// childSessionVault answers a child token mint, one credential read under it and the
+// accessor revoke and lease revoke the broker makes.
+func childSessionVault(t *testing.T, policy string) (*httptest.Server, *childVaultRecord) {
+	t.Helper()
+	rec := &childVaultRecord{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/token/create":
+			writeJSON(w, map[string]any{"auth": map[string]any{"client_token": "child-secret", "accessor": "child-accessor", "policies": []string{policy}, "lease_duration": 60, "renewable": false}})
+		case "/v1/database/creds/reader":
+			writeJSON(w, map[string]any{"lease_id": "database/creds/reader/lease-1", "lease_duration": 30, "renewable": true, "data": map[string]any{"username": "user", "password": "synthetic-password"}})
+		case "/v1/auth/token/revoke-accessor":
+			rec.revoked.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/sys/leases/revoke/database/creds/reader/lease-1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Error("unexpected API path", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
