@@ -1064,16 +1064,51 @@ func (s *SQLStore) ExpireCredentialOAuthStates(ctx context.Context, before time.
 	return int(n), nil
 }
 
+// userKDFAlgorithm rejects an unset algorithm; a record must say how it was derived.
+func userKDFAlgorithm(a string) (string, error) {
+	if a == "" {
+		return "", errors.New("KDF algorithm is required")
+	}
+	return a, nil
+}
+
+// masterKDFAlgorithm is NULL for a passwordless record and required otherwise.
+func masterKDFAlgorithm(r *MasterKeyRecord) (any, error) {
+	if r.KDFTime == nil {
+		return nil, nil
+	}
+	return userKDFAlgorithm(r.KDFAlgorithm)
+}
+
+// scanKDFAlgorithm reads the column; NULL or empty is a row written by an image older than the column, which is Argon2id.
+func scanKDFAlgorithm(n sql.NullString) string {
+	if n.Valid && n.String != "" {
+		return n.String
+	}
+	return "argon2id"
+}
+
+// wrapKindOrPassword maps an unset wrap kind to the column default.
+func wrapKindOrPassword(k string) string {
+	if k == "" {
+		return WrapKindPassword
+	}
+	return k
+}
+
 // --- Users ---
 
-func (s *SQLStore) CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*User, error) {
+func (s *SQLStore) CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*User, error) {
+	if _, err := userKDFAlgorithm(kdfAlgorithm); err != nil {
+		return nil, err
+	}
 	id := newUUID()
 	now := time.Now().UTC()
 	nowStr := s.dialect.FormatTime(now)
 
 	_, err := s.db.ExecContext(ctx,
-		s.dialect.Rebind("INSERT INTO users (id, email, password_hash, password_salt, role, is_active, kdf_time, kdf_memory, kdf_threads, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
-		id, email, passwordHash, passwordSalt, role, s.dialect.BoolVal(false), kdfTime, kdfMemory, kdfThreads, nowStr, nowStr,
+		s.dialect.Rebind("INSERT INTO users (id, email, password_hash, password_salt, role, is_active, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+		id, email, passwordHash, passwordSalt, role, s.dialect.BoolVal(false), kdfTime, kdfMemory, kdfThreads, kdfAlgorithm, nowStr, nowStr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating user: %w", err)
@@ -1081,21 +1116,23 @@ func (s *SQLStore) CreateUser(ctx context.Context, email string, passwordHash, p
 
 	return &User{
 		ID: id, Email: email, PasswordHash: passwordHash, PasswordSalt: passwordSalt,
-		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads,
+		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads, KDFAlgorithm: kdfAlgorithm,
 		Role: role, IsActive: false, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
 func (s *SQLStore) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	row := s.db.QueryRowContext(ctx,
-		s.dialect.Rebind("SELECT id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, role, is_active, created_at, updated_at FROM users WHERE email = ?"), email,
+		s.dialect.Rebind("SELECT id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, role, is_active, created_at, updated_at FROM users WHERE email = ?"), email,
 	)
 
 	var u User
+	var kdfAlgo sql.NullString
 	var createdAt, updatedAt interface{}
-	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordSalt, &u.KDFTime, &u.KDFMemory, &u.KDFThreads, &u.Role, &u.IsActive, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordSalt, &u.KDFTime, &u.KDFMemory, &u.KDFThreads, &kdfAlgo, &u.Role, &u.IsActive, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
+	u.KDFAlgorithm = scanKDFAlgorithm(kdfAlgo)
 	u.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	u.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 	return &u, nil
@@ -1109,7 +1146,10 @@ func (s *SQLStore) CountUsers(ctx context.Context) (int, error) {
 
 // RegisterFirstUser atomically checks that no users exist and creates the
 // first user as an active owner. Returns ErrNotFirstUser if users already exist.
-func (s *SQLStore) RegisterFirstUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*User, error) {
+func (s *SQLStore) RegisterFirstUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*User, error) {
+	if _, err := userKDFAlgorithm(kdfAlgorithm); err != nil {
+		return nil, err
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -1129,8 +1169,8 @@ func (s *SQLStore) RegisterFirstUser(ctx context.Context, email string, password
 	nowStr := s.dialect.FormatTime(now)
 
 	_, err = tx.ExecContext(ctx,
-		s.dialect.Rebind("INSERT INTO users (id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, role, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?)"),
-		id, email, passwordHash, passwordSalt, kdfTime, kdfMemory, kdfThreads, s.dialect.BoolVal(true), nowStr, nowStr,
+		s.dialect.Rebind("INSERT INTO users (id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, role, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?)"),
+		id, email, passwordHash, passwordSalt, kdfTime, kdfMemory, kdfThreads, kdfAlgorithm, s.dialect.BoolVal(true), nowStr, nowStr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating owner: %w", err)
@@ -1152,21 +1192,23 @@ func (s *SQLStore) RegisterFirstUser(ctx context.Context, email string, password
 
 	return &User{
 		ID: id, Email: email, PasswordHash: passwordHash, PasswordSalt: passwordSalt,
-		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads,
+		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads, KDFAlgorithm: kdfAlgorithm,
 		Role: "owner", IsActive: true, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
 func (s *SQLStore) GetUserByID(ctx context.Context, id string) (*User, error) {
 	row := s.db.QueryRowContext(ctx,
-		s.dialect.Rebind("SELECT id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, role, is_active, created_at, updated_at FROM users WHERE id = ?"), id,
+		s.dialect.Rebind("SELECT id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, role, is_active, created_at, updated_at FROM users WHERE id = ?"), id,
 	)
 
 	var u User
+	var kdfAlgo sql.NullString
 	var createdAt, updatedAt interface{}
-	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordSalt, &u.KDFTime, &u.KDFMemory, &u.KDFThreads, &u.Role, &u.IsActive, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordSalt, &u.KDFTime, &u.KDFMemory, &u.KDFThreads, &kdfAlgo, &u.Role, &u.IsActive, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
+	u.KDFAlgorithm = scanKDFAlgorithm(kdfAlgo)
 	u.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	u.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 	return &u, nil
@@ -1185,7 +1227,7 @@ func (s *SQLStore) GetUserEmailByID(ctx context.Context, id string) (string, err
 
 func (s *SQLStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		s.dialect.Rebind("SELECT id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, role, is_active, created_at, updated_at FROM users ORDER BY email"),
+		s.dialect.Rebind("SELECT id, email, password_hash, password_salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, role, is_active, created_at, updated_at FROM users ORDER BY email"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing users: %w", err)
@@ -1195,10 +1237,12 @@ func (s *SQLStore) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
+		var kdfAlgo sql.NullString
 		var createdAt, updatedAt interface{}
-		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordSalt, &u.KDFTime, &u.KDFMemory, &u.KDFThreads, &u.Role, &u.IsActive, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordSalt, &u.KDFTime, &u.KDFMemory, &u.KDFThreads, &kdfAlgo, &u.Role, &u.IsActive, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scanning user: %w", err)
 		}
+		u.KDFAlgorithm = scanKDFAlgorithm(kdfAlgo)
 		u.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 		u.UpdatedAt, _ = s.dialect.ScanTime(updatedAt)
 		users = append(users, u)
@@ -1206,11 +1250,14 @@ func (s *SQLStore) ListUsers(ctx context.Context) ([]User, error) {
 	return users, rows.Err()
 }
 
-func (s *SQLStore) UpdateUserPassword(ctx context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) error {
+func (s *SQLStore) UpdateUserPassword(ctx context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) error {
+	if _, err := userKDFAlgorithm(kdfAlgorithm); err != nil {
+		return err
+	}
 	nowStr := s.now()
 	res, err := s.db.ExecContext(ctx,
-		s.dialect.Rebind("UPDATE users SET password_hash = ?, password_salt = ?, kdf_time = ?, kdf_memory = ?, kdf_threads = ?, updated_at = ? WHERE id = ?"),
-		passwordHash, passwordSalt, kdfTime, kdfMemory, kdfThreads, nowStr, userID,
+		s.dialect.Rebind("UPDATE users SET password_hash = ?, password_salt = ?, kdf_time = ?, kdf_memory = ?, kdf_threads = ?, kdf_algorithm = ?, updated_at = ? WHERE id = ?"),
+		passwordHash, passwordSalt, kdfTime, kdfMemory, kdfThreads, kdfAlgorithm, nowStr, userID,
 	)
 	if err != nil {
 		return fmt.Errorf("updating user password: %w", err)
@@ -1220,6 +1267,25 @@ func (s *SQLStore) UpdateUserPassword(ctx context.Context, userID string, passwo
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// UpgradeUserPasswordHash rewrites a row only while it still holds the exact hash and KDF params that were read, matched by value and not by label, so a login racing a password change cannot write the old password back.
+func (s *SQLStore) UpgradeUserPasswordHash(ctx context.Context, expected *User, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (bool, error) {
+	if _, err := userKDFAlgorithm(kdfAlgorithm); err != nil {
+		return false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`UPDATE users SET password_hash = ?, password_salt = ?, kdf_time = ?, kdf_memory = ?, kdf_threads = ?, kdf_algorithm = ?, updated_at = ?
+		 WHERE id = ? AND password_hash = ? AND password_salt = ? AND kdf_time = ? AND kdf_memory = ? AND kdf_threads = ?
+		   AND (kdf_algorithm = ? OR (kdf_algorithm IS NULL AND CAST(? AS TEXT) = 'argon2id'))`),
+		passwordHash, passwordSalt, kdfTime, kdfMemory, kdfThreads, kdfAlgorithm, s.now(),
+		expected.ID, expected.PasswordHash, expected.PasswordSalt, expected.KDFTime, expected.KDFMemory, expected.KDFThreads, expected.KDFAlgorithm, expected.KDFAlgorithm,
+	)
+	if err != nil {
+		return false, fmt.Errorf("upgrading user password hash: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (s *SQLStore) UpdateUserRole(ctx context.Context, userID, role string) error {
@@ -1792,16 +1858,19 @@ func (s *SQLStore) DeleteSession(ctx context.Context, rawToken string) error {
 func (s *SQLStore) GetMasterKeyRecord(ctx context.Context) (*MasterKeyRecord, error) {
 	row := s.db.QueryRowContext(ctx,
 		s.dialect.Rebind(`SELECT sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext,
-		        salt, kdf_time, kdf_memory, kdf_threads, created_at
+		        salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm,
+		        kms_wrapped_dek, kms_key_name, wrap_kind, created_at
 		 FROM master_key WHERE id = 1`),
 	)
 
 	var rec MasterKeyRecord
+	var kdfAlgo sql.NullString
 	var createdAt interface{}
 	err := row.Scan(
 		&rec.Sentinel, &rec.SentinelNonce,
 		&rec.DEKCiphertext, &rec.DEKNonce, &rec.DEKPlaintext,
-		&rec.Salt, &rec.KDFTime, &rec.KDFMemory, &rec.KDFThreads,
+		&rec.Salt, &rec.KDFTime, &rec.KDFMemory, &rec.KDFThreads, &kdfAlgo,
+		&rec.KMSWrappedDEK, &rec.KMSKeyName, &rec.WrapKind,
 		&createdAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1810,18 +1879,26 @@ func (s *SQLStore) GetMasterKeyRecord(ctx context.Context) (*MasterKeyRecord, er
 	if err != nil {
 		return nil, fmt.Errorf("getting master key record: %w", err)
 	}
+	if rec.KDFTime != nil {
+		rec.KDFAlgorithm = scanKDFAlgorithm(kdfAlgo)
+	}
 	rec.CreatedAt, _ = s.dialect.ScanTime(createdAt)
 	return &rec, nil
 }
 
 func (s *SQLStore) SetMasterKeyRecord(ctx context.Context, record *MasterKeyRecord) error {
-	_, err := s.db.ExecContext(ctx,
-		s.dialect.Rebind(`INSERT INTO master_key (id, sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext, salt, kdf_time, kdf_memory, kdf_threads)
-		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	algo, err := masterKDFAlgorithm(record)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		s.dialect.Rebind(`INSERT INTO master_key (id, sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext, salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, kms_wrapped_dek, kms_key_name, wrap_kind)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO NOTHING`),
 		record.Sentinel, record.SentinelNonce,
 		record.DEKCiphertext, record.DEKNonce, record.DEKPlaintext,
-		record.Salt, record.KDFTime, record.KDFMemory, record.KDFThreads,
+		record.Salt, record.KDFTime, record.KDFMemory, record.KDFThreads, algo,
+		record.KMSWrappedDEK, record.KMSKeyName, wrapKindOrPassword(record.WrapKind),
 	)
 	if err != nil {
 		return fmt.Errorf("setting master key record: %w", err)
@@ -1830,15 +1907,21 @@ func (s *SQLStore) SetMasterKeyRecord(ctx context.Context, record *MasterKeyReco
 }
 
 func (s *SQLStore) UpdateMasterKeyRecord(ctx context.Context, record *MasterKeyRecord) error {
+	algo, err := masterKDFAlgorithm(record)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx,
 		s.dialect.Rebind(`UPDATE master_key SET
 		    sentinel = ?, sentinel_nonce = ?,
 		    dek_ciphertext = ?, dek_nonce = ?, dek_plaintext = ?,
-		    salt = ?, kdf_time = ?, kdf_memory = ?, kdf_threads = ?
+		    salt = ?, kdf_time = ?, kdf_memory = ?, kdf_threads = ?, kdf_algorithm = ?,
+		    kms_wrapped_dek = ?, kms_key_name = ?, wrap_kind = ?
 		 WHERE id = 1`),
 		record.Sentinel, record.SentinelNonce,
 		record.DEKCiphertext, record.DEKNonce, record.DEKPlaintext,
-		record.Salt, record.KDFTime, record.KDFMemory, record.KDFThreads,
+		record.Salt, record.KDFTime, record.KDFMemory, record.KDFThreads, algo,
+		record.KMSWrappedDEK, record.KMSKeyName, wrapKindOrPassword(record.WrapKind),
 	)
 	if err != nil {
 		return fmt.Errorf("updating master key record: %w", err)
@@ -1847,6 +1930,93 @@ func (s *SQLStore) UpdateMasterKeyRecord(ctx context.Context, record *MasterKeyR
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// SetMasterKeyKMSWrap writes only the KMS columns, so the password wrap is never rewritten and a stale read cannot put an old one back.
+func (s *SQLStore) SetMasterKeyKMSWrap(ctx context.Context, expected *MasterKeyRecord, wrapped []byte, keyName string) (bool, error) {
+	if expected.KDFTime == nil || expected.KDFMemory == nil || expected.KDFThreads == nil {
+		return false, errors.New("a KMS wrap needs a password-protected record to sit beside")
+	}
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`UPDATE master_key SET kms_wrapped_dek = ?, kms_key_name = ?, wrap_kind = ?
+		 WHERE id = 1 AND kms_wrapped_dek IS NULL AND salt = ? AND dek_ciphertext = ? AND kdf_time = ? AND kdf_memory = ? AND kdf_threads = ?`),
+		wrapped, keyName, WrapKindKMS, expected.Salt, expected.DEKCiphertext, *expected.KDFTime, *expected.KDFMemory, *expected.KDFThreads)
+	if err != nil {
+		return false, fmt.Errorf("saving the KMS wrap: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ClearMasterKeyPlaintext nulls only dek_plaintext, matched on the KMS wrap and plaintext as read, so a record that changed since is left alone.
+func (s *SQLStore) ClearMasterKeyPlaintext(ctx context.Context, expected *MasterKeyRecord) (bool, error) {
+	if expected.KMSWrappedDEK == nil || expected.DEKPlaintext == nil {
+		return false, errors.New("only a KMS-wrapped record with a plaintext key has one to clear")
+	}
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`UPDATE master_key SET dek_plaintext = NULL WHERE id = 1 AND kms_wrapped_dek = ? AND dek_plaintext = ?`),
+		expected.KMSWrappedDEK, expected.DEKPlaintext)
+	if err != nil {
+		return false, fmt.Errorf("clearing the plaintext master key: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RemoveMasterKeyPasswordWrap nulls the password and plaintext columns, matched on the KMS wrap and wrap kind as read, so a break-glass mark recorded since is never overwritten.
+func (s *SQLStore) RemoveMasterKeyPasswordWrap(ctx context.Context, expected *MasterKeyRecord) (bool, error) {
+	if expected.KMSWrappedDEK == nil {
+		return false, errors.New("only a KMS-wrapped record can drop its password wrap")
+	}
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`UPDATE master_key SET
+		    dek_ciphertext = NULL, dek_nonce = NULL, dek_plaintext = NULL,
+		    salt = NULL, kdf_time = NULL, kdf_memory = NULL, kdf_threads = NULL, kdf_algorithm = NULL
+		 WHERE id = 1 AND kms_wrapped_dek = ? AND wrap_kind = ?`),
+		expected.KMSWrappedDEK, wrapKindOrPassword(expected.WrapKind))
+	if err != nil {
+		return false, fmt.Errorf("removing the password wrap: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SetMasterKeyWrapKind switches a KMS record between its two unlock kinds and leaves every other column alone.
+func (s *SQLStore) SetMasterKeyWrapKind(ctx context.Context, kind string) error {
+	if kind != WrapKindKMS && kind != WrapKindKMSFallback {
+		return fmt.Errorf("unknown wrap kind %q", kind)
+	}
+	_, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`UPDATE master_key SET wrap_kind = ? WHERE id = 1 AND wrap_kind IN (?, ?) AND wrap_kind <> ?`),
+		kind, WrapKindKMS, WrapKindKMSFallback, kind)
+	if err != nil {
+		return fmt.Errorf("recording the unlock path: %w", err)
+	}
+	return nil
+}
+
+// UpgradeMasterKeyRecord rewrites the record only while it still has the exact salt and KDF params that were read, matched by value and not by label, so a pod racing a password change cannot write an old secret back.
+func (s *SQLStore) UpgradeMasterKeyRecord(ctx context.Context, expected, record *MasterKeyRecord) (bool, error) {
+	if record.KDFTime == nil || expected.KDFTime == nil || expected.KDFMemory == nil || expected.KDFThreads == nil {
+		return false, errors.New("upgrade needs a password-protected record")
+	}
+	algo, err := masterKDFAlgorithm(record)
+	if err != nil {
+		return false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		s.dialect.Rebind(`UPDATE master_key SET
+		    dek_ciphertext = ?, dek_nonce = ?, salt = ?, kdf_time = ?, kdf_memory = ?, kdf_threads = ?, kdf_algorithm = ?
+		 WHERE id = 1 AND salt = ? AND dek_ciphertext = ? AND kdf_time = ? AND kdf_memory = ? AND kdf_threads = ?
+		   AND (kdf_algorithm = ? OR (kdf_algorithm IS NULL AND CAST(? AS TEXT) = 'argon2id'))`),
+		record.DEKCiphertext, record.DEKNonce, record.Salt, record.KDFTime, record.KDFMemory, record.KDFThreads, algo,
+		expected.Salt, expected.DEKCiphertext, *expected.KDFTime, *expected.KDFMemory, *expected.KDFThreads, expected.KDFAlgorithm, expected.KDFAlgorithm,
+	)
+	if err != nil {
+		return false, fmt.Errorf("upgrading master key record: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // --- Broker Configs ---

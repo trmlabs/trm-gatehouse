@@ -30,6 +30,8 @@ var tp = timePtr
 
 // mockStore implements Store for testing.
 type mockStore struct {
+	beforeHashUpgrade  func() // runs just before a conditional hash upgrade, to simulate a racing writer
+	hashUpgradeErr     error
 	masterKeyRecord    *store.MasterKeyRecord
 	sessions           map[string]*store.Session
 	vaults             map[string]*store.Vault
@@ -74,25 +76,25 @@ func (m *mockStore) GetMasterKeyRecord(_ context.Context) (*store.MasterKeyRecor
 	return m.masterKeyRecord, nil
 }
 
-func (m *mockStore) CreateUser(_ context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error) {
+func (m *mockStore) CreateUser(_ context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*store.User, error) {
 	u := &store.User{
 		ID: "user-" + email, Email: email,
 		PasswordHash: passwordHash, PasswordSalt: passwordSalt,
-		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads,
+		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads, KDFAlgorithm: kdfAlgorithm,
 		Role: role, CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 	m.users[email] = u
 	return u, nil
 }
 
-func (m *mockStore) RegisterFirstUser(_ context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error) {
+func (m *mockStore) RegisterFirstUser(_ context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*store.User, error) {
 	if len(m.users) > 0 {
 		return nil, store.ErrNotFirstUser
 	}
 	u := &store.User{
 		ID: "user-" + email, Email: email,
 		PasswordHash: passwordHash, PasswordSalt: passwordSalt,
-		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads,
+		KDFTime: kdfTime, KDFMemory: kdfMemory, KDFThreads: kdfThreads, KDFAlgorithm: kdfAlgorithm,
 		Role: "owner", IsActive: true, CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 	m.users[email] = u
@@ -113,7 +115,8 @@ func (m *mockStore) GetUserByEmail(_ context.Context, email string) (*store.User
 	if !ok {
 		return nil, fmt.Errorf("user not found")
 	}
-	return u, nil
+	cp := *u // a real store returns a copy
+	return &cp, nil
 }
 
 func (m *mockStore) CountUsers(_ context.Context) (int, error) {
@@ -464,7 +467,24 @@ func (m *mockStore) UpdateUserRole(_ context.Context, userID, role string) error
 	return fmt.Errorf("user not found")
 }
 
-func (m *mockStore) UpdateUserPassword(_ context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) error {
+func (m *mockStore) UpgradeUserPasswordHash(_ context.Context, expected *store.User, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (bool, error) {
+	if m.hashUpgradeErr != nil {
+		return false, m.hashUpgradeErr
+	}
+	if m.beforeHashUpgrade != nil {
+		m.beforeHashUpgrade()
+	}
+	for _, u := range m.users {
+		if u.ID == expected.ID && u.KDFAlgorithm == expected.KDFAlgorithm && u.KDFTime == expected.KDFTime && u.KDFMemory == expected.KDFMemory && u.KDFThreads == expected.KDFThreads && string(u.PasswordHash) == string(expected.PasswordHash) {
+			u.PasswordHash, u.PasswordSalt = passwordHash, passwordSalt
+			u.KDFTime, u.KDFMemory, u.KDFThreads, u.KDFAlgorithm = kdfTime, kdfMemory, kdfThreads, kdfAlgorithm
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *mockStore) UpdateUserPassword(_ context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) error {
 	for _, u := range m.users {
 		if u.ID == userID {
 			u.PasswordHash = passwordHash
@@ -472,6 +492,7 @@ func (m *mockStore) UpdateUserPassword(_ context.Context, userID string, passwor
 			u.KDFTime = kdfTime
 			u.KDFMemory = kdfMemory
 			u.KDFThreads = kdfThreads
+			u.KDFAlgorithm = kdfAlgorithm
 			return nil
 		}
 	}
@@ -1385,7 +1406,7 @@ func setupMockStoreWithUser(t *testing.T, email, password string) *mockStore {
 	ms.users[email] = &store.User{
 		ID: "user-id", Email: email,
 		PasswordHash: hash, PasswordSalt: salt,
-		KDFTime: kdfP.Time, KDFMemory: kdfP.Memory, KDFThreads: kdfP.Threads,
+		KDFTime: kdfP.Time, KDFMemory: kdfP.Memory, KDFThreads: kdfP.Threads, KDFAlgorithm: kdfP.Algorithm,
 		Role: "owner", IsActive: true,
 	}
 	return ms
@@ -1659,7 +1680,7 @@ func TestVerifyReturnsTokenAndPersistsDeviceLabel(t *testing.T) {
 	ms.users["new@test.com"] = &store.User{
 		ID: "u-new", Email: "new@test.com",
 		PasswordHash: hash, PasswordSalt: salt,
-		KDFTime: kdfP.Time, KDFMemory: kdfP.Memory, KDFThreads: kdfP.Threads,
+		KDFTime: kdfP.Time, KDFMemory: kdfP.Memory, KDFThreads: kdfP.Threads, KDFAlgorithm: kdfP.Algorithm,
 		Role: "member", IsActive: false,
 	}
 	if _, err := ms.CreateEmailVerification(context.Background(), "new@test.com", "123456", time.Now().Add(15*time.Minute)); err != nil {

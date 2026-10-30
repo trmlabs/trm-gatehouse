@@ -3,6 +3,10 @@ package mitm
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -18,9 +22,11 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/agenttoken"
 	"github.com/Infisical/agent-vault/internal/auditchain"
+	"github.com/Infisical/agent-vault/internal/authorize"
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 type staticTokenListener struct{ net.Listener }
@@ -428,4 +434,48 @@ func parseTime(s string) time.Time {
 		panic(err)
 	}
 	return t
+}
+
+// A Gumloop ID token admits the Automation its org names, on the static-token listener alone, and every refusal carries a code.
+func TestResolveAgentTokenGumloopOIDC(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	point, _ := key.PublicKey.Bytes()
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		x, y := base64.RawURLEncoding.EncodeToString(point[1:33]), base64.RawURLEncoding.EncodeToString(point[33:65])
+		_, _ = fmt.Fprintf(w, `{"keys":[{"kty":"EC","crv":"P-256","kid":"k1","alg":"ES256","use":"sig","x":%q,"y":%q}]}`, x, y)
+	}))
+	defer jwks.Close()
+	sign := func(org string, exp time.Time) string {
+		header, payload := `{"alg":"ES256","kid":"k1"}`, fmt.Sprintf(`{"iss":%q,"aud":"gatehouse-broker","exp":%d,"gumloop_org_id":%q,"gumloop_owner_id":"owner-7","gumloop_owner_type":"user"}`, runnerid.GumloopIssuer, exp.Unix(), org)
+		input := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload))
+		digest := sha256.Sum256([]byte(input))
+		r, s, _ := ecdsa.Sign(rand.Reader, key, digest[:])
+		return input + "." + base64.RawURLEncoding.EncodeToString(append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...))
+	}
+	catalog := staticCatalog(t, 443, `{"id":"gl-1","name":"gumloop-one","owner":"platform-team","entries":["llm"],"gumloop":{"orgID":"org-1"}}`)
+	verifier := &runnerid.GumloopVerifier{JWKSURL: jwks.URL, Issuer: runnerid.GumloopIssuer, Audience: "gatehouse-broker", Client: jwks.Client()}
+	p := &Proxy{agentTokens: agenttoken.Either{Static: agenttoken.Static{Catalog: catalog}, OIDC: agenttoken.GumloopOIDC{Catalog: catalog, Verifier: verifier}}}
+	peer := netip.MustParseAddr("192.0.2.7")
+	ctx := withKinds(context.Background(), []string{brokercore.KindStaticToken})
+	exp := time.Now().Add(time.Hour)
+	scope, err := p.resolveScope(ctx, sign("org-1", exp), "", peer, nil, false)
+	if err != nil || scope.AgentID != "gl-1" || scope.Automation != "gl-1" || scope.Pool != "automations" || scope.IdentityKind != brokercore.KindStaticToken ||
+		scope.TokenSource != authorize.SourceGumloopOIDC || scope.TokenOwner != "owner-7" || claimsOf(scope).TokenOwner != "owner-7" || scope.NotAfter.IsZero() || scope.NotAfter.After(exp.Add(time.Second)) {
+		t.Fatalf("%+v %v", scope, err)
+	}
+	for name, tc := range map[string]struct{ token, reason string }{
+		"an unlisted org":     {sign("org-9", exp), agenttoken.ReasonOrgUnlisted},
+		"an expired token":    {sign("org-1", time.Now().Add(-time.Minute)), "oidc_expired"},
+		"a bad signature":     {sign("org-1", exp)[:len(sign("org-1", exp))-4] + "AAAA", "oidc_signature"},
+		"a token of no shape": {"a.b.c", "oidc_malformed"},
+	} {
+		_, err := p.resolveScope(ctx, tc.token, "", peer, nil, false)
+		if brokercore.DenialReason(err) != tc.reason {
+			t.Errorf("%s: %q", name, brokercore.DenialReason(err))
+		}
+	}
+	// A vault hint is refused for an ID token as for a static one.
+	if _, err := p.resolveScope(ctx, sign("org-1", exp), "vault", peer, nil, false); brokercore.DenialReason(err) != agenttoken.ReasonMalformed {
+		t.Errorf("hint: %v", err)
+	}
 }

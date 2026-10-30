@@ -39,7 +39,7 @@ var ErrInvalid = errors.New("runner session token refused")
 type Kind string
 
 const (
-	KindPerson Kind = "person" // a human, by email in a configured domain
+	KindPerson Kind = "person" // a human, by email in a configured domain (Claude) or by an immutable ID (Cursor)
 	KindAgent  Kind = "agent"  // an agent:<id> session (for example a Slack-started one); no person
 	KindNone   Kind = "none"   // no verified identity
 )
@@ -47,11 +47,12 @@ const (
 // Session is a verified runner session.
 type Session struct {
 	Kind        Kind
-	Subject     string   // the lower-cased email for a person; the owner for an agent
+	Subject     string   // the lower-cased email for a person (an Entra object ID for a mapped Cursor user); the owner for an agent
 	Owner       string   // the vendor's stable owner (user:, agent: or service_account:), or ""
 	Run         string   // the Cursor run (cloud_agent_id); "" for Claude
 	Source      string   // Cursor: how the run started, upper-cased (AUTOMATIONS for an Automation); "" for Claude
 	Automation  string   // Cursor: the Automation that started the run (automation_id), or ""
+	Team        string   // Cursor: the run's team (team_id), one the verifier is configured for; "" for Claude
 	Pools       []string // ccpool_ IDs in the audience (Claude)
 	Expires     time.Time
 	TokenSHA256 string

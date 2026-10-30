@@ -346,16 +346,17 @@ func (s *Server) BaseURL() string { return s.baseURL }
 // Store is the persistence interface used by the server.
 type Store interface {
 	GetMasterKeyRecord(ctx context.Context) (*store.MasterKeyRecord, error)
-	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error)
+	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*store.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
 	GetUserByID(ctx context.Context, id string) (*store.User, error)
 	GetUserEmailByID(ctx context.Context, id string) (string, error)
 	ListUsers(ctx context.Context) ([]store.User, error)
 	UpdateUserRole(ctx context.Context, userID, role string) error
-	UpdateUserPassword(ctx context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) error
+	UpdateUserPassword(ctx context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) error
+	UpgradeUserPasswordHash(ctx context.Context, expected *store.User, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (bool, error)
 	DeleteUser(ctx context.Context, userID string) error
 	CountUsers(ctx context.Context) (int, error)
-	RegisterFirstUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*store.User, error)
+	RegisterFirstUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*store.User, error)
 	CreateUserSession(ctx context.Context, p store.CreateUserSessionParams) (*store.Session, error)
 	CreateScopedSession(ctx context.Context, p store.CreateScopedSessionParams) (*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
@@ -1610,12 +1611,6 @@ func (s *Server) actorKeyer() ratelimit.Keyer {
 func (s *Server) tier(t ratelimit.Tier, keyer ratelimit.Keyer) func(http.HandlerFunc) http.HandlerFunc {
 	return s.rateLimit.HandlerFunc(t, keyer, s.logger)
 }
-
-var (
-	dummyPasswordHash []byte
-	dummyPasswordSalt []byte
-	dummyKDFParams    crypto.KDFParams
-)
 
 // requireAuth wraps a handler and validates the Bearer token or av_session cookie.
 // The authenticated session is stored in the request context.

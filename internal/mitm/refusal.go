@@ -60,6 +60,7 @@ var refusals = map[string]refusalKind{
 	"entitlement_unavailable":  {status: http.StatusServiceUnavailable, retryAfter: 5, next: "the directory could not confirm your access; " + nextRetry},
 	"entitlement_rate_limited": {status: http.StatusTooManyRequests, retryAfter: 60, next: "too many access checks for this person in the last minute; " + nextRetry},
 	"busy":                     {status: http.StatusTooManyRequests, retryAfter: 5, next: "the broker is at its connection limit, or this address has too many failed sign-ins; " + nextRetry},
+	"subagent_unavailable":     {status: http.StatusServiceUnavailable, retryAfter: 5, next: "the broker could not read or write subagent registrations; " + nextRetry},
 	// The limiter's own wait replaces this second when it gives one; when it
 	// gives none, the second still keeps an agent from retrying at once.
 	"rate_limited": {status: http.StatusTooManyRequests, retryAfter: 1, next: "this workload is over its request rate for the destination; " + nextRetry},
@@ -131,6 +132,14 @@ var refusals = map[string]refusalKind{
 	"automation_on_person_pool": {next: "a run a Cursor Automation started is not served on a pool for people's own runs; " + nextNotAllowed},
 	"automation_not_granted":    {next: "the catalog does not list this destination for this run's Automation; " + nextNotAllowed},
 	"automation_read_only":      {next: "the catalog gives this run's Automation fetch and reads only on this GitHub destination, not pushes or pull request changes; " + nextNotAllowed},
+
+	// Lasting, on a subagent's run or its registration (authorize.RegisterSubagent).
+	"subagents_not_granted": {next: "the catalog does not let this Automation's runs register subagents; " + nextNotAllowed},
+	"subagent_nested":       {next: "a subagent cannot register subagents of its own; register each one from the Automation's own run."},
+	"subagent_taken":        {next: "another run already registered this subagent's run; do not retry it, report it."},
+	"subagent_limit":        {next: "this run has registered as many subagents as its Automation's catalog block allows; " + nextNotAllowed},
+	"subagent_mismatch":     {next: "this run was registered by a run with another owner, team, pool or Automation, so it does not act for that Automation; " + nextNotAllowed},
+	"subagent_parent_gone":  {next: "the Automation's run that registered this subagent has ended, so the subagent no longer acts for it; stop, and start the work again from a live run."},
 }
 
 // refusalCode is the code an agent sees for an audit outcome: the outcome

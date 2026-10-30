@@ -110,3 +110,55 @@ func TestCursorRunCannotUseATokenAgentsBlock(t *testing.T) {
 		t.Errorf("a run naming a token agent: %q", got)
 	}
 }
+
+var gumloopAgent = `{"id":"gl-1","name":"gumloop-one","owner":"platform-team","entries":["tracker"],"gumloop":{"orgID":"org-1"}}`
+
+func TestGumloopAgentIsDecidedForItsBlockAndNamesItsSource(t *testing.T) {
+	catalog := tokenCatalog(t, true, gumloopAgent)
+	pool, _ := catalog.Pool("automations")
+	who, refusal := Resolve(context.Background(), pool, "", Claims{TokenAgent: "gl-1", TokenSource: SourceGumloopOIDC}, nil, nil)
+	if refusal != "" || who.Kind != "automation" || who.Subject != "gl-1" || who.Source != SourceGumloopOIDC || who.Automation != "gl-1" || who.Audited() != "" {
+		t.Fatalf("%q %+v", refusal, who)
+	}
+	// An unnamed source stays a static token's.
+	if who, _ = Resolve(context.Background(), pool, "", Claims{TokenAgent: "gl-1"}, nil, nil); who.Source != SourceStaticToken {
+		t.Errorf("source %q", who.Source)
+	}
+	// A pool with no static harness serves no Gumloop agent either.
+	bare, _ := tokenCatalog(t, false, gumloopAgent).Pool("automations")
+	if _, got := Resolve(context.Background(), bare, "", Claims{TokenAgent: "gl-1", TokenSource: SourceGumloopOIDC}, nil, nil); got != "automation_unlisted" {
+		t.Errorf("no static harness: %q", got)
+	}
+}
+
+// An org-wide block's requests name the verified Gumloop owner, so one org's owners are told apart in the audit row.
+func TestGumloopOwnerIsAuditedAsTheRunPerson(t *testing.T) {
+	pool, _ := tokenCatalog(t, true, gumloopAgent).Pool("automations")
+	who, refusal := Resolve(context.Background(), pool, "", Claims{TokenAgent: "gl-1", TokenSource: SourceGumloopOIDC, TokenOwner: "owner-7"}, nil, nil)
+	if refusal != "" || who.Audited() != "owner-7" {
+		t.Fatalf("%q %+v", refusal, who)
+	}
+	if who, _ = Resolve(context.Background(), pool, "", Claims{TokenAgent: "gl-1", TokenOwner: "owner-7"}, nil, nil); who.Audited() != "" {
+		t.Errorf("a static token carried an owner: %q", who.Audited())
+	}
+}
+
+func TestCursorRunCannotUseAGumloopAgentsBlock(t *testing.T) {
+	pool, _ := tokenCatalog(t, true, gumloopAgent).Pool("automations")
+	runs := cursorRuns{"run-gl": automationRun("alice@example.com", "bc-1", "gl-1")}
+	if _, got := Resolve(context.Background(), pool, "run-gl", Claims{Pod: "pod-1", ClaimedRun: "bc-1"}, runs, &authorizetest.MemBinder{}); got != "automation_unlisted" {
+		t.Errorf("a run naming a Gumloop agent: %q", got)
+	}
+}
+
+func TestAttributeNamesAGumloopAgentAndNoRunBorrowsItsBlock(t *testing.T) {
+	pool, _ := tokenCatalog(t, true, gumloopAgent).Pool("automations")
+	got := Attribute(context.Background(), pool, "", Claims{TokenAgent: "gl-1", TokenSource: SourceGumloopOIDC}, nil)
+	if got.Source != SourceGumloopOIDC || got.Automation != "gl-1" || got.AutomationName != "gumloop-one" {
+		t.Fatalf("%+v", got)
+	}
+	runs := cursorRuns{"run-gl": automationRun("alice@example.com", "bc-1", "gl-1")}
+	if got := Attribute(context.Background(), pool, "run-gl", Claims{}, runs); got.AutomationName != "" || got.AutomationOwner != "" {
+		t.Errorf("a run naming a Gumloop agent was given its block's name: %+v", got)
+	}
+}

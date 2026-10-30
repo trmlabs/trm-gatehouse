@@ -288,7 +288,7 @@ func copyInstanceSettings(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDia
 
 func copyMasterKey(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
 	rows, err := src.db.QueryContext(ctx,
-		"SELECT id, sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext, salt, kdf_time, kdf_memory, kdf_threads, created_at FROM master_key")
+		"SELECT id, sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext, salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, kms_wrapped_dek, kms_key_name, wrap_kind, created_at FROM master_key")
 	if err != nil {
 		return 0, err
 	}
@@ -299,8 +299,11 @@ func copyMasterKey(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Di
 		var id int
 		var sentinel, sentinelNonce, dekCT, dekNonce, dekPlain, salt []byte
 		var kdfTime, kdfMemory, kdfThreads interface{}
+		var kdfAlgo sql.NullString
+		var kmsKeyName, wrapKind string
+		var kmsDEK []byte
 		var createdAt interface{}
-		if err := rows.Scan(&id, &sentinel, &sentinelNonce, &dekCT, &dekNonce, &dekPlain, &salt, &kdfTime, &kdfMemory, &kdfThreads, &createdAt); err != nil {
+		if err := rows.Scan(&id, &sentinel, &sentinelNonce, &dekCT, &dekNonce, &dekPlain, &salt, &kdfTime, &kdfMemory, &kdfThreads, &kdfAlgo, &kmsDEK, &kmsKeyName, &wrapKind, &createdAt); err != nil {
 			return n, err
 		}
 		ts, err := convertTime(createdAt, src.dialect, dstDialect)
@@ -308,8 +311,8 @@ func copyMasterKey(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Di
 			return n, fmt.Errorf("converting created_at: %w", err)
 		}
 		_, err = tx.ExecContext(ctx,
-			dstDialect.Rebind("INSERT INTO master_key (id, sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext, salt, kdf_time, kdf_memory, kdf_threads, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
-			id, sentinel, sentinelNonce, dekCT, dekNonce, dekPlain, salt, kdfTime, kdfMemory, kdfThreads, ts,
+			dstDialect.Rebind("INSERT INTO master_key (id, sentinel, sentinel_nonce, dek_ciphertext, dek_nonce, dek_plaintext, salt, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, kms_wrapped_dek, kms_key_name, wrap_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+			id, sentinel, sentinelNonce, dekCT, dekNonce, dekPlain, salt, kdfTime, kdfMemory, kdfThreads, kdfAlgo, kmsDEK, kmsKeyName, wrapKind, ts,
 		)
 		if err != nil {
 			return n, err
@@ -394,7 +397,7 @@ func copyVaultSettings(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialec
 
 func copyUsers(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialect) (int, error) {
 	rows, err := src.db.QueryContext(ctx,
-		"SELECT id, email, password_hash, password_salt, role, created_at, updated_at, kdf_time, kdf_memory, kdf_threads, is_active FROM users")
+		"SELECT id, email, password_hash, password_salt, role, created_at, updated_at, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, is_active FROM users")
 	if err != nil {
 		return 0, err
 	}
@@ -405,8 +408,9 @@ func copyUsers(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialec
 		var id, email, role string
 		var pwHash, pwSalt []byte
 		var kdfTime, kdfMemory, kdfThreads int
+		var kdfAlgo sql.NullString
 		var createdAt, updatedAt, isActive interface{}
-		if err := rows.Scan(&id, &email, &pwHash, &pwSalt, &role, &createdAt, &updatedAt, &kdfTime, &kdfMemory, &kdfThreads, &isActive); err != nil {
+		if err := rows.Scan(&id, &email, &pwHash, &pwSalt, &role, &createdAt, &updatedAt, &kdfTime, &kdfMemory, &kdfThreads, &kdfAlgo, &isActive); err != nil {
 			return n, err
 		}
 		ca, err := convertTime(createdAt, src.dialect, dstDialect)
@@ -422,8 +426,8 @@ func copyUsers(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dialec
 			return n, fmt.Errorf("converting is_active: %w", err)
 		}
 		_, err = tx.ExecContext(ctx,
-			dstDialect.Rebind("INSERT INTO users (id, email, password_hash, password_salt, role, created_at, updated_at, kdf_time, kdf_memory, kdf_threads, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
-			id, email, pwHash, pwSalt, role, ca, ua, kdfTime, kdfMemory, kdfThreads, boolVal,
+			dstDialect.Rebind("INSERT INTO users (id, email, password_hash, password_salt, role, created_at, updated_at, kdf_time, kdf_memory, kdf_threads, kdf_algorithm, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+			id, email, pwHash, pwSalt, role, ca, ua, kdfTime, kdfMemory, kdfThreads, kdfAlgo, boolVal,
 		)
 		if err != nil {
 			return n, err

@@ -211,7 +211,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// tunnel attempt reveals nothing about other pools' catalog; only the
 	// audit row tells the two apart.
 	if p.strictCredentialProxy && p.adapter.valid() {
-		if catalog := p.adapter.Catalog.Current(); !catalog.HasHostForPool(host, port, connectScope.Pool) {
+		if catalog := p.adapter.Catalog.Current(); !catalog.HasHostForPool(host, port, connectScope.Pool) && !subagentRoute(catalog, host, port, connectScope.Pool) {
 			outcome := "unlisted"
 			if catalog.HasHost(host, port) {
 				outcome = "pool"

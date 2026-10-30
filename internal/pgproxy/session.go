@@ -114,6 +114,8 @@ type Requester struct {
 	// A Cursor run's source and Automation, and the catalog's name and
 	// owner for a listed Automation; audit only.
 	Source, Automation, AutomationName, AutomationOwner string
+	// Run and ParentRun (the registering Automation run for a subagent) are for audit only.
+	Run, ParentRun string
 }
 
 type requesterKey struct{}

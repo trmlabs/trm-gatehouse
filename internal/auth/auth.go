@@ -44,7 +44,7 @@ type VerificationRecord struct {
 }
 
 // SetupWithPassword creates a new random DEK, encrypts the sentinel with it,
-// then wraps the DEK under a KEK derived from the password via Argon2id.
+// then wraps the DEK under a KEK derived from the password (PBKDF2-HMAC-SHA256, or Argon2id until the KDF upgrade is on).
 func SetupWithPassword(password []byte) (*MasterKey, *VerificationRecord, error) {
 	dek, sentinelCT, sentinelNonce, err := generateDEK()
 	if err != nil {
@@ -105,7 +105,10 @@ func generateDEK() (dek, sentinelCT, sentinelNonce []byte, err error) {
 // Unlock derives the KEK from the password, unwraps the DEK, and verifies
 // the sentinel. Returns ErrWrongPassword if the password is incorrect.
 func Unlock(password []byte, record *VerificationRecord) (*MasterKey, error) {
-	kek := crypto.DeriveKey(password, record.Salt, record.Params)
+	kek, err := crypto.DeriveKey(password, record.Salt, record.Params)
+	if err != nil {
+		return nil, fmt.Errorf("deriving key: %w", err)
+	}
 
 	dek, err := crypto.Decrypt(record.DEKCiphertext, record.DEKNonce, kek)
 	crypto.WipeBytes(kek)
@@ -138,14 +141,20 @@ func UnlockPasswordless(record *VerificationRecord) (*MasterKey, error) {
 // WrapDEK wraps a DEK under a new KEK derived from the password.
 // Returns the salt, wrapped DEK ciphertext, nonce, and KDF params.
 func WrapDEK(dek, password []byte) (salt, dekCT, dekNonce []byte, params crypto.KDFParams, err error) {
-	params = crypto.DefaultKDFParams()
+	params, err = crypto.DefaultKDFParams()
+	if err != nil {
+		return nil, nil, nil, params, err
+	}
 
 	salt, err = crypto.GenerateSalt(int(params.SaltLen))
 	if err != nil {
 		return nil, nil, nil, params, fmt.Errorf("generating KEK salt: %w", err)
 	}
 
-	kek := crypto.DeriveKey(password, salt, params)
+	kek, err := crypto.DeriveKey(password, salt, params)
+	if err != nil {
+		return nil, nil, nil, params, fmt.Errorf("deriving KEK: %w", err)
+	}
 	dekCT, dekNonce, err = crypto.Encrypt(dek, kek)
 	crypto.WipeBytes(kek)
 	if err != nil {
@@ -168,21 +177,30 @@ func verifySentinel(dek, sentinelCT, sentinelNonce []byte) error {
 	return nil
 }
 
-// HashUserPassword hashes a user password with a random salt using Argon2id.
+// HashUserPassword hashes a user password with a random salt (PBKDF2-HMAC-SHA256, or Argon2id until the KDF upgrade is on).
 // Returns the hash, salt, and the KDF parameters used (for storage alongside the hash).
 func HashUserPassword(password []byte) (hash, salt []byte, params crypto.KDFParams, err error) {
-	params = crypto.DefaultKDFParams()
+	params, err = crypto.DefaultKDFParams()
+	if err != nil {
+		return nil, nil, params, err
+	}
 	salt, err = crypto.GenerateSalt(int(params.SaltLen))
 	if err != nil {
 		return nil, nil, params, fmt.Errorf("generating salt: %w", err)
 	}
-	hash = crypto.DeriveKey(password, salt, params)
+	hash, err = crypto.DeriveKey(password, salt, params)
+	if err != nil {
+		return nil, nil, params, fmt.Errorf("hashing password: %w", err)
+	}
 	return hash, salt, params, nil
 }
 
 // VerifyUserPassword checks a password against a stored hash, salt, and KDF params.
 func VerifyUserPassword(password, hash, salt []byte, params crypto.KDFParams) bool {
-	derived := crypto.DeriveKey(password, salt, params)
+	derived, err := crypto.DeriveKey(password, salt, params)
+	if err != nil {
+		return false
+	}
 	return subtle.ConstantTimeCompare(derived, hash) == 1
 }
 

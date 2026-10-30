@@ -77,6 +77,8 @@ A `session-jwt` harness with requester `cursor-oidc` and a `cursor-session` pool
 
 The broker checks the RS256 signature against Cursor's published keys (`https://api.cursor.com/keys`), issuer `https://api.cursor.com`, an audience exactly equal to `AGENT_VAULT_CURSOR_AUDIENCE` (Cursor does not allowlist audiences), `agent_runtime: self_hosted`, a `team_id` in `AGENT_VAULT_CURSOR_TEAM_IDS`, a `cloud_agent_id`, and a lifetime of at most an hour (Cursor's is five minutes). A run names a person only when `sub` is `user:<id>` and `owner_email` is in a domain listed in `AGENT_VAULT_CURSOR_PERSON_DOMAINS`; the person is that email, looked up as the Entra user principal name. A `service_account:` run never names a person. On a `cursor-session` pool every request must name a person, T0 included: a request with no run token is refused (`session_missing`), and so is one whose run names no person, such as a service account's, an owner without a known email or in another domain, or any run when no domains are configured (`no_person`). A run an Automation started is refused too (`automation_on_person_pool`) unless the pool opts in; see [What an Automation's run may use](#what-an-automations-run-may-use). The refusal is that one request's: other Pods, and later requests that carry a good token, are decided on their own. `CURSOR_USER_ID` in the worker's environment is never read: the agent can rewrite it.
 
+To name a person by immutable IDs instead of email, set `AGENT_VAULT_CURSOR_PEOPLE_FILE` to a JSON file of Cursor user ID to Entra object ID, the same map the Cursor runner admits by (`{"<cursor user id>": "<entra object id>"}`; keep the two in agreement). A `user:<id>` run then names a person only when `<id>` is in the map: the person is the mapped object ID, which the directory looks up as an object ID, and `owner_email` and `AGENT_VAULT_CURSOR_PERSON_DOMAINS` are ignored. An unmapped user names no person (`no_person`), so entries above T0 are refused. The audit row's `requester` and a `{requester}` branch segment then hold the object ID, not an email. The file is read once at start: change it, then restart the broker. Startup fails if the file is missing, is not one JSON object, holds an ID that is not plain, an object ID that is not a lower-case GUID, or a duplicate ID or object ID. Unset, owner_email is used as described above.
+
 Any process on a worker can mint a token for that worker's run, and a token copied elsewhere would otherwise still verify. So a token counts only on the Pod the spawn hook created for its run: its `cloud_agent_id` must equal the Pod's `gatehouse.trmlabs.com/cursor-request-id` annotation, which the hook writes from `CURSOR_REQUEST_ID` (the same `bc-` ID; the worker cannot change its own Pod) and the broker reads from the live Pod at each admission. A Pod without that annotation names nobody (`session_run`). Each token is also pinned to the first Pod that presents it, and, since runs on one Pod share its workspace, each Pod to its first run owner (`sub`) for a day: a run by anyone else on that Pod is refused (`session_pod_owner`).
 
 ### What an Automation's run may use
@@ -91,13 +93,14 @@ automations:
     entries: [tracker, repo]       # entries it may use; each also granted to the pool
     write: [repo]                  # optional: where it may push and change pull requests; [] fetches and reads only
     settings: {API_BASE: https://api.example.com/v1}   # optional: plain configuration for its runs' shells; see below
+    subagents: 25                  # optional: how many subagent runs each of its runs may register; absent, none
 ```
 
 The run token is verified exactly as on a `cursor-session` pool (run, Pod and run-owner pins included). Then every request on the pool, T0 included, must come from an Automation the catalog lists and use an entry listed for it:
 
 | Check | Refusal |
 |---|---|
-| `source` is `AUTOMATIONS` with an `automation_id`, so a person's run routed here gets nothing | `not_automation` |
+| `source` is `AUTOMATIONS` with an `automation_id`, so a person's run routed here gets nothing, unless the run is a subagent an Automation's run registered (below) | `not_automation` |
 | The id is listed | `automation_unlisted` |
 | The entry is one the Automation lists, even when the pool is granted it | `automation_not_granted` |
 | The entry's tier is within the pool's `ceiling` (the catalog also refuses such a grant at load) | `pool_ceiling` |
@@ -150,6 +153,43 @@ Settings are never secrets, and the catalog refuses anything that looks like one
 The sidecar's `automationSettings` takes `file` (absolute, in a directory of its own), `waitSeconds` (default 180, at most 3600) and `refreshSeconds` (default 300, 30 to 86400). The file is replaced whole each time (written beside it, then renamed), so a shell reads the old file or the new one. It exists within `waitSeconds` of the sidecar starting, so a shell waiting for it waits no longer: without the broker's answer by then, or when the broker refuses the run, the file sets nothing and prints one line on stderr saying the settings are unavailable, and the sidecar keeps asking (after a failure within 30 seconds, after a refusal at the next refresh); a later answer replaces it. The sidecar asks again every `refreshSeconds`, so a catalog change reaches shells started after it. It logs `settings_written` with the names and how long after it started, `settings_refused`, `settings_unavailable` and `settings_wait_expired`, never a value. Only a sidecar that relays a Cursor run's token (`sessionSocketDir`) accepts the setting, and an older relay refuses a configuration that has it, so update the relay image and its configuration together.
 
 Deploy a broker that reads `settings` to every replica, and repin the catalog validator, before any block carries it. An older broker reading Vault drops a block with a field it does not know, so that Automation is refused, and an older validator refuses the whole catalog. A catalog without `settings` behaves the same on either broker. Before rolling back to an older broker, remove `settings` from every block and let every replica load that version.
+
+### An Automation's subagents
+
+An Automation's run may start subagents. Each is a Cursor run of its own, with its own `bc-` id, on its own worker Pod, and its first request is usually the clone of its repository. Cursor's token for a subagent's run names no Automation and nothing about the run that started it, so on its own it is refused (`not_automation`). The parent proves the link instead: its run registers each subagent's run with the broker, and the subagent's run is then served as the same Automation, with exactly that Automation's block (its `entries` and `write`), while the parent's run is live.
+
+An Automation opts in with `subagents`, the most subagent runs one of its runs may register (1 to 10,000). Without it, its runs register none. A block with `tokenSHA256` cannot set it: a static-token agent has no run to vouch for.
+
+To register a subagent, the parent's run sends `POST https://subagents.gatehouse.invalid/v1/subagents/<bc- id>`, with no body, through the same proxy as every other request, as soon as it learns the subagent's id. The host is the broker's own on a pool that decides per Automation and is under `.invalid`, so nothing on it goes upstream. A run registers each subagent once; a repeat by the same run is accepted. The answer is JSON naming the subagent's `run`, the `parentRun`, the `automation` and when the registration `expires`: the parent Pod's deadline.
+
+```sh
+curl -sS -X POST --proxy "$GATEHOUSE_HTTPS_PROXY" --cacert "$GATEHOUSE_CA_FILE" \
+  "https://subagents.gatehouse.invalid/v1/subagents/$SUBAGENT_ID"
+```
+
+| Check, at registration | Refusal |
+|---|---|
+| The caller is a listed Automation's own run, verified by its run token on its own Pod, as for any request | the usual refusal, such as `not_automation` |
+| The caller is not itself a subagent | `subagent_nested` |
+| The Automation's block sets `subagents` | `subagents_not_granted` |
+| The id is a `bc-` run id other than the caller's | `request_shape` |
+| No other run registered it first | `subagent_taken` |
+| The caller has registered fewer subagents than its block allows | `subagent_limit` |
+
+| Check, on each of the subagent's requests | Refusal |
+|---|---|
+| Its run is registered (the request waits for it, below) | `not_automation` |
+| Its token's owner (`sub`) and team equal the parent's, it is on the parent's pool, and it names no other Automation | `subagent_mismatch` |
+| The Automation is still listed and still sets `subagents` | `automation_unlisted` or `subagents_not_granted` |
+| The parent's Pod has not reached its deadline and, read live from its cluster, is the same Running Pod with its worker container running and still serving the parent's run | `subagent_parent_gone` |
+
+The subagent's token is verified as any run's is, with the run, Pod and run owner pins. Every replica reads the same registrations from the broker's store, and a registry the broker cannot read or write is refused as `subagent_unavailable` (503 with `Retry-After`). A subagent's clone can arrive before its parent has registered it, so a run's Pod waits for the registration from its first request, up to `AGENT_VAULT_SUBAGENT_WAIT_SECONDS` (default 120, at most 600) when the pool has an Automation that sets `subagents`; after that its requests are decided at once.
+
+The link holds because the parent vouches for it, not because Cursor states it. A parent can lend its grant only to a run of the same Cursor owner and team, on the same pool, while the parent's own run is live, and never more than its own block. A parent whose agent is misled can lend the grant to another such run, which could then do what the parent itself could.
+
+Every row from a verified Cursor run records `run`, the run's `cloud_agent_id`. A subagent's rows also record `parentRun`, the registering run, and name the Automation in `automation`, `automationName` and `automationOwner`; `source` stays what the subagent's own token said. A registration's rows (`binding: subagents`, `operation: subagent.register`) name the registering run in `run` and the subagent's run in `path`.
+
+Deploy a broker that reads `subagents` to every replica before any block sets it: an older broker reading Vault drops a block with a field it does not know, and one started on a catalog file refuses the whole catalog, as for `write`.
 
 ### Who an agent-sandbox Pod names
 

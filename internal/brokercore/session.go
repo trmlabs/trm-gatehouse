@@ -35,9 +35,15 @@ type ProxyScope struct {
 	// ClaimedRun is the Cursor run the spawn hook recorded on the live Pod
 	// (CursorRunAnnotation), read at attestation; empty when there is none.
 	ClaimedRun string
+	// Pod locates the attested pool Pod for a later liveness check; zero for any other identity.
+	Pod PodRef
 	// Automation is the catalog Automation a verified agent token names
 	// (KindStaticToken); empty for every other identity.
 	Automation string
+	// TokenSource names the proof behind Automation when it was not a static token; empty otherwise.
+	TokenSource string
+	// TokenOwner is the verified Gumloop owner id behind Automation, for the audit row; empty otherwise.
+	TokenOwner string
 	// AttestedRequester is the login a shared proxy attested for the agent,
 	// from its Pod's requester annotation; empty when the proxy names none.
 	AttestedRequester string

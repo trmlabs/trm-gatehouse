@@ -10,6 +10,8 @@ func TestRequesterSegment(t *testing.T) {
 	for _, tc := range []struct{ kind, subject, want string }{
 		{"person", "alice@example.com", "alice@example.com"},
 		{"person", "Alice.Smith+ci@Example.com", "alice.smith+ci@example.com"},
+		{"person", "22222222-2222-2222-2222-222222222222", "22222222-2222-2222-2222-222222222222"},
+		{"person", "22222222-2222-2222-2222-22222222222", ""},
 		{"automation", "auto-1", "automation-auto-1"},
 		{"automation", "Nightly.Fix_2", "automation-Nightly.Fix_2"},
 		// No segment: a kind that names no person or Automation, a person

@@ -442,6 +442,36 @@ func (c Catalog) StaticAgent(id string) (Automation, string, bool) {
 	return Automation{}, "", false
 }
 
+// GumloopAgent finds the Automation naming a verified Gumloop org and owner (the owner's block, else the org's) and its pool.
+func (c Catalog) GumloopAgent(orgID, ownerID string) (Automation, string, bool) {
+	if orgID == "" {
+		return Automation{}, "", false
+	}
+	var found, orgWide *Automation
+	for id := range c.automations {
+		a := c.automations[id]
+		switch {
+		case a.Gumloop == nil || a.Gumloop.OrgID != orgID:
+		case a.Gumloop.OwnerID == "":
+			orgWide = &a
+		case a.Gumloop.OwnerID == ownerID:
+			found = &a
+		}
+	}
+	if found == nil {
+		found = orgWide
+	}
+	if found == nil {
+		return Automation{}, "", false
+	}
+	for _, h := range c.harnesses {
+		if h.Identity.Kind == IdentityStaticToken {
+			return *found, h.Authorization.PoolName, true
+		}
+	}
+	return Automation{}, "", false
+}
+
 // RequesterKind is where the person behind a session comes from, or "".
 func (p Profile) RequesterKind() string {
 	if p.Identity.Requester != nil {

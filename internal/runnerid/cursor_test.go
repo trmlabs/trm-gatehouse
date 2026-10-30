@@ -62,7 +62,7 @@ func cursorSetup(t *testing.T) (*CursorVerifier, *rsa.PrivateKey, time.Time) {
 func TestCursorPersonRun(t *testing.T) {
 	v, key, now := cursorSetup(t)
 	s, err := v.Verify(context.Background(), signRS256(t, key, "c1", cursorClaimsFor(now)))
-	if err != nil || s.Kind != KindPerson || s.Subject != "alice@example.com" || s.Owner != "user:42" || s.Run != "bc-1" || len(s.TokenSHA256) != 64 {
+	if err != nil || s.Kind != KindPerson || s.Subject != "alice@example.com" || s.Owner != "user:42" || s.Run != "bc-1" || s.Team != "7" || len(s.TokenSHA256) != 64 {
 		t.Fatalf("session %+v err %v", s, err)
 	}
 }
@@ -144,6 +144,9 @@ func TestCursorRefusals(t *testing.T) {
 
 func TestCursorJWKSRefusesWeakRSAKeys(t *testing.T) {
 	small, _ := rsa.GenerateKey(rand.Reader, 1024) // #nosec G403 -- the weak key under test
+	if small == nil {
+		t.Skip("FIPS 140-only mode cannot generate a 1024-bit RSA key")
+	}
 	srv := httptest.NewServer(&rsaIssuer{keys: map[string]*rsa.PrivateKey{"c1": small}})
 	defer srv.Close()
 	now := time.Now()
@@ -189,5 +192,52 @@ func TestCursorRunRefusesAnUnsafeSourceOrAutomation(t *testing.T) {
 		if _, err := v.Verify(context.Background(), signRS256(t, key, "c1", c)); err == nil {
 			t.Fatalf("%v accepted", bad)
 		}
+	}
+}
+
+const peopleOID = "22222222-2222-2222-2222-222222222222"
+
+func TestCursorPeopleMapNamesTheMappedUser(t *testing.T) {
+	v, key, now := cursorSetup(t)
+	v.People = map[string]string{"42": peopleOID}
+	s, err := v.Verify(context.Background(), signRS256(t, key, "c1", cursorClaimsFor(now)))
+	if err != nil || s.Kind != KindPerson || s.Subject != peopleOID || s.Owner != "user:42" {
+		t.Fatalf("session %+v err %v", s, err)
+	}
+}
+
+func TestCursorPeopleMapIgnoresOwnerEmail(t *testing.T) {
+	v, key, now := cursorSetup(t)
+	v.People = map[string]string{"42": peopleOID}
+	for name, email := range map[string]string{"other domain": "alice@other.com", "none": "", "someone else": "bob@example.com"} {
+		t.Run(name, func(t *testing.T) {
+			c := cursorClaimsFor(now)
+			c["owner_email"] = email
+			s, err := v.Verify(context.Background(), signRS256(t, key, "c1", c))
+			if err != nil || s.Kind != KindPerson || s.Subject != peopleOID {
+				t.Fatalf("session %+v err %v", s, err)
+			}
+		})
+	}
+	// With no domains the email path names no one, the map still does.
+	v.PersonDomains = nil
+	if s, err := v.Verify(context.Background(), signRS256(t, key, "c1", cursorClaimsFor(now))); err != nil || s.Subject != peopleOID {
+		t.Fatalf("session %+v err %v", s, err)
+	}
+}
+
+func TestCursorPeopleMapUnmappedUserNamesNoPerson(t *testing.T) {
+	v, key, now := cursorSetup(t)
+	v.People = map[string]string{"99": peopleOID}
+	// The email is in a configured domain, yet the user is not in the map.
+	s, err := v.Verify(context.Background(), signRS256(t, key, "c1", cursorClaimsFor(now)))
+	if err != nil || s.Kind != KindNone || s.Subject != "" || s.Owner != "user:42" {
+		t.Fatalf("session %+v err %v", s, err)
+	}
+	// A service account is never a person, mapped or not.
+	c := cursorClaimsFor(now)
+	c["sub"] = "service_account:99"
+	if s, err := v.Verify(context.Background(), signRS256(t, key, "c1", c)); err != nil || s.Kind != KindAgent {
+		t.Fatalf("session %+v err %v", s, err)
 	}
 }

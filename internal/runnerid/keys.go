@@ -30,16 +30,23 @@ type jwks struct {
 	keys      map[string]crypto.PublicKey
 	loaded    time.Time     // last successful fetch
 	attempted time.Time     // last fetch attempt
+	failed    bool          // the last fetch attempt failed
 	inflight  chan struct{} // closed when the fetch in progress ends
 }
 
 func (c *jwks) key(ctx context.Context, kid, url string, client *http.Client, now func() time.Time) crypto.PublicKey {
+	k, _ := c.lookup(ctx, kid, url, client, now)
+	return k
+}
+
+// lookup is key plus whether an absent kid is settled: false when the set could not be fetched or is stale, so the kid may exist.
+func (c *jwks) lookup(ctx context.Context, kid, url string, client *http.Client, now func() time.Time) (crypto.PublicKey, bool) {
 	c.mu.Lock()
 	t := now()
 	fresh := !c.loaded.IsZero() && t.Sub(c.loaded) < keysMaxAge
 	if k := c.keys[kid]; k != nil && fresh {
 		c.mu.Unlock()
-		return k
+		return k, true
 	}
 	// One fetch at a time, outside the lock: concurrent verifies wait for it
 	// instead of each holding the lock across a network call.
@@ -48,16 +55,16 @@ func (c *jwks) key(ctx context.Context, kid, url string, client *http.Client, no
 		select {
 		case <-wait:
 		case <-ctx.Done():
-			return nil
+			return nil, false
 		}
 		return c.current(kid, now)
 	}
 	if !c.attempted.IsZero() && t.Sub(c.attempted) < refetchBackoff {
 		defer c.mu.Unlock()
 		if fresh {
-			return c.keys[kid]
+			return c.keys[kid], !c.failed
 		}
-		return nil
+		return nil, false
 	}
 	c.attempted = t
 	done := make(chan struct{})
@@ -66,6 +73,7 @@ func (c *jwks) key(ctx context.Context, kid, url string, client *http.Client, no
 	// The caller's cancellation must not fail the refresh for everyone else.
 	keys, err := fetchKeys(context.WithoutCancel(ctx), url, client)
 	c.mu.Lock()
+	c.failed = err != nil
 	if err == nil {
 		c.keys, c.loaded = keys, t
 	}
@@ -75,14 +83,14 @@ func (c *jwks) key(ctx context.Context, kid, url string, client *http.Client, no
 	return c.current(kid, now)
 }
 
-// current returns a key from the last good set while it is within its hour.
-func (c *jwks) current(kid string, now func() time.Time) crypto.PublicKey {
+// current returns a key from the last good set while it is within its hour, and whether an absent kid is settled by a fetch that succeeded.
+func (c *jwks) current(kid string, now func() time.Time) (crypto.PublicKey, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.loaded.IsZero() || now().Sub(c.loaded) >= keysMaxAge {
-		return nil
+		return nil, false
 	}
-	return c.keys[kid]
+	return c.keys[kid], !c.failed
 }
 
 // RefuseRedirects is an http.Client CheckRedirect that follows no redirect:

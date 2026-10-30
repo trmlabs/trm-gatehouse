@@ -1,14 +1,20 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/authorize"
+	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/entitlement"
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/netguard"
@@ -58,7 +64,13 @@ func attachAuthorization(adapter *mitm.HeaderAdapter, getenv func(string) string
 //     those teams; AGENT_VAULT_CURSOR_PERSON_DOMAINS names persons by
 //     owner_email as AGENT_VAULT_RUNNER_PERSON_DOMAINS does for Claude.
 //     AGENT_VAULT_CURSOR_JWKS_URL and AGENT_VAULT_CURSOR_ISSUER default to
-//     Cursor's published ones;
+//     Cursor's published ones; AGENT_VAULT_CURSOR_PEOPLE_FILE, when set,
+//     replaces owner_email: a JSON object of Cursor user ID to Entra object ID,
+//     the only way a user run names a person, by that object ID;
+//   - AGENT_VAULT_GUMLOOP_AUDIENCE must be a broker-only audience: Gumloop sets
+//     aud to whatever provider path a credential names, so the audience alone
+//     separates a broker token from a GCP federation token. Never use a real
+//     workload identity provider path;
 //   - AGENT_VAULT_SANDBOX_PERSON_DOMAINS lists the email domains whose logins,
 //     attested by a shared proxy from an agent Pod's requester annotation, name
 //     a person, as the Entra user principal name. Unset: no attested login
@@ -186,6 +198,13 @@ func cursorVerifier(audience string, getenv func(string) string, client *http.Cl
 	if err != nil {
 		return nil, err
 	}
+	people, err := cursorPeople(getenv("AGENT_VAULT_CURSOR_PEOPLE_FILE"))
+	if err != nil {
+		return nil, err
+	}
+	if people != nil && len(domains) > 0 {
+		slog.Warn("AGENT_VAULT_CURSOR_PERSON_DOMAINS is ignored because AGENT_VAULT_CURSOR_PEOPLE_FILE is set; the file alone names Cursor persons")
+	}
 	url, issuer := getenv("AGENT_VAULT_CURSOR_JWKS_URL"), getenv("AGENT_VAULT_CURSOR_ISSUER")
 	if url == "" {
 		url = runnerid.CursorJWKSURL
@@ -196,7 +215,7 @@ func cursorVerifier(audience string, getenv func(string) string, client *http.Cl
 	if !strings.HasPrefix(url, "https://") {
 		return nil, fmt.Errorf("AGENT_VAULT_CURSOR_JWKS_URL must be https")
 	}
-	return &runnerid.CursorVerifier{JWKSURL: url, Issuer: issuer, Audience: audience, TeamIDs: teams, PersonDomains: domains, Client: client}, nil
+	return &runnerid.CursorVerifier{JWKSURL: url, Issuer: issuer, Audience: audience, TeamIDs: teams, PersonDomains: domains, People: people, Client: client}, nil
 }
 
 // personDomains parses a person email domain list: lower-case DNS names only.
@@ -215,18 +234,108 @@ func personDomains(name string, getenv func(string) string) ([]string, error) {
 	return domains, nil
 }
 
+// cursorPeople reads AGENT_VAULT_CURSOR_PEOPLE_FILE: a JSON object of Cursor
+// user ID to Entra object ID, the shape of the Cursor runner's reviewed map.
+// "" (unset) is nil, which keeps naming persons by owner_email. Any other
+// problem is an error: a bad map must stop startup, never widen who is named.
+func cursorPeople(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	const name = "AGENT_VAULT_CURSOR_PEOPLE_FILE"
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("%s must be an absolute path", name)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > 1<<20 {
+		return nil, fmt.Errorf("%s must be a readable file of at most 1 MiB", name)
+	}
+	bad := fmt.Errorf(`%s must be one JSON object of Cursor user ID to lower-case Entra object ID, with no duplicate IDs or object IDs`, name)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, bad
+	}
+	people, seen := map[string]string{}, map[string]bool{}
+	for dec.More() {
+		key, err := dec.Token()
+		id, ok := key.(string)
+		var oid string
+		if err != nil || !ok || dec.Decode(&oid) != nil || !cursorUserID.MatchString(id) || !uuidPattern.MatchString(oid) {
+			return nil, bad
+		}
+		if _, dup := people[id]; dup || seen[oid] {
+			return nil, bad
+		}
+		people[id], seen[oid] = oid, true
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') || dec.More() || len(people) == 0 {
+		return nil, bad
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, bad
+	}
+	return people, nil
+}
+
 var (
+	cursorUserID    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	domainPattern   = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 	audiencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,252}$`)
 	teamPattern     = regexp.MustCompile(`^[0-9]{1,20}$`)
 	uuidPattern     = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
-// sessionBinder is the store's runner-session pin table, or nil when the
-// store cannot hold one (claude-session pools then refuse every session).
-func sessionBinder(st any) authorize.Binder {
-	if b, ok := st.(authorize.Binder); ok {
+// maxSubagentWaitSeconds caps AGENT_VAULT_SUBAGENT_WAIT_SECONDS so a huge value cannot overflow or hold a request for hours.
+const maxSubagentWaitSeconds = 600
+
+// sessionBinder is the store's runner-session pin table, or nil when it cannot hold one (claude-session pools then refuse every session).
+// Subagents are served only when the store keeps registrations and pods reads admitted Pods.
+func sessionBinder(st, pods any) authorize.Binder {
+	b, ok := st.(authorize.Binder)
+	if !ok {
+		return nil
+	}
+	registry, hasRegistry := st.(authorize.SubagentStore)
+	live, hasPods := pods.(brokercore.LivePods)
+	if !hasRegistry || !hasPods {
 		return b
 	}
+	return &authorize.Subagents{Binder: b, Registry: registry, Pods: live,
+		Wait: time.Duration(min(intEnvValue("AGENT_VAULT_SUBAGENT_WAIT_SECONDS"), maxSubagentWaitSeconds)) * time.Second}
+}
+
+// subagentsServable refuses to start when the catalog grants subagents but the binder cannot serve them.
+func subagentsServable(adapter *mitm.HeaderAdapter) error {
+	if _, ok := adapter.Sessions.(*authorize.Subagents); ok || adapter.Catalog == nil {
+		return nil
+	}
+	for _, p := range adapter.Catalog.Current().Pools() {
+		if p.GrantsSubagents() {
+			return fmt.Errorf("the catalog grants subagents, which need a store with registrations and live Pod reads (not AGENT_VAULT_WORKLOAD_ATTESTATION=tokenreview)")
+		}
+	}
 	return nil
+}
+
+// gumloopVerifier is nil when no Gumloop setting is set (the issuer alone is a partial config and fails), and refuses Gumloop settings without the static-token port; else the JWKS URL (https) and audience are both required; the issuer env var overrides the default issuer.
+func gumloopVerifier(getenv func(string) string) (*runnerid.GumloopVerifier, error) {
+	url, audience, issuer := getenv("AGENT_VAULT_GUMLOOP_JWKS_URL"), getenv("AGENT_VAULT_GUMLOOP_AUDIENCE"), getenv("AGENT_VAULT_GUMLOOP_ISSUER")
+	if url == "" && audience == "" && issuer == "" {
+		return nil, nil
+	}
+	if getenv("AGENT_VAULT_STATIC_TOKEN_PORT") == "" {
+		return nil, fmt.Errorf("AGENT_VAULT_GUMLOOP_* needs AGENT_VAULT_STATIC_TOKEN_PORT")
+	}
+	if !strings.HasPrefix(url, "https://") {
+		return nil, fmt.Errorf("AGENT_VAULT_GUMLOOP_JWKS_URL must be https")
+	}
+	if !audiencePattern.MatchString(audience) {
+		return nil, fmt.Errorf("AGENT_VAULT_GUMLOOP_AUDIENCE must be printable with no spaces")
+	}
+	if issuer == "" {
+		issuer = runnerid.GumloopIssuer
+	}
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: runnerid.RefuseRedirects,
+		Transport: &http.Transport{DialContext: netguard.SafeDialContext(netguard.AllowPrivateFromEnv()), TLSHandshakeTimeout: 5 * time.Second}}
+	return &runnerid.GumloopVerifier{JWKSURL: url, Issuer: issuer, Audience: audience, Client: client}, nil
 }

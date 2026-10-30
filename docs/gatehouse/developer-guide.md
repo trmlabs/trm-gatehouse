@@ -118,6 +118,7 @@ end-to-end test harness's.
 | Destination | Point the client at | Credential to send |
 |---|---|---|
 | HTTP API | `HTTPS_PROXY=http://127.0.0.1:14443` | The entry's `header` set to its `placeholder` (after its `scheme`, if set), or no header |
+| HTTP Basic pairs | The same proxy | A listed non-secret public user and the entry's placeholder password in one Basic `Authorization` header. Entries with `basicPairs` require this selector; an optional configured public-user header must agree. |
 | GitHub pull requests | The same proxy | `GH_TOKEN=__vault_GITHUB_TOKEN__`, or no token |
 | Git | `git clone https://github.com/<org>/<repo>` through the proxy | Nothing. Any `Authorization` header is refused. |
 | Google | The same proxy, with `CLOUDSDK_AUTH_ACCESS_TOKEN=__vault_GCP__` | `Authorization: Bearer` and the entry's placeholder |
@@ -169,7 +170,7 @@ find the audit row.
 |---|---|---|
 | 403 | The host or path is not in the catalog, your pool has no grant, or the tier check refused: no person behind the session, no directory account for that person (`not_in_directory`), not in the group, or a session from another pool | Add the entry or the grant, or request the group; for `not_in_directory`, tell the Gatehouse operators |
 | 405 | The method is not listed for that path | Add the method to the entry |
-| 400 | Something other than the exact placeholder in the key header, a placeholder anywhere else, plain HTTP, or an unsupported request (an upgrade, a compressed body) | Send only the placeholder, in the entry's header, over HTTPS |
+| 400 | Something other than the exact placeholder in the key header, a missing or invalid Basic-pair selector, a placeholder anywhere else, plain HTTP, or an unsupported request (an upgrade, a compressed body) | Send the placeholder in the entry's header over HTTPS; for `basicPairs`, use one listed public user with the placeholder password |
 | 413 | The request is larger than the entry allows | Raise `maxRequestBytes` |
 | 429 | This worker's rate limit for that entry (`rate_limited`), or too many group checks for one person in a minute (`entitlement_rate_limited`) | Slow down; wait the `Retry-After` seconds; after three refused retries, tell the Gatehouse operators |
 | 502 | The service could not be reached, or its response was refused, for example because it echoed the credential | Check the service |

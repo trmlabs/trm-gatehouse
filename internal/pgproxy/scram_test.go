@@ -78,14 +78,14 @@ func TestSCRAMClient_RejectsBadServer(t *testing.T) {
 	// Server nonce that does not extend the client nonce must be rejected.
 	s := &scramClient{password: "pencil", clientNonce: "abc"}
 	s.firstBare = "n=,r=abc"
-	if _, err := s.finalMessage("r=DIFFERENT,s=" + base64.StdEncoding.EncodeToString([]byte("salt")) + ",i=4096"); err == nil {
+	if _, err := s.finalMessage("r=DIFFERENT,s=" + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")) + ",i=4096"); err == nil {
 		t.Fatal("expected rejection when server nonce does not extend the client nonce")
 	}
 
 	// Valid proof computation, then a tampered server signature must be rejected.
 	s2 := &scramClient{password: "pencil", clientNonce: "abc"}
 	s2.firstBare = "n=,r=abc"
-	if _, err := s2.finalMessage("r=abcXYZ,s=" + base64.StdEncoding.EncodeToString([]byte("salt")) + ",i=4096"); err != nil {
+	if _, err := s2.finalMessage("r=abcXYZ,s=" + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")) + ",i=4096"); err != nil {
 		t.Fatalf("finalMessage: %v", err)
 	}
 	if err := s2.checkServerFinal("v=" + base64.StdEncoding.EncodeToString([]byte("not-the-right-signature-32bytes!"))); err == nil {

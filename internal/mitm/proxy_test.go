@@ -3,6 +3,7 @@ package mitm
 import (
 	"bufio"
 	"context"
+	"crypto/fips140"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // RFC 6455 WebSocket handshake requires SHA-1
 	"crypto/tls"
@@ -1090,7 +1091,11 @@ func openMITMTunnel(t *testing.T, proxyURL *url.URL, roots *x509.CertPool, targe
 }
 
 func websocketAccept(key string) string {
-	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")) //nolint:gosec // RFC 6455 mandates SHA-1 for the accept-key
+	var sum [sha1.Size]byte
+	// RFC 6455 mandates SHA-1 for the accept-key, which FIPS 140-only mode refuses.
+	fips140.WithoutEnforcement(func() {
+		sum = sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")) //nolint:gosec // RFC 6455 handshake
+	})
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 

@@ -494,7 +494,7 @@ func (s *Server) handleUserInviteAccept(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		newUser, err := s.store.CreateUser(ctx, inv.Email, hash, salt, inv.Role, kdfP.Time, kdfP.Memory, kdfP.Threads)
+		newUser, err := s.store.CreateUser(ctx, inv.Email, hash, salt, inv.Role, kdfP.Time, kdfP.Memory, kdfP.Threads, kdfP.Algorithm)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "Failed to create user")
 			return

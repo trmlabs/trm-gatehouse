@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 type kindAttestor struct{ kind string }
@@ -196,6 +197,20 @@ func TestKeyRefusalNamesKidAndPeer(t *testing.T) {
 	p.logRefusal("proxy_source", brokercore.DenialKey(brokercore.WithPeer(brokercore.Denied("proxy_source"), peer)))
 	if strings.Contains(buf.String(), "kid=") || strings.Contains(buf.String(), "peer=") {
 		t.Fatalf("plain refusal line %q", buf.String())
+	}
+}
+
+// A signing-key fetch outage is a 503 with the audit decision of its own, not the 403 of a key the issuer does not publish.
+func TestKeysUnavailableRefusalIsRetryable(t *testing.T) {
+	refusal := brokercore.WithPeer(brokercore.DeniedKey(runnerid.ReasonKeysUnavailable, "k1"), netip.MustParseAddr("10.20.30.40"))
+	f := newAdapterFixture(t, func(o *Options) { o.Attestor = &tokenRecordingAttestor{err: refusal} })
+	f.client = newTrustingClient(f.proxyURL, url.User(fakeJWT), f.roots)
+	_, _, err := f.do(t, "GET", "/v1/chat/x", "", nil)
+	if err == nil || !strings.HasSuffix(err.Error(), ": Service Unavailable") {
+		t.Fatalf("caller saw %v", err)
+	}
+	if e := f.audit.last(); e.Event != "denied" || e.Decision != "identity_oidc_keys_unavailable" || e.Kid != "k1" || e.Status != 503 {
+		t.Fatalf("audit row %+v", e)
 	}
 }
 

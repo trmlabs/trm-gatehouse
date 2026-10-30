@@ -26,6 +26,7 @@ type mintedSet struct {
 	accessors map[string]struct{}
 }
 
+// add, has and drop take the set by pointer so the field add creates lazily is read under the lock.
 func (m *mintedSet) add(set *map[string]struct{}, id string) {
 	if id == "" {
 		return
@@ -38,17 +39,17 @@ func (m *mintedSet) add(set *map[string]struct{}, id string) {
 	(*set)[id] = struct{}{}
 }
 
-func (m *mintedSet) has(set map[string]struct{}, id string) bool {
+func (m *mintedSet) has(set *map[string]struct{}, id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := set[id]
+	_, ok := (*set)[id]
 	return ok
 }
 
-func (m *mintedSet) drop(set map[string]struct{}, id string) {
+func (m *mintedSet) drop(set *map[string]struct{}, id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(set, id)
+	delete(*set, id)
 }
 
 // minted returns the client's minted set, shared with every session it opens.
@@ -85,12 +86,12 @@ func (c *Client) noteSession(accessor string) {
 
 func (c *Client) forgetLease(leaseID string) {
 	m := c.mintedSet()
-	m.drop(m.leases, leaseID)
+	m.drop(&m.leases, leaseID)
 }
 
 func (c *Client) forgetSession(accessor string) {
 	m := c.mintedSet()
-	m.drop(m.accessors, accessor)
+	m.drop(&m.accessors, accessor)
 }
 
 // SetRevokeRefusal sets what runs when a revocation is refused, with its kind.
@@ -113,7 +114,7 @@ func gatehouseOnlyRole(leaseID string) bool {
 // leased under a Gatehouse-only role; else it refuses and reports.
 func (c *Client) allowLeaseRevoke(leaseID string) error {
 	m := c.mintedSet()
-	if m.has(m.leases, leaseID) || gatehouseOnlyRole(leaseID) {
+	if m.has(&m.leases, leaseID) || gatehouseOnlyRole(leaseID) {
 		return nil
 	}
 	return c.refuseRevoke(RevokeKindLease)
@@ -121,7 +122,7 @@ func (c *Client) allowLeaseRevoke(leaseID string) error {
 
 func (c *Client) allowSessionRevoke(accessor string) error {
 	m := c.mintedSet()
-	if m.has(m.accessors, accessor) {
+	if m.has(&m.accessors, accessor) {
 		return nil
 	}
 	return c.refuseRevoke(RevokeKindSession)

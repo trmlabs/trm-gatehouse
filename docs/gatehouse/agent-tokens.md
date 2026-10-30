@@ -53,6 +53,25 @@ automations:
 
 Authorization is the Automation's: its `entries`, `write` and `owner`, the pool's grants and ceiling, and no person. See [What an Automation's run may use](broker-catalog.md#what-an-automations-run-may-use).
 
+## Gumloop ID tokens
+
+A Gumloop agent can prove itself with the ID token Gumloop signs for it, so the platform holds no long-lived secret. The same static-token listener reads it: a token shaped like `<agent-id>.<secret>` is checked as above, any other as an ID token. Set `AGENT_VAULT_GUMLOOP_JWKS_URL` and `AGENT_VAULT_GUMLOOP_AUDIENCE` to turn it on.
+
+The broker checks the signature against the issuer's signing keys (RS256 or ES256, cached for an hour and refetched when a token names a new key), the issuer, that the audience includes the configured one, that the token has not expired and expires within an hour, and any not-before time. It then reads `gumloop_org_id` and `gumloop_owner_id` (an owner that is not a user, by `gumloop_owner_type`, is refused as `oidc_owner_type`) and serves the Automation whose block names them. Any failure is refused with a reason code (`oidc_*`) and an audit row; the audit row's source is `GUMLOOP_OIDC`.
+
+```yaml
+automations:
+  - id: example-gumloop-agent
+    name: example-gumloop-agent
+    owner: example-team
+    entries: [example-entry]
+    gumloop:
+      orgID: "<the organization id>"
+      ownerID: "<optional: one owner in that organization>"
+```
+
+A block with `ownerID` serves only that owner; a block without it serves any other owner in the organization. One organization and owner pair belongs to one block. A block has `gumloop` or `tokenSHA256`, never both, and neither can be reached by a Cursor run naming its id. Access is the block's `entries`, as for any Automation, and the token lives only as long as Gumloop issues it, so there is nothing to rotate or revoke here beyond removing the block.
+
 ## Minting a token
 
 ```bash

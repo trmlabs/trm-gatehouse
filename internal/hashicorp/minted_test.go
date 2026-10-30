@@ -3,6 +3,7 @@ package hashicorp
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -132,5 +133,26 @@ func TestASessionsLeasesAreTheParentsToRevoke(t *testing.T) {
 	// Once revoked, the accessor is no longer the broker's to revoke again.
 	if err := c.RevokeDatabaseSession(context.Background(), session.Accessor); !errors.Is(err, ErrNotMinted) {
 		t.Fatalf("a second revoke of the same accessor: %v", err)
+	}
+}
+
+// Fails only under -race (as CI runs it): a revoke check raced the first mint's lazy map creation.
+func TestARevokeCheckDuringTheFirstMintDoesNotRace(t *testing.T) {
+	for range 50 {
+		c := &Client{}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			c.noteLease("database/creds/shared-readonly/first")
+			c.noteSession("first-accessor")
+		})
+		wg.Go(func() {
+			for range 100 {
+				_ = c.allowLeaseRevoke("database/creds/shared-readonly/first")
+				_ = c.allowSessionRevoke("first-accessor")
+				c.forgetLease("database/creds/shared-readonly/other")
+				c.forgetSession("other-accessor")
+			}
+		})
+		wg.Wait()
 	}
 }

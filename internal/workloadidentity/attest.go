@@ -471,7 +471,55 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 	}
 	scope.WorkloadID, scope.NotAfter, scope.Pool, scope.IdentityKind = k.Pod.UID, notAfter, binding.Pool, brokercore.KindPodToken
 	scope.ClaimedRun = pod.Metadata.Annotations[brokercore.CursorRunAnnotation]
+	scope.Pod = brokercore.PodRef{Domain: d.name, Namespace: k.Namespace, Name: k.Pod.Name, UID: k.Pod.UID, Container: binding.ContainerName}
 	return scope, nil
+}
+
+var _ brokercore.LivePods = (*Resolver)(nil)
+
+// PodRunning rereads the Pod from its cluster; a missing Pod is false, any other failed read is an error.
+func (r *Resolver) PodRunning(ctx context.Context, ref brokercore.PodRef, run string) (bool, error) {
+	if ref.IsZero() || run == "" {
+		return false, nil
+	}
+	read := r.api
+	found := false
+	for _, d := range r.domains {
+		if d.name != ref.Domain {
+			continue
+		}
+		found = true
+		if d.remote {
+			read = d.pods
+		}
+	}
+	if !found || read == nil {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(r.config.TimeoutSeconds)*time.Second)
+	defer cancel()
+	var pod livePod
+	if err := read(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(ref.Namespace)+"/pods/"+url.PathEscape(ref.Name), nil, &pod); err != nil {
+		var refused *kubeStatusError
+		if errors.As(err, &refused) && refused.code == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	m := pod.Metadata
+	if m.UID != ref.UID || m.Name != ref.Name || m.Namespace != ref.Namespace || m.DeletionTimestamp != nil ||
+		pod.Status.Phase != "Running" || m.Annotations[brokercore.CursorRunAnnotation] != run {
+		return false, nil
+	}
+	if ref.Container == "" {
+		return true, nil
+	}
+	for _, c := range pod.Status.ContainerStatuses {
+		if c.Name == ref.Container {
+			return c.State.Running != nil && c.RestartCount == 0, nil
+		}
+	}
+	return false, nil
 }
 
 // verifySignature checks a JWS signature with the algorithm the key's type

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/auth"
@@ -147,7 +149,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if defaultVault != nil {
 		defaultVaultID = defaultVault.ID
 	}
-	user, err := s.store.RegisterFirstUser(ctx, req.Email, hash, salt, defaultVaultID, kdfParams.Time, kdfParams.Memory, kdfParams.Threads)
+	user, err := s.store.RegisterFirstUser(ctx, req.Email, hash, salt, defaultVaultID, kdfParams.Time, kdfParams.Memory, kdfParams.Threads, kdfParams.Algorithm)
 	if err == nil {
 		// First user: owner created successfully.
 		s.initialized.Store(true)
@@ -189,7 +191,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create as inactive member, require email verification.
-	_, err = s.store.CreateUser(ctx, req.Email, hash, salt, "member", kdfParams.Time, kdfParams.Memory, kdfParams.Threads)
+	_, err = s.store.CreateUser(ctx, req.Email, hash, salt, "member", kdfParams.Time, kdfParams.Memory, kdfParams.Threads, kdfParams.Algorithm)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to create user")
 		return
@@ -468,7 +470,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.UpdateUserPassword(ctx, user.ID, hash, salt, newKDFParams.Time, newKDFParams.Memory, newKDFParams.Threads); err != nil {
+	if err := s.store.UpdateUserPassword(ctx, user.ID, hash, salt, newKDFParams.Time, newKDFParams.Memory, newKDFParams.Threads, newKDFParams.Algorithm); err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to update password")
 		return
 	}
@@ -541,15 +543,90 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// upgradeLegacyPasswordHash rehashes an Argon2id or off-count PBKDF2 password at the configured PBKDF2 count after a login when the upgrade is on; a lost race or failure only logs.
+func (s *Server) upgradeLegacyPasswordHash(ctx context.Context, user *store.User, password []byte) {
+	if !userKDFParams(user).NeedsUpgrade() {
+		return
+	}
+	hash, salt, p, err := auth.HashUserPassword(password)
+	if err == nil {
+		var written bool
+		if written, err = s.store.UpgradeUserPasswordHash(ctx, user, hash, salt, p.Time, p.Memory, p.Threads, p.Algorithm); err == nil && !written {
+			s.logger.Debug("password hash upgrade skipped, the password changed first")
+		}
+	}
+	if err != nil {
+		s.logger.Warn("password hash upgrade failed", "error", err)
+	}
+}
+
+// loginDerive is the KDF a login runs; tests wrap it to count calls.
+var loginDerive = crypto.DeriveKey
+
+// dummyPassword is the fixed input of every dummy derive, so a typed password only reaches a KDF to verify a real record.
+var dummyPassword = []byte("agent-vault-dummy-login-password")
+
+// dummySalt is the salt of every dummy derive, built on first use.
+var dummySalt = sync.OnceValue(func() []byte {
+	salt, _ := crypto.GenerateSalt(16)
+	return salt
+})
+
+// burnKDF runs one throwaway derive of the given algorithm; PBKDF2 runs the given iteration count.
+func burnKDF(algo string, iterations uint32) {
+	p := crypto.KDFParams{Algorithm: algo, Time: iterations, KeyLen: 32, SaltLen: 16}
+	if algo == crypto.AlgoArgon2id {
+		p = crypto.KDFParams{Algorithm: algo, Time: 3, Memory: 64 * 1024, Threads: 4, KeyLen: 32, SaltLen: 16}
+	}
+	_, _ = loginDerive(dummyPassword, dummySalt(), p)
+}
+
+// configuredIterations is the PBKDF2 count new records and dummy derives use.
+func configuredIterations() uint32 {
+	if _, n, err := crypto.KDFConfig(); err == nil {
+		return n
+	}
+	return crypto.DefaultPBKDF2Iterations
+}
+
+// failLoginKDF tops a failed login up to one Argon2id and one PBKDF2 derive at the configured count; derived is the record the check really ran, nil when none did.
+func failLoginKDF(derived *crypto.KDFParams) {
+	algo := ""
+	if derived != nil {
+		algo = derived.EffectiveAlgorithm()
+	}
+	if algo != crypto.AlgoArgon2id {
+		burnKDF(crypto.AlgoArgon2id, 0)
+	}
+	n := configuredIterations()
+	switch {
+	case algo != crypto.AlgoPBKDF2SHA256:
+		burnKDF(crypto.AlgoPBKDF2SHA256, n)
+	case derived.Time < n:
+		burnKDF(crypto.AlgoPBKDF2SHA256, n-derived.Time)
+	}
+}
+
+// verifyLoginPassword checks the password with the same KDF counting as a stored record would use; derived is nil when the record could not be derived.
+func verifyLoginPassword(password []byte, user *store.User) (ok bool, derived *crypto.KDFParams) {
+	p := userKDFParams(user)
+	key, err := loginDerive(password, user.PasswordSalt, p)
+	if err != nil {
+		return false, nil
+	}
+	return subtle.ConstantTimeCompare(key, user.PasswordHash) == 1, &p
+}
+
 // userKDFParams reconstructs KDFParams from a User's stored fields.
 // KeyLen and SaltLen use the standard values (32 and 16).
 func userKDFParams(u *store.User) crypto.KDFParams {
 	return crypto.KDFParams{
-		Time:    u.KDFTime,
-		Memory:  u.KDFMemory,
-		Threads: u.KDFThreads,
-		KeyLen:  32,
-		SaltLen: 16,
+		Time:      u.KDFTime,
+		Memory:    u.KDFMemory,
+		Threads:   u.KDFThreads,
+		Algorithm: u.KDFAlgorithm,
+		KeyLen:    32,
+		SaltLen:   16,
 	}
 }
 
@@ -587,10 +664,6 @@ func clientIP(r *http.Request) string {
 		}
 	}
 	return remoteIP
-}
-
-func init() {
-	dummyPasswordHash, dummyPasswordSalt, dummyKDFParams, _ = auth.HashUserPassword([]byte("sb-dummy-timing-equalization"))
 }
 
 // newUserSessionParams builds a CreateUserSessionParams populated with the
@@ -636,21 +709,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := s.store.GetUserByEmail(ctx, req.Email)
 	if err != nil {
-		// Run KDF against dummy hash to equalize response time (prevent user enumeration).
-		auth.VerifyUserPassword([]byte(req.Password), dummyPasswordHash, dummyPasswordSalt, dummyKDFParams)
+		// Every failed login costs one Argon2id and one PBKDF2 derive, so timing does not reveal accounts or the KDF setting.
+		failLoginKDF(nil)
 		jsonError(w, http.StatusUnauthorized, "Invalid email or password")
 		return
 	}
 
-	if !auth.VerifyUserPassword([]byte(req.Password), user.PasswordHash, user.PasswordSalt, userKDFParams(user)) {
+	ok, derived := verifyLoginPassword([]byte(req.Password), user)
+	if !ok {
+		failLoginKDF(derived)
 		jsonError(w, http.StatusUnauthorized, "Invalid email or password")
 		return
 	}
 
 	if !user.IsActive {
+		failLoginKDF(derived)
 		jsonError(w, http.StatusUnauthorized, "Invalid email or password")
 		return
 	}
+
+	s.upgradeLegacyPasswordHash(ctx, user, []byte(req.Password))
 
 	params := newUserSessionParams(r, user.ID)
 	params.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
@@ -715,7 +793,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.UpdateUserPassword(ctx, user.ID, hash, salt, newKDFParams.Time, newKDFParams.Memory, newKDFParams.Threads); err != nil {
+	if err := s.store.UpdateUserPassword(ctx, user.ID, hash, salt, newKDFParams.Time, newKDFParams.Memory, newKDFParams.Threads, newKDFParams.Algorithm); err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to update password")
 		return
 	}

@@ -48,6 +48,8 @@ network isolation or support for other hosted-agent runtimes.
 
     Password resolution order: `AGENT_VAULT_MASTER_PASSWORD` env var, then `--password-stdin`, then interactive prompt. If no password is provided, runs in passwordless mode (DEK stored unwrapped). The env var is unset from the process immediately after reading.
 
+    With `AGENT_VAULT_MASTER_KEY_KMS` set, the DEK is wrapped by Google Cloud KMS or AWS KMS and no password is needed. A password-only vault is switched over on the first start that has its password, and the password then stays as break-glass. See [Cloud KMS master key](/self-hosting/kms).
+
     | Flag | Default | Description |
     |------|---------|-------------|
     | `--host` | `127.0.0.1` | Host to bind to |
@@ -68,6 +70,12 @@ network isolation or support for other hosted-agent runtimes.
     | `PORT` | Server listen port (default `14321`). The `--port` flag takes precedence. |
     | `DATABASE_URL` | PostgreSQL connection URL (e.g. `postgres://user:pass@host:5432/agentvault`). When set, Agent Vault uses Postgres instead of SQLite. The `--database-url` flag takes precedence. See [PostgreSQL](/self-hosting/postgres). |
     | `AGENT_VAULT_MASTER_PASSWORD` | Derives a KEK that wraps the data encryption key. Omit for passwordless mode. |
+    | `AGENT_VAULT_MASTER_KEY_KMS` | `gcpkms://projects/.../cryptoKeys/KEY` or `awskms://arn:...:key/ID` (a key ARN, not an alias). Wraps the data encryption key with that cloud key instead of a master password. See [Cloud KMS master key](/self-hosting/kms). |
+    | `AGENT_VAULT_KMS_BREAK_GLASS` | Optional boolean, default `false`. When KMS fails at start, or a KMS-wrapped vault starts without `AGENT_VAULT_MASTER_KEY_KMS`, `true` lets the broker unlock with the master password if its wrap still exists, logs an error and records the fallback. Otherwise both refuse to start. |
+    | `AGENT_VAULT_KMS_FIPS` | Optional boolean, default `false`. Must parse or startup fails. Forces the AWS KMS FIPS endpoint outside `us-gov` regions, where it is always used. |
+    | `AGENT_VAULT_REQUIRE_FIPS` | Optional boolean, default `false`. Must parse or startup fails. `true` refuses to start unless Go's FIPS 140-3 mode is on and `AGENT_VAULT_KDF_UPGRADE` is `true`. Every start logs whether FIPS 140-3 mode is on. |
+| `AGENT_VAULT_PBKDF2_ITERATIONS` | Optional whole number, default `600000`, from `600000` to `10000000`; anything else fails startup. PBKDF2 iterations for new records; existing records move to this count on their next successful login or unlock. Only used when `AGENT_VAULT_KDF_UPGRADE` is `true`. |
+    | `AGENT_VAULT_KDF_UPGRADE` | Optional boolean, default `false`. Off: new and changed passwords are written as Argon2id and nothing is upgraded, so an older image can still read every record. On: they are written as PBKDF2 (FIPS) and Argon2id records are upgraded on the next successful login or unlock. Turn on for GovCloud and fresh installs. |
     | `AGENT_VAULT_CREDENTIAL_PROXY` | Optional boolean, default `false`. Enables the restricted release profile with request-time Vault reads, fail-closed forwarding and durable audit admission. Requires workload identity, verified Vault TLS (loopback HTTP is allowed for local fixtures), and loopback listeners behind protected ingress. See [Credential proxy profile](/self-hosting/environment-variables#credential-proxy-profile). |
     | `AGENT_VAULT_WORKLOAD_IDENTITY_FILE` | Path to a JSON Kubernetes workload policy. Enables the same exclusive projected-token verifier on HTTP and PostgreSQL proxy admission, without a standing-token fallback. Required by `AGENT_VAULT_CREDENTIAL_PROXY=true`; management authentication stays separate. |
     | `AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE` | Optional whole number, default `60`. Each person's fresh directory lookups per minute for entitlement checks, in each broker process and counted separately for HTTP and PostgreSQL, so the directory sees up to this times the broker replicas, times two when both run; past it a check is refused as `entitlement_rate_limited` (429 with `Retry-After`). At most `AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX`. See [Environment variables](/self-hosting/environment-variables). |
@@ -1136,6 +1144,22 @@ Password changes only re-wrap the encryption key (one database row). No credenti
   </Accordion>
 </AccordionGroup>
 
+## Master key
+
+<AccordionGroup>
+  <Accordion title="agent-vault master-key remove-password-wrap">
+    ```bash
+    agent-vault master-key remove-password-wrap [--force]
+    ```
+
+    Remove the break-glass master password from a vault wrapped by Google Cloud KMS or AWS KMS, so the broker starts with KMS alone. Requires the server to be stopped and `AGENT_VAULT_MASTER_KEY_KMS` set to the vault's key. The command first asks KMS to unwrap the key and refuses, changing nothing, if that fails. See [Cloud KMS master key](/self-hosting/kms).
+
+    | Flag | Description |
+    |------|-------------|
+    | `--force` | Proceed when `DATABASE_URL` is set. Requires all instances to be stopped. |
+  </Accordion>
+</AccordionGroup>
+
 ## Utilities
 
 <AccordionGroup>
@@ -1175,6 +1199,32 @@ Password changes only re-wrap the encryption key (one database row). No credenti
     | Flag | Default | Description |
     |------|---------|-------------|
     | `--yes` | `false` | Skip confirmation prompt |
+  </Accordion>
+
+  <Accordion title="agent-vault tls-probe">
+    ```bash
+    agent-vault tls-probe [flags] [target...]
+    ```
+
+    Run TLS handshakes to upstreams from inside this build, so a FIPS image can be checked before it is rolled out. Targets are arguments, or one per line on standard input (blank lines and lines starting with `#` are skipped):
+
+    | Target | Handshake |
+    |--------|-----------|
+    | `host:port` | Direct TLS, including Neo4j `bolt+s` |
+    | `postgres://host:port` | PostgreSQL SSLRequest, then TLS |
+    | `smtp://host:port` | SMTP STARTTLS |
+
+    Certificates are verified against the system roots the broker uses for upstream connections, plus `--ca-file`. Each target prints one line: `OK`, the TLS version, the cipher suite and the key exchange group, or `FAIL` and the error. The exit status is non-zero if any target fails.
+
+    | Flag | Default | Description |
+    |------|---------|-------------|
+    | `--ca-file` | | PEM file of extra root certificates to trust, added to the system roots |
+    | `--timeout` | `10s` | Time allowed for each target |
+
+    ```bash
+    agent-vault tls-probe api.example.com:443 postgres://db.internal:5432
+    printf '%s\n' neo4j.internal:7687 smtp://mail.internal:587 | agent-vault tls-probe
+    ```
   </Accordion>
 
   <Accordion title="agent-vault version">

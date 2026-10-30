@@ -115,8 +115,21 @@ type MasterKeyRecord struct {
 	KDFTime       *uint32
 	KDFMemory     *uint32
 	KDFThreads    *uint8
+	KDFAlgorithm  string // "pbkdf2-sha256" or legacy "argon2id"
+	// KMSWrappedDEK is the DEK wrapped by the cloud key named in KMSKeyName (nil when unused).
+	KMSWrappedDEK []byte
+	KMSKeyName    string // "gcpkms://..." or "awskms://..." as configured; empty when unused
+	WrapKind      string // WrapKindPassword (also passwordless), WrapKindKMS, or WrapKindKMSFallback
 	CreatedAt     time.Time
 }
+
+// Wrap kinds: which wrap unlocks the DEK first at startup.
+const (
+	WrapKindPassword = "password"
+	WrapKindKMS      = "kms"
+	// WrapKindKMSFallback marks a KMS vault whose last unlock went through the break-glass password.
+	WrapKindKMSFallback = "kms-password-fallback"
+)
 
 // Session represents an authenticated session.
 // User sessions: VaultID may be set (scoped) or empty (global login).
@@ -191,9 +204,10 @@ type User struct {
 	Email        string
 	PasswordHash []byte
 	PasswordSalt []byte
-	KDFTime      uint32 // Argon2id time parameter used when password was hashed
-	KDFMemory    uint32 // Argon2id memory parameter (KiB) used when password was hashed
-	KDFThreads   uint8  // Argon2id threads parameter used when password was hashed
+	KDFTime      uint32 // iterations (PBKDF2) or passes (Argon2id) used when password was hashed
+	KDFMemory    uint32 // Argon2id memory (KiB); 0 for PBKDF2
+	KDFThreads   uint8  // Argon2id threads; 0 for PBKDF2
+	KDFAlgorithm string // "pbkdf2-sha256" or legacy "argon2id"
 	Role         string // "owner", "member", or "no-access"
 	IsActive     bool   // false until email is verified (first user is auto-active)
 	CreatedAt    time.Time
@@ -474,17 +488,19 @@ type Store interface {
 	ExpireCredentialOAuthStates(ctx context.Context, before time.Time) (int, error)
 
 	// Users
-	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*User, error)
+	CreateUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, role string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	GetUserEmailByID(ctx context.Context, id string) (string, error)
 	ListUsers(ctx context.Context) ([]User, error)
 	UpdateUserRole(ctx context.Context, userID, role string) error
-	UpdateUserPassword(ctx context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) error
+	UpdateUserPassword(ctx context.Context, userID string, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) error
+	// UpgradeUserPasswordHash rewrites the row only while it still holds the hash and KDF params of expected as read; false means another writer won.
+	UpgradeUserPasswordHash(ctx context.Context, expected *User, passwordHash, passwordSalt []byte, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (bool, error)
 	DeleteUser(ctx context.Context, userID string) error
 	CountUsers(ctx context.Context) (int, error)
 	CountOwners(ctx context.Context) (int, error)
-	RegisterFirstUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8) (*User, error)
+	RegisterFirstUser(ctx context.Context, email string, passwordHash, passwordSalt []byte, defaultVaultID string, kdfTime uint32, kdfMemory uint32, kdfThreads uint8, kdfAlgorithm string) (*User, error)
 
 	// Vault grants (unified: actor_id + actor_type)
 	GrantVaultRole(ctx context.Context, actorID, actorType, vaultID, role string) error
@@ -545,6 +561,16 @@ type Store interface {
 	GetMasterKeyRecord(ctx context.Context) (*MasterKeyRecord, error)
 	SetMasterKeyRecord(ctx context.Context, record *MasterKeyRecord) error
 	UpdateMasterKeyRecord(ctx context.Context, record *MasterKeyRecord) error
+	// UpgradeMasterKeyRecord rewrites the record only while it still has the salt and KDF params of expected as read; false means another writer won.
+	UpgradeMasterKeyRecord(ctx context.Context, expected, record *MasterKeyRecord) (bool, error)
+	// SetMasterKeyWrapKind records how a KMS vault last unlocked (WrapKindKMS or WrapKindKMSFallback); it never touches a password-kind record.
+	SetMasterKeyWrapKind(ctx context.Context, kind string) error
+	// ClearMasterKeyPlaintext removes the plaintext key from a KMS-wrapped record, only while the record still holds the KMS wrap and plaintext of expected as read; false means another writer won.
+	ClearMasterKeyPlaintext(ctx context.Context, expected *MasterKeyRecord) (bool, error)
+	// SetMasterKeyKMSWrap adds a KMS wrap beside an unchanged password wrap, only while the record still has the salt, wrapped key and KDF params of expected as read and no KMS wrap yet; false means another writer won.
+	SetMasterKeyKMSWrap(ctx context.Context, expected *MasterKeyRecord, wrapped []byte, keyName string) (bool, error)
+	// RemoveMasterKeyPasswordWrap drops the password wrap and any plaintext key, only while the record still has the KMS wrap and wrap kind of expected as read; false means another writer won.
+	RemoveMasterKeyPasswordWrap(ctx context.Context, expected *MasterKeyRecord) (bool, error)
 
 	// Proposals
 	CreateProposal(ctx context.Context, vaultID, sessionID, servicesJSON, credentialsJSON, message, userMessage string, credentials map[string]EncryptedCredential) (*Proposal, error)

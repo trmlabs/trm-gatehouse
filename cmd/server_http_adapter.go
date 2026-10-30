@@ -167,7 +167,8 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 	if err := attachAuthorization(adapter, getenv); err != nil {
 		return nil, err
 	}
-	adapter.Sessions = sessionBinder(srv.CleanupStore())
+	// The proxy's attestor, which reads Pods, joins it in attachMITMIfEnabled.
+	adapter.Sessions = sessionBinder(srv.CleanupStore(), nil)
 	decoys, err := decoySource(ctx, client, getenv, srv.Logger())
 	if err != nil {
 		return nil, err

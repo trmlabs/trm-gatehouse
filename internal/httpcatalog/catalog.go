@@ -41,19 +41,16 @@ type Entry struct {
 	// password, the way clients such as axios and curl -u encode it. The
 	// header is Authorization and the scheme is Basic, so neither is set.
 	BasicUser bool `json:"basicUser,omitempty"`
-	// BasicPair sends the key, stored as "user:password", as HTTP Basic
-	// credentials, for vendors that issue a key pair (a public and a secret
-	// key). The worker sends the placeholder as both user name and password,
-	// or the stored user name, which is not secret, and the placeholder as
-	// the password. The header is Authorization and the scheme is Basic, so
-	// neither is set.
-	BasicPair bool `json:"basicPair,omitempty"`
+	// BasicPair keeps the password broker-only; its user must be non-secret.
+	// BasicPairs requires that public user to select a fixed Vault reference.
+	BasicPair  bool              `json:"basicPair,omitempty"`
+	BasicPairs BasicPairBindings `json:"basicPairs,omitempty"`
 	// PairUserHeader names a second header in which the client also sends a
 	// Basic pair's user name, such as Langfuse's X-Langfuse-Public-Key. Its
 	// value must be the stored user name. basicPair entries only.
 	PairUserHeader string `json:"pairUserHeader,omitempty"`
 	// Placeholder is what a worker may send in Header instead of the key, so
-	// SDKs that insist on a key still work. The worker may also omit Header.
+	// SDKs that insist on a key still work. Only BasicPairs requires Header.
 	Placeholder string `json:"placeholder"`
 	Key         KeyRef `json:"key"`
 	// ClientCertificate, header entries only, is a certificate and key in
@@ -655,6 +652,11 @@ func (e *Entry) normalize() error {
 	if !idPattern.MatchString(e.Name) {
 		return errors.New("name must be a short identifier")
 	}
+	if e.BasicPairs != nil {
+		if err := e.normalizeBasicPairs(); err != nil {
+			return err
+		}
+	}
 	e.Host = strings.ToLower(e.Host)
 	labels := strings.Split(e.Host, ".")
 	if !hostPattern.MatchString(e.Host) || len(e.Host) > 253 || strings.Trim(labels[len(labels)-1], "0123456789") == "" {
@@ -826,7 +828,7 @@ func (e *Entry) normalizeHeaderCredential() error {
 	if e.ClientCredentials != nil {
 		return e.normalizeClientCredentials()
 	}
-	if prefix, path := keyPath(); !ValidMount(e.Key.Mount) || len(e.Key.Path) > 127 || !path.MatchString(e.Key.Path) || e.Key.Field == "" {
+	if prefix, _ := keyPath(); e.BasicPairs == nil && !e.Key.valid() {
 		return fmt.Errorf("key needs a KV mount, a path under %s/ and a field", prefix)
 	}
 	return nil
@@ -2318,8 +2320,8 @@ func (e *Entry) Credential(v string) string {
 
 // CallerCredential is the value a worker sends in Header: the placeholder
 // encoded as the key would be, and for a Basic pair, the placeholder as both
-// user name and password. A Basic pair also takes the stored user name with
-// the placeholder as password (CallerPairUser).
+// user name and password for a single Key. BasicPairs instead requires a
+// listed public user with the placeholder password (CallerPairUser).
 func (e *Entry) CallerCredential() string {
 	if e.BasicPair {
 		return e.Credential(e.Placeholder + ":" + e.Placeholder)

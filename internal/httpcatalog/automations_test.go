@@ -145,7 +145,13 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 		"unsafe name":      {"id": "auto-9", "name": "an \"x\"", "owner": "owner@example.com", "entries": []any{"vendor"}},
 		"unknown field":    {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "pools": []any{"p"}},
 		// Who runs an Automation decides nothing, so a runner group is refused.
-		"runner group": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "runnerGroup": "11111111-2222-3333-4444-555555555555", "entries": []any{"vendor"}},
+		"runner group":         {"id": "auto-9", "name": "x", "owner": "owner@example.com", "runnerGroup": "11111111-2222-3333-4444-555555555555", "entries": []any{"vendor"}},
+		"negative subagents":   {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "subagents": -1},
+		"too many subagents":   {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "subagents": MaxSubagents + 1},
+		"fractional subagents": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "subagents": 1.5},
+		// A static-token agent has no Cursor run to vouch for a subagent.
+		"subagents on a token agent": {"id": "auto-9", "name": "x", "owner": "owner@example.com", "entries": []any{"vendor"}, "subagents": 4,
+			"tokenSHA256": []any{strings.Repeat("a", 64)}, "expires": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
 	} {
 		c := automationCatalog()
 		c["automations"] = append(c["automations"].([]any), a)
@@ -435,5 +441,25 @@ func TestPrefixLoaderLeavesOutAnEmptyAutomationsList(t *testing.T) {
 		if _, ok := top["automations"]; ok != (len(automations) > 0) {
 			t.Errorf("%s: document carries automations %v: %s", name, ok, top["automations"])
 		}
+	}
+}
+
+// A block's subagents key sets how many subagents its runs may register; absent registers none.
+func TestAutomationSubagentsSetting(t *testing.T) {
+	c := automationCatalog()
+	c["automations"].([]any)[0].(map[string]any)["subagents"] = 25
+	catalog, err := parseCatalog(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, ok := catalog.Automation("auto-1"); !ok || a.Subagents != 25 {
+		t.Fatalf("auto-1: %+v", a)
+	}
+	if a, ok := catalog.Automation("auto-2"); !ok || a.Subagents != 0 {
+		t.Fatalf("auto-2: %+v", a)
+	}
+	block, err := ParseAutomationBlock([]byte("- {id: auto-3, name: x, owner: platform-team, entries: [vendor], subagents: 3}\n"))
+	if err != nil || block.Subagents != 3 {
+		t.Fatalf("block %+v %v", block, err)
 	}
 }

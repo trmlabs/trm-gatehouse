@@ -107,7 +107,8 @@ func TestPinnedSetValidation(t *testing.T) {
 		}
 		return m
 	}
-	small, _ := rsa.GenerateKey(rand.Reader, 1024) // #nosec G403 -- the test proves a short key is refused
+	// An odd 1024-bit modulus stands in for a short key, which FIPS 140-only mode cannot generate.
+	small := &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int).SetBit(big.NewInt(1), 1023, 1), E: 65537}}
 	for name, td := range map[string]TrustDomain{
 		"private exponent d":         pinnedDomain(rc, with(map[string]any{"d": "AQAB"})),
 		"private prime p":            pinnedDomain(rc, with(map[string]any{"p": "AQAB"})),

@@ -546,6 +546,13 @@ func readBearer(path string) (string, error) {
 	return bearer, nil
 }
 
+// kubeStatusError is a Kubernetes API answer other than 200 or 201.
+type kubeStatusError struct{ code int }
+
+func (e *kubeStatusError) Error() string {
+	return fmt.Sprintf("workload verifier refused request (status %d)", e.code)
+}
+
 // kubeCall makes one JSON call to a Kubernetes API server and decodes a
 // bounded 200 or 201 answer into out.
 func kubeCall(ctx context.Context, client *http.Client, server, bearer, method, path string, body []byte, out any) error {
@@ -561,7 +568,7 @@ func kubeCall(ctx context.Context, client *http.Client, server, bearer, method, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("workload verifier refused request (status %d)", resp.StatusCode)
+		return &kubeStatusError{resp.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil || len(b) > 1<<20 || json.Unmarshal(b, out) != nil {

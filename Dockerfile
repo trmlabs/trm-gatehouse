@@ -31,7 +31,7 @@ RUN --mount=type=secret,id=build_ca \
     else go mod download; fi
 COPY . .
 COPY --from=frontend /internal/server/webdist /src/internal/server/webdist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w \
+RUN GOFIPS140=v1.0.0 CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w \
     -X github.com/Infisical/agent-vault/cmd.version=${VERSION} \
     -X github.com/Infisical/agent-vault/cmd.commit=${COMMIT} \
     -X github.com/Infisical/agent-vault/cmd.date=${BUILD_DATE} \

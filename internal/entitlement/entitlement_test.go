@@ -194,8 +194,12 @@ func TestGraphSource(t *testing.T) {
 	if _, err := g.Lookup(context.Background(), "bob@example.test", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
 		t.Fatalf("missing user: %v, want ErrNotInDirectory", err)
 	}
-	if _, err := g.Lookup(context.Background(), user, []string{g1}); !errors.Is(err, ErrNotInDirectory) {
-		t.Fatalf("a subject that is not the user's UPN: %v, want ErrNotInDirectory", err)
+	// An object ID subject (a mapped Cursor user) is looked up by that ID.
+	if p, err := g.Lookup(context.Background(), user, []string{g1}); err != nil || p.ObjectID != user || len(p.MemberOf) != 1 {
+		t.Fatalf("an object ID subject: %+v %v", p, err)
+	}
+	if _, err := g.Lookup(context.Background(), "alice-no-at", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
+		t.Fatalf("a subject that is neither a UPN nor an object ID: %v, want ErrNotInDirectory", err)
 	}
 	if _, err := g.Lookup(context.Background(), "down@example.test", []string{g1}); err == nil || errors.Is(err, ErrNotInDirectory) {
 		t.Fatalf("directory 503: %v, want a passing error", err)

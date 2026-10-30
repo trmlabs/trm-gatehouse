@@ -406,6 +406,7 @@ func (b *Broker) handleBolt(conn net.Conn, stream io.Reader, session, attestatio
 	event.Tier, event.Decision, event.Groups, event.CacheAgeSec = who.Tier, who.Decision, who.Groups, who.CacheAgeSec
 	event.RequesterDepartment = auditchain.DepartmentField(who.Department)
 	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
+	event.Run, event.ParentRun = who.Run, who.ParentRun
 	if who.Kind == "person" || who.Kind == "agent" || who.Kind == "automation" {
 		event.Requester = who.Subject
 	}

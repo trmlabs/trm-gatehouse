@@ -61,6 +61,8 @@ type Automation struct {
 	// Expires, optional and only with TokenSHA256, is an RFC 3339 time after
 	// which the token is refused whatever its hash.
 	Expires string `json:"expires,omitempty"`
+	// Subagents caps how many subagent runs one run may register with this block's grant; zero registers none, and only run-token blocks may set it.
+	Subagents int `json:"subagents,omitempty"`
 
 	// Settings are plain configuration the Automation's runs get as
 	// environment variables in their shells (see CheckSetting): never a
@@ -68,8 +70,17 @@ type Automation struct {
 	// sidecar of a worker whose verified run token names this Automation.
 	Settings map[string]string `json:"settings,omitempty"`
 
+	// Gumloop makes the block an agent proving itself with a Gumloop-signed ID token; it excludes tokenSHA256.
+	Gumloop *GumloopIdentity `json:"gumloop,omitempty"`
+
 	expires time.Time
 	hashes  [][32]byte // TokenSHA256 decoded once, at validation
+}
+
+// GumloopIdentity names the Gumloop org and optional owner whose ID tokens are this Automation; without OwnerID it takes any owner no other block names.
+type GumloopIdentity struct {
+	OrgID   string `json:"orgID"`
+	OwnerID string `json:"ownerID,omitempty"`
 }
 
 // WriteList is an Automation's write list, and whether its block has the key.
@@ -132,6 +143,15 @@ func (a *Automation) validate() error {
 	if err := a.validateToken(); err != nil {
 		return err
 	}
+	if a.Subagents < 0 || a.Subagents > MaxSubagents {
+		return fmt.Errorf("subagents must be from 0 to %d", MaxSubagents)
+	}
+	if a.Subagents > 0 && a.HasOwnIdentity() {
+		return errors.New("subagents is for an Automation reached by a Cursor run token, not one with tokenSHA256 or gumloop")
+	}
+	if err := a.validateGumloop(); err != nil {
+		return err
+	}
 	slices.Sort(a.Write.Names)
 	for i, name := range a.Write.Names {
 		if !idPattern.MatchString(name) || (i > 0 && a.Write.Names[i-1] == name) {
@@ -139,6 +159,19 @@ func (a *Automation) validate() error {
 		}
 	}
 	return CheckSettings(a.Settings, SettingsMaxBytes())
+}
+
+func (a *Automation) validateGumloop() error {
+	if a.Gumloop == nil {
+		return nil
+	}
+	if a.HasToken() {
+		return errors.New("gumloop and tokenSHA256 are two ways to prove one identity: a block has one")
+	}
+	if !idPattern.MatchString(a.Gumloop.OrgID) || (a.Gumloop.OwnerID != "" && !idPattern.MatchString(a.Gumloop.OwnerID)) {
+		return errors.New("gumloop.orgID, and gumloop.ownerID when set, must be short identifiers")
+	}
+	return nil
 }
 
 var tokenHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -190,6 +223,9 @@ func (a *Automation) validateToken() error {
 	return nil
 }
 
+// MaxSubagents bounds the subagents setting so a mistyped value cannot read as unlimited.
+const MaxSubagents = 10000
+
 // MaxTokenLifetime is the longest a per-agent static token may live: a block
 // with tokenSHA256 is refused when its expires is further out than this from
 // the time the catalog loads. Renewal is a new token with --keep-hash, so the
@@ -205,6 +241,9 @@ var tokenClock = time.Now
 // HasToken reports whether the block is an agent that proves itself with a
 // static token.
 func (a Automation) HasToken() bool { return len(a.TokenSHA256) > 0 }
+
+// HasOwnIdentity is true for a static token or Gumloop ID token block, so no Cursor run token may name its id.
+func (a Automation) HasOwnIdentity() bool { return a.HasToken() || a.Gumloop != nil }
 
 // TokenExpires is when the block's token stops being accepted, or the zero
 // time for none.
@@ -267,6 +306,7 @@ func (a Automation) Writes(entry string) bool {
 // at any count.
 func indexAutomations(list []Automation, entries map[string]string) (map[string]Automation, error) {
 	index := make(map[string]Automation, len(list))
+	claimed := map[string]string{} // gumloop org and owner: automation id
 	for i := range list {
 		a := &list[i]
 		if err := a.validate(); err != nil {
@@ -282,6 +322,13 @@ func indexAutomations(list []Automation, entries map[string]string) (map[string]
 		}
 		if err := a.checkWrite(func(entry string) string { return entries[entry] }); err != nil {
 			return nil, fmt.Errorf("automation %q: %w", a.ID, err)
+		}
+		if g := a.Gumloop; g != nil {
+			key := g.OrgID + "\x00" + g.OwnerID
+			if other, ok := claimed[key]; ok {
+				return nil, fmt.Errorf("automations %q and %q name the same gumloop org and owner", other, a.ID)
+			}
+			claimed[key] = a.ID
 		}
 		index[a.ID] = *a
 	}
@@ -312,6 +359,19 @@ func (p Pool) Automation(id string) (Automation, bool) {
 	}
 	a, ok := p.automations[id]
 	return a, ok
+}
+
+// GrantsSubagents reports whether any Automation the pool lists sets subagents.
+func (p Pool) GrantsSubagents() bool {
+	if p.Identity != IdentityCursorAutomation {
+		return false
+	}
+	for _, a := range p.automations {
+		if a.Subagents > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // IdentityCursorAutomation is the pool identity whose runs are decided per

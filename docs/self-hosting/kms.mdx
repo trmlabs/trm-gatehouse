@@ -1,0 +1,93 @@
+---
+title: "Cloud KMS master key"
+description: "Wrap the encryption key with Google Cloud KMS or AWS KMS so there is no master password to hold."
+---
+
+By default Agent Vault wraps its data encryption key (DEK) under a key derived from a master password. With a cloud key service the wrap is done by a key that never leaves the service, and the broker needs no master password at all. Both services are FIPS-validated, so the wrapping step is covered by an approved module.
+
+Only the DEK is wrapped. Credentials and the CA key stay encrypted under the same DEK, so switching to KMS re-encrypts nothing.
+
+## Choose a key
+
+Set `AGENT_VAULT_MASTER_KEY_KMS` to one of:
+
+| Service | Value |
+|---------|-------|
+| Google Cloud KMS | `gcpkms://projects/PROJECT/locations/LOCATION/keyRings/RING/cryptoKeys/KEY` |
+| AWS KMS | `awskms://arn:PARTITION:kms:REGION:ACCOUNT:key/KEY-ID` (a key ARN, for example `awskms://arn:aws-us-gov:kms:us-gov-west-1:...:key/...`) |
+
+The value is checked strictly before any call to the cloud: nothing but the exact key path or ARN is accepted. For AWS the partition is `aws` or `aws-us-gov`, the region must match the partition (a `us-gov` region needs `aws-us-gov`), the account is 12 digits, and the resource is `key/` plus a key ID, multi-Region `mrk-` IDs included. An alias ARN is refused: whoever can repoint an alias would choose the key for the next wrap.
+
+Use a symmetric encryption key. Give Google a crypto key, not a key version: encryption uses its primary version and decryption finds the right version on its own.
+
+Credentials come from the platform, so nothing secret goes in the setting:
+
+- **Google Cloud**: Application Default Credentials, so Workload Identity on GKE works.
+- **AWS**: the default credential chain, so an EKS service-account role works. The AWS FIPS endpoint is used whenever the key's region is a `us-gov` region. Set `AGENT_VAULT_KMS_FIPS=true` to force it in any other region.
+
+Every wrap is bound to this use and to this vault (additional authenticated data on Google, an encryption context on AWS), so a wrap made for one vault does not unwrap under another. The binding does not limit who can call the key, though: anything that can decrypt with it can try any context. Use one key per vault, and do not share the key with other systems.
+
+## Permissions
+
+Grant the broker's identity only the key it uses.
+
+| Service | Grant | Scope |
+|---------|-------|-------|
+| Google Cloud KMS | `roles/cloudkms.cryptoKeyEncrypterDecrypter` | The one crypto key, not the project or key ring |
+| AWS KMS | `kms:Encrypt` and `kms:Decrypt` | The one key ARN in the role's policy, and in the key policy |
+
+Encrypt is used when a vault is created or switched over and to verify the wrap. Decrypt is used on every start.
+
+KMS is checked only at startup. The broker holds the key in memory after that, so a revoked grant or a KMS outage affects a pod only when it restarts.
+
+## New vault
+
+Set `AGENT_VAULT_MASTER_KEY_KMS` before the first start. The broker creates the DEK, wraps it with KMS, reads it back to check it, and only then saves it. No master password is needed or stored, so an older broker image cannot open a vault created this way.
+
+## Switch an existing vault
+
+1. Grant the IAM above and set `AGENT_VAULT_MASTER_KEY_KMS` on the broker.
+2. Start the broker once with the current master password (`AGENT_VAULT_MASTER_PASSWORD`, `--password-stdin` or the prompt). It unlocks with the password, wraps the same DEK with KMS, unwraps it again to confirm, and only then saves it. If any step fails it stops with an error and changes nothing.
+3. The password wrap stays as a break-glass, exactly as it was, so rolling back to an older broker image still starts with the password. From now on the broker unlocks with KMS first and logs which path unlocked. It uses the password only when KMS fails, `AGENT_VAULT_KMS_BREAK_GLASS=true`, the password wrap still exists and a password was provided (see below).
+4. Run it this way until you trust the KMS setup, then remove the password.
+
+With several instances on one PostgreSQL database, the first instance to start does the switch-over; the others read the saved wrap.
+
+A vault in passwordless mode has no password wrap to start from. Run `agent-vault master-password set` once first.
+
+## Remove the password
+
+With the server stopped and `AGENT_VAULT_MASTER_KEY_KMS` set to the vault's key, run:
+
+```bash
+agent-vault master-key remove-password-wrap
+```
+
+Run it only once you will not roll back: an older broker image reads only the password wrap, so it cannot start after this. The command asks KMS to unwrap the DEK and checks it against the vault. If KMS cannot unwrap it, the command refuses and changes nothing. Otherwise it deletes the password wrap, and from then on the broker starts with KMS alone. With `DATABASE_URL` set, stop every instance and add `--force`.
+
+After this, losing access to the KMS key means losing the vault, so keep the key's own protections (deletion delay, backups of the key policy) in place.
+
+## If KMS fails
+
+When `AGENT_VAULT_MASTER_KEY_KMS` is set, every KMS failure stops the start: a wrong key, a different key name, a permission error, an unreachable service, and a key that unwraps something that is not this vault. Nothing is changed.
+
+The one exception is an explicit `AGENT_VAULT_KMS_BREAK_GLASS=true`. Then, if the password wrap still exists and the master password is provided, the broker unlocks with the password and logs an error with the KMS failure. Leave it unset in normal operation. It must be `true` or `false`; anything else stops the start.
+
+| State | Result |
+|-------|--------|
+| KMS fails, break-glass off | Refuses to start and names the setting |
+| KMS fails, break-glass on, password wrap kept, password provided | Unlocks with the password and logs an error |
+| KMS fails, break-glass on, no password provided | Refuses to start |
+| Password wrap removed | Refuses to start with the KMS error |
+
+The broker records every unlock that went through the break-glass password, whether KMS failed or `AGENT_VAULT_MASTER_KEY_KMS` was not set. `remove-password-wrap` refuses until a start has unlocked with KMS again, so the password is never removed while KMS may be broken.
+
+## If KMS is not configured
+
+A vault wrapped by KMS that starts without `AGENT_VAULT_MASTER_KEY_KMS` refuses to start, so a lost setting is never mistaken for a normal start. The message names both settings. With no password wrap the message names `AGENT_VAULT_MASTER_KEY_KMS` only, because there is nothing to fall back on.
+
+With `AGENT_VAULT_KMS_BREAK_GLASS=true`, the password wrap still present and the master password provided, the broker unlocks with the password, logs an error, and records the unlock the same way as a KMS failure fallback, so `remove-password-wrap` refuses until a start has unlocked with KMS again.
+
+## Old plaintext key
+
+An older image's `master-password remove` on a KMS vault leaves a plaintext copy of the key in the record, which unlocks the vault without KMS. The first start that unlocks with KMS clears it, but only when it matches the key KMS unwrapped; a copy that differs is left in place with a warning. `remove-password-wrap` clears it too, and refuses when it differs. The `master-password set`, `change` (when no password wrap remains) and `remove` commands refuse a KMS vault.

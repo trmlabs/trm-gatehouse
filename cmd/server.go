@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/fips140"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -119,11 +120,18 @@ var serverCmd = &cobra.Command{
 		if err := checkShutdownSeconds(os.Getenv); err != nil {
 			return err
 		}
+		kdfUpgrade, _, err := crypto.KDFConfig()
+		if err != nil {
+			return err
+		}
 		if err := imagerule.SetRegistry(os.Getenv(imagerule.RegistryEnv)); err != nil {
 			return err
 		}
 		httpcatalog.EmailClaim.Store(os.Getenv("AGENT_VAULT_AUTOMATED_AUTH_EMAIL_CLAIM"))
 		logger := buildLogger(logLevel)
+		if err := checkFIPS(logger, fips140.Enabled(), kdfUpgrade); err != nil {
+			return err
+		}
 
 		// --- Detached child path: read master key + initialized flag from stdin pipe ---
 		if os.Getenv("_AGENT_VAULT_DETACHED") == "1" {
@@ -252,6 +260,13 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 	default:
 		return fmt.Errorf("AGENT_VAULT_WORKLOAD_ATTESTATION must be unset or tokenreview")
 	}
+	// Subagent requests are checked against their parent's live Pod, which the workload identity resolver reads.
+	if adapter != nil {
+		adapter.Sessions = sessionBinder(srv.CleanupStore(), sessions)
+		if err := subagentsServable(adapter); err != nil {
+			return err
+		}
+	}
 	// Pool workers need a real peer address, which behind the in-Pod TLS
 	// terminator only a PROXY header supplies; without it, keep token review.
 	var attestor brokercore.Attestor
@@ -263,11 +278,18 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 	// Agent tokens are checked against the live catalog, so the static-token
 	// listener needs one; without it that listener would refuse everyone.
 	var agentTokens agenttoken.Verifier
+	oidc, err := gumloopVerifier(os.Getenv)
+	if err != nil {
+		return err
+	}
 	if os.Getenv("AGENT_VAULT_STATIC_TOKEN_PORT") != "" {
 		if adapter == nil || adapter.Catalog == nil {
 			return fmt.Errorf("AGENT_VAULT_STATIC_TOKEN_PORT needs the HTTP catalog")
 		}
 		agentTokens = agenttoken.Static{Catalog: adapter.Catalog}
+		if oidc != nil {
+			agentTokens = agenttoken.Either{Static: agentTokens, OIDC: agenttoken.GumloopOIDC{Catalog: adapter.Catalog, Verifier: oidc}}
+		}
 	}
 	var extraSANs []string
 	if u, err := url.Parse(srv.BaseURL()); err == nil {
@@ -692,9 +714,9 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		if err != nil {
 			return fmt.Errorf("postgres broker authorization: %w", err)
 		}
-		opts.Databases = server.NewCatalogDatabaseResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore()))
+		opts.Databases = server.NewCatalogDatabaseResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore(), sessions))
 		// Graph databases (Bolt) arrive on this listener too.
-		opts.Graphs = server.NewCatalogGraphResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore()))
+		opts.Graphs = server.NewCatalogGraphResolver(catalog, authz.verifier(), authz.entitlements, sessionBinder(srv.CleanupStore(), sessions))
 		opts.GraphLogins = server.NewVaultGraphLogins(&httpcatalog.Keys{Vault: client.Logical()})
 	}
 	if v := intEnvValue("AGENT_VAULT_BOLT_MAX_MESSAGE_BYTES"); v > 0 {
@@ -872,6 +894,25 @@ func checkShutdownSeconds(getenv func(string) string) error {
 	return nil
 }
 
+// envRequireFIPS makes startup refuse unless Go's FIPS 140-3 mode and AGENT_VAULT_KDF_UPGRADE are both on.
+const envRequireFIPS = "AGENT_VAULT_REQUIRE_FIPS"
+
+// checkFIPS logs whether FIPS 140-3 mode is on and, with AGENT_VAULT_REQUIRE_FIPS=true, refuses a start without it or the KDF upgrade.
+func checkFIPS(logger *slog.Logger, fipsMode, kdfUpgrade bool) error {
+	require, err := strictBoolEnv(envRequireFIPS)
+	if err != nil {
+		return err
+	}
+	logger.Info("FIPS 140-3 mode", "enabled", fipsMode, "required", require)
+	switch {
+	case require && !fipsMode:
+		return fmt.Errorf("%s is true but Go FIPS 140-3 mode is off (build with GOFIPS140 and do not set GODEBUG=fips140=off); refusing to start", envRequireFIPS)
+	case require && !kdfUpgrade:
+		return fmt.Errorf("%s is true but %s is not; set %s=true or the broker writes Argon2id, which is not FIPS-approved; refusing to start", envRequireFIPS, crypto.KDFUpgradeEnv, crypto.KDFUpgradeEnv)
+	}
+	return nil
+}
+
 func intEnvValue(key string) int {
 	if raw := os.Getenv(key); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
@@ -1014,7 +1055,7 @@ func promptOwnerSetup(cmd *cobra.Command, db store.Store, masterPassword []byte)
 		return fmt.Errorf("looking up default vault: %w", err)
 	}
 
-	if _, err := db.RegisterFirstUser(context.Background(), email, hash, salt, vault.ID, kdfP.Time, kdfP.Memory, kdfP.Threads); err != nil {
+	if _, err := db.RegisterFirstUser(context.Background(), email, hash, salt, vault.ID, kdfP.Time, kdfP.Memory, kdfP.Threads, kdfP.Algorithm); err != nil {
 		return fmt.Errorf("creating owner account: %w", err)
 	}
 
@@ -1026,6 +1067,13 @@ func promptOwnerSetup(cmd *cobra.Command, db store.Store, masterPassword []byte)
 // Priority: AGENT_VAULT_MASTER_PASSWORD envvar > --password-stdin > interactive prompt.
 // When no password is provided (envvar empty, no --password-stdin), sets up in passwordless mode.
 func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool) (*auth.MasterKey, error) {
+	// 0. AGENT_VAULT_MASTER_KEY_KMS: KMS first, the password only as switch-over input or break-glass
+	if w, err := kmsWrapperFromEnv(context.Background()); err != nil {
+		return nil, err
+	} else if w != nil {
+		return unlockOrSetupKMS(cmd, db, w, passwordStdin)
+	}
+
 	// 1. AGENT_VAULT_MASTER_PASSWORD envvar (highest priority, for containerized/cloud deployments)
 	if envPw := os.Getenv("AGENT_VAULT_MASTER_PASSWORD"); envPw != "" {
 		_ = os.Unsetenv("AGENT_VAULT_MASTER_PASSWORD")
@@ -1061,6 +1109,14 @@ func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool) (*aut
 		return setupMasterKey(db, pw)
 	}
 
+	if record.KMSWrappedDEK != nil && record.DEKCiphertext == nil {
+		return nil, errKMSOnly(record)
+	}
+	breakGlass, err := kmsGateWithoutKMS(record)
+	if err != nil {
+		return nil, err
+	}
+
 	// Existing record — check if passwordless
 	if record.DEKPlaintext != nil {
 		verRec := buildVerificationRecord(record)
@@ -1082,8 +1138,14 @@ func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool) (*aut
 		}
 
 		mk, err := auth.Unlock(password, verRec)
+		if err == nil {
+			rewrapLegacyMasterKey(db, mk, password, record)
+		}
 		crypto.WipeBytes(password)
 		if err == nil {
+			if breakGlass {
+				recordKMSFallback(db, record)
+			}
 			return mk, nil
 		}
 
@@ -1110,6 +1172,16 @@ func unlockOrSetupWithPassword(db store.Store, password []byte) (*auth.MasterKey
 		return setupMasterKey(db, password)
 	}
 
+	if record.KMSWrappedDEK != nil && record.DEKCiphertext == nil {
+		crypto.WipeBytes(password)
+		return nil, errKMSOnly(record)
+	}
+	breakGlass, err := kmsGateWithoutKMS(record)
+	if err != nil {
+		crypto.WipeBytes(password)
+		return nil, err
+	}
+
 	// Passwordless instance — password is ignored, unlock without it
 	if record.DEKPlaintext != nil {
 		crypto.WipeBytes(password)
@@ -1124,9 +1196,15 @@ func unlockOrSetupWithPassword(db store.Store, password []byte) (*auth.MasterKey
 	// Password-protected — single attempt, no retry
 	verRec := buildVerificationRecord(record)
 	mk, err := auth.Unlock(password, verRec)
+	if err == nil {
+		rewrapLegacyMasterKey(db, mk, password, record)
+	}
 	crypto.WipeBytes(password)
 	if err != nil {
 		return nil, fmt.Errorf("wrong password")
+	}
+	if breakGlass {
+		recordKMSFallback(db, record)
 	}
 	return mk, nil
 }
@@ -1203,6 +1281,27 @@ func setupMasterKey(db store.Store, password []byte) (*auth.MasterKey, error) {
 	return nil, fmt.Errorf("master key in database is password-protected but AGENT_VAULT_MASTER_PASSWORD is not set; all pods must use the same master password")
 }
 
+// rewrapLegacyMasterKey re-wraps a DEK that is Argon2id or PBKDF2 at another iteration count under the configured PBKDF2 count after an unlock when the upgrade is on; a lost race or failure only logs.
+func rewrapLegacyMasterKey(db store.Store, mk *auth.MasterKey, password []byte, record *store.MasterKeyRecord) {
+	if record.KDFTime == nil || !buildVerificationRecord(record).Params.NeedsUpgrade() {
+		return
+	}
+	salt, dekCT, dekNonce, params, err := auth.WrapDEK(mk.Key(), password)
+	if err == nil {
+		upgraded := *record
+		upgraded.DEKCiphertext, upgraded.DEKNonce, upgraded.Salt = dekCT, dekNonce, salt
+		upgraded.KDFTime, upgraded.KDFMemory, upgraded.KDFThreads = &params.Time, &params.Memory, &params.Threads
+		upgraded.KDFAlgorithm = params.Algorithm
+		var written bool
+		if written, err = db.UpgradeMasterKeyRecord(context.Background(), record, &upgraded); err == nil && !written {
+			slog.Debug("master key KDF upgrade skipped, the record changed first")
+		}
+	}
+	if err != nil {
+		slog.Warn("master key KDF upgrade failed", "error", err)
+	}
+}
+
 // verificationToStoreRecord converts an auth VerificationRecord to a store MasterKeyRecord.
 func verificationToStoreRecord(rec *auth.VerificationRecord) *store.MasterKeyRecord {
 	r := &store.MasterKeyRecord{
@@ -1217,6 +1316,7 @@ func verificationToStoreRecord(rec *auth.VerificationRecord) *store.MasterKeyRec
 		r.KDFTime = &rec.Params.Time
 		r.KDFMemory = &rec.Params.Memory
 		r.KDFThreads = &rec.Params.Threads
+		r.KDFAlgorithm = rec.Params.Algorithm
 	}
 	return r
 }
@@ -1232,13 +1332,13 @@ func buildVerificationRecord(record *store.MasterKeyRecord) *auth.VerificationRe
 		Salt:          record.Salt,
 	}
 	if record.KDFTime != nil {
-		defaults := crypto.DefaultKDFParams()
 		vr.Params = crypto.KDFParams{
-			Time:    *record.KDFTime,
-			Memory:  *record.KDFMemory,
-			Threads: *record.KDFThreads,
-			KeyLen:  defaults.KeyLen,
-			SaltLen: defaults.SaltLen,
+			Time:      *record.KDFTime,
+			Memory:    *record.KDFMemory,
+			Threads:   *record.KDFThreads,
+			Algorithm: record.KDFAlgorithm,
+			KeyLen:    32,
+			SaltLen:   16,
 		}
 	}
 	return vr

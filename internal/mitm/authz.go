@@ -33,17 +33,10 @@ func sessionToken(ctx context.Context) string {
 func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, entry *httpcatalog.Entry, event *auditchain.Event) (authorize.Requester, string) {
 	a := p.adapter
 	pool, _ := a.Catalog.Current().Pool(scope.Pool) // undefined pools: no identity, ceiling T0
-	var verifier authorize.Verifier
-	if a.Runner != nil {
-		verifier = a.Runner
-	}
-	who, refusal := authorize.Resolve(ctx, pool, sessionToken(ctx), authorize.Claims{Pod: scope.WorkloadID, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester, TokenAgent: tokenAgent(scope)}, verifier, a.Sessions)
-	event.TokenSHA256, event.RequesterKind = who.TokenSHA256, who.Kind
-	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
+	who, refusal := p.requester(ctx, scope, pool, event)
 	if refusal != "" {
 		return who, refusal
 	}
-	event.Requester = who.Audited()
 	d := authorize.Decide(ctx, a.Entitlements, pool, *entry, who)
 	event.Tier, event.Decision, event.RequesterOID = d.Tier, d.Outcome, d.ObjectID
 	event.RequesterDepartment = auditchain.DepartmentField(d.Department)
@@ -53,6 +46,29 @@ func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, ent
 		return who, d.Outcome
 	}
 	return who, ""
+}
+
+// requester resolves who stands behind a request and fills the audit event with the run token's claims and the admitted requester.
+func (p *Proxy) requester(ctx context.Context, scope *brokercore.ProxyScope, pool httpcatalog.Pool, event *auditchain.Event) (authorize.Requester, string) {
+	a := p.adapter
+	var verifier authorize.Verifier
+	if a.Runner != nil {
+		verifier = a.Runner
+	}
+	who, refusal := authorize.Resolve(ctx, pool, sessionToken(ctx), claimsOf(scope), verifier, a.Sessions)
+	event.TokenSHA256, event.RequesterKind = who.TokenSHA256, who.Kind
+	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
+	event.Run, event.ParentRun = who.Run, who.ParentRun
+	if refusal == "" {
+		event.Requester = who.Audited()
+	}
+	return who, refusal
+}
+
+// claimsOf maps what the broker learned about the workload at admission into authorize.Claims.
+func claimsOf(scope *brokercore.ProxyScope) authorize.Claims {
+	return authorize.Claims{Pod: scope.WorkloadID, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester, TokenAgent: tokenAgent(scope),
+		TokenSource: scope.TokenSource, TokenOwner: scope.TokenOwner, PodRef: scope.Pod, NotAfter: scope.NotAfter}
 }
 
 // attribute names the run behind a refusal that comes before any entry is
@@ -68,7 +84,7 @@ func (p *Proxy) attribute(ctx context.Context, scope *brokercore.ProxyScope, eve
 	if a.Runner != nil {
 		verifier = a.Runner
 	}
-	who := authorize.Attribute(ctx, pool, sessionToken(ctx), authorize.Claims{TokenAgent: tokenAgent(scope)}, verifier)
+	who := authorize.Attribute(ctx, pool, sessionToken(ctx), authorize.Claims{TokenAgent: tokenAgent(scope), TokenSource: scope.TokenSource}, verifier)
 	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
 }
 

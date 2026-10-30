@@ -88,9 +88,13 @@ func TestV1InputIsUnchanged(t *testing.T) {
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v12\x00")) {
 		t.Fatal("a v12 row does not use the v12 input")
 	}
-	r.MACVersion = MACVersionCurrent
+	r.MACVersion = 13
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v13\x00")) {
-		t.Fatal("a current row does not use the v13 input")
+		t.Fatal("a v13 row does not use the v13 input")
+	}
+	r.MACVersion = MACVersionCurrent
+	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v14\x00")) {
+		t.Fatal("a current row does not use the v14 input")
 	}
 }
 
@@ -103,7 +107,7 @@ func authzFixture(t *testing.T) (*fixture, string) {
 		Operation: "pr.open", Database: "examplecore", RequesterDepartment: "Security & IT", Branch: "agent/pool-a/fix",
 		Source: "AUTOMATIONS", Automation: "auto-1", AutomationName: "explorer", AutomationOwner: "owner@example.com",
 		Path: "/example.v1.Reads/ReadRows", Settings: "API_BASE,MODE", GraphQLErrors: "FORBIDDEN@node.commits.nodes.0.commit",
-		PullRequest: 12, Route: "pull-files", GitEntry: "github-git", Cause: "dial_timeout", Match: strings.Repeat("ab", 32), UpstreamMessage: "Update is not a fast forward"}); err != nil {
+		PullRequest: 12, Route: "pull-files", GitEntry: "github-git", Cause: "dial_timeout", Match: strings.Repeat("ab", 32), Run: "bc-20", ParentRun: "bc-1", UpstreamMessage: "Update is not a fast forward"}); err != nil {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
@@ -123,7 +127,7 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 		"kid":             {`"kid":"invalid"`, `"kid":"k1"`},
 		"kid hash":        {`"kidSHA256":"0123456789ab"`, `"kidSHA256":"ba9876543210"`},
 		"peer":            {`"peer":"10.0.0.5"`, `"peer":"10.0.0.6"`},
-		"version":         {`"macVersion":13`, `"macVersion":12`},
+		"version":         {`"macVersion":14`, `"macVersion":13`},
 		"operation":       {`"operation":"pr.open"`, `"operation":"pr.read"`},
 		"database":        {`"database":"examplecore"`, `"database":"exampletm2"`},
 		"department":      {`"requesterDepartment":"Security \u0026 IT"`, `"requesterDepartment":"Engineering"`},
@@ -141,6 +145,8 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 		"pull":            {`"pullRequest":12`, `"pullRequest":13`},
 		"route":           {`"route":"pull-files"`, `"route":"read-pull"`},
 		"git entry":       {`"gitEntry":"github-git"`, `"gitEntry":"other-git"`},
+		"run":             {`"run":"bc-20"`, `"run":"bc-21"`},
+		"parent run":      {`"parentRun":"bc-1"`, `"parentRun":"bc-2"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, out := authzFixture(t)
@@ -180,6 +186,8 @@ func TestV1RowsCannotCarryAuthorizationOrDowngrade(t *testing.T) {
 		"v7 row with an owner":      func(r *Row) { r.MACVersion, r.AutomationOwner = 7, "owner@example.com" },
 		"v8 row with a path":        func(r *Row) { r.MACVersion, r.Path = 8, "/example.v1.Reads/ReadRows" },
 		"v9 row with settings":      func(r *Row) { r.MACVersion, r.Settings = 9, "API_BASE" },
+		"v11 row with a run":        func(r *Row) { r.MACVersion, r.Run = 11, "bc-20" },
+		"v11 row with a parent run": func(r *Row) { r.MACVersion, r.ParentRun = 11, "bc-1" },
 		"plain downgrade":           func(*Row) {},
 		"unknown version":           func(r *Row) { r.MACVersion = MACVersionCurrent + 1 },
 	} {
@@ -209,7 +217,7 @@ func hasKind(r Report, kind string) bool {
 	return false
 }
 
-// A trail written by a v2 broker, then after upgrades by v3 to v10 ones,
+// A trail written by a v2 broker, then after upgrades by v3 to v12 ones,
 // verifies; an older row after a newer one is a step down and does not.
 func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	writeMACVersion = 2
@@ -280,9 +288,15 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
-	writeMACVersion = MACVersionCurrent
+	writeMACVersion = 13
 	f.restart(t)
 	if err := f.chain.Record(Event{Event: EventHTTPResponse, Outcome: "completed", Status: 422, Route: "update-branch", UpstreamMessage: "Update is not a fast forward"}); err != nil {
+		t.Fatal(err)
+	}
+	f.checkpoint(t)
+	writeMACVersion = MACVersionCurrent
+	f.restart(t)
+	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "subagent_parent_gone", Run: "bc-20", ParentRun: "bc-1"}); err != nil {
 		t.Fatal(err)
 	}
 	f.session(t, 2)
@@ -292,8 +306,8 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	for _, r := range rows(t, out) {
 		versions[r.MACVersion]++
 	}
-	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[6] == 0 || versions[7] == 0 || versions[8] == 0 || versions[9] == 0 || versions[10] == 0 || versions[11] == 0 || versions[12] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 12 {
-		t.Fatalf("trail versions %v, want v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12 then v13", versions)
+	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[6] == 0 || versions[7] == 0 || versions[8] == 0 || versions[9] == 0 || versions[10] == 0 || versions[11] == 0 || versions[12] == 0 || versions[13] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 13 {
+		t.Fatalf("trail versions %v, want v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13 then v14", versions)
 	}
 	if report := verify(t, f.verifier(), out); len(report.Findings) != 0 {
 		t.Fatalf("upgraded trail: %v", kinds(report))
@@ -301,13 +315,13 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	parsed := rows(t, out)
 	last := parsed[len(parsed)-1]
 	key, _ := f.keys.lookup(last.KeyVersion)
-	for _, older := range []int{2, 3, 4, 5, 6, 7, 8, 9} {
+	for _, older := range []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13} {
 		forged := Row{Type: RowType, Replica: last.Replica, Boot: last.Boot, Seq: last.Seq + 1, Time: last.Time,
 			Event: EventSessionOpen, Pool: "claude", KeyVersion: last.KeyVersion, Prev: last.MAC, MACVersion: older}
 		forged.MAC = forged.computeMAC(key)
 		line, _ := json.Marshal(forged)
 		if report := verify(t, f.verifier(), out+string(line)+"\n"); !hasKind(report, FindingEdit) {
-			t.Fatalf("step down from v12 to v%d accepted: %v", older, kinds(report))
+			t.Fatalf("step down from v14 to v%d accepted: %v", older, kinds(report))
 		}
 	}
 }

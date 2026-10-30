@@ -16,7 +16,7 @@ RUN --mount=type=secret,id=build_ca \
       && rm /tmp/build-ca.pem; \
     else go mod download; fi
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /agent-vault .
+RUN GOFIPS140=v1.0.0 CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /agent-vault .
 
 # glibc base with a shell, so a CI container job can run steps (and the
 # runner's JavaScript actions) in it. The validator needs no network.

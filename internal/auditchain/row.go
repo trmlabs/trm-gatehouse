@@ -149,6 +149,10 @@ type Row struct {
 	// none, with "+N" for entries that do not fit (see GraphQLErrorsField).
 	// Never an error message or any of the data.
 	GraphQLErrors string `json:"graphqlErrors,omitempty"`
+	// Run is the verified Cursor run's cloud_agent_id.
+	Run string `json:"run,omitempty"`
+	// ParentRun is the registering run on a subagent row served as an Automation.
+	ParentRun string `json:"parentRun,omitempty"`
 	// chain_start: the previous boot and its last persisted checkpoint row,
 	// so a deleted boot or a truncated tail is detectable.
 	PrevBoot          uint64 `json:"prevBoot,omitempty"`
@@ -163,13 +167,14 @@ type Row struct {
 	// department; 7 adds a CI restart's branch; 8 adds the run's source and
 	// Automation; 9 adds the request path; 10 adds the settings served, the
 	// GraphQL error summary and a GitHub request's pull request, route and git
-	// entry; MACVersionCurrent (13) adds the upstream error message, and covers every field.
+	// entry; 11 adds the upstream error cause, 12 the injection match, 13 the upstream error message;
+	// MACVersionCurrent (14) adds the run and parent run, and covers every field.
 	MACVersion int    `json:"macVersion,omitempty"`
 	MAC        string `json:"mac"`
 }
 
 // MACVersionCurrent is the MAC input every new row uses.
-const MACVersionCurrent = 13
+const MACVersionCurrent = 14
 
 // macInput encodes every field except MAC with explicit lengths, so no two
 // distinct rows share an input regardless of field contents. Version 2 adds
@@ -181,7 +186,7 @@ const MACVersionCurrent = 13
 // request path, and version 10 the settings served and the GraphQL error
 // summary. Older versions are kept only to verify rows written before
 // them, and a row carrying a field its version's MAC does not cover fails
-// verification (see v2Only through v13Only).
+// verification (see v2Only through v14Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,
@@ -239,7 +244,11 @@ func (r Row) macInput() []byte {
 		return lengthPrefixed("gatehouse-audit-v12", fields...)
 	}
 	fields = append(fields, r.UpstreamMessage)
-	return lengthPrefixed("gatehouse-audit-v13", fields...)
+	if r.MACVersion < 14 {
+		return lengthPrefixed("gatehouse-audit-v13", fields...)
+	}
+	fields = append(fields, r.Run, r.ParentRun)
+	return lengthPrefixed("gatehouse-audit-v14", fields...)
 }
 
 // v2Only reports whether a row sets a field that only the v2 MAC covers.
@@ -286,6 +295,9 @@ func (r Row) v12Only() bool { return r.Match != "" }
 
 // v13Only reports whether a row sets a field that only the v13 MAC covers.
 func (r Row) v13Only() bool { return r.UpstreamMessage != "" }
+
+// v14Only reports whether a row sets a field that only the v14 MAC covers.
+func (r Row) v14Only() bool { return r.Run != "" || r.ParentRun != "" }
 
 func (r Row) computeMAC(key []byte) string {
 	h := hmac.New(sha256.New, key)

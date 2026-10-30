@@ -603,8 +603,10 @@ func TestInjectionInPullRequestBodyIsFlaggedNotChanged(t *testing.T) {
 	if code, body := f.post(t, "GET", routeRepo+"/pulls/50", "Bearer "+githubTokenPlaceholder, ""); code != 200 || body != injectedPullBody {
 		t.Fatalf("worker got %d %q", code, body)
 	}
+	const wantFlagged = 2
 	var flagged []auditchain.Event
-	for deadline := time.Now().Add(5 * time.Second); len(flagged) == 0 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(5 * time.Second); len(flagged) < wantFlagged && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		flagged = flagged[:0]
 		for _, e := range f.audit.all() {
 			if e.Event == auditchain.EventInjection {
 				flagged = append(flagged, e)

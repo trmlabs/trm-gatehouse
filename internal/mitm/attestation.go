@@ -255,6 +255,8 @@ func (p *Proxy) resolveAgentToken(ctx context.Context, token, hint string, peer 
 		AgentID:      session.Automation,
 		Automation:   session.Automation,
 		Pool:         session.Pool,
+		TokenSource:  session.Source,
+		TokenOwner:   session.Owner,
 		IdentityKind: brokercore.KindStaticToken,
 		NotAfter:     session.Expires,
 	}, nil

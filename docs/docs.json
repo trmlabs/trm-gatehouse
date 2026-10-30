@@ -67,6 +67,7 @@
               "self-hosting/docker",
               "self-hosting/fly-io",
               "self-hosting/postgres",
+              "self-hosting/kms",
               "self-hosting/environment-variables",
               "self-hosting/maintenance",
               "guides/instance-settings",

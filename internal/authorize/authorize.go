@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/entitlement"
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 	"github.com/Infisical/agent-vault/internal/runnerid"
@@ -41,11 +42,21 @@ type Claims struct {
 	// TokenAgent is the Automation a verified static agent token names, the
 	// one identity here that no Pod stands behind; empty for every other.
 	TokenAgent string
+	// PodRef and NotAfter locate the Pod and its deadline for a parent registering a subagent; zero for a non-pool-Pod identity.
+	PodRef   brokercore.PodRef
+	NotAfter time.Time
+	// TokenSource is how that identity was proven, for the audit row; empty is a static token.
+	TokenSource string
+	// TokenOwner is the verified Gumloop owner id, recorded as the run's person since no Pod or run token names one.
+	TokenOwner string
 }
 
 // SourceStaticToken is the audit row's Source for an Automation admitted by
 // its static token, where a Cursor run's would be AUTOMATIONS.
 const SourceStaticToken = "STATIC_TOKEN"
+
+// SourceGumloopOIDC is the audit row's Source for an Automation admitted by a Gumloop ID token.
+const SourceGumloopOIDC = "GUMLOOP_OIDC"
 
 // podOwnerPin is how long a Pod stays pinned to the first Cursor run owner it
 // presents. Pod UIDs never repeat, so the pin only has to outlive the Pod;
@@ -76,9 +87,14 @@ type Requester struct {
 	AutomationName  string
 	AutomationOwner string
 	RunPerson       string
+	// Run and ParentRun are read only by the audit row; ParentRun is the Automation run that registered a subagent.
+	Run       string
+	ParentRun string
 	// grant is the catalog's block for a listed Automation, which decides
 	// MayWrite. A pointer, so a Requester stays comparable.
 	grant *httpcatalog.Automation
+	// owner and team are the run token's sub and team_id, which registered subagents must share.
+	owner, team string
 }
 
 // MayWrite reports whether the requester gets the pool's write grant on a git
@@ -155,11 +171,7 @@ func (r Requester) BranchSegment() string { return httpcatalog.RequesterSegment(
 // so every request on it must come from one the catalog lists, T0 included: a
 // run any other way, such as a person's from the web or Slack
 // (not_automation), or by an Automation the catalog does not list
-// (automation_unlisted), is refused. A listed Automation's run is its own
-// whoever a user or service-account token names: a user outside the
-// configured domains, or a service account, is served the same, and a person
-// the token does name is kept for the audit row only. On every Cursor pool the run's source and
-// Automation are kept for the audit row, refused or not.
+// (automation_unlisted), is refused unless a listed Automation's run registered it as a subagent.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
 	pod, claimedRun := claims.Pod, claims.ClaimedRun
 	who := Requester{Kind: "none"}
@@ -207,7 +219,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 		if err != nil {
 			return who, "session_token"
 		}
-		who.TokenSHA256, who.Source, who.Automation = s.TokenSHA256, s.Source, s.Automation
+		who.TokenSHA256, who.Source, who.Automation, who.Run = s.TokenSHA256, s.Source, s.Automation, s.Run
 		// A Cursor token is bound to the broker's teams and audience instead,
 		// and to the run the controller started this Pod for.
 		if !cursor && !s.InPool(pool.CCPoolID) {
@@ -239,17 +251,20 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 			}
 			if pool.Profile().Authorization.Mode == httpcatalog.AuthorizeAutomation {
 				if s.Source != runnerid.SourceAutomations || s.Automation == "" {
+					if sub, ok := b.(*Subagents); ok {
+						return sub.resolve(ctx, pool, s, pod, who)
+					}
 					return who, "not_automation"
 				}
 				a, ok := pool.Automation(s.Automation)
 				// A block with a token hash is an agent that proves itself
 				// by that token alone; a run token naming its id is refused,
 				// so a vendor's ids and the catalog's agent ids never alias.
-				if !ok || a.HasToken() {
+				if !ok || a.HasOwnIdentity() {
 					return who, "automation_unlisted"
 				}
 				who.Kind, who.Subject, who.AutomationName, who.AutomationOwner = "automation", a.ID, a.Name, a.Owner
-				who.grant = &a
+				who.grant, who.owner, who.team = &a, s.Owner, s.Team
 				if s.Kind == runnerid.KindPerson {
 					who.RunPerson = s.Subject
 				}
@@ -310,11 +325,14 @@ func resolveTokenAgent(pool httpcatalog.Pool, session string, claims Claims) (Re
 		return who, "automation_unlisted"
 	}
 	a, ok := pool.Automation(claims.TokenAgent)
-	if !ok || !a.HasToken() {
+	if !ok || !a.HasOwnIdentity() {
 		return who, "automation_unlisted"
 	}
 	who.Kind, who.Subject, who.AutomationName, who.AutomationOwner = "automation", a.ID, a.Name, a.Owner
 	who.Source, who.Automation = SourceStaticToken, a.ID
+	if claims.TokenSource == SourceGumloopOIDC {
+		who.Source, who.RunPerson = SourceGumloopOIDC, claims.TokenOwner
+	}
 	who.grant = &a
 	return who, ""
 }
@@ -328,7 +346,7 @@ func resolveTokenAgent(pool httpcatalog.Pool, session string, claims Claims) (Re
 // a token that does not verify, or no token, names nothing.
 func Attribute(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier) Requester {
 	if claims.TokenAgent != "" {
-		who, _ := resolveTokenAgent(pool, "", Claims{TokenAgent: claims.TokenAgent})
+		who, _ := resolveTokenAgent(pool, "", Claims{TokenAgent: claims.TokenAgent, TokenSource: claims.TokenSource})
 		return Requester{Source: who.Source, Automation: who.Automation, AutomationName: who.AutomationName, AutomationOwner: who.AutomationOwner}
 	}
 	cv, ok := v.(CursorVerifier)
@@ -340,7 +358,7 @@ func Attribute(ctx context.Context, pool httpcatalog.Pool, session string, claim
 		return Requester{}
 	}
 	who := Requester{Source: s.Source, Automation: s.Automation}
-	if a, ok := pool.Automation(s.Automation); ok && !a.HasToken() && s.Source == runnerid.SourceAutomations {
+	if a, ok := pool.Automation(s.Automation); ok && !a.HasOwnIdentity() && s.Source == runnerid.SourceAutomations {
 		who.AutomationName, who.AutomationOwner = a.Name, a.Owner
 	}
 	return who

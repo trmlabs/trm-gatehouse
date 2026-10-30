@@ -10,7 +10,7 @@ Point the worker's HTTPS proxy at its local relay, trust the broker's CA, and ei
 Authorization: Bearer __vault_LLM_KEY__
 ```
 
-SDKs that insist on a key get the placeholder as their key value. The worker never sees the real key, so it cannot reach a transcript, a log or a commit.
+SDKs that insist on a key get the placeholder as their key value. For a Basic-pair entry with `basicPairs`, send the listed non-secret public user and the placeholder password in one Basic `Authorization` header; omitting the header cannot select a binding. The worker never sees the secret key, so it cannot reach a transcript, a log or a commit.
 
 ## Catalog
 
@@ -39,7 +39,8 @@ Set `AGENT_VAULT_HTTP_CATALOG_FILE` to a JSON file. One entry per binding:
 | `methods` | Any of GET, HEAD, POST, PUT, PATCH, DELETE. |
 | `header`, `scheme`, `placeholder` | Where the key goes. A worker may send exactly the placeholder there, or nothing. A worker's own value is refused. |
 | `basicUser` | The key is an HTTP Basic user name with an empty password, as axios `auth.username` and `curl -u key:` send it. The header is `Authorization` and `scheme` is unset. The worker sends its placeholder encoded the same way (set the client's key to the placeholder), or nothing. |
-| `basicPair` | The key is stored as `user:password` and sent as HTTP Basic credentials, for vendors that issue a key pair, such as a public and a secret key. The header is `Authorization` and `scheme` is unset; it excludes `basicUser`. The worker sets the client's secret key to the placeholder, and its public key to the real one or to the placeholder; the client then sends the stored user name or the placeholder as user name, the placeholder as password, or nothing. Any other user name is refused (`credential_header`). A stored key without a non-empty user and password is never sent: it is refused as `key_not_basic_pair`, a 503 without `Retry-After`, since only rewriting the value clears it. Responses that echo the encoded pair or the password alone are cut off. The user half is not screened and a worker may hold it, so store only a non-secret user name there, such as a public key. |
+| `basicPair` | The key is stored as `user:password` and sent as HTTP Basic credentials. The header is `Authorization` and `scheme` is unset; it excludes `basicUser`. With a single `key`, the worker may omit the header, send the placeholder as both halves, or send the stored non-secret user and placeholder password. With `basicPairs`, it must send a listed user and placeholder password. A stored key without both halves, or whose user disagrees with the selected binding, is refused as `key_not_basic_pair` (503 without `Retry-After`); fix the value in Vault. Responses echoing the pair or password are cut off. The user half is not screened and a worker may hold it, so it must be non-secret. |
+| `basicPairs` | Replaces `key` on a `basicPair` header entry: a non-empty list of `{"name":"project-alpha","user":"pk-project-alpha","key":{"mount":"gatehouse","path":"vendors/langfuse-alpha","field":"pair"}}`. Names are unique short identifiers; users are unique, non-empty printable ASCII without spaces, colons or placeholder markers. Each key follows the same Vault reference rules as `key`; full references must be distinct. Missing, unknown, malformed, repeated or conflicting selectors refuse before any credential read. Route, method, pool and verified requester checks still apply; a public user grants no access. Other credential kinds cannot use this field. Deploy a supporting broker first: an older broker rejects the whole file-backed catalog during strict parsing. |
 | `pairUserHeader` | For a `basicPair` client that also sends the user name in a header of its own, such as Langfuse's `X-Langfuse-Public-Key`. The value there must be the stored user name exactly: another value is refused (`credential_header`), and the placeholder there as `placeholder_misplaced`. The broker forwards it to the vendor. Without this field the header is dropped like any unlisted one. It may not be a reserved header or one the broker forwards anyway: Accept, Accept-Language, Content-Type, User-Agent, or one listed in `forwardHeaders`. |
 | `key` | A KV version 2 secret on a KV mount (`gatehouse` in these examples), at a path under `vendors/` (lower-case segments, at most 127 characters). `AGENT_VAULT_CATALOG_KEY_PREFIX` (`validate --key-prefix`) names another prefix, such as `agents/keys`. Writing a new version rotates the key. |
 | `clientCertificate` | A client certificate the broker presents to the host in the TLS handshake, for a service that accepts only client certificates (mutual TLS): `{"mount": "gatehouse", "path": "vendors/<name>"}`, under the same prefix as `key`, a KV version 2 secret whose `cert` field holds the PEM certificate and whose `key` field holds its PEM private key. An entry with one may leave out `header`, `scheme`, `placeholder` and `key`, and the worker then sends no credential. See [Client certificates](#client-certificates-mutual-tls). |
@@ -71,6 +72,17 @@ Store `pk-lf-...:sk-lf-...` in Vault and list the header:
 ```
 
 A Langfuse key can read and write its whole project, so the entry's methods and paths are the only limit: `GET` on `/api/public` reads; trace export needs `POST` on `/api/public/otel/v1/traces`. Clients that send only `Authorization`, such as the Langfuse CLI or a plain OpenTelemetry exporter with `Authorization=Basic <base64 of public key:placeholder>` in `OTEL_EXPORTER_OTLP_HEADERS`, work with the same entry. Node's OpenTelemetry exporter makes its own HTTP agent, which ignores `HTTPS_PROXY` even with `NODE_USE_ENV_PROXY=1`; give it the proxy with `httpAgentOptions: {proxyEnv: process.env}`, or export from Python.
+
+For several projects on the same host and route, replace `key` with fixed bindings:
+
+```json
+"basicPairs": [
+  {"name": "project-alpha", "user": "pk-project-alpha", "key": {"mount": "gatehouse", "path": "vendors/langfuse-alpha", "field": "pair"}},
+  {"name": "project-beta", "user": "pk-project-beta", "key": {"mount": "gatehouse", "path": "vendors/langfuse-beta", "field": "pair"}}
+]
+```
+
+Set `LANGFUSE_PUBLIC_KEY` to the chosen binding's user and keep `LANGFUSE_SECRET_KEY` as the entry's placeholder. Each Vault field must hold that exact public user followed by `:` and its password. `Authorization` alone selects the binding; `X-Langfuse-Public-Key` is optional and, when sent, must appear once and agree. Neither a missing header, two placeholders nor the public-user header alone selects a default. All bindings share the entry's grants, methods, paths and rate bucket. Every caller granted the entry can select every listed binding. Langfuse projects share a host and routes, so this entry cannot give them different audiences; list only projects the whole granted population may read.
 
 ### groundcover
 
@@ -203,7 +215,11 @@ A broker older than this field leaves out any entry that lists it, so deploy the
 - **Signed audit.** Each call records an `http_request` row before the vendor is contacted and an `http_response` row with the status and outcome. Each refusal records a `denied` row with its reason: `unlisted`, `method`, `pool`, `request_shape`, `placeholder_misplaced` and the rest. Rows name the pool, the Pod, the binding, the method, the path once the caller is authenticated (never the query, and never on a browser-session host), and a request ID returned to the worker as `X-Request-Id`.
 - **Fail closed.** No catalog entry, no pool grant, no key or client certificate from Vault, or an overdue audit checkpoint: the call is refused before the vendor is contacted.
 
+For `basicPairs`, the signed `binding` field is `<entry name>/<selected binding name>` after selection, including credential failures. It contains configured non-secret names, never the stored pair or password. Refusals before selection name only the entry, when matched. Key caching, rotation and vendor-triggered invalidation use the selected Vault reference and leave other bindings' references alone.
+
 ## Keys and rotation
+
+For `basicPairs`, changing the public user also requires updating its catalog binding and the worker's selector. Coordinate those changes with the new stored pair; a cache refresh alone cannot complete a public-key rotation.
 
 The broker reads each key from Vault at most once a minute and shares that read across concurrent requests. A new KV version takes effect within a minute, or at once when the vendor answers 401 or 403, which drops the cached key. Deleting the key in Vault revokes it within a minute: deleting or destroying the current version, deleting the secret, or removing or emptying the field makes the next read refuse the destination as `key_deleted` and drop the cached key. Only when Vault does not answer (unreachable, sealed, a server error or permission denied) does a cached key keep working, for five minutes past its minute, then calls are refused as `key_unavailable`. A stored key with a byte outside printable ASCII (0x21 to 0x7e), such as a trailing newline or a space, or longer than 8192 bytes, is refused the same way as a deleted one but recorded as `key_not_header_safe`, so the fix is to rewrite the value. Every refusal names its reason to the agent in the `X-Gatehouse-Refusal` header. `key_unavailable` is passing (503 with `Retry-After`); `key_deleted`, `key_not_header_safe` and, for a `basicPair` entry, `key_not_basic_pair` answer 503 without it, since only an operator can clear them (see the agent protocol page).
 

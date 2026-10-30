@@ -42,8 +42,13 @@ type CursorVerifier struct {
 	// PersonDomains are the lower-case email domains whose user runs name a
 	// person. Empty: no run names a person, so entries above T0 are refused.
 	PersonDomains []string
-	Client        *http.Client
-	Now           func() time.Time
+	// People maps a Cursor user ID to the Entra object ID of the person. Set
+	// (non-nil): a user:<id> run names a person only when <id> is a key, the
+	// session subject is that object ID, and owner_email and PersonDomains
+	// are ignored. Nil: a person is named by owner_email as above.
+	People map[string]string
+	Client *http.Client
+	Now    func() time.Time
 
 	cache jwks
 }
@@ -123,13 +128,17 @@ func (v *CursorVerifier) Verify(ctx context.Context, token string) (Session, err
 	// Cursor's documentation spells the source in both cases; one spelling
 	// keeps every comparison exact.
 	session := Session{Kind: KindNone, Owner: c.Subject, Run: c.RunID, Source: strings.ToUpper(c.Source), Automation: c.AutoID,
-		Expires: expires, TokenSHA256: hex.EncodeToString(sum[:])}
+		Team: c.TeamID, Expires: expires, TokenSHA256: hex.EncodeToString(sum[:])}
 	switch {
 	case strings.HasPrefix(c.Subject, "service_account:") && len(c.Subject) > len("service_account:"):
 		// A service account's run has no person behind it.
 		session.Kind, session.Subject = KindAgent, c.Subject
 	case strings.HasPrefix(c.Subject, "user:") && len(c.Subject) > len("user:"):
-		if email, ok := personEmail(c.Email, v.PersonDomains); ok {
+		if v.People != nil {
+			if oid, ok := v.People[strings.TrimPrefix(c.Subject, "user:")]; ok && oid != "" {
+				session.Kind, session.Subject = KindPerson, oid
+			}
+		} else if email, ok := personEmail(c.Email, v.PersonDomains); ok {
 			session.Kind, session.Subject = KindPerson, email
 		}
 	default:

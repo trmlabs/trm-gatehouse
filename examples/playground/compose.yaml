@@ -1,0 +1,497 @@
+{
+  "name": "agent-vault-playground",
+  "services": {
+    "operator": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "operator"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "backend": {
+          "aliases": [
+            "identity.example"
+          ]
+        },
+        "broker": {
+          "aliases": [
+            "identity.example"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "broker:/state/broker",
+        "vault:/state/vault",
+        "relay:/state/relay",
+        "payments:/state/payments",
+        "logs:/state/logs",
+        "attacker:/state/attacker",
+        "baseline:/state/baseline",
+        "public:/public",
+        "control:/control",
+        "status:/status",
+        "database:/state/database",
+        "operator:/state/operator"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "broker": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "broker"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "512m",
+      "networks": {
+        "backend": {},
+        "broker": {
+          "aliases": [
+            "broker.example"
+          ]
+        },
+        "services": {}
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "broker:/state:ro",
+        "public:/public",
+        "audit:/audit"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "vault": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "vault"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "256m",
+      "networks": {
+        "backend": {
+          "aliases": [
+            "vault.example"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "vault:/state:ro",
+        "public:/public:ro"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "relay": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "relay"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "sandbox": {},
+        "broker": {
+          "aliases": [
+            "relay-broker"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "relay:/state",
+        "public:/public:ro"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "payments": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "payments"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "services": {
+          "aliases": [
+            "payments.example"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "payments:/state:ro",
+        "public:/public:ro",
+        "story:/story"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "logs": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "logs"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "services": {
+          "aliases": [
+            "logs.example"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "logs:/state:ro",
+        "public:/public:ro",
+        "story:/story:ro"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "attacker": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "attacker"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "services": {
+          "aliases": [
+            "attacker.example"
+          ]
+        },
+        "open": {
+          "aliases": [
+            "attacker.example"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "attacker:/state:ro",
+        "public:/public:ro",
+        "inbox:/inbox"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "baseline": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "baseline"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "open": {}
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "baseline:/state:ro",
+        "public:/public:ro",
+        "control:/control"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "sandbox": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "sandbox"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "sandbox": {},
+        "terminal": {
+          "aliases": [
+            "sandbox-terminal"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "public:/public:ro"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "web": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "web"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "terminal": {
+          "aliases": [
+            "web-terminal"
+          ]
+        },
+        "publish": {
+          "aliases": [
+            "web-public"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "public:/public:ro",
+        "control:/control",
+        "audit:/audit:ro",
+        "inbox:/inbox:ro",
+        "status:/status:ro",
+        "story:/story:ro"
+      ],
+      "ports": [
+        "127.0.0.1:8787:8787"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    },
+    "database": {
+      "image": "agent-vault-playground:local",
+      "command": [
+        "database"
+      ],
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 128,
+      "mem_limit": "128m",
+      "networks": {
+        "backend": {
+          "aliases": [
+            "database.example"
+          ]
+        }
+      },
+      "dns": [
+        "127.0.0.1"
+      ],
+      "restart": "no",
+      "init": true,
+      "volumes": [
+        "database:/state",
+        "public:/public:ro"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "8m",
+          "max-file": "2"
+        }
+      }
+    }
+  },
+  "networks": {
+    "sandbox": {
+      "internal": true
+    },
+    "terminal": {
+      "internal": true
+    },
+    "broker": {
+      "internal": true
+    },
+    "services": {
+      "internal": true
+    },
+    "backend": {
+      "internal": true
+    },
+    "open": {
+      "internal": true
+    },
+    "publish": {}
+  },
+  "volumes": {
+    "broker": {},
+    "vault": {},
+    "relay": {},
+    "payments": {},
+    "logs": {},
+    "attacker": {},
+    "baseline": {},
+    "public": {},
+    "control": {},
+    "audit": {},
+    "inbox": {},
+    "status": {},
+    "database": {},
+    "operator": {},
+    "story": {}
+  }
+}

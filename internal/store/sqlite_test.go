@@ -9,6 +9,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func tp(t time.Time) *time.Time { return &t }
@@ -387,7 +390,7 @@ func TestSessionCRUD(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "session-crud@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "session-crud@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	expires := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
 
 	sess, err := s.CreateUserSession(ctx, CreateUserSessionParams{UserID: u.ID, ExpiresAt: expires})
@@ -459,11 +462,11 @@ func TestDeleteUserCascadesScopedTokensMintedByUser(t *testing.T) {
 	ctx := context.Background()
 
 	ns, _ := s.GetVault(ctx, "default")
-	u, err := s.CreateUser(ctx, "minter@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, err := s.CreateUser(ctx, "minter@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	keeper, err := s.CreateUser(ctx, "keeper@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	keeper, err := s.CreateUser(ctx, "keeper@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	if err != nil {
 		t.Fatalf("CreateUser keeper: %v", err)
 	}
@@ -655,7 +658,7 @@ func TestListScopedSessionsExcludesExpiredAndUserRows(t *testing.T) {
 	// User-login row that happens to carry the same vault_id (none today, but
 	// the list query must defend against future cross-pollution by filtering
 	// user_id IS NULL AND agent_id IS NULL).
-	u, _ := s.CreateUser(ctx, "scoped-list@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "scoped-list@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	if _, err := s.CreateUserSession(ctx, CreateUserSessionParams{
 		UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour),
 	}); err != nil {
@@ -675,7 +678,7 @@ func TestGlobalSessionHasEmptyVaultID(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "global-session@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "global-session@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	expires := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
 	sess, err := s.CreateUserSession(ctx, CreateUserSessionParams{UserID: u.ID, ExpiresAt: expires})
 	if err != nil {
@@ -733,7 +736,7 @@ func TestCreateUserSessionPopulatesMetadata(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "meta@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "meta@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	exp := time.Now().Add(365 * 24 * time.Hour).UTC().Truncate(time.Second)
 	sess, err := s.CreateUserSession(ctx, CreateUserSessionParams{
 		UserID:        u.ID,
@@ -771,7 +774,7 @@ func TestTouchSessionThrottlesAndAdvances(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "touch@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "touch@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	sess, _ := s.CreateUserSession(ctx, CreateUserSessionParams{
 		UserID:    u.ID,
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -839,7 +842,7 @@ func TestListAndRevokeUserSessions(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "multi@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "multi@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	a, _ := s.CreateUserSession(ctx, CreateUserSessionParams{UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour), DeviceLabel: "a"})
 	b, _ := s.CreateUserSession(ctx, CreateUserSessionParams{UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour), DeviceLabel: "b"})
 
@@ -868,7 +871,7 @@ func TestListAndRevokeUserSessions(t *testing.T) {
 	}
 
 	// Cross-account revoke is a no-op (returns ErrNoRows).
-	other, _ := s.CreateUser(ctx, "other@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	other, _ := s.CreateUser(ctx, "other@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 	if err := s.RevokeUserSession(ctx, other.ID, b.PublicID); err != sql.ErrNoRows {
 		t.Fatalf("cross-account revoke should be ErrNoRows, got %v", err)
 	}
@@ -886,7 +889,7 @@ func TestPreMigrationSessionStillUsable(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "legacy@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "legacy@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 
 	// Forge a row that looks like one minted by the pre-040 server: just
 	// id/user_id/expires_at/created_at, no idle_ttl, no last_used_at, but
@@ -978,6 +981,7 @@ func TestMasterKeyRecordRoundTripWithPassword(t *testing.T) {
 		KDFTime:       &kdfTime,
 		KDFMemory:     &kdfMemory,
 		KDFThreads:    &kdfThreads,
+		KDFAlgorithm:  "argon2id",
 	}
 	if err := s.SetMasterKeyRecord(ctx, in); err != nil {
 		t.Fatalf("SetMasterKeyRecord: %v", err)
@@ -1054,6 +1058,7 @@ func TestMasterKeyRecordUpdate(t *testing.T) {
 	in.KDFTime = &kdfTime
 	in.KDFMemory = &kdfMemory
 	in.KDFThreads = &kdfThreads
+	in.KDFAlgorithm = "argon2id"
 	if err := s.UpdateMasterKeyRecord(ctx, in); err != nil {
 		t.Fatal(err)
 	}
@@ -1542,7 +1547,7 @@ func TestCreateMemberUser(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, err := s.CreateUser(ctx, "member@test.com", []byte("hash"), []byte("salt"), "member", 3, 65536, 4)
+	u, err := s.CreateUser(ctx, "member@test.com", []byte("hash"), []byte("salt"), "member", 600000, 0, 0, "pbkdf2-sha256")
 	if err != nil {
 		t.Fatalf("CreateUser(member): %v", err)
 	}
@@ -1555,7 +1560,7 @@ func TestGetUserByID(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, err := s.CreateUser(ctx, "user@test.com", []byte("hash"), []byte("salt"), "owner", 3, 65536, 4)
+	u, err := s.CreateUser(ctx, "user@test.com", []byte("hash"), []byte("salt"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1583,8 +1588,8 @@ func TestListUsers(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	s.CreateUser(ctx, "alice@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
-	s.CreateUser(ctx, "bob@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	s.CreateUser(ctx, "alice@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
+	s.CreateUser(ctx, "bob@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 
 	users, err := s.ListUsers(ctx)
 	if err != nil {
@@ -1603,7 +1608,7 @@ func TestUpdateUserRole(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 
 	if err := s.UpdateUserRole(ctx, u.ID, "owner"); err != nil {
 		t.Fatalf("UpdateUserRole: %v", err)
@@ -1629,7 +1634,7 @@ func TestDeleteUser(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "del@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "del@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 
 	if err := s.DeleteUser(ctx, u.ID); err != nil {
 		t.Fatalf("DeleteUser: %v", err)
@@ -1645,9 +1650,9 @@ func TestCountOwners(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	s.CreateUser(ctx, "owner1@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
-	s.CreateUser(ctx, "member1@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
-	s.CreateUser(ctx, "owner2@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	s.CreateUser(ctx, "owner1@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
+	s.CreateUser(ctx, "member1@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
+	s.CreateUser(ctx, "owner2@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 
 	count, err := s.CountOwners(ctx)
 	if err != nil {
@@ -1662,7 +1667,7 @@ func TestVaultGrantsCRUD(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 	ns, _ := s.CreateVault(ctx, "dev")
 
 	// Grant
@@ -1710,7 +1715,7 @@ func TestGrantVaultAccessIdempotent(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 	ns, _ := s.CreateVault(ctx, "dev")
 
 	// Granting twice should not error
@@ -1724,7 +1729,7 @@ func TestRevokeVaultAccessNotFound(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 	ns, _ := s.CreateVault(ctx, "dev")
 
 	err := s.RevokeVaultAccess(ctx, u.ID, ns.ID)
@@ -1737,7 +1742,7 @@ func TestDeleteUserSessions(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	sess, _ := s.CreateUserSession(ctx, CreateUserSessionParams{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour)})
 
 	if err := s.DeleteUserSessions(ctx, u.ID); err != nil {
@@ -1754,7 +1759,7 @@ func TestDeleteUserCascadesGrants(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "user@test.com", []byte("h"), []byte("s"), "member", 600000, 0, 0, "pbkdf2-sha256")
 	ns, _ := s.CreateVault(ctx, "dev")
 	s.GrantVaultRole(ctx, u.ID, "user", ns.ID, "member")
 
@@ -2257,7 +2262,7 @@ func TestCreateExternalVault(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, err := s.CreateUser(ctx, "ext@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, err := s.CreateUser(ctx, "ext@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -2323,7 +2328,7 @@ func TestCreateExternalVaultRollbackOnDuplicateName(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "ext-dup@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "ext-dup@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 
 	params := CreateExternalVaultParams{
 		Name:                "dup-vault",
@@ -2359,7 +2364,7 @@ func TestCreateExternalVaultRollbackOnDuplicateName(t *testing.T) {
 func TestCreateExternalVaultRejectsBelowMinPollInterval(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
-	u, _ := s.CreateUser(ctx, "min-poll@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "min-poll@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	_, err := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "spin-vault",
 		Kind:                "infisical",
@@ -2376,7 +2381,7 @@ func TestCreateExternalVaultRejectsBelowMinPollInterval(t *testing.T) {
 func TestCascadeDeleteVaultRemovesCredentialStore(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
-	u, _ := s.CreateUser(ctx, "cascade-cs@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "cascade-cs@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	v, err := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "cascade-cs-vault",
 		Kind:                "infisical",
@@ -2400,7 +2405,7 @@ func TestReplaceVaultCredentialsForSyncRotates(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "replace@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "replace@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	v, err := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "replace-vault",
 		Kind:                "infisical",
@@ -2449,7 +2454,7 @@ func TestReplaceVaultCredentialsForSyncEmptyWipes(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "wipe@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "wipe@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	v, _ := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "wipe-vault",
 		Kind:                "infisical",
@@ -2473,7 +2478,7 @@ func TestUpdateVaultCredentialStoreHealth(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "health@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "health@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	v, _ := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "health-vault",
 		Kind:                "infisical",
@@ -2506,7 +2511,7 @@ func TestListVaultCredentialStoresFiltersBuiltin(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "list@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "list@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 
 	// A builtin vault (no row in vault_credential_stores).
 	if _, err := s.CreateVault(ctx, "plain"); err != nil {
@@ -2600,7 +2605,7 @@ func TestDeleteVaultCredentialStoreKeepsCredentials(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
-	u, _ := s.CreateUser(ctx, "disconnect@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "disconnect@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	v, err := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "switch-down",
 		Kind:                CredentialStoreInfisical,
@@ -2650,7 +2655,7 @@ func TestReplaceVaultCredentialsForSyncGatedOnStoreRow(t *testing.T) {
 	ctx := context.Background()
 
 	const cfgA = `{"project_id":"a","environment":"dev","secret_path":"/"}`
-	u, _ := s.CreateUser(ctx, "sync@test.com", []byte("h"), []byte("s"), "owner", 3, 65536, 4)
+	u, _ := s.CreateUser(ctx, "sync@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	v, err := s.CreateExternalVault(ctx, CreateExternalVaultParams{
 		Name:                "sync-race",
 		Kind:                CredentialStoreInfisical,
@@ -2807,5 +2812,457 @@ func TestListUnmatchedHosts(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Fatalf("expected 0 hosts for nonexistent vault, got %d", len(empty))
+	}
+}
+
+func TestKDFAlgorithmRoundTrip(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+
+	u, err := s.CreateUser(ctx, "algo@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetUserByID(ctx, u.ID)
+	if err != nil || got.KDFAlgorithm != "pbkdf2-sha256" || got.KDFTime != 600000 {
+		t.Fatalf("user algorithm not stored: %+v err=%v", got, err)
+	}
+
+	legacy, err := s.CreateUser(ctx, "legacy-algo@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4, "argon2id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateUserPassword(ctx, legacy.ID, []byte("h2"), []byte("s2"), 600000, 0, 0, "pbkdf2-sha256"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetUserByID(ctx, legacy.ID)
+	if got.KDFAlgorithm != "pbkdf2-sha256" || got.KDFMemory != 0 {
+		t.Fatalf("UpdateUserPassword did not store the algorithm: %+v", got)
+	}
+
+	kt, km, kth := uint32(600000), uint32(0), uint8(0)
+	if err := s.SetMasterKeyRecord(ctx, &MasterKeyRecord{
+		Sentinel: []byte("a"), SentinelNonce: []byte("b"), DEKCiphertext: []byte("c"), DEKNonce: []byte("d"),
+		Salt: []byte("e"), KDFTime: &kt, KDFMemory: &km, KDFThreads: &kth, KDFAlgorithm: "pbkdf2-sha256",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := s.GetMasterKeyRecord(ctx)
+	if err != nil || rec.KDFAlgorithm != "pbkdf2-sha256" {
+		t.Fatalf("master key algorithm not stored: %+v err=%v", rec, err)
+	}
+}
+
+func TestEmptyKDFAlgorithmIsAnError(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateUser(ctx, "empty@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4, ""); err == nil {
+		t.Fatal("CreateUser accepted an empty algorithm")
+	}
+	if _, err := s.RegisterFirstUser(ctx, "first@test.com", []byte("h"), []byte("s"), "", 3, 65536, 4, ""); err == nil {
+		t.Fatal("RegisterFirstUser accepted an empty algorithm")
+	}
+	u, err := s.CreateUser(ctx, "ok@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4, "argon2id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateUserPassword(ctx, u.ID, []byte("h"), []byte("s"), 3, 65536, 4, ""); err == nil {
+		t.Fatal("UpdateUserPassword accepted an empty algorithm")
+	}
+	if _, err := s.UpgradeUserPasswordHash(ctx, u, []byte("h2"), []byte("s2"), 600000, 0, 0, ""); err == nil {
+		t.Fatal("UpgradeUserPasswordHash accepted an empty algorithm")
+	}
+	kt, km, kth := uint32(3), uint32(65536), uint8(4)
+	if err := s.SetMasterKeyRecord(ctx, &MasterKeyRecord{Sentinel: []byte("a"), Salt: []byte("e"), KDFTime: &kt, KDFMemory: &km, KDFThreads: &kth}); err == nil {
+		t.Fatal("SetMasterKeyRecord accepted a password-protected record with no algorithm")
+	}
+}
+
+func TestUpgradeUserPasswordHashIsConditional(t *testing.T) {
+	checkUpgradeUserPasswordHash(t, openTestDB(t))
+}
+
+func TestUpgradeMasterKeyRecordIsConditional(t *testing.T) {
+	checkUpgradeMasterKeyRecord(t, openTestDB(t))
+}
+
+// Shared with the PostgreSQL test so both dialects prove the conditional writes.
+func checkUpgradeUserPasswordHash(t *testing.T, s *SQLStore) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := s.CreateUser(ctx, newUUID()+"@upgrade.test", []byte("old-hash"), []byte("old-salt"), "member", 3, 65536, 4, "argon2id")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A reset changed the hash after the login read it: the stale upgrade writes nothing and is not an error.
+	if err := s.UpdateUserPassword(ctx, u.ID, []byte("reset-hash"), []byte("reset-salt"), 3, 65536, 4, "argon2id"); err != nil {
+		t.Fatal(err)
+	}
+	written, err := s.UpgradeUserPasswordHash(ctx, u, []byte("new"), []byte("new-salt"), 600000, 0, 0, "pbkdf2-sha256")
+	if err != nil || written {
+		t.Fatalf("stale upgrade: written=%v err=%v", written, err)
+	}
+	got, _ := s.GetUserByID(ctx, u.ID)
+	if string(got.PasswordHash) != "reset-hash" || got.KDFAlgorithm != "argon2id" {
+		t.Fatalf("stale upgrade changed the row: %+v", got)
+	}
+
+	// The same hash with different params is another record: refused.
+	stale := *got
+	stale.KDFMemory++
+	if written, err = s.UpgradeUserPasswordHash(ctx, &stale, []byte("new"), []byte("new-salt"), 600000, 0, 0, "pbkdf2-sha256"); err != nil || written {
+		t.Fatalf("params changed since the read: written=%v err=%v", written, err)
+	}
+
+	if written, err = s.UpgradeUserPasswordHash(ctx, got, []byte("new"), []byte("new-salt"), 600000, 0, 0, "pbkdf2-sha256"); err != nil || !written {
+		t.Fatalf("matching upgrade: written=%v err=%v", written, err)
+	}
+	after, _ := s.GetUserByID(ctx, u.ID)
+	if string(after.PasswordHash) != "new" || after.KDFAlgorithm != "pbkdf2-sha256" || after.KDFTime != 600000 || after.KDFMemory != 0 {
+		t.Fatalf("upgrade not applied: %+v", after)
+	}
+	// Zero rows on a replay: the row no longer matches what was read.
+	if written, err = s.UpgradeUserPasswordHash(ctx, got, []byte("newer"), []byte("s"), 700000, 0, 0, "pbkdf2-sha256"); err != nil || written {
+		t.Fatalf("replayed upgrade: written=%v err=%v", written, err)
+	}
+
+	// An Argon2id hash labelled pbkdf2-sha256, as an older image's password change leaves it, upgrades by value.
+	m, err := s.CreateUser(ctx, newUUID()+"@mislabelled.test", []byte("argon-hash"), []byte("argon-salt"), "member", 3, 65536, 4, "pbkdf2-sha256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written, err = s.UpgradeUserPasswordHash(ctx, m, []byte("fixed"), []byte("fixed-salt"), 600000, 0, 0, "pbkdf2-sha256"); err != nil || !written {
+		t.Fatalf("mislabelled upgrade: written=%v err=%v", written, err)
+	}
+	fixed, _ := s.GetUserByID(ctx, m.ID)
+	if string(fixed.PasswordHash) != "fixed" || fixed.KDFTime != 600000 || fixed.KDFMemory != 0 || fixed.KDFThreads != 0 || fixed.KDFAlgorithm != "pbkdf2-sha256" {
+		t.Fatalf("mislabelled row not rewritten as PBKDF2: %+v", fixed)
+	}
+}
+
+func checkUpgradeMasterKeyRecord(t *testing.T, s *SQLStore) {
+	t.Helper()
+	ctx := context.Background()
+	kt, km, kth := uint32(3), uint32(65536), uint8(4)
+	old := &MasterKeyRecord{
+		Sentinel: []byte("sent"), SentinelNonce: []byte("n"), DEKCiphertext: []byte("old-ct"), DEKNonce: []byte("old-n"),
+		Salt: []byte("old-salt"), KDFTime: &kt, KDFMemory: &km, KDFThreads: &kth, KDFAlgorithm: "argon2id",
+	}
+	if err := s.SetMasterKeyRecord(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMasterKeyRecord(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	pt, pm, pth := uint32(600000), uint32(0), uint8(0)
+	upgraded := &MasterKeyRecord{
+		Sentinel: []byte("sent"), SentinelNonce: []byte("n"), DEKCiphertext: []byte("new-ct"), DEKNonce: []byte("new-n"),
+		Salt: []byte("new-salt"), KDFTime: &pt, KDFMemory: &pm, KDFThreads: &pth, KDFAlgorithm: "pbkdf2-sha256",
+	}
+
+	// `master-password change` landed first: a different salt, so the stale upgrade writes nothing.
+	changed := &MasterKeyRecord{
+		Sentinel: []byte("sent"), SentinelNonce: []byte("n"), DEKCiphertext: []byte("changed-ct"), DEKNonce: []byte("changed-n"),
+		Salt: []byte("changed-salt"), KDFTime: &kt, KDFMemory: &km, KDFThreads: &kth, KDFAlgorithm: "argon2id",
+	}
+	if err := s.UpdateMasterKeyRecord(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	written, err := s.UpgradeMasterKeyRecord(ctx, old, upgraded)
+	if err != nil || written {
+		t.Fatalf("stale upgrade: written=%v err=%v", written, err)
+	}
+	if rec, _ := s.GetMasterKeyRecord(ctx); string(rec.Salt) != "changed-salt" || rec.KDFAlgorithm != "argon2id" {
+		t.Fatalf("stale upgrade changed the record: %+v", rec)
+	}
+
+	// Same salt but other params than were read: also refused.
+	otherMem := km + 1
+	drifted := *changed
+	drifted.KDFMemory = &otherMem
+	if written, err = s.UpgradeMasterKeyRecord(ctx, &drifted, upgraded); err != nil || written {
+		t.Fatalf("params changed since the read: written=%v err=%v", written, err)
+	}
+
+	if written, err = s.UpgradeMasterKeyRecord(ctx, changed, upgraded); err != nil || !written {
+		t.Fatalf("matching upgrade: written=%v err=%v", written, err)
+	}
+	rec, _ := s.GetMasterKeyRecord(ctx)
+	if string(rec.Salt) != "new-salt" || rec.KDFAlgorithm != "pbkdf2-sha256" || *rec.KDFTime != 600000 {
+		t.Fatalf("upgrade not applied: %+v", rec)
+	}
+
+	// A wrap by an older image labelled pbkdf2-sha256 but with Argon2id params upgrades by value.
+	mislabelled := &MasterKeyRecord{
+		Sentinel: []byte("sent"), SentinelNonce: []byte("n"), DEKCiphertext: []byte("mis-ct"), DEKNonce: []byte("mis-n"),
+		Salt: []byte("mis-salt"), KDFTime: &kt, KDFMemory: &km, KDFThreads: &kth, KDFAlgorithm: "pbkdf2-sha256",
+	}
+	if err := s.UpdateMasterKeyRecord(ctx, mislabelled); err != nil {
+		t.Fatal(err)
+	}
+	fixed := *upgraded
+	fixed.DEKCiphertext, fixed.Salt = []byte("fixed-ct"), []byte("fixed-salt")
+	if written, err = s.UpgradeMasterKeyRecord(ctx, mislabelled, &fixed); err != nil || !written {
+		t.Fatalf("mislabelled upgrade: written=%v err=%v", written, err)
+	}
+	rec, _ = s.GetMasterKeyRecord(ctx)
+	if string(rec.Salt) != "fixed-salt" || rec.KDFAlgorithm != "pbkdf2-sha256" || *rec.KDFTime != 600000 || *rec.KDFMemory != 0 || *rec.KDFThreads != 0 {
+		t.Fatalf("mislabelled record not rewritten as PBKDF2: %+v", rec)
+	}
+}
+
+func TestNullKDFAlgorithmReadsAsArgon2id(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	u, err := s.CreateUser(ctx, "null-algo@test.com", []byte("h"), []byte("s"), "member", 3, 65536, 4, "argon2id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An image older than the column inserts rows without it.
+	if _, err := s.db.ExecContext(ctx, "UPDATE users SET kdf_algorithm = NULL WHERE id = ?", u.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetUserByID(ctx, u.ID)
+	if err != nil || got.KDFAlgorithm != "argon2id" {
+		t.Fatalf("NULL should read as argon2id: %+v err=%v", got, err)
+	}
+	written, err := s.UpgradeUserPasswordHash(ctx, got, []byte("n"), []byte("s"), 600000, 0, 0, "pbkdf2-sha256")
+	if err != nil || !written {
+		t.Fatalf("a NULL-algorithm row is Argon2id and must be upgradable: written=%v err=%v", written, err)
+	}
+}
+
+func TestKDFAlgorithmMigrationBackfillsExistingRows(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:kdfmig?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE users (id TEXT PRIMARY KEY, kdf_time INTEGER)`,
+		`CREATE TABLE master_key (id INTEGER PRIMARY KEY, kdf_time INTEGER)`,
+		`INSERT INTO users (id, kdf_time) VALUES ('u1', 3), ('u2', 3)`,
+		`INSERT INTO master_key (id, kdf_time) VALUES (1, 3)`,
+	} {
+		if err := db.Exec(stmt).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mig func(*gorm.DB) error
+	for _, m := range gormMigrations {
+		if m.Name == "20261029120000_kdf_algorithm" {
+			mig = m.Fn
+		}
+	}
+	if mig == nil {
+		t.Fatal("migration not registered")
+	}
+	if err := mig(db); err != nil {
+		t.Fatal(err)
+	}
+	var nulls int64
+	db.Raw(`SELECT (SELECT COUNT(*) FROM users WHERE kdf_algorithm IS NOT 'argon2id') + (SELECT COUNT(*) FROM master_key WHERE kdf_algorithm IS NOT 'argon2id')`).Scan(&nulls)
+	if nulls != 0 {
+		t.Fatalf("%d existing rows were not backfilled to argon2id", nulls)
+	}
+
+	// A passwordless master key has no KDF and stays NULL; running again is harmless.
+	if err := db.Exec(`UPDATE master_key SET kdf_time = NULL, kdf_algorithm = NULL`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := mig(db); err != nil {
+		t.Fatal(err)
+	}
+	var passwordless int64
+	db.Raw(`SELECT COUNT(*) FROM master_key WHERE kdf_algorithm IS NULL`).Scan(&passwordless)
+	if passwordless != 1 {
+		t.Fatalf("passwordless master key row was backfilled, count=%d", passwordless)
+	}
+}
+
+func TestMasterKeyRecordKMSWrapRoundTrip(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+
+	in := &MasterKeyRecord{Sentinel: []byte("s"), SentinelNonce: []byte("n"), DEKPlaintext: []byte("dek")}
+	if err := s.SetMasterKeyRecord(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetMasterKeyRecord(ctx)
+	if err != nil || got.WrapKind != WrapKindPassword || got.KMSWrappedDEK != nil || got.KMSKeyName != "" {
+		t.Fatalf("a record without a KMS wrap should read as wrap kind password: %+v, %v", got, err)
+	}
+
+	in.KMSWrappedDEK, in.KMSKeyName, in.WrapKind = []byte("kms-wrapped"), "gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k", WrapKindKMS
+	if err := s.UpdateMasterKeyRecord(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetMasterKeyRecord(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.KMSWrappedDEK) != "kms-wrapped" || got.KMSKeyName != in.KMSKeyName || got.WrapKind != WrapKindKMS {
+		t.Fatalf("KMS wrap did not round-trip: %+v", got)
+	}
+}
+
+func TestSetMasterKeyKMSWrapIsConditionalAndLeavesThePasswordWrap(t *testing.T) {
+	checkSetMasterKeyKMSWrap(t, openTestDB(t))
+}
+
+func TestSetMasterKeyWrapKindOnlyMovesAKMSRecord(t *testing.T) {
+	checkSetMasterKeyWrapKind(t, openTestDB(t))
+}
+
+func TestClearMasterKeyPlaintextIsConditionalAndTouchesOneColumn(t *testing.T) {
+	checkClearMasterKeyPlaintext(t, openTestDB(t))
+}
+
+func TestRemoveMasterKeyPasswordWrapIsConditionalOnTheWrapKind(t *testing.T) {
+	checkRemoveMasterKeyPasswordWrap(t, openTestDB(t))
+}
+
+// resetMasterKey puts the single master key row into the given state, whatever it held before.
+func resetMasterKey(t *testing.T, s *SQLStore, rec *MasterKeyRecord) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.SetMasterKeyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMasterKeyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func passwordMasterKeyRecord() *MasterKeyRecord {
+	kt, km, kth := uint32(3), uint32(65536), uint8(4)
+	return &MasterKeyRecord{
+		Sentinel: []byte("sent"), SentinelNonce: []byte("n"), DEKCiphertext: []byte("ct"), DEKNonce: []byte("nn"),
+		Salt: []byte("salt"), KDFTime: &kt, KDFMemory: &km, KDFThreads: &kth, KDFAlgorithm: "argon2id",
+	}
+}
+
+func checkSetMasterKeyKMSWrap(t *testing.T, s *SQLStore) {
+	t.Helper()
+	ctx := context.Background()
+	rec := passwordMasterKeyRecord()
+	resetMasterKey(t, s, rec)
+	stale := *rec
+	stale.Salt = []byte("other-salt")
+	if written, err := s.SetMasterKeyKMSWrap(ctx, &stale, []byte("w"), "gcpkms://k"); err != nil || written {
+		t.Fatalf("a stale read wrote: written=%v err=%v", written, err)
+	}
+	if written, err := s.SetMasterKeyKMSWrap(ctx, rec, []byte("w"), "gcpkms://k"); err != nil || !written {
+		t.Fatalf("matching read: written=%v err=%v", written, err)
+	}
+	got, _ := s.GetMasterKeyRecord(ctx)
+	if string(got.KMSWrappedDEK) != "w" || got.WrapKind != WrapKindKMS || string(got.DEKCiphertext) != "ct" || string(got.Salt) != "salt" || got.KDFAlgorithm != "argon2id" {
+		t.Fatalf("unexpected record: %+v", got)
+	}
+	if written, err := s.SetMasterKeyKMSWrap(ctx, rec, []byte("w2"), "gcpkms://k2"); err != nil || written {
+		t.Fatalf("a second wrap overwrote the first: written=%v err=%v", written, err)
+	}
+	if _, err := s.SetMasterKeyKMSWrap(ctx, &MasterKeyRecord{}, []byte("w"), "gcpkms://k"); err == nil {
+		t.Fatal("a record with no password wrap must be refused")
+	}
+}
+
+func checkSetMasterKeyWrapKind(t *testing.T, s *SQLStore) {
+	t.Helper()
+	ctx := context.Background()
+	rec := passwordMasterKeyRecord()
+	resetMasterKey(t, s, rec)
+	if err := s.SetMasterKeyWrapKind(ctx, WrapKindKMSFallback); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetMasterKeyRecord(ctx); got.WrapKind != WrapKindPassword {
+		t.Fatalf("a password record must never take a KMS kind, got %q", got.WrapKind)
+	}
+	if err := s.SetMasterKeyWrapKind(ctx, "bogus"); err == nil {
+		t.Fatal("an unknown kind must be refused")
+	}
+
+	rec.KMSWrappedDEK, rec.KMSKeyName, rec.WrapKind = []byte("w"), "gcpkms://k", WrapKindKMS
+	resetMasterKey(t, s, rec)
+	for _, kind := range []string{WrapKindKMSFallback, WrapKindKMSFallback, WrapKindKMS} {
+		if err := s.SetMasterKeyWrapKind(ctx, kind); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := s.GetMasterKeyRecord(ctx)
+		if got.WrapKind != kind || string(got.KMSWrappedDEK) != "w" || got.KMSKeyName != "gcpkms://k" || string(got.DEKCiphertext) != "ct" || string(got.Salt) != "salt" {
+			t.Fatalf("after setting %q: %+v", kind, got)
+		}
+	}
+}
+
+func checkClearMasterKeyPlaintext(t *testing.T, s *SQLStore) {
+	t.Helper()
+	ctx := context.Background()
+	rec := passwordMasterKeyRecord()
+	rec.KMSWrappedDEK, rec.KMSKeyName, rec.WrapKind, rec.DEKPlaintext = []byte("w"), "gcpkms://k", WrapKindKMS, []byte("plain-dek")
+	resetMasterKey(t, s, rec)
+
+	stale := *rec
+	stale.DEKPlaintext = []byte("other")
+	if cleared, err := s.ClearMasterKeyPlaintext(ctx, &stale); err != nil || cleared {
+		t.Fatalf("a stale read cleared: cleared=%v err=%v", cleared, err)
+	}
+	if got, _ := s.GetMasterKeyRecord(ctx); string(got.DEKPlaintext) != "plain-dek" {
+		t.Fatal("a stale clear changed the record")
+	}
+	if cleared, err := s.ClearMasterKeyPlaintext(ctx, rec); err != nil || !cleared {
+		t.Fatalf("matching read: cleared=%v err=%v", cleared, err)
+	}
+	got, _ := s.GetMasterKeyRecord(ctx)
+	if got.DEKPlaintext != nil || string(got.KMSWrappedDEK) != "w" || string(got.DEKCiphertext) != "ct" || string(got.Salt) != "salt" || got.WrapKind != WrapKindKMS {
+		t.Fatalf("only the plaintext key should be gone: %+v", got)
+	}
+	if cleared, err := s.ClearMasterKeyPlaintext(ctx, rec); err != nil || cleared {
+		t.Fatalf("a second clear: cleared=%v err=%v", cleared, err)
+	}
+	if _, err := s.ClearMasterKeyPlaintext(ctx, passwordMasterKeyRecord()); err == nil {
+		t.Fatal("a record with no KMS wrap and plaintext key must be refused")
+	}
+}
+
+func checkRemoveMasterKeyPasswordWrap(t *testing.T, s *SQLStore) {
+	t.Helper()
+	ctx := context.Background()
+	rec := passwordMasterKeyRecord()
+	rec.KMSWrappedDEK, rec.KMSKeyName, rec.WrapKind, rec.DEKPlaintext = []byte("w"), "gcpkms://k", WrapKindKMS, []byte("plain-dek")
+	resetMasterKey(t, s, rec)
+
+	if err := s.SetMasterKeyWrapKind(ctx, WrapKindKMSFallback); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := s.RemoveMasterKeyPasswordWrap(ctx, rec); err != nil || removed {
+		t.Fatalf("a break-glass mark recorded since the read was overwritten: removed=%v err=%v", removed, err)
+	}
+	got, _ := s.GetMasterKeyRecord(ctx)
+	if got.WrapKind != WrapKindKMSFallback || string(got.DEKCiphertext) != "ct" || string(got.Salt) != "salt" || string(got.DEKPlaintext) != "plain-dek" {
+		t.Fatalf("a lost race changed the record: %+v", got)
+	}
+
+	if err := s.SetMasterKeyWrapKind(ctx, WrapKindKMS); err != nil {
+		t.Fatal(err)
+	}
+	stale := *rec
+	stale.KMSWrappedDEK = []byte("other-wrap")
+	if removed, err := s.RemoveMasterKeyPasswordWrap(ctx, &stale); err != nil || removed {
+		t.Fatalf("a stale KMS wrap removed: removed=%v err=%v", removed, err)
+	}
+	if removed, err := s.RemoveMasterKeyPasswordWrap(ctx, rec); err != nil || !removed {
+		t.Fatalf("matching read: removed=%v err=%v", removed, err)
+	}
+	got, _ = s.GetMasterKeyRecord(ctx)
+	if got.DEKCiphertext != nil || got.DEKNonce != nil || got.DEKPlaintext != nil || got.Salt != nil || got.KDFTime != nil || got.KDFMemory != nil || got.KDFThreads != nil {
+		t.Fatalf("the password wrap is still there: %+v", got)
+	}
+	if string(got.KMSWrappedDEK) != "w" || got.KMSKeyName != "gcpkms://k" || got.WrapKind != WrapKindKMS || string(got.Sentinel) != "sent" {
+		t.Fatalf("only the password wrap should be gone: %+v", got)
+	}
+	if _, err := s.RemoveMasterKeyPasswordWrap(ctx, passwordMasterKeyRecord()); err == nil {
+		t.Fatal("a record with no KMS wrap must be refused")
 	}
 }

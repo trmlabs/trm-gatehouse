@@ -27,19 +27,18 @@ All [credentials](/learn/credentials) stored in a [vault](/learn/vaults) are enc
 Agent Vault uses a **KEK/DEK key-wrapping architecture**:
 
 1. A random 256-bit **DEK** (Data Encryption Key) is generated on first boot. This key encrypts all credentials and the CA private key.
-2. If a **master password** is set, Argon2id derives a **KEK** (Key Encryption Key) that wraps the DEK. The KEK is never stored — it is derived in memory, used to unwrap the DEK, then wiped.
+2. If a **master password** is set, PBKDF2-HMAC-SHA256 (NIST SP 800-132) derives a **KEK** (Key Encryption Key) that wraps the DEK. The KEK is never stored — it is derived in memory, used to unwrap the DEK, then wiped.
 3. If no master password is set (**passwordless mode**), the DEK is stored in plaintext in the database. Security depends on filesystem access controls — suitable for PaaS platforms where the platform manages volume isolation.
 
 | Parameter | Value |
 | --------- | ----- |
 | Data encryption | AES-256-GCM |
 | Key wrapping | AES-256-GCM |
-| KDF (for KEK) | Argon2id |
-| Time cost | 3 iterations |
-| Memory cost | 64 MiB |
-| Parallelism | 4 threads |
+| KDF (for KEK) | PBKDF2-HMAC-SHA256 when `AGENT_VAULT_KDF_UPGRADE=true`, otherwise Argon2id |
+| Iterations | 600,000 by default, set with `AGENT_VAULT_PBKDF2_ITERATIONS` (600,000 to 10,000,000) |
+| Used when | `AGENT_VAULT_KDF_UPGRADE=true`; otherwise new records are Argon2id (see below) |
 | DEK length | 256 bits (random, `crypto/rand`) |
-| KEK length | 256 bits (Argon2id output) |
+| KEK length | 256 bits (PBKDF2 output) |
 | Salt length | 128 bits (random per setup) |
 
 Each encryption operation uses a fresh random nonce generated from `crypto/rand`. Credential values are decrypted in memory only at proxy time to resolve auth headers, then discarded.
@@ -53,11 +52,24 @@ Each encryption operation uses a fresh random nonce generated from `crypto/rand`
   memory after unwrapping the DEK.
 </Note>
 
+## Cloud KMS wrapping
+
+With `AGENT_VAULT_MASTER_KEY_KMS` set, a Google Cloud KMS or AWS KMS key wraps the DEK in place of a password-derived KEK, so no master password has to be held. A password-only vault is switched over on the next start: the DEK is wrapped, unwrapped again to verify it, and then saved, with the password wrap kept as break-glass until `agent-vault master-key remove-password-wrap`. Credentials are not re-encrypted. See [Cloud KMS master key](/self-hosting/kms).
+
 ## Password hashing
 
-User passwords are hashed with **Argon2id** using the same parameters as master key derivation. Each user gets an independent random salt. Password verification uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
+With `AGENT_VAULT_KDF_UPGRADE=true`, user passwords are hashed with **PBKDF2-HMAC-SHA256** using the same parameters as master key derivation; by default they are still hashed with Argon2id. Each user gets an independent random salt. Password verification uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
 
-KDF parameters are stored per user, so Agent Vault can upgrade hashing parameters in the future without invalidating existing accounts.
+The algorithm and its parameters are stored per user and on the master key record, so Agent Vault can change them without invalidating existing accounts. Both algorithms are always read and verified. Which one is written is set by `AGENT_VAULT_KDF_UPGRADE`, off by default in this release so an older image can still read every record:
+
+- **Off (default):** new and changed passwords are written as Argon2id, and nothing is upgraded.
+- **On:** new and changed passwords are written as PBKDF2. An Argon2id user hash is replaced on that user's next successful login, and an Argon2id-wrapped master key is re-wrapped on the next successful unlock. Each upgrade is skipped if the record changed in the meantime.
+
+GovCloud and any fresh install should turn it on from day one. A later release will make on the default and then remove Argon2id.
+
+## FIPS 140-3 mode
+
+Agent Vault builds with `GOFIPS140=v1.0.0`, which links the frozen Go Cryptographic Module v1.0.0 that went through FIPS 140-3 validation. PBKDF2 is the approved password KDF; Argon2id is not approved. Setting `GODEBUG=fips140=only` at runtime makes the Go standard library refuse unapproved algorithms. It does not cover Argon2id, which comes from `golang.org/x/crypto`, so a FIPS deployment must run with `AGENT_VAULT_KDF_UPGRADE=true`. Every start logs whether FIPS 140-3 mode is on, and `AGENT_VAULT_REQUIRE_FIPS=true` refuses to start unless it is on and the upgrade setting is `true`.
 
 Changing a password (`agent-vault account change-password` or `POST /v1/auth/change-password`) invalidates all existing sessions and issues a fresh token.
 
@@ -193,7 +205,7 @@ A summary of how each category of sensitive data is stored:
 | Data | Storage format | Readable after storage? |
 | ---- | -------------- | ----------------------- |
 | Credentials | AES-256-GCM ciphertext + nonce | Yes, by vault members and admins via CLI (`credential get`, `credential list --reveal`). Proxy-role agents cannot read values. |
-| User passwords | Argon2id hash + salt + params | No |
+| User passwords | PBKDF2-HMAC-SHA256 hash + salt + algorithm and params | No |
 | Session tokens | SHA-256 hash | No (raw returned once at creation) |
 | DEK (data encryption key) | Wrapped by KEK (password mode) or plaintext (passwordless mode) in `master_key` table | Yes, in memory while server runs |
 | Master password | Not stored | N/A (KEK derived in memory, wiped after DEK unwrap) |

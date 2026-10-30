@@ -73,8 +73,9 @@ type GraphSource struct {
 	Endpoint string // https://graph.microsoft.com/v1.0
 	Token    func(context.Context) (string, error)
 	Client   *http.Client
-	// SubjectIsObjectID: the subject is the Entra object ID. Otherwise it is
-	// looked up as a user principal name: a Claude or Cursor session names its
+	// SubjectIsObjectID: the subject must be an Entra object ID. Otherwise a
+	// subject that is one (a Cursor user mapped by AGENT_VAULT_CURSOR_PEOPLE_FILE)
+	// is looked up by it, and any other is looked up as a user principal name: a Claude or Cursor session names its
 	// person by a lower-case email in a configured domain, and the user Graph
 	// returns must carry exactly that UPN (Entra compares UPNs without case),
 	// never a mail alias.
@@ -103,6 +104,8 @@ func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string
 	if g.SubjectIsObjectID && !objectID.MatchString(subject) {
 		return Person{}, ErrNotInDirectory
 	}
+	// A UPN holds an "@", so it is never an object ID.
+	byID := g.SubjectIsObjectID || objectID.MatchString(subject)
 	err := g.call(ctx, http.MethodGet, path, nil, &user)
 	if errors.Is(err, errNotFound) {
 		return Person{}, ErrNotInDirectory
@@ -111,7 +114,7 @@ func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string
 		return Person{}, errors.New("directory user lookup failed")
 	}
 	// The directory answered with another account than the subject names.
-	if (g.SubjectIsObjectID && user.ID != subject) || (!g.SubjectIsObjectID && (subject == "" || !strings.EqualFold(user.UPN, subject))) {
+	if (byID && user.ID != subject) || (!byID && (subject == "" || !strings.EqualFold(user.UPN, subject))) {
 		return Person{}, ErrNotInDirectory
 	}
 	var memberOf []string

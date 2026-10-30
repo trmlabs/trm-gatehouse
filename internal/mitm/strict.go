@@ -18,6 +18,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 	"github.com/Infisical/agent-vault/internal/requestlog"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 const strictResponseLimit = 1 << 20
@@ -120,12 +121,19 @@ func (p *Proxy) strictAuthLimitDeny(w http.ResponseWriter, r *http.Request, d ra
 	p.strictDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusTooManyRequests, d.RetryAfter)
 }
 
-// strictIdentityDeny refuses a caller whose identity was not admitted (403).
+// keysUnavailableRetry is the wait an agent is told after a signing-key fetch failed.
+const keysUnavailableRetry = 5 * time.Second
+
+// strictIdentityDeny refuses a caller whose identity was not admitted (403), or 503 with Retry-After when its signing keys could not be fetched.
 // With the catalog's signed audit, the row names the refusing check.
 func (p *Proxy) strictIdentityDeny(w http.ResponseWriter, r *http.Request, err error) {
 	reason := brokercore.DenialReason(err)
 	if p.adapter != nil && p.adapter.valid() && reason != "" {
-		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusForbidden, "identity_"+reason, brokercore.DenialKey(err), 0)
+		status, wait := http.StatusForbidden, time.Duration(0)
+		if reason == runnerid.ReasonKeysUnavailable {
+			status, wait = http.StatusServiceUnavailable, keysUnavailableRetry
+		}
+		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, "identity_"+reason, brokercore.DenialKey(err), wait)
 		return
 	}
 	p.strictUnauthenticatedDeny(w, r, http.StatusForbidden)

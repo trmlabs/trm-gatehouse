@@ -311,6 +311,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusBadRequest, "plain_http")
 		return
 	}
+	// The subagent registration route is the broker's own and never goes upstream.
+	if subagentRoute(catalog, host, port, scope.Pool) {
+		p.registerSubagent(w, r, target, scope, event, catalog)
+		return
+	}
 	// Every matched entry passes the authorization model before any credential
 	// is fetched: pool ceiling, then the verified requester's entitlements.
 	// who is the requester the last check authorized; a git or github-api
@@ -463,11 +468,31 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	} else if operation != "" {
 		event.Operation = operation
 	}
+	key, selectedUser := entry.Key, ""
+	if len(entry.BasicPairs) > 0 {
+		values := r.Header.Values(entry.Header)
+		if len(values) != 1 {
+			deny(http.StatusBadRequest, "credential_header")
+			return
+		}
+		user, ok := entry.CallerPairUser(values[0])
+		if ok {
+			for _, pair := range entry.BasicPairs {
+				if pair.User == user {
+					key, selectedUser = pair.Key, pair.User
+					event.Binding += "/" + pair.Name
+					break
+				}
+			}
+		}
+		if selectedUser == "" {
+			deny(http.StatusBadRequest, "credential_header")
+			return
+		}
+	}
 	expectedCredential := entry.CallerCredential()
-	// A Basic pair's user name is not secret, so a client may hold the real
-	// one and send it where it puts it: in Header, with the placeholder as
-	// the password, and in the entry's PairUserHeader. Each must equal the
-	// stored user name, which is known once the key is read.
+	// A supplied public user must agree with the selected binding before
+	// any credential read, and with the stored pair before forwarding.
 	var sentUsers []string
 	sentUserHeader := false
 	forwarded := http.Header{}
@@ -505,6 +530,12 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 			forwarded[name] = append([]string(nil), values...)
 		}
 	}
+	for _, sent := range sentUsers {
+		if selectedUser != "" && sent != selectedUser {
+			deny(http.StatusBadRequest, "credential_header")
+			return
+		}
+	}
 	// One rate bucket per Pod, not per pool agent: a pool of many workers
 	// shares one agent identity.
 	enf := p.rateLimit.EnforceProxy(r.Context(), proxyLimitActor(scope), entry.Name)
@@ -532,14 +563,14 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 			return
 		}
 	case entry.HeaderCredential():
-		secret, err = a.Keys.Get(r.Context(), entry.Key)
+		secret, err = a.Keys.Get(r.Context(), key)
 		if err != nil {
 			deny(http.StatusServiceUnavailable, keyOutcome(err))
 			return
 		}
 	}
 	user, password, pair := httpcatalog.SplitPair(secret.Value())
-	if entry.BasicPair && !pair {
+	if entry.BasicPair && (!pair || (selectedUser != "" && user != selectedUser)) {
 		// As for a key no header may carry, only rewriting the stored value
 		// clears this, so the refusal is lasting.
 		deny(http.StatusServiceUnavailable, "key_not_basic_pair")
@@ -624,7 +655,7 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		case entry.ClientCredentials != nil:
 			a.ClientTokens.Invalidate(entry)
 		case entry.HeaderCredential():
-			a.Keys.Invalidate(entry.Key)
+			a.Keys.Invalidate(key)
 		}
 		if entry.ClientCertificate != nil {
 			a.ClientCertificates.Invalidate(*entry.ClientCertificate)

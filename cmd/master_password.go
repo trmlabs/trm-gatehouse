@@ -41,6 +41,9 @@ var masterPasswordSetCmd = &cobra.Command{
 		if record == nil {
 			return fmt.Errorf("no master key record found — run 'agent-vault server' first")
 		}
+		if record.KMSWrappedDEK != nil {
+			return errKMSManaged(record)
+		}
 		if record.DEKPlaintext == nil {
 			return fmt.Errorf("instance already has a master password — use 'agent-vault master-password change' instead")
 		}
@@ -80,6 +83,7 @@ var masterPasswordSetCmd = &cobra.Command{
 		record.KDFTime = &params.Time
 		record.KDFMemory = &params.Memory
 		record.KDFThreads = &params.Threads
+		record.KDFAlgorithm = params.Algorithm
 
 		if err := db.UpdateMasterKeyRecord(ctx, record); err != nil {
 			return fmt.Errorf("persisting updated record: %w", err)
@@ -113,6 +117,9 @@ var masterPasswordChangeCmd = &cobra.Command{
 		}
 		if record == nil {
 			return fmt.Errorf("no master key record found — run 'agent-vault server' first")
+		}
+		if record.DEKCiphertext == nil && record.KMSWrappedDEK != nil {
+			return errKMSManaged(record)
 		}
 		if record.DEKCiphertext == nil {
 			return fmt.Errorf("instance has no master password — use 'agent-vault master-password set' instead")
@@ -158,6 +165,7 @@ var masterPasswordChangeCmd = &cobra.Command{
 		record.KDFTime = &params.Time
 		record.KDFMemory = &params.Memory
 		record.KDFThreads = &params.Threads
+		record.KDFAlgorithm = params.Algorithm
 
 		if err := db.UpdateMasterKeyRecord(ctx, record); err != nil {
 			return fmt.Errorf("persisting updated record: %w", err)
@@ -192,6 +200,9 @@ var masterPasswordRemoveCmd = &cobra.Command{
 		if record == nil {
 			return fmt.Errorf("no master key record found — run 'agent-vault server' first")
 		}
+		if record.KMSWrappedDEK != nil {
+			return errKMSManaged(record)
+		}
 		if record.DEKCiphertext == nil {
 			return fmt.Errorf("instance already has no master password")
 		}
@@ -221,6 +232,7 @@ var masterPasswordRemoveCmd = &cobra.Command{
 		record.KDFTime = nil
 		record.KDFMemory = nil
 		record.KDFThreads = nil
+		record.KDFAlgorithm = ""
 
 		if err := db.UpdateMasterKeyRecord(ctx, record); err != nil {
 			return fmt.Errorf("persisting updated record: %w", err)

@@ -107,6 +107,8 @@ type Event struct {
 	Method          string
 	Status          int
 	Duration        int64 // milliseconds
+	// Run and ParentRun: see Row.
+	Run, ParentRun string
 }
 
 var (
@@ -206,7 +208,7 @@ func (e Event) Validate() error {
 		return ErrInvalidEvent
 	}
 	for _, v := range []string{e.Pool, e.Agent, e.PodUID, e.Binding, e.Session, e.Outcome, e.Requester, e.RequesterKind, e.RequesterOID, e.TokenSHA256, e.Tier, e.Decision, e.Kid, e.KidSHA256, e.Peer,
-		e.Source, e.Automation, e.AutomationName, e.AutomationOwner, e.GraphQLErrors, e.Route, e.GitEntry} {
+		e.Source, e.Automation, e.AutomationName, e.AutomationOwner, e.Run, e.ParentRun, e.GraphQLErrors, e.Route, e.GitEntry} {
 		if !identifier(v, true) {
 			return ErrInvalidEvent
 		}
@@ -540,7 +542,7 @@ func (c *Chain) Record(e Event) error {
 		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
 		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment, Branch: e.Branch,
 		Source: e.Source, Automation: e.Automation, AutomationName: e.AutomationName, AutomationOwner: e.AutomationOwner,
-		Path: e.Path, Settings: e.Settings, GraphQLErrors: e.GraphQLErrors, Cause: e.Cause, Match: e.Match, UpstreamMessage: e.UpstreamMessage, PullRequest: e.PullRequest, Route: e.Route, GitEntry: e.GitEntry, Method: e.Method, Status: e.Status, Duration: e.Duration})
+		Run: e.Run, ParentRun: e.ParentRun, Path: e.Path, Settings: e.Settings, GraphQLErrors: e.GraphQLErrors, Cause: e.Cause, Match: e.Match, UpstreamMessage: e.UpstreamMessage, PullRequest: e.PullRequest, Route: e.Route, GitEntry: e.GitEntry, Method: e.Method, Status: e.Status, Duration: e.Duration})
 	return err
 }
 

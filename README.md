@@ -47,6 +47,10 @@ deployments build from source.
 
 ## Try it in 5 minutes
 
+For an interactive local challenge with a browser shell, run `make playground`.
+See the [playground guide](examples/playground/README.md) for the missions,
+break-it rules and what the demo proves.
+
 One container brings a test secrets manager and a test PostgreSQL database,
 runs with no network access, and checks the core behavior. You need Docker and
 nothing else.

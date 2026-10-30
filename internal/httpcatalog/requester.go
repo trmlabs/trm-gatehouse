@@ -41,14 +41,18 @@ func validRequesterTemplate(prefix string) bool {
 }
 
 // segmentPattern is what a requester segment may hold: the characters of a
-// lower-cased email or a catalog identifier, all safe in a git ref, a GitHub
+// lower-cased email, an object ID or a catalog identifier, all safe in a git ref, a GitHub
 // branch name and an audit row.
 var segmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]{0,199}$`)
 
+var objectIDSegment = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 // RequesterSegment is the branch segment that names a requester under a
-// {requester} prefix: a person's email, lower-cased, or "automation-" and the
-// Automation's catalog id. Emails always hold one "@" and Automation segments
-// never do, so no person's segment is an Automation's. Anyone else (a runner
+// {requester} prefix: a person's email, lower-cased, or their Entra object ID
+// (a Cursor user the broker maps), or "automation-" and the Automation's
+// catalog id. Emails always hold one "@", object IDs are hex groups and
+// Automation segments start "automation-", so no person's segment is an
+// Automation's. Anyone else (a runner
 // agent, a workload, a request naming no one) has none, nor does a name git
 // cannot carry in a branch, so a {requester} prefix reaches nothing for them.
 // kind and subject are authorize.Requester's.
@@ -57,7 +61,8 @@ func RequesterSegment(kind, subject string) string {
 	switch kind {
 	case "person":
 		segment = strings.ToLower(subject)
-		if strings.Count(segment, "@") != 1 {
+		// An email, or the Entra object ID of a Cursor user the broker maps.
+		if strings.Count(segment, "@") != 1 && !objectIDSegment.MatchString(segment) {
 			return ""
 		}
 	case "automation":

@@ -10,7 +10,7 @@ RUN --mount=type=secret,id=demo_ca \
 COPY main.go ./
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=0 go build -trimpath -o /agent-vault .
+RUN GOFIPS140=v1.0.0 CGO_ENABLED=0 go build -trimpath -o /agent-vault .
 
 FROM hashicorp/vault:1.19.4@sha256:b5f675b0bf681568cd7354c697fe4ce953024312d6d23ee7216deda60c192bad AS vault
 FROM postgres:16-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825

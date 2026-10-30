@@ -17,7 +17,7 @@ web-dev:
 	cd web && npm run dev
 
 build: web
-	go build -trimpath -ldflags '$(LDFLAGS)' -o agent-vault .
+	GOFIPS140=v1.0.0 go build -trimpath -ldflags '$(LDFLAGS)' -o agent-vault .
 
 # Hot-reload dev: Go backend (air) + React frontend (Vite HMR)
 # Env vars can come from .env file OR `infisical run -- make dev`.
@@ -66,3 +66,13 @@ docker:
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(DATE) \
 		-t infisical/agent-vault .
+
+.PHONY: playground playground-shell playground-autoplay playground-down
+playground:
+	bash examples/playground/playground.sh up
+playground-shell:
+	bash examples/playground/playground.sh shell
+playground-autoplay:
+	bash examples/playground/playground.sh autoplay
+playground-down:
+	bash examples/playground/playground.sh down
