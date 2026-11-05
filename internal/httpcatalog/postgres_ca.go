@@ -8,14 +8,10 @@ import (
 	"fmt"
 )
 
-// maxPinnedCABytes bounds a database entry's pinned CA. A chain of a few
-// certificates fits many times over; the catalog is held in memory and in
-// every Vault entry document.
+// maxPinnedCABytes bounds a database entry's pinned CA; the catalog is held in memory and in every Vault entry document.
 const maxPinnedCABytes = 32 << 10
 
-// validPinnedCA accepts PEM CERTIFICATE blocks and nothing else, at least one.
-// Each must be a CA certificate or self-signed: pinning a leaf some other CA
-// issued would trust nothing the handshake can check.
+// validPinnedCA accepts only PEM CERTIFICATE blocks, each a CA or self-signed: pinning a leaf another CA issued would trust nothing the handshake can check.
 func validPinnedCA(text string) error {
 	if len(text) > maxPinnedCABytes {
 		return fmt.Errorf("postgres ca is over %d bytes", maxPinnedCABytes)
@@ -23,7 +19,6 @@ func validPinnedCA(text string) error {
 	rest := []byte(text)
 	count := 0
 	for {
-		// pem.Decode skips text before a block; nothing may hide there.
 		rest = bytes.TrimLeft(rest, " \t\r\n")
 		if len(rest) == 0 {
 			break
@@ -34,7 +29,6 @@ func validPinnedCA(text string) error {
 		}
 		rest = next
 		if block.Type != "CERTIFICATE" {
-			// Never echo the block: a pasted private key must not reach a log.
 			return errors.New("postgres ca holds a PEM block that is not a CERTIFICATE")
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
@@ -52,9 +46,7 @@ func validPinnedCA(text string) error {
 	return nil
 }
 
-// selfSigned checks the signature against the certificate's own key without
-// CheckSignatureFrom's CA constraint: Citus's generated certificate carries
-// no extensions at all.
+// selfSigned checks the signature against the certificate's own key without CheckSignatureFrom's CA constraint, since Citus's certificate has no extensions.
 func selfSigned(cert *x509.Certificate) bool {
 	return bytes.Equal(cert.RawIssuer, cert.RawSubject) &&
 		cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature) == nil

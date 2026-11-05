@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// The per-person budget is the setting when one is given, with no smaller
-// cap behind it, and today's 60 a minute when none is.
+// The per-person budget is the setting when given, with no smaller cap behind it, and 60 a minute when none is.
 func TestLookupBudgetIsASetting(t *testing.T) {
 	for _, c := range []struct {
 		name string

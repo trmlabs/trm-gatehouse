@@ -13,46 +13,32 @@ import (
 	"time"
 )
 
-// ClientCertificateRef locates the client certificate an entry presents to
-// its upstream in the TLS handshake (mutual TLS): a KV version 2 secret whose
-// "cert" field holds the PEM certificate, followed by any intermediates, and
-// whose "key" field holds its PEM private key. Both come from one read, so a
-// new KV version rotates them together.
+// ClientCertificateRef locates the client certificate an entry presents upstream (mutual TLS): a KV version 2 secret with "cert" (PEM, then intermediates) and "key" fields, read together so a new version rotates both.
 type ClientCertificateRef struct {
 	Mount string `json:"mount"`
 	Path  string `json:"path"`
 }
 
-// The fields of a client certificate's secret.
 const (
 	ClientCertificateField    = "cert"
 	ClientCertificateKeyField = "key"
 )
 
-// valid reports whether the reference names a KV mount and a path under the
-// catalog's key prefix, the same rule as an entry's key.
 func (r ClientCertificateRef) valid() bool {
 	_, path := keyPath()
 	return ValidMount(r.Mount) && len(r.Path) <= 127 && path.MatchString(r.Path)
 }
 
-// ClientCertificate is a parsed client certificate and its KV version. It
-// prints as its version and expiry only; the private key is reachable only
-// through TLSCertificate, for the handshake.
+// ClientCertificate prints as its version and expiry only; the private key is reachable only through TLSCertificate.
 type ClientCertificate struct {
 	certificate tls.Certificate
 	Version     int
 	NotBefore   time.Time
 	NotAfter    time.Time
-	// ChainFingerprint is the SHA-256 of everything the upstream sees: each
-	// certificate presented, leaf first, as DER, which delimits itself. The
-	// leaf fixes the key (tls.X509KeyPair checks that they match), so two
-	// certificates with one ChainFingerprint present the same thing, and a
-	// new intermediate under the same leaf is a new ChainFingerprint.
+	// ChainFingerprint is the SHA-256 of every certificate presented, leaf first, as DER, so a new intermediate is a new fingerprint.
 	ChainFingerprint [sha256.Size]byte
 }
 
-// TLSCertificate is the certificate and key for a tls.Config.
 func (c *ClientCertificate) TLSCertificate() *tls.Certificate { return &c.certificate }
 
 func (c ClientCertificate) String() string {
@@ -61,9 +47,7 @@ func (c ClientCertificate) String() string {
 func (c ClientCertificate) GoString() string           { return c.String() }
 func (c ClientCertificate) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(c.String())) }
 
-// Usable reports whether the certificate may be presented at now: inside its
-// validity window. An upstream refuses one outside it anyway; the broker
-// refuses first, with a reason an operator can act on.
+// Usable reports whether the certificate is inside its validity window; the broker refuses first, with a reason an operator can act on.
 func (c *ClientCertificate) Usable(now time.Time) error {
 	if now.Before(c.NotBefore) || !now.Before(c.NotAfter) {
 		return ErrClientCertificateExpired
@@ -72,35 +56,20 @@ func (c *ClientCertificate) Usable(now time.Time) error {
 }
 
 var (
-	// ErrClientCertificateUnavailable means Vault could not be read.
 	ErrClientCertificateUnavailable = errors.New("client certificate unavailable")
-	// ErrClientCertificateDeleted means Vault answered without a certificate
-	// and key: the secret or its current version is deleted or destroyed, or
-	// a field is missing or empty. No cached copy outlives it.
+	// ErrClientCertificateDeleted means Vault answered without a certificate and key; no cached copy outlives it.
 	ErrClientCertificateDeleted = fmt.Errorf("%w: deleted in Vault", ErrClientCertificateUnavailable)
-	// ErrClientCertificateInvalid means Vault answered with a value the
-	// broker will not present: not a PEM certificate and matching key, too
-	// large, or a CA certificate rather than an end-entity one. It is cached
-	// and refused like ErrClientCertificateDeleted, but tells the operator
-	// the value needs fixing, not restoring.
+	// ErrClientCertificateInvalid means the value is not a PEM end-entity certificate with its key, or is too large; the operator must fix it, not restore it.
 	ErrClientCertificateInvalid = fmt.Errorf("%w: not an end-entity certificate with its key", ErrClientCertificateDeleted)
-	// ErrClientCertificateExpired means the certificate is outside its
-	// validity window (see Usable).
 	ErrClientCertificateExpired = errors.New("client certificate outside its validity window")
 )
 
-// Bounds on a stored certificate chain and key, far above any real one.
 const (
 	maxClientCertificateBytes = 64 << 10
 	maxClientKeyBytes         = 16 << 10
 )
 
-// ClientCertificates caches each client certificate as Keys caches a key: for
-// TTL (default and maximum 1 minute), so a new KV version is presented within
-// TTL, or sooner after Invalidate; a deleted or invalid one is refused from
-// the first read that sees it; and only an unreachable or failing Vault keeps
-// a cached certificate in use, for up to MaxStale (default 5 minutes) past its
-// TTL.
+// ClientCertificates caches certificates as Keys caches keys: TTL (default and maximum 1 minute); a deleted or invalid one is refused at the first read that sees it; only an unreachable Vault keeps a cached one, for MaxStale (default 5 minutes).
 type ClientCertificates struct {
 	Vault    Logical
 	TTL      time.Duration
@@ -124,8 +93,6 @@ func (c *ClientCertificates) settings() (time.Duration, time.Duration, time.Time
 	return k.settings()
 }
 
-// Get returns the current certificate for ref. Concurrent misses for one
-// certificate share a single Vault read.
 func (c *ClientCertificates) Get(ctx context.Context, ref ClientCertificateRef) (*ClientCertificate, error) {
 	ttl, stale, now := c.settings()
 	c.mu.Lock()
@@ -177,9 +144,7 @@ func (c cachedCertificate) result() (*ClientCertificate, error) {
 	return c.cert, nil
 }
 
-// Invalidate drops a cached certificate after the upstream refuses it, so the
-// next request reads the newest version. Like Keys.Invalidate, it acts at
-// most once per certificate every 30 seconds.
+// Invalidate drops a cached certificate after the upstream refuses it, at most once per certificate every 30 seconds.
 func (c *ClientCertificates) Invalidate(ref ClientCertificateRef) {
 	_, _, now := c.settings()
 	c.mu.Lock()
@@ -228,11 +193,7 @@ func (c *ClientCertificates) read(ctx context.Context, ref ClientCertificateRef)
 	return cert, nil
 }
 
-// ParseClientCertificate checks a PEM certificate chain and key the way the
-// broker does before presenting them: the key matches the first certificate,
-// which is an end-entity certificate, not a CA. A CA's key can sign new
-// certificates, which a broker presenting one identity never needs. Errors
-// are ErrClientCertificateInvalid and never quote either value.
+// ParseClientCertificate checks that the key matches the first certificate and that it is an end-entity one, not a CA, whose key could sign new certificates. Errors never quote either value.
 func ParseClientCertificate(certPEM, keyPEM string) (*ClientCertificate, error) {
 	if len(certPEM) > maxClientCertificateBytes || len(keyPEM) > maxClientKeyBytes {
 		return nil, ErrClientCertificateInvalid

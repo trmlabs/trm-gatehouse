@@ -11,16 +11,14 @@ import (
 	"time"
 )
 
-// logOutput receives the relay's structured log: JSON lines on stderr, apart
-// from the audit trail (which may be stdout in shared mode). Tests swap it.
+// logOutput is the structured log (JSON on stderr), separate from the audit trail; tests swap it.
 var logOutput io.Writer = os.Stderr
 
 func newRelayLog() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(logOutput, nil)).With("component", "gatehouse-relay")
 }
 
-// Why a relayed session ended. The first cause recorded wins: a later error
-// on the other side is the consequence, not the cause.
+// The first cause recorded wins: a later error on the other side is the consequence.
 const (
 	endClientClosed   = "client_closed"   // the agent closed its side
 	endClientReset    = "client_reset"    // the agent's side failed
@@ -31,7 +29,6 @@ const (
 	endRelayStopping  = "relay_stopping"  // the relay itself is stopping
 )
 
-// ending records why a session ended.
 type ending struct {
 	mu     sync.Mutex
 	reason string
@@ -57,8 +54,7 @@ func (e *ending) get() string {
 	return e.reason
 }
 
-// readCause is the end reason a read error on one side means, or "" when the
-// relay closed that side itself.
+// readCause is the end reason for a read error, or "" when the relay closed that side itself.
 func readCause(upstream bool, e error) string {
 	var timeout net.Error
 	switch {
@@ -77,7 +73,6 @@ func readCause(upstream bool, e error) string {
 	}
 }
 
-// watchedReader reports its first read error, as it happens.
 type watchedReader struct {
 	r    io.Reader
 	once sync.Once
@@ -96,7 +91,6 @@ func watch(r io.Reader, upstream bool, end *ending) io.Reader {
 	return &watchedReader{r: r, on: func(e error) { end.set(readCause(upstream, e)) }}
 }
 
-// stopCause is the end reason for a relay context that is done.
 func stopCause(ctx context.Context) string {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return endDeadline
@@ -104,18 +98,12 @@ func stopCause(ctx context.Context) string {
 	return endRelayStopping
 }
 
-// normalEnds are the ends counted rather than logged one by one: at fleet
-// churn of 100,000 sessions a line each would be noise. Every other end
-// (a reset on either side, a withdrawn agent) is logged on its own line.
+// normalEnds are counted, not logged one by one; every other end gets its own line.
 var normalEnds = map[string]bool{endClientClosed: true, endUpstreamClosed: true, endDeadline: true, endRelayStopping: true, "closed": true}
 
-// sessionSummaryWindow spaces the counts of normal ends.
 var sessionSummaryWindow = time.Minute
 
-// logClose logs an abnormal end on its own line (WARN for a broker-side
-// reset, INFO otherwise) and counts a normal one into a periodic
-// sessions_closed summary. The upstream watch also counts broker-side ends,
-// so a front that disappears is named once.
+// logClose logs an abnormal end on its own line and counts a normal one into a periodic summary.
 func (r *relay) logClose(protocol, peer string, agent agentIdentity, upstream, target string, started time.Time, end *ending) {
 	reason := end.get()
 	individually := true
@@ -138,8 +126,6 @@ func (r *relay) logClose(protocol, peer string, agent agentIdentity, upstream, t
 		slog.Int64("durationMs", time.Since(started).Milliseconds()))
 }
 
-// closeCounts counts normal session ends by protocol and reason and logs
-// them once per window.
 type closeCounts struct {
 	mu      sync.Mutex
 	counts  map[string]int
@@ -169,7 +155,6 @@ func (c *closeCounts) count(log *slog.Logger, protocol, reason string) {
 	})
 }
 
-// flush logs the counts not yet logged, as the relay stops.
 func (c *closeCounts) flush(log *slog.Logger) {
 	c.mu.Lock()
 	counts := c.counts
@@ -180,15 +165,12 @@ func (c *closeCounts) flush(log *slog.Logger) {
 	}
 }
 
-// massCloseWindow and massCloseMinimum: this many broker-side ends within the
-// window are one event, an upstream that dropped its connections together
-// (the broker's TLS front killed, say), logged once with the count.
+// This many broker-side ends within the window are one event (an upstream dropping connections together), logged once with the count.
 const (
 	massCloseWindow  = time.Second
 	massCloseMinimum = 5
 )
 
-// upstreamWatch names an upstream's failures once instead of per connection.
 type upstreamWatch struct {
 	mu    sync.Mutex
 	state map[string]*upstreamState
@@ -215,12 +197,8 @@ func (w *upstreamWatch) get(address string) *upstreamState {
 	return s
 }
 
-// ended counts one broker-side end; the first in a quiet spell opens a
-// window, and at its close a burst is logged once.
-// ended counts one broker-side end and says whether it still gets its own
-// log line: the first massCloseMinimum in a window do, and the rest of a burst
-// (a broker restart drops thousands at once) are only counted, as
-// "suppressed" in the window's upstream_dropped_sessions.
+// ended says whether the end gets its own log line: the first massCloseMinimum per window do,
+// and the rest of a burst are counted as suppressed.
 func (w *upstreamWatch) ended(log *slog.Logger, address, reason string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -250,8 +228,6 @@ func (w *upstreamWatch) ended(log *slog.Logger, address, reason string) bool {
 	return individually
 }
 
-// dialed records a dial's outcome: the first failure after success, and the
-// first success after failure, are each logged once.
 func (w *upstreamWatch) dialed(log *slog.Logger, address string, e error) {
 	w.mu.Lock()
 	s := w.get(address)
@@ -271,9 +247,7 @@ func (w *upstreamWatch) dialed(log *slog.Logger, address string, e error) {
 	}
 }
 
-// refusalWatch names refused new connections without one line each: a limit
-// refuses the new connection and never touches open ones, and the refusals in
-// each window are logged once with their count.
+// refusalWatch logs refused new connections once per window with their count.
 type refusalWatch struct {
 	mu      sync.Mutex
 	count   int

@@ -29,9 +29,7 @@ type DynamicSecretInfo struct {
 	Name string
 }
 
-// DynamicLease is a minted (or renewed) dynamic-secret lease. Fields carries
-// the SECRET credential values keyed by their provider field name (username,
-// password, …); never log it.
+// DynamicLease is a minted or renewed lease; Fields holds SECRET credential values, never log it.
 type DynamicLease struct {
 	LeaseID  string
 	Fields   map[string]string
@@ -56,10 +54,7 @@ type Client struct {
 
 	httpc *http.Client
 
-	// slugCache memoizes project-ID → project-slug lookups (dynamic-secret
-	// endpoints key on the slug, but Agent Vault stores the ID). Entries expire
-	// after slugCacheTTL so a renamed project slug re-resolves instead of
-	// 404ing every dynamic call until restart.
+	// slugCache memoizes project ID to slug (dynamic-secret endpoints key on slug); entries expire so a rename re-resolves.
 	slugMu    sync.Mutex
 	slugCache map[string]slugCacheEntry
 }
@@ -69,14 +64,10 @@ type slugCacheEntry struct {
 	fetchedAt time.Time
 }
 
-// slugCacheTTL bounds how long a resolved project slug is reused. Slugs rarely
-// change, so this only matters after a rename; an hour keeps the workspace
-// lookups negligible while self-healing within a bounded window.
+// slugCacheTTL bounds slug reuse so a renamed project re-resolves within an hour.
 const slugCacheTTL = time.Hour
 
-// NewClient returns ErrNotConfigured when INFISICAL_URL is unset (callers
-// keep the server alive) or ErrNoAuthMethod when set but no machine-identity
-// env vars are present.
+// NewClient returns ErrNotConfigured when INFISICAL_URL is unset, ErrNoAuthMethod when no machine-identity env vars are set.
 func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 	siteURL := os.Getenv("INFISICAL_URL")
 	if siteURL == "" {
@@ -242,9 +233,7 @@ func (c *Client) RevokeLease(ctx context.Context, cfg VaultConfig, leaseID strin
 	return err
 }
 
-// projectSlug resolves a project ID to its slug via GET /api/v1/workspace/{id},
-// caching the result for the process. The SDK auto-refreshes the bearer token,
-// so GetAccessToken returns a current one.
+// projectSlug resolves a project ID to its slug via GET /api/v1/workspace/{id} and caches it.
 func (c *Client) projectSlug(ctx context.Context, projectID string) (string, error) {
 	c.slugMu.Lock()
 	if e, ok := c.slugCache[projectID]; ok && time.Since(e.fetchedAt) < slugCacheTTL {
@@ -298,9 +287,7 @@ func getProjectSlug(ctx context.Context, httpc *http.Client, siteURL, token, pro
 	return parsed.Workspace.Slug, nil
 }
 
-// stringifyFields renders a lease's map[string]any credential payload as
-// strings. JSON numbers arrive as float64; render them without a trailing
-// ".0" so ports and the like inject cleanly.
+// stringifyFields renders credential values as strings, without a trailing ".0" on JSON numbers.
 func stringifyFields(data map[string]any) map[string]string {
 	out := make(map[string]string, len(data))
 	for k, v := range data {
@@ -320,9 +307,7 @@ func stringifyFields(data map[string]any) map[string]string {
 	return out
 }
 
-// loginWithMethod dispatches to the SDK. Kubernetes and LDAP read env vars
-// manually because the SDK looks up the SA-token path under the wrong key
-// (typo) and the LDAP helper only env-reads the identity ID.
+// loginWithMethod reads Kubernetes and LDAP env vars manually because the SDK misreads the SA-token path key and the LDAP identity ID.
 func loginWithMethod(c sdk.InfisicalClientInterface, method AuthMethod) error {
 	auth := c.Auth()
 	switch method {

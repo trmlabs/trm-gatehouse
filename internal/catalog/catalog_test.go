@@ -9,9 +9,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// serviceFromTemplate mirrors what the add-service form's applyPreset builds
-// from a template, so validating it here catches a preset that would produce
-// an unsubmittable form or a rejected proposal.
+// serviceFromTemplate mirrors the add-service form's preset so a bad template fails here.
 func serviceFromTemplate(t Template) broker.Service {
 	auth := broker.Auth{Type: t.AuthType}
 	switch t.AuthType {

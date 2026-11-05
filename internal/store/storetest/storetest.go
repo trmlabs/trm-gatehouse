@@ -1,10 +1,4 @@
-// Package storetest gives tests a fully migrated SQLite store without paying
-// for every migration in every test.
-//
-// Running the migrations takes over a second per store under -race, and most
-// broker tests open a fresh store. Seed builds one migrated database per test
-// binary and copies it into place, so store.Open on the copy finds nothing
-// pending and the tests that open stores keep exercising store.Open itself.
+// Package storetest gives tests a migrated SQLite store without running every migration per test.
 package storetest
 
 import (
@@ -28,8 +22,7 @@ var template = sync.OnceValues(func() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Closing the last connection checkpoints the write-ahead log into the
-	// main file, so the file alone holds the whole schema.
+	// Closing the last connection checkpoints the WAL, so the file alone holds the schema.
 	if err := s.Close(); err != nil {
 		return nil, err
 	}
@@ -39,8 +32,7 @@ var template = sync.OnceValues(func() ([]byte, error) {
 	return os.ReadFile(path)
 })
 
-// Seed writes a fully migrated, empty SQLite database at path. Open it with
-// store.Open as usual. path must not exist yet.
+// Seed copies one per-binary migrated database to path, which must not exist, so store.Open finds nothing pending.
 func Seed(t testing.TB, path string) {
 	t.Helper()
 	data, err := template()
@@ -60,8 +52,7 @@ func Seed(t testing.TB, path string) {
 	}
 }
 
-// Open seeds a migrated store in a fresh temporary directory, opens it and
-// closes it when the test ends.
+// Open seeds a migrated store in a temporary directory and closes it when the test ends.
 func Open(t testing.TB) *store.SQLStore {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.db")

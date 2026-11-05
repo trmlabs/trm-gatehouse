@@ -16,8 +16,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
-// A pool binding with no agentID or vaultID starts the broker, which makes
-// the pool's agent and vault and grants the agent proxy on it.
 func TestStartupProvisionsPoolBindings(t *testing.T) {
 	dir, db := t.TempDir(), storetest.Open(t)
 	tls := httptest.NewTLSServer(http.NotFoundHandler())

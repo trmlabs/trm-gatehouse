@@ -59,8 +59,6 @@ func TestAuditBootSurvivesReopen(t *testing.T) {
 	}
 }
 
-// The store's heads are what an export is checked against: each replica's
-// current boot and its newest persisted checkpoint.
 func TestAuditHeadsListEveryReplica(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()

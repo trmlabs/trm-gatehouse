@@ -22,7 +22,6 @@ func TestStartupValue(t *testing.T) {
 		{"application_name", strings.Repeat("a", 64), "", false},
 		{"application_name", "injected\nlog", "", false},
 		{"application_name", "客户端", "", false},
-		// Encodings as the server matches them, forwarded canonical.
 		{"client_encoding", "UTF8", "UTF8", true},
 		{"client_encoding", "utf-8", "UTF8", true},
 		{"client_encoding", "unicode", "UTF8", true},
@@ -44,12 +43,10 @@ func TestStartupValue(t *testing.T) {
 		{"search_path", strings.Repeat("s", 257), "", false},
 		{"standard_conforming_strings", "on", "on", true},
 		{"standard_conforming_strings", "ON", "on", true},
-		// Off, the server reads backslash escapes the broker's lexer does not.
 		{"standard_conforming_strings", "off", "", false},
 		{"standard_conforming_strings", "false", "", false},
 		{"standard_conforming_strings", "0", "", false},
 		{"standard_conforming_strings", "no", "", false},
-		// Fail closed on everything else.
 		{"options", "-c statement_timeout=0", "", false},
 		{"replication", "database", "", false},
 		{"role", "admin", "", false},
@@ -62,8 +59,7 @@ func TestStartupValue(t *testing.T) {
 	}
 }
 
-// Keys match case-insensitively and come back canonical: libpq sends PGTZ
-// and PGDATESTYLE as lowercase "timezone" and "datestyle".
+// Keys match case-insensitively and come back canonical.
 func TestStartupParameterKeys(t *testing.T) {
 	for key, want := range map[string]string{"timezone": "TimeZone", "datestyle": "DateStyle", "TimeZone": "TimeZone",
 		"CLIENT_ENCODING": "client_encoding", "Application_Name": "application_name"} {
@@ -79,7 +75,6 @@ func TestStartupParameterKeys(t *testing.T) {
 	}
 }
 
-// What drivers send by default passes as a whole.
 func TestStartupValueAcceptsDriverDefaults(t *testing.T) {
 	drivers := map[string]map[string]string{
 		// pgJDBC 42.x

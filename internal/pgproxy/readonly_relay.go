@@ -12,14 +12,7 @@ import (
 // relay holds to classify, as the pooled path bounds every message.
 const maxReadOnlyStatementBytes = 64 << 20
 
-// relayReadOnly is relay for a read-only login on the unpooled path. The
-// client's messages are read whole and its statements classified, so one that
-// could create a temporary object never reaches the database. The upstream
-// direction stays a byte copy that only tracks message boundaries.
-//
-// refused reports a refused statement. The session then ends: the database
-// stream is stopped first, and clean reports whether it stopped between
-// messages, so the caller can still send the client a refusal it can read.
+// relayReadOnly is relay for a read-only login on the unpooled path.
 func relayReadOnly(client, upstream net.Conn, notice *closeState) (refused, clean bool) {
 	toClient := &frameTracker{w: client}
 	filter := newReassertFilter(toClient)
@@ -48,9 +41,8 @@ func relayReadOnly(client, upstream net.Conn, notice *closeState) (refused, clea
 	}
 }
 
-// copyClientReadOnly forwards client messages to upstream until the client
-// leaves, a write fails, or a statement is refused (true). A fast-path
-// FunctionCall names its function by OID, so it is refused too.
+// copyClientReadOnly forwards client messages to upstream until the client leaves, a write fails, or a statement is refused (true).
+// A fast-path FunctionCall names its function by OID, so it is refused too.
 func copyClientReadOnly(upstream io.Writer, client io.Reader, filter *reassertFilter) bool {
 	r := bufio.NewReaderSize(client, 32<<10)
 	w := bufio.NewWriterSize(upstream, 32<<10)
@@ -146,9 +138,8 @@ func statementText(kind byte, payload []byte) (string, bool) {
 	return string(payload[:end]), true
 }
 
-// frameTracker passes the server's byte stream to the client and follows its
-// message framing, so the relay knows whether the stream stopped between two
-// messages.
+// frameTracker passes the server's byte stream to the client and follows its message framing, so the relay
+// knows whether the stream stopped between two messages.
 type frameTracker struct {
 	w         io.Writer
 	header    [5]byte
@@ -199,6 +190,4 @@ func (t *frameTracker) advance(p []byte) {
 
 func (t *frameTracker) atBoundary() bool { return !t.broken && t.have == 0 && t.remaining == 0 }
 
-// idle reports that the last complete message was a ReadyForQuery outside a
-// transaction, so nothing the client sent is open on the database.
 func (t *frameTracker) idle() bool { return t.atBoundary() && t.last == 'Z' && t.status == 'I' }

@@ -11,25 +11,14 @@ import (
 	"github.com/Infisical/agent-vault/internal/auditchain"
 )
 
-// readyAnswerLimit bounds GitHub's answer to readyMutation, which names one
-// pull request's number and draft state.
+// readyAnswerLimit bounds GitHub's answer to readyMutation.
 const readyAnswerLimit = 64 << 10
 
-// graphqlErrorType is a GraphQL error type as GitHub names them (FORBIDDEN,
-// NOT_FOUND). Any other value is logged as "invalid", so nothing else GitHub
-// sends reaches the log.
+// graphqlErrorType is a GraphQL error type as GitHub names them; any other value is logged as "invalid", so nothing else GitHub sends reaches the log.
 var graphqlErrorType = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
-// relayReady sends readyMutation and reads GitHub's whole answer before any of
-// it reaches the worker. GitHub answers a mutation it refuses with HTTP 200 and
-// an errors list (a token without contents write gets FORBIDDEN), so relaying
-// that 200 would let the worker's gh exit 0 with the pull request still a
-// draft, and the audit row would say completed. A 200 that does not show pull
-// request number ready is recorded as graphql_error and answered 502 with a
-// fixed body; the broker log names the pull request, the reason and the error
-// types, never GitHub's messages, under the row's session. A 200 that does
-// show it, and any other status, is relayed as relayResponse relays any
-// answer.
+// relayReady sends readyMutation and reads GitHub's whole answer before relaying it: GitHub refuses a mutation with HTTP 200 and an errors list, so relaying that would let gh exit 0 with the pull request still a draft.
+// A 200 not showing the pull request ready is recorded as graphql_error and answered 502 with a fixed body; the log names error types, never GitHub's messages.
 func (p *Proxy) relayReady(w http.ResponseWriter, out *http.Request, needles [][]byte, limit, number int64, event auditchain.Event, finish func(int, string), rejected func(*http.Response)) {
 	resp, err := p.upstream.RoundTrip(out)
 	if err != nil {
@@ -69,11 +58,7 @@ func (p *Proxy) relayReady(w http.ResponseWriter, out *http.Request, needles [][
 	p.relayResponse(w, resp, needles, limit, finish, rejected)
 }
 
-// readyRefused reports why GitHub's answer to readyMutation does not show pull
-// request number ready, or "" when it does: "errors" when it lists any, with
-// their distinct types ("none" for an error without one); "still_draft" when
-// the pull request it returns is still a draft; "unexpected" for any other
-// answer.
+// readyRefused reports why GitHub's answer does not show the pull request ready, or "" when it does: "errors" (with their distinct types), "still_draft" or "unexpected".
 func readyRefused(data []byte, number int64) (reason string, types []string) {
 	var answer struct {
 		Data *struct {

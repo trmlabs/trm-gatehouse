@@ -2,11 +2,7 @@
 
 package pgproxy
 
-// Transaction-mode multiplexing against a real PostgreSQL. Requires
-// AV_TEST_PG_POOL_ADMIN, an admin DSN for a disposable server, for example
-// postgres://postgres:<password>@127.0.0.1:55434/postgres?sslmode=disable.
-// The tests create their own roles and database objects with synthetic
-// passwords and drop them afterwards.
+// Transaction-mode multiplexing against a real PostgreSQL.
 
 import (
 	"context"
@@ -559,10 +555,7 @@ func TestRealPostgres_PoolReplacesDeadIdleConnections(t *testing.T) {
 	}
 }
 
-// The classifier cannot see inside functions. A function that sets a session
-// setting, creates a temp table, takes a session advisory lock or prepares an
-// SQL statement passes as a plain SELECT; the check-in backstop finds the state, resets the connection
-// and audits the catch, so the next client starts clean.
+// The classifier cannot see inside functions.
 func TestRealPostgres_PoolCheckInCatchesStateTheClassifierMissed(t *testing.T) {
 	f := newPoolFixture(t, 1, time.Hour, PoolOptions{})
 	ctx := context.Background()
@@ -620,9 +613,8 @@ func TestRealPostgres_PoolCheckInCatchesStateTheClassifierMissed(t *testing.T) {
 	}
 }
 
-// Two entitlement tiers are two bindings with two database roles. Their
-// clients never share a server connection: every transaction runs as its
-// own tier's role, even with both tiers busy on one small shared budget.
+// Two entitlement tiers are two bindings with two database roles.
+// Their clients never share a server connection: every transaction runs as its own tier's role.
 func TestRealPostgres_PoolKeySeparatesEntitlementTiers(t *testing.T) {
 	env := newPoolEnv(t)
 	minter := &tierMinter{env: env}
@@ -709,10 +701,8 @@ func (f *poolFixture) connectTo(t *testing.T, database string) *pgx.Conn {
 	return conn
 }
 
-// libpq is what psycopg drives, so libpq's default startup packet is
-// psycopg's: user, database, application_name (psql sets one) and the
-// locale's client_encoding, which is SQL_ASCII under the C locale. Requires
-// AV_TEST_PSQL, a psql binary.
+// libpq is what psycopg drives, so libpq's default startup packet is psycopg's: user, database,
+// application_name (psql sets one) and the locale's client_encoding, which is SQL_ASCII under the C locale.
 func TestRealPostgres_PoolLibpqDefaultStartup(t *testing.T) {
 	psql := os.Getenv("AV_TEST_PSQL")
 	if psql == "" {
@@ -734,9 +724,7 @@ func TestRealPostgres_PoolLibpqDefaultStartup(t *testing.T) {
 	}
 }
 
-// node-postgres 8.x sends only user and database by default and uses unnamed
-// statements with parameters. Requires AV_TEST_NODE_PG_MODULES, a
-// node_modules directory containing pg.
+// node-postgres 8.x sends only user and database by default and uses unnamed statements with parameters.
 func TestRealPostgres_PoolNodePgDefaultStartup(t *testing.T) {
 	modules := os.Getenv("AV_TEST_NODE_PG_MODULES")
 	if modules == "" {
@@ -762,10 +750,8 @@ func TestRealPostgres_PoolNodePgDefaultStartup(t *testing.T) {
 	}
 }
 
-// State a function plants behind a plain SELECT, which the classifier cannot
-// see: a temporary domain, a SQL-level prepared statement, sequence state and
-// role-level defaults. Check-in resets the first three and retires the
-// credential for the last, whose effect DISCARD ALL cannot undo.
+// State a function plants behind a plain SELECT, which the classifier cannot see: a temporary domain, a
+// SQL-level prepared statement, sequence state and role-level defaults.
 func TestRealPostgres_PoolCheckInCatchesTheReviewedLeaks(t *testing.T) {
 	f := newPoolFixture(t, 1, time.Hour, PoolOptions{})
 	ctx := context.Background()
@@ -834,9 +820,7 @@ func TestRealPostgres_PoolCheckInCatchesTheReviewedLeaks(t *testing.T) {
 	_ = user
 }
 
-// A role switched behind a plain SELECT would hand the next client of the
-// connection another role's access. Check-in closes that connection rather
-// than reset it, and the next client is back on the pool login.
+// A role switched behind a plain SELECT would hand the next client of the connection another role's access.
 func TestRealPostgres_PoolCheckInClosesASwitchedRole(t *testing.T) {
 	f := newPoolFixture(t, 1, time.Hour, PoolOptions{})
 	ctx := context.Background()
@@ -885,9 +869,8 @@ func TestRealPostgres_PoolCheckInClosesASwitchedRole(t *testing.T) {
 	}
 }
 
-// A reported parameter changed alongside role-level defaults must not let
-// check-in skip the role check: DISCARD ALL resets the parameter but not the
-// login's defaults, which would then reach every later client.
+// A reported parameter changed alongside role-level defaults must not let check-in skip the role check:
+// DISCARD ALL resets the parameter but not the login's defaults.
 func TestRealPostgres_PoolCheckInChecksRolesEvenWhenAParameterChanged(t *testing.T) {
 	f := newPoolFixture(t, 1, time.Hour, PoolOptions{})
 	ctx := context.Background()

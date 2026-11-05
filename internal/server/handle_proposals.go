@@ -449,9 +449,7 @@ func (s *Server) handleAdminProposalApprove(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 
-		// OAuth credentials: tokens come from the connect flow or token
-		// upload, not from the approval request. Build an OAuthCredentialConfig
-		// and let ApplyProposal handle the credential row.
+		// OAuth tokens come from the connect flow, not the approval request; ApplyProposal handles the credential row.
 		if slot.Type == "oauth" && slot.OAuth != nil {
 			oc := store.OAuthCredentialConfig{
 				Key:              slot.Key,
@@ -504,10 +502,7 @@ func (s *Server) handleAdminProposalApprove(w http.ResponseWriter, r *http.Reque
 		finalCredentials[slot.Key] = store.EncryptedCredential{Ciphertext: ct, Nonce: nonce}
 	}
 
-	// MergeServices requires non-empty Name on both sides; normalize
-	// proposed entries against current existing state using the same
-	// helper as the create path. The lock serializes load → merge →
-	// apply against concurrent direct upserts on /services.
+	// The lock serializes load, merge and apply against concurrent direct upserts on /services.
 	unlock, err := s.lockVault(ctx, ns.ID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "lock failed")

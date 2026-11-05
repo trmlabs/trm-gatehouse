@@ -17,9 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// selfListenerConfig is a sidecar with one routed port per broker lane: one
-// routed by the broker's catalog, one by a fixed list, each on its own
-// upstream.
 func selfListenerConfig() FixedConfig {
 	c := selfConfig()
 	lane := func(address, audience string) UpstreamConfig {
@@ -72,7 +69,6 @@ func TestSelfModeRoutedListenersValidation(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// Outside a sidecar the field does not exist.
 	f := newRelayFixture(t)
 	paired := f.c
 	paired.PostgresListeners = []PostgresListenerConfig{{Listen: "127.0.0.1:15432", Upstream: f.upstream(t, "broker.internal:15443"),
@@ -101,8 +97,6 @@ func TestSelfModeRoutedListenersValidation(t *testing.T) {
 	}
 }
 
-// manyListeners is a sidecar config with n routed ports, one per loopback
-// port from 20000 up.
 func manyListeners(n int) FixedConfig {
 	c := selfListenerConfig()
 	c.PostgresBindings = nil
@@ -115,8 +109,6 @@ func manyListeners(n int) FixedConfig {
 	return c
 }
 
-// The number of routed ports is a setting. Unset it allows ten thousand, far
-// beyond any worker; set, it is the bound, up to the loopback port space.
 func TestSelfModeRoutedListenerBound(t *testing.T) {
 	for name, tc := range map[string]struct {
 		listeners, bound int
@@ -139,9 +131,6 @@ func TestSelfModeRoutedListenerBound(t *testing.T) {
 	}
 }
 
-// laneBroker is a fake broker that records what one routed port sends it: the
-// session line, the startup's database and the proof the relay presents as
-// its password.
 type laneBroker struct {
 	address string
 	seen    chan laneArrival
@@ -199,12 +188,6 @@ func newLaneBroker(t *testing.T, cert tls.Certificate) *laneBroker {
 	return b
 }
 
-// Each routed port forwards the worker's database name to its own broker,
-// with that broker's proof and that lane's session token; the other broker
-// hears nothing of it. A name outside a listed port's databases is refused
-// before any broker is dialed. A client's SSLRequest, which libpq sends first
-// by default (sslmode=prefer), is declined with N on every sidecar port, a
-// fixed binding's included, and the session goes on in plaintext.
 func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 	f := newRelayFixture(t)
 	lanes := map[string]*laneBroker{"lane": newLaneBroker(t, f.cert), "other-lane": newLaneBroker(t, f.cert)}
@@ -258,8 +241,6 @@ func TestSelfModeRoutedListenersReachTheirOwnBroker(t *testing.T) {
 		}
 		if typ == 'R' && binary.BigEndian.Uint32(body) == 3 {
 			_, _ = conn.Write(encodePGFrame('p', []byte("gatehouse-relay-placeholder\x00")))
-			// The fake broker stops after the proof; the relay then ends the
-			// session, so there is nothing more to read.
 		}
 		return typ, body
 	}
@@ -306,7 +287,6 @@ func sessionFor(audience string) string {
 	return "e30.e30." + audience
 }
 
-// claimAudience is the single audience a test proof names.
 func claimAudience(t *testing.T, proof string) string {
 	t.Helper()
 	parts := strings.Split(proof, ".")

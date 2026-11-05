@@ -1,8 +1,4 @@
-// Command recorder stands in for GitHub so the fixtures in testdata/gh can
-// be recorded from a real gh without any token. It logs every request gh
-// sends (method, path, the headers the fixtures keep, body) as one JSON line,
-// and answers each GraphQL query with data shaped exactly by its selection,
-// so gh carries on to its next call. See ../README.md.
+// Command recorder stands in for GitHub so the fixtures in testdata/gh can be recorded from a real gh without a token; see ../README.md.
 package main
 
 import (
@@ -21,7 +17,6 @@ import (
 
 const prID = "PR_kwDNA-jNB9A" // [0, 1000, 2000]
 
-// scalar is a plausible value for a leaf field, by name.
 func scalar(name, parent string) any {
 	l := strings.ToLower(name)
 	switch {

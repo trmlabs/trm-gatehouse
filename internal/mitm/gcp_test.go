@@ -38,11 +38,7 @@ func (gcpRoot) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: "synthetic-broker-root", Expiry: time.Now().Add(time.Hour)}, nil
 }
 
-// gcpFake plays STS, IAM Credentials, Cloud Storage, BigQuery and a service
-// of the operator's own that verifies Google ID tokens. Storage honors each
-// downscoped token's boundary the way Google does: an object outside the
-// boundary's prefix is refused. The service accepts only an ID token it saw
-// minted for its own audience.
+// gcpFake plays STS, IAM Credentials, Cloud Storage, BigQuery and a service that verifies Google ID tokens; Storage refuses objects outside a downscoped token's prefix.
 type gcpFake struct {
 	mu         sync.Mutex
 	boundary   map[string]string // downscoped token -> allowed object prefix
@@ -53,8 +49,7 @@ type gcpFake struct {
 	reject     atomic.Bool // the service refuses the next request with 401
 }
 
-// syntheticIDToken is shaped like a Google ID token, unsigned: a payload
-// with aud, email and exp an hour out, and a signature naming the mint.
+// syntheticIDToken is an unsigned token shaped like a Google ID token.
 func syntheticIDToken(audience, email string, n int32) string {
 	header, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})
 	payload, _ := json.Marshal(map[string]any{"aud": audience, "email": email, "exp": time.Now().Add(time.Hour).Unix()})
@@ -132,9 +127,7 @@ func (f *gcpFake) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"principal":%q}`, account) // #nosec G705 -- test fake; JSON response
 	case "svc.example.com":
-		// An audience-pinned service: a Google-signed ID token for its own
-		// audience, from an allowed account. The fake checks the token it
-		// minted and the aud in its payload, as the real one would verify.
+		// An audience-pinned service: the fake checks the token it minted and the aud in its payload.
 		email, ok := f.identities[bearer]
 		var claims struct {
 			Aud string `json:"aud"`
@@ -228,7 +221,6 @@ func newGCPFixture(t *testing.T) *gcpFixture {
 	return f
 }
 
-// get calls through the broker as a worker whose sidecar names session.
 func (f *gcpFixture) get(t *testing.T, session, rawURL string) (int, string) {
 	t.Helper()
 	client := newTrustingClient(f.proxyURL, url.User("workload-token"), f.roots)
@@ -250,8 +242,7 @@ func (f *gcpFixture) get(t *testing.T, session, rawURL string) (int, string) {
 	return resp.StatusCode, string(data)
 }
 
-// A downscoped token reads its own prefix and nothing else in the bucket;
-// Storage refuses the other prefix with the very token the broker minted.
+// A downscoped token reads its own prefix only; Storage refuses the other prefix with the very token the broker minted.
 func TestGCPDownscopedTokenStaysInItsPrefix(t *testing.T) {
 	f := newGCPFixture(t)
 	code, body := f.get(t, "alice", "https://storage.googleapis.com/storage/v1/b/example-agent-files/o/teams%2Fanalytics%2Fq3.csv")
@@ -266,7 +257,6 @@ func TestGCPDownscopedTokenStaysInItsPrefix(t *testing.T) {
 	}
 }
 
-// Each impersonating entry gets a token for its own service account only.
 func TestGCPImpersonationUsesOnlyTheEntrysAccount(t *testing.T) {
 	f := newGCPFixture(t)
 	code, body := f.get(t, "alice", "https://bigquery.googleapis.com/bigquery/v2/projects/example-analytics/datasets")
@@ -288,10 +278,7 @@ func TestGCPImpersonationUsesOnlyTheEntrysAccount(t *testing.T) {
 	}
 }
 
-// An identity entry turns the worker's placeholder into an ID token for the
-// service's audience, carrying the account's email and no scope. The token
-// is reused, screened out of a response that echoes it, dropped when the
-// service refuses it, and never sent beyond the entry's paths.
+// An identity entry turns the placeholder into an ID token for the service's audience; the token is reused, screened out of echoes, dropped on refusal, and never sent beyond the entry's paths.
 func TestGCPIdentityTokenIsBoundToTheAudience(t *testing.T) {
 	f := newGCPFixture(t)
 	whoami := "https://svc.example.com/api/whoami"
@@ -302,8 +289,7 @@ func TestGCPIdentityTokenIsBoundToTheAudience(t *testing.T) {
 	if code, _ := f.get(t, "alice", whoami); code != 200 || f.fake.mints.Load() != 1 {
 		t.Fatalf("second request: %d, minted %d tokens, want one reused", code, f.fake.mints.Load())
 	}
-	// A response that echoes the token is cut off before the worker sees it;
-	// get fails the test if any token reaches the worker.
+	// A response that echoes the token is cut off before the worker sees it.
 	if code, _ := f.get(t, "alice", "https://svc.example.com/api/echo"); f.audit.last().Outcome != "secret_echo" {
 		t.Fatalf("echoed token: %d %q", code, f.audit.last().Outcome)
 	}
@@ -313,14 +299,12 @@ func TestGCPIdentityTokenIsBoundToTheAudience(t *testing.T) {
 	if code, _ := f.get(t, "alice", "https://svc.example.com/admin/users"); code != 403 {
 		t.Fatalf("path outside the entry: %d", code)
 	}
-	// The service's own 403 keeps the token; only a refused token mints again.
 	if code, _ := f.get(t, "alice", "https://svc.example.com/api/denied"); code != 403 {
 		t.Fatalf("denied by the service: %d", code)
 	}
 	if code, _ := f.get(t, "alice", whoami); code != 200 || f.fake.mints.Load() != 1 {
 		t.Fatalf("after the service's 403: %d, minted %d tokens, want the first reused", code, f.fake.mints.Load())
 	}
-	// The service's 401 drops the token; the next request mints a new one.
 	f.fake.reject.Store(true)
 	if code, _ := f.get(t, "alice", whoami); code != 401 {
 		t.Fatalf("refused by the service: %d", code)
@@ -336,8 +320,7 @@ func TestGCPIdentityTokenIsBoundToTheAudience(t *testing.T) {
 	}
 }
 
-// The Cursor pool, a person outside the group, and a worker with no session
-// are refused before any token is minted.
+// The Cursor pool, a person outside the group, and a worker with no session are refused before any token is minted.
 func TestGCPRefusesCursorPoolAndUnentitledPeople(t *testing.T) {
 	f := newGCPFixture(t)
 	gcs := "https://storage.googleapis.com/storage/v1/b/example-agent-files/o/teams%2Fanalytics%2Fq3.csv"
@@ -348,7 +331,6 @@ func TestGCPRefusesCursorPoolAndUnentitledPeople(t *testing.T) {
 		t.Fatalf("no session: %d %q", code, f.audit.last().Outcome)
 	}
 	f.sessions.set(&brokercore.ProxyScope{VaultID: "vault-1", AgentID: "pool-agent", Pool: "cursor", WorkloadID: "pod-uid-9", VaultRole: "proxy"})
-	// A pool without the grant is refused at CONNECT, before any tunnel opens.
 	if code, _ := f.get(t, "alice", gcs); code != 0 || f.audit.last().Outcome != "pool" {
 		t.Fatalf("cursor pool: %d %q", code, f.audit.last().Outcome)
 	}

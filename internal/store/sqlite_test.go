@@ -16,9 +16,7 @@ import (
 
 func tp(t time.Time) *time.Time { return &t }
 
-// migratedTemplate is one fully migrated database file, built once per test
-// binary. Running every migration costs over a second per test under -race,
-// so openTestDB copies this file instead and Open finds nothing pending.
+// migratedTemplate is built once per test binary; openTestDB copies it so Open finds nothing pending.
 var migratedTemplate = sync.OnceValues(func() ([]byte, error) {
 	dir, err := os.MkdirTemp("", "store-template")
 	if err != nil {
@@ -655,9 +653,8 @@ func TestListScopedSessionsExcludesExpiredAndUserRows(t *testing.T) {
 		t.Fatalf("CreateScopedSession (expired): %v", err)
 	}
 
-	// User-login row that happens to carry the same vault_id (none today, but
-	// the list query must defend against future cross-pollution by filtering
-	// user_id IS NULL AND agent_id IS NULL).
+	// User-login row that happens to carry the same vault_id (none today);
+	// the list query must defend against cross-pollution by filtering user_id IS NULL AND agent_id IS NULL.
 	u, _ := s.CreateUser(ctx, "scoped-list@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 	if _, err := s.CreateUserSession(ctx, CreateUserSessionParams{
 		UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour),
@@ -880,20 +877,14 @@ func TestListAndRevokeUserSessions(t *testing.T) {
 	}
 }
 
-// TestPreMigrationSessionStillUsable simulates a session row created before
-// migration 040 — populated id/user_id/expires_at, NULL on the columns
-// added by 040 except for public_id (backfilled by the migration's UPDATE).
-// It must continue to authenticate, enumerate, and revoke without
-// requiring the user to re-login.
+// TestPreMigrationSessionStillUsable checks a session row from before migration 040 still authenticates, enumerates and revokes.
 func TestPreMigrationSessionStillUsable(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 
 	u, _ := s.CreateUser(ctx, "legacy@test.com", []byte("h"), []byte("s"), "owner", 600000, 0, 0, "pbkdf2-sha256")
 
-	// Forge a row that looks like one minted by the pre-040 server: just
-	// id/user_id/expires_at/created_at, no idle_ttl, no last_used_at, but
-	// with the backfilled public_id the migration would have written.
+	// Forge a pre-040 row: no idle_ttl or last_used_at, but the public_id the migration backfills.
 	rawToken := "av_sess_legacy_test_token_value_with_padding_to_64_chars_xxxxxxx"
 	tokenHash := hashSessionToken(rawToken)
 	expiresAt := time.Now().Add(time.Hour).UTC().Format(time.DateTime)
@@ -2172,12 +2163,7 @@ func TestExpirePendingPasswordResets(t *testing.T) {
 	}
 }
 
-// TestListRequestLogsTailOrdering is a regression test: when a burst
-// larger than the page size lands between polls, the tail query must
-// consume the oldest rows first so subsequent polls can advance the
-// cursor through the whole burst without gaps. Before the ASC fix,
-// `ORDER BY id DESC LIMIT N` returned the *newest* N rows and silently
-// lost the older ones on the next poll.
+// TestListRequestLogsTailOrdering guards that a burst larger than the page size is consumed oldest first, so polls advance without gaps.
 func TestListRequestLogsTailOrdering(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -2215,11 +2201,7 @@ func TestListRequestLogsTailOrdering(t *testing.T) {
 		t.Fatalf("historical page not DESC: %v", []int64{page[0].ID, page[1].ID, page[2].ID})
 	}
 
-	// Tail from an id boundary: returns rows (boundary, boundary+Limit]
-	// in ASC order so a subsequent poll with after=boundary+Limit picks
-	// up from there with no gap. Before the fix, the query was
-	// `ORDER BY id DESC LIMIT N`, which returned the newest N rows above
-	// the boundary and silently dropped the older ones.
+	// Tail from a boundary returns (boundary, boundary+Limit] in ASC order so the next poll continues without a gap.
 	boundary := page[2].ID - 1
 	tail, err := s.ListRequestLogs(ctx, ListRequestLogsOpts{VaultID: &ns.ID, After: boundary, Limit: 3})
 	if err != nil {
@@ -2236,9 +2218,7 @@ func TestListRequestLogsTailOrdering(t *testing.T) {
 	}
 }
 
-// TestNoAccessRoleAcceptedByMigration verifies migration 045 widened the
-// instance-role CHECK constraint on agents.role. A wire value of "no-access"
-// must persist; an invalid value must still be rejected.
+// TestNoAccessRoleAcceptedByMigration verifies agents.role accepts "no-access" (migration 045) and still rejects invalid values.
 func TestNoAccessRoleAcceptedByMigration(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -2646,10 +2626,7 @@ func TestDeleteVaultCredentialStoreKeepsCredentials(t *testing.T) {
 	}
 }
 
-// ReplaceVaultCredentialsForSync writes only while the row still matches the
-// config the snapshot was fetched against. This closes two races where an
-// in-flight sync would clobber credentials: a concurrent disconnect, and a
-// concurrent switch to a different Infisical config.
+// ReplaceVaultCredentialsForSync writes only while the row still matches the snapshot's config, closing races with a concurrent disconnect or config switch.
 func TestReplaceVaultCredentialsForSyncGatedOnStoreRow(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()

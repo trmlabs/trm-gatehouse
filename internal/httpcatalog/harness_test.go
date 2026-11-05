@@ -12,8 +12,6 @@ const (
 	digestB = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 )
 
-// harnessCatalog is the three harnesses Gatehouse serves: Cursor workers, Claude
-// sessions and agent-sandbox, each with its pool and one entry granted to all.
 func harnessCatalog() map[string]any {
 	inCluster := map[string]any{"issuer": "https://container.googleapis.com/v1/projects/p/locations/l/clusters/example-cluster", "keys": "in-cluster", "audience": "gatehouse"}
 	return map[string]any{
@@ -77,8 +75,6 @@ func TestHarnessProfilesLoad(t *testing.T) {
 	}
 }
 
-// A catalog with no harnesses keeps working: each pool's profile is derived
-// from its identity, as the broker behaved before profiles.
 func TestPoolsWithoutHarnessesDeriveTheirProfile(t *testing.T) {
 	c := harnessCatalog()
 	delete(c, "harnesses")
@@ -99,7 +95,6 @@ func TestPoolsWithoutHarnessesDeriveTheirProfile(t *testing.T) {
 	}
 }
 
-// Every missing or contradictory field refuses the whole catalog.
 func TestIncompleteOrContradictoryHarnessIsRefused(t *testing.T) {
 	cases := map[string]func(c map[string]any){
 		"no name":         func(c map[string]any) { delete(harnessAt(c, 0), "name") },
@@ -207,8 +202,6 @@ func TestIncompleteOrContradictoryHarnessIsRefused(t *testing.T) {
 	}
 }
 
-// A Cursor pool decides per person when its sidecar mints the run's identity
-// token; each vendor's requester serves only its own vendor's pools.
 func TestCursorPersonProfile(t *testing.T) {
 	person := func(c map[string]any) {
 		h := harnessAt(c, 0)
@@ -265,9 +258,6 @@ func TestCursorPersonProfile(t *testing.T) {
 	}
 }
 
-// One shared proxy serves customer and developer sandboxes as two profiles:
-// the customer one at the external ceiling with no entries, the developer
-// one with its own pool and grants.
 func TestCustomerAndDeveloperSandboxProfiles(t *testing.T) {
 	c := harnessCatalog()
 	teamA := map[string]any{}
@@ -286,15 +276,12 @@ func TestCustomerAndDeveloperSandboxProfiles(t *testing.T) {
 	if pool.Ceiling != CeilingExternal || pool.Profile().Name != "agent-sandbox-team-a" {
 		t.Fatalf("team-a: %+v", pool)
 	}
-	// Granting the customer pool anything refuses the catalog.
 	c["entries"] = []any{json.RawMessage(`{` + strings.Replace(entryBase, `"pools":["p"]`, `"pools":["sandboxes","team-a"]`, 1) + `}`)}
 	if _, err := parseCatalog(t, c); err == nil {
 		t.Fatal("an entry granted to the customer sandboxes' external pool was accepted")
 	}
 }
 
-// A proxy-attested harness may admit images by an agent-sandbox repository
-// path instead of digests; two harnesses may never claim overlapping paths.
 func TestHarnessImagePrefixes(t *testing.T) {
 	const teamA = "registry.example.com/example-project/example-images/team-a/"
 	c := harnessCatalog()
@@ -337,9 +324,6 @@ func TestHarnessImagePrefixes(t *testing.T) {
 	}
 }
 
-// A sidecar harness may serve agents in another cluster, on that cluster's
-// keys: the broker's identity configuration decides whether it can read
-// their Pods (a trust domain's pods), and refuses the binding otherwise.
 func TestHarnessSidecarAcrossClusters(t *testing.T) {
 	c := harnessCatalog()
 	for _, i := range []int{0, 1} {
@@ -355,7 +339,6 @@ func TestHarnessSidecarAcrossClusters(t *testing.T) {
 	}
 }
 
-// Pinned keys are another cluster's keys, as remote ones are.
 func TestHarnessPinnedKeys(t *testing.T) {
 	c := harnessCatalog()
 	harnessAt(c, 2)["trustDomain"].(map[string]any)["keys"] = "pinned"
@@ -368,8 +351,6 @@ func TestHarnessPinnedKeys(t *testing.T) {
 	}
 }
 
-// One harness may serve a namespace per tenant: 10,000 load, one more is
-// refused as malformed.
 func TestHarnessServesTenThousandNamespaces(t *testing.T) {
 	for n, ok := range map[int]bool{10000: true, 10001: false} {
 		c := harnessCatalog()
@@ -384,8 +365,6 @@ func TestHarnessServesTenThousandNamespaces(t *testing.T) {
 	}
 }
 
-// An agent-sandbox pool decides per person when its proxy attests the Pod's
-// requester; the requester counts only there, and only on such a pool.
 func TestAttestedPersonProfile(t *testing.T) {
 	person := func(c map[string]any) {
 		h := harnessAt(c, 2)

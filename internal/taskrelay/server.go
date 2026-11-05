@@ -17,15 +17,9 @@ import (
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
-// handshakeTimeout is the default bound on a connection's setup. Ten seconds
-// covers a TLS handshake and the broker's admission (a Kubernetes token
-// review and a catalog decision, each normally under a second) several times
-// over, yet frees a slot held by a client that stalls before its startup.
-// Set handshakeSeconds where the broker sits far away or under heavy load.
+// handshakeTimeout is the default bound on a connection's setup: several times a TLS handshake plus admission, yet it frees a slot held by a stalled client.
 const handshakeTimeout = 10 * time.Second
 
-// maxConnections is a sidecar's default connection cap when the render sets
-// none (maxConnections).
 const maxConnections = 32
 
 type relay struct {
@@ -41,27 +35,20 @@ type relay struct {
 	workMu        sync.Mutex
 	stopping      bool
 	foreignPeer   atomic.Bool // set once a non-paired address has connected
-	// pgTLS, with a broker-issued certificate, answers a PostgreSQL client's
-	// SSLRequest; its listeners are then plain TCP and refuse plaintext.
-	pgTLS *tls.Config
-	// log is the relay's structured log (closelog.go); upstreams names an
-	// upstream's failures once.
+	// pgTLS, with a broker-issued certificate, answers SSLRequest; listeners are then plain TCP and refuse plaintext.
+	pgTLS     *tls.Config
 	log       *slog.Logger
 	upstreams upstreamWatch
 	atLimit   refusalWatch
 	closes    closeCounts
 }
 
-// Run serves native TLS only. Failure of any listener, pairing, deadline or
-// durable audit terminates the whole task. Supervisory detection is bounded by
-// the one-second polling interval plus the three-second Kubernetes timeout.
+// Run serves native TLS only; failure of any listener, pairing, deadline or durable audit ends the whole task.
 func Run(parent context.Context, c FixedConfig) error {
 	return RunWithListen(parent, c, net.Listen)
 }
 
-// loopbackOnly refuses, and closes, a socket that listen binds anywhere but
-// loopback. Validation holds a sidecar's configured addresses to loopback; this
-// holds the sockets a caller's listen returns to the same rule.
+// loopbackOnly refuses and closes a socket that listen binds anywhere but loopback.
 func loopbackOnly(listen func(network, address string) (net.Listener, error)) func(network, address string) (net.Listener, error) {
 	return func(network, address string) (net.Listener, error) {
 		l, e := listen(network, address)
@@ -76,10 +63,7 @@ func loopbackOnly(listen func(network, address string) (net.Listener, error)) fu
 	}
 }
 
-// RunWithListen is Run with the way it binds an address passed in. A test hands
-// it listeners it already holds, so it never has to choose a free port, release
-// it and hope nothing takes it before Run binds it. A sidecar's listeners must
-// still be on loopback, whichever socket listen returns.
+// RunWithListen is Run with the bind function passed in; a sidecar's listeners must still be on loopback.
 func RunWithListen(parent context.Context, c FixedConfig, listen func(network, address string) (net.Listener, error)) (result error) {
 	if e := c.Validate(time.Now()); e != nil {
 		return e
@@ -129,8 +113,7 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 		}
 	}
 	var tlsConfig *tls.Config
-	// A shared proxy without a certificate serves plaintext on the Pod
-	// network; its upstreams to the broker are TLS regardless.
+	// A shared proxy without a certificate serves plaintext on the Pod network; upstreams to the broker are TLS regardless.
 	if !c.Self && c.TLSCertFile != "" {
 		cert, e := tls.LoadX509KeyPair(c.TLSCertFile, c.TLSKeyFile)
 		if e != nil {
@@ -138,8 +121,7 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}}
 	}
-	// A broker-issued certificate is obtained before any listener binds,
-	// then renewed in the background for as long as the proxy runs.
+	// A broker-issued certificate is obtained before any listener binds, then renewed in the background.
 	certDone := make(chan struct{})
 	close(certDone)
 	if c.TLS != nil {
@@ -154,8 +136,6 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 		go func() { defer close(certDone); serving.run(ctx) }()
 	}
 	defer func() { cancel(); <-certDone }()
-	// Durable activity reports until the relay stops, then once more after
-	// every listener has closed.
 	durableDone := make(chan struct{})
 	close(durableDone)
 	if d := c.DurableActivity; d != nil && pair.cache != nil {
@@ -185,7 +165,6 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 			_ = l.Close()
 		}
 		r.wg.Wait()
-		// Every session has ended: log the counts the next window would have.
 		r.closes.flush(r.log)
 		if audit.record("relay", "terminal") != nil {
 			result = errDenied
@@ -206,8 +185,6 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 		return l, nil
 	}
 	bind := func(address string) (net.Listener, error) { return bindAs(address, tlsConfig) }
-	// A PostgreSQL listener with a broker-issued certificate starts in TCP and
-	// upgrades on the client's SSLRequest.
 	bindPostgres := func(address string) (net.Listener, error) {
 		if r.pgTLS != nil {
 			return bindAs(address, nil)
@@ -247,8 +224,7 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 		serveHTTP(l, http.HandlerFunc(r.connect))
 	}
 	if c.AdminListen != "" && pair.cache != nil {
-		// Plaintext and outside the connection slots: it serves one read-only
-		// report, and its network policy admits only the janitor.
+		// Plaintext and outside the connection slots: one read-only report; its network policy admits only the janitor.
 		l, e := listen("tcp", c.AdminListen)
 		if e != nil {
 			return errConfig
@@ -299,8 +275,6 @@ func RunWithListen(parent context.Context, c FixedConfig, listen func(network, a
 		}
 		servePostgres(l, func(conn net.Conn) { r.postgres(conn, binding, nil) })
 	}
-	// A routed listener takes the database from the client's startup: the
-	// shared proxy's one port, or each of a sidecar's ports, one per broker.
 	routed := append([]PostgresListenerConfig(nil), c.PostgresListeners...)
 	if c.PostgresListener != nil {
 		routed = append(routed, *c.PostgresListener)
@@ -405,8 +379,7 @@ func (r *relay) beginWork() bool {
 
 type boundedListener struct {
 	net.Listener
-	slots chan struct{}
-	// refused, if set, is told of each connection closed at the limit.
+	slots   chan struct{}
 	refused func()
 }
 type countedConn struct {
@@ -475,8 +448,6 @@ func (r *relay) admit(ctx context.Context, peer, protocol string) error {
 	return r.record(protocol, "admitted")
 }
 
-// attest returns, in shared mode, the encoded attestation of the agent Pod at
-// peer and its UID. Outside shared mode it returns empty strings and no error.
 func (r *relay) attest(peer string) (encoded string, agent agentIdentity, err error) {
 	if r.pair.cache == nil {
 		return "", agent, nil
@@ -491,7 +462,6 @@ func (r *relay) attest(peer string) (encoded string, agent agentIdentity, err er
 	return encoded, agentIdentity{pod: a.PodUID, owner: a.OwnerUID, requester: a.Requester}, nil
 }
 
-// handshake is this relay's bound on a connection's setup.
 func (r *relay) handshake() time.Duration {
 	if r.config.HandshakeSeconds != 0 {
 		return time.Duration(r.config.HandshakeSeconds) * time.Second
@@ -499,14 +469,9 @@ func (r *relay) handshake() time.Duration {
 	return handshakeTimeout
 }
 
-// agentIdentity is the Pod and controller UIDs, and the requester, a
-// connection was admitted for.
 type agentIdentity struct{ pod, owner, requester string }
 
-// watchPeer, in shared mode, rechecks the connection's agent Pod every
-// second and calls end once it is no longer the same admissible Pod under the
-// same controller and requester: deleted, its Sandbox gone or replaced, past
-// its deadline, or its watch down. The returned function stops the watch.
+// watchPeer rechecks the agent Pod every second and ends the connection once it is no longer the same admissible Pod, controller and requester.
 func (r *relay) watchPeer(peer string, admitted agentIdentity, end func()) func() {
 	if r.pair.cache == nil {
 		return func() {}
@@ -537,8 +502,6 @@ func (r *relay) watchPeer(peer string, admitted agentIdentity, end func()) func(
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// dialUpstream dials and handshakes within ctx's deadline, or within
-// handshakeTimeout when ctx has none.
 func dialUpstream(ctx context.Context, c UpstreamConfig) (net.Conn, error) {
 	t, e := clientTLS(c.CAFile, c.ServerName)
 	if e != nil {
@@ -553,8 +516,6 @@ func dialUpstream(ctx context.Context, c UpstreamConfig) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", c.Address)
 }
 
-// copyTunnel relays a (the agent) and b (the broker) until either ends,
-// recording in end why it ended.
 func copyTunnel(ctx context.Context, a net.Conn, ar io.Reader, b net.Conn, br io.Reader, deadline time.Time, end *ending) {
 	_ = a.SetDeadline(deadline)
 	_ = b.SetDeadline(deadline)

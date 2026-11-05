@@ -1,19 +1,14 @@
 import type { HttpClient } from "../http.js";
 import type { ScopedSession } from "../types.js";
 
-/**
- * Options for creating a vault-scoped session.
- */
+/** Options for creating a vault-scoped session. */
 export interface CreateSessionOptions {
   /** Session TTL in seconds (300-604800, i.e. 5 minutes to 7 days).
    *  Defaults to the server's 24h. */
   ttlSeconds?: number;
 }
 
-/**
- * Container configuration for routing a sandboxed agent's HTTP and
- * HTTPS traffic through Agent Vault's transparent MITM proxy.
- */
+/** Container configuration for routing a sandboxed agent's traffic through the MITM proxy. */
 export interface ContainerConfig {
   /** Environment variables to inject into the container. */
   env: {
@@ -24,16 +19,11 @@ export interface ContainerConfig {
     /** Hosts to bypass the proxy. */
     NO_PROXY: string;
   };
-  /** Root CA certificate PEM content. Mount this into the container and
-   *  point CA trust env vars (SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, etc.)
-   *  at the mount path. Use {@link buildProxyEnv} to generate the full
-   *  env var set once you know the mount path. */
+  /** Root CA certificate PEM content; mount it and point CA trust env vars at the path. */
   caCertificate: string;
 }
 
-/**
- * A minted vault-scoped session.
- */
+/** A minted vault-scoped session. */
 export interface Session {
   /** The vault-scoped session token. */
   token: string;
@@ -49,15 +39,7 @@ export interface Session {
 /** Default MITM proxy port when the server doesn't advertise one. */
 const DEFAULT_MITM_PORT = 14322;
 
-/**
- * Build the complete set of proxy environment variables for a container,
- * including CA trust variables pointing at the given certificate path.
- *
- * @param config - The container config from a minted session.
- * @param certPath - The path where the CA certificate will be mounted
- *   inside the container (e.g. `"/etc/ssl/agent-vault-ca.pem"`).
- * @returns A flat env var object ready to pass to the container runtime.
- */
+/** Build the proxy environment variables for a container, with CA trust variables pointing at certPath. */
 export function buildProxyEnv(
   config: ContainerConfig,
   certPath: string,
@@ -85,10 +67,7 @@ interface MitmInfo {
   port: number;
 }
 
-/**
- * Resource for minting vault-scoped session tokens.
- * Maps to `POST /v1/sessions`.
- */
+/** Resource for minting vault-scoped session tokens (`POST /v1/sessions`). */
 export class SessionsResource {
   /** Cached MITM info promise — fetched once, reused across create() calls. */
   private mitmInfoCache: Promise<MitmInfo | null> | null = null;
@@ -98,17 +77,7 @@ export class SessionsResource {
     private readonly vaultName: string,
   ) {}
 
-  /**
-   * Mint a vault-scoped session token.
-   *
-   * The returned session includes a `containerConfig` with the MITM proxy
-   * URL, bypass list, and root CA certificate. Pass these to your container
-   * runtime so the sandboxed agent's HTTPS traffic routes through Agent Vault
-   * transparently. Use {@link buildProxyEnv} to expand the config into a
-   * complete env var set once you know the CA certificate mount path.
-   *
-   * `containerConfig` is `null` when the server has MITM disabled.
-   */
+  /** Mint a vault-scoped session token; `containerConfig` is `null` when the server has MITM disabled. */
   async create(options?: CreateSessionOptions): Promise<Session> {
     const [res, mitmInfo] = await Promise.all([
       this.httpClient.post<ScopedSession>("/v1/sessions", {
@@ -147,10 +116,7 @@ export class SessionsResource {
     return this.mitmInfoCache;
   }
 
-  /**
-   * Fetch the MITM CA certificate and extract host/port metadata.
-   * Returns null when MITM is disabled on the server.
-   */
+  /** Fetch the MITM CA certificate and host/port metadata, or null when MITM is disabled. */
   private async fetchMitmInfo(): Promise<MitmInfo | null> {
     const resp = await this.httpClient.raw("GET", "/v1/mitm/ca.pem");
     if (resp.status === 404 || !resp.ok) {

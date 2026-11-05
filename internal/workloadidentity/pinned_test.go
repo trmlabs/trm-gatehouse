@@ -29,8 +29,6 @@ func pinnedSet(keys ...map[string]any) json.RawMessage {
 	return b
 }
 
-// pinnedDomain is the remote cluster's trust domain, with its public key
-// pinned in configuration instead of fetched.
 func pinnedDomain(rc *remoteCluster, keys ...map[string]any) TrustDomain {
 	td := rc.td
 	td.Keys, td.JWKSURL, td.CAFile = "pinned", "", ""
@@ -38,8 +36,6 @@ func pinnedDomain(rc *remoteCluster, keys ...map[string]any) TrustDomain {
 	return td
 }
 
-// A pinned domain verifies with no network call; an unknown kid and an
-// expired token are refused.
 func TestPinnedKeysVerifyWithoutFetching(t *testing.T) {
 	f := setupPool(t)
 	rc := newRemoteCluster(t)
@@ -69,7 +65,6 @@ func TestPinnedKeysVerifyWithoutFetching(t *testing.T) {
 	}
 }
 
-// EC P-256 keys verify ES256 tokens, and only ES256 tokens.
 func TestPinnedES256(t *testing.T) {
 	f := setupPool(t)
 	rc := newRemoteCluster(t)
@@ -92,7 +87,6 @@ func TestPinnedES256(t *testing.T) {
 	}
 }
 
-// Only a complete public key set can be pinned.
 func TestPinnedSetValidation(t *testing.T) {
 	f := setupPool(t)
 	rc := newRemoteCluster(t)
@@ -146,7 +140,6 @@ func TestPinnedSetValidation(t *testing.T) {
 	}
 }
 
-// A shared proxy is admitted end to end under a pinned trust domain.
 func TestProxyAttestedUnderPinnedKeys(t *testing.T) {
 	p := setupProxy(t)
 	c := p.r.config
@@ -165,9 +158,7 @@ func TestProxyAttestedUnderPinnedKeys(t *testing.T) {
 	}
 }
 
-// Each signing-key refusal has its trust-domain mode's own code and names the
-// token's kid and the connection's peer, never any part of the token. A kid
-// that is not a plain identifier is recorded as "invalid" plus a hash prefix.
+// Each signing-key refusal has its mode's own code and names the kid and peer, never any part of the token; a kid that is not a plain identifier is recorded as "invalid" plus a hash prefix.
 func TestKeyRefusalsNameKidAndPeer(t *testing.T) {
 	f := setupPool(t)
 	ctx := context.Background()

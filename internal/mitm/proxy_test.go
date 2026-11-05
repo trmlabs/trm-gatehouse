@@ -87,12 +87,7 @@ func (f *fakeCredProvider) Inject(_ context.Context, _, targetHost string, targe
 	return res.result, res.err
 }
 
-// setupProxy starts a mitm.Proxy backed by a freshly-generated SoftCA and
-// the given session + credential stubs. Returns the listening URL, the
-// root-cert pool for client-side trust, and the proxy instance. Tests
-// that need to customise Options (e.g. inject a LogSink) pass option
-// mutators that run before New() so the field is set before the
-// serving goroutine starts and is therefore race-free.
+// setupProxy starts a mitm.Proxy with a fresh SoftCA and stubs; option mutators run before New() to stay race-free.
 func setupProxy(t *testing.T, sr brokercore.SessionResolver, cp brokercore.CredentialProvider, optMutators ...func(*Options)) (proxyURL *url.URL, clientRoots *x509.CertPool, p *Proxy) {
 	t.Helper()
 
@@ -143,9 +138,7 @@ func setupProxy(t *testing.T, sr brokercore.SessionResolver, cp brokercore.Crede
 	return proxyURL, clientRoots, p
 }
 
-// newTrustingClient returns an http.Client that routes HTTPS through
-// proxyURL (with the given userinfo encoded as Basic Proxy-Authorization)
-// and trusts the given roots for the terminated client-side TLS.
+// newTrustingClient returns an http.Client that routes HTTPS through proxyURL and trusts the given roots.
 func newTrustingClient(proxyURL *url.URL, userInfo *url.Userinfo, roots *x509.CertPool) *http.Client {
 	u := *proxyURL
 	u.User = userInfo
@@ -225,11 +218,7 @@ func TestMITMInjectsCredentials(t *testing.T) {
 	if sawProxyAuth != "" {
 		t.Fatalf("upstream saw Proxy-Authorization %q; must be stripped", sawProxyAuth)
 	}
-	// RFC 7230 §5.4: forwarded Host MUST equal the URI authority,
-	// including non-default port. handleConnect → forwardRequest passes
-	// the canonical "host:port" target into outReq.Host. Locks in the
-	// fix from #151 (#150 review item 2) so the CONNECT path stays
-	// RFC-compliant for non-default-port upstreams.
+	// RFC 7230 5.4: the forwarded Host must equal the URI authority, including a non-default port.
 	if sawHost != upstreamAuthority {
 		t.Errorf("upstream Host = %q, want %q", sawHost, upstreamAuthority)
 	}
@@ -922,10 +911,7 @@ func TestMITMWebSocketUpstreamHandshakeTimeout(t *testing.T) {
 }
 
 func TestMITMPassthroughForwardsClientAuthorization(t *testing.T) {
-	// On the MITM ingress, Proxy-Authorization is the broker-scoped credential
-	// and Authorization is the client's own upstream header — it must flow
-	// through unchanged for passthrough services. Proxy-Authorization and
-	// hop-by-hop headers must still be stripped.
+	// Authorization is the client's upstream header and must pass through unchanged; Proxy-Authorization and hop-by-hop headers must be stripped.
 	var sawAuth, sawCookie, sawTrace, sawProxyAuth string
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuth = r.Header.Get("Authorization")
@@ -964,10 +950,7 @@ func TestMITMPassthroughForwardsClientAuthorization(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer upstream-token")
 	req.Header.Set("Cookie", "session=abc")
 	req.Header.Set("X-Trace-Id", "trace-123")
-	// Set Proxy-Authorization on the tunneled request explicitly. Go's
-	// http.Transport only emits Proxy-Authorization on the CONNECT
-	// handshake (via url.User), not on in-tunnel requests, so without
-	// this assignment the strip assertion below would be vacuous.
+	// Set Proxy-Authorization explicitly: http.Transport only sends it on CONNECT, so the strip assertion would otherwise be vacuous.
 	req.Header.Set("Proxy-Authorization", "Basic c2hvdWxkLWJlLXN0cmlwcGVk")
 
 	resp, err := client.Do(req)
@@ -1165,9 +1148,7 @@ func readWebSocketTextFrame(r io.Reader) (string, error) {
 	return string(payload), nil
 }
 
-// rawConnect dials the proxy over plain TCP, sends a CONNECT request with the
-// given extra headers (e.g. Proxy-Authorization), and returns the response.
-// Callers assert on the returned status code and body.
+// rawConnect dials the proxy over plain TCP, sends CONNECT with the given extra headers, and returns the response.
 func rawConnect(t *testing.T, proxyURL *url.URL, roots *x509.CertPool, extraHeaders string) *http.Response {
 	t.Helper()
 	conn, err := net.Dial("tcp", proxyURL.Host)
@@ -1286,10 +1267,7 @@ func TestMITMUnknownHostInTunnel(t *testing.T) {
 	}
 }
 
-// TestMITMUnknownHostPassthrough verifies that when the credential provider
-// returns a Passthrough result (no service matched but the vault's policy
-// permits forwarding) the proxy forwards the request upstream untouched —
-// no Authorization header is injected and the request reaches the origin.
+// TestMITMUnknownHostPassthrough verifies a Passthrough result forwards the request untouched with no Authorization injected.
 func TestMITMUnknownHostPassthrough(t *testing.T) {
 	var gotAuthHeader string
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1360,11 +1338,7 @@ func TestMITMUpstreamCertUntrusted(t *testing.T) {
 	}
 }
 
-// Origin-form requests (GET /path) sent directly to the proxy listener
-// — i.e. requests that try to use the proxy as if it were an origin
-// server — must be rejected. The dispatch only routes CONNECT and
-// absolute-form forward-proxy shapes; everything else is malformed for
-// this ingress and returns 400.
+// Origin-form requests sent directly to the proxy listener are malformed for this ingress and must return 400.
 func TestMITMRejectsOriginFormRequests(t *testing.T) {
 	proxyURL, clientRoots, _ := setupProxy(t, errResolver(brokercore.ErrInvalidSession), &fakeCredProvider{})
 
@@ -1533,9 +1507,7 @@ func TestMITMSubstitutionRewritesQueryAndHeader(t *testing.T) {
 	}
 }
 
-// overrideRemoteAddr wraps the proxy's HTTP handler to set RemoteAddr to
-// a non-loopback IP so rate-limit tests exercise the non-exempt path.
-// Must be called after setupProxy but before any requests are made.
+// overrideRemoteAddr sets a non-loopback RemoteAddr so rate-limit tests hit the non-exempt path; call after setupProxy.
 func overrideRemoteAddr(p *Proxy, addr string) {
 	orig := p.httpServer.Handler
 	p.httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

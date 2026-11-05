@@ -8,8 +8,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// EnableCredentialProxy selects request-time Vault reads instead of local
-// synchronization. Call once before attaching listeners or starting the server.
+// EnableCredentialProxy selects request-time Vault reads; call before attaching listeners or starting the server.
 func (s *Server) EnableCredentialProxy()       { s.credentialProxy = true }
 func (s *Server) CredentialProxyEnabled() bool { return s.credentialProxy }
 
@@ -25,8 +24,7 @@ func (r requestSecrets) ReadForRequest(ctx context.Context, id string) (map[stri
 	return (hashicorp.RequestResolver{Store: r.s.store, Fetcher: r.s.hashicorpClient}).ReadForRequest(ctx, id)
 }
 
-// Clear legacy synchronized rows before any listener is started. This prevents
-// future use, not forensic erasure of prior database files or backups.
+// Clear legacy synchronized rows before any listener starts; prevents future use, not forensic erasure.
 func (s *Server) prepareCredentialProxy(ctx context.Context) error {
 	if !s.credentialProxy {
 		return nil
@@ -50,13 +48,17 @@ func (s *Server) prepareCredentialProxy(ctx context.Context) error {
 	return nil
 }
 
-// AttachDatabaseCleanup binds the durable journal owner to server shutdown.
 func (s *Server) AttachDatabaseCleanup(c interface{ Close(context.Context) error }) {
 	s.pgLeaseCloser = c
 }
 
 // AttachShutdown registers fn to run when Start returns, before the Vault logins are revoked.
 func (s *Server) AttachShutdown(fn func()) { s.shutdownFuncs = append(s.shutdownFuncs, fn) }
+
+// AttachFinalShutdown registers fn to run when Start returns, after the Vault logins are revoked.
+func (s *Server) AttachFinalShutdown(fn func()) {
+	s.finalShutdownFuncs = append(s.finalShutdownFuncs, fn)
+}
 
 // CleanupStore supplies the configured persistent store for database journaling.
 func (s *Server) CleanupStore() Store { return s.store }

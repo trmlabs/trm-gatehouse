@@ -16,9 +16,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// TestMITMPortBasedRouting verifies that two HTTPS services on the same
-// host but different ports each receive their own credentials through
-// the CONNECT tunnel path.
+// TestMITMPortBasedRouting verifies two HTTPS services on one host with different ports get their own credentials.
 func TestMITMPortBasedRouting(t *testing.T) {
 	var sawAuth1, sawAuth2 string
 

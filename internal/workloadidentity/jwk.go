@@ -12,13 +12,10 @@ import (
 	"math/big"
 )
 
-// publicMembers are the JWK members a pinned public key may carry. Anything
-// else, and above all a private member (d, p, q, dp, dq, qi, k, oth), refuses
-// the whole set: a pinned set is public keys and nothing more.
+// publicMembers are the JWK members a pinned key may carry; any other, above all a private one (d, p, q, dp, dq, qi, k, oth), refuses the whole set.
 var publicMembers = map[string]bool{"kty": true, "kid": true, "alg": true, "use": true, "n": true, "e": true, "crv": true, "x": true, "y": true}
 
-// parseJWK turns one public JWK into a verification key: RSA (RS256, at least
-// 2048 bits) or EC P-256 (ES256). It reports ok false for anything else.
+// parseJWK turns a public JWK into a verification key: RSA (RS256, at least 2048 bits) or EC P-256 (ES256); ok is false for anything else.
 func parseJWK(m map[string]any) (kid string, key crypto.PublicKey, ok bool) {
 	field := func(name string) string { s, _ := m[name].(string); return s }
 	kid = field("kid")
@@ -59,9 +56,7 @@ func parseJWK(m map[string]any) (kid string, key crypto.PublicKey, ok bool) {
 	return "", nil, false
 }
 
-// parsePinnedJWKS validates a pinned public key set strictly: 1 to 16 keys,
-// each a valid public RSA or EC P-256 key with a unique kid, no private or
-// unknown members. Any fault refuses the whole set.
+// parsePinnedJWKS validates a pinned set strictly: 1 to 16 valid public RSA or EC P-256 keys with unique kids and no private or unknown members; any fault refuses the set.
 func parsePinnedJWKS(raw json.RawMessage) (map[string]crypto.PublicKey, error) {
 	var set struct {
 		Keys []map[string]any `json:"keys"`

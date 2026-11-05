@@ -6,28 +6,23 @@ import (
 	"strings"
 )
 
-// DefaultPollIntervalSeconds applies when the create call omits the field.
 const DefaultPollIntervalSeconds = 60
 
 // MinPollIntervalSeconds mirrors the DB CHECK constraint.
 const MinPollIntervalSeconds = 10
 
-// DefaultKVVersion is assumed when the create call omits kv_version. KV v2 is
-// the default secrets engine on a modern Vault (`secret/`).
+// DefaultKVVersion applies when kv_version is omitted; KV v2 is the modern Vault default.
 const DefaultKVVersion = 2
 
-// VaultConfig is the JSON shape persisted in vault_credential_stores.config_json
-// for hashicorp-backed vaults. Mount is the KV secrets-engine mount path
-// (e.g. "secret"); SecretPath is the path to a single KV item within that mount
-// whose key/value pairs become the vault's credentials.
+// VaultConfig is the JSON persisted in vault_credential_stores.config_json.
+// Mount and SecretPath name a single KV item whose pairs become the vault's credentials.
 type VaultConfig struct {
 	Mount      string `json:"mount"`
 	SecretPath string `json:"secret_path"`
 	KVVersion  int    `json:"kv_version"`
 }
 
-// Validate enforces the structural invariants the client and the broker both
-// rely on. Returns a flat error message safe to surface to API callers.
+// Validate returns a flat error message safe to surface to API callers.
 func (c VaultConfig) Validate() error {
 	if strings.TrimSpace(c.Mount) == "" {
 		return fmt.Errorf("mount is required (e.g. \"secret\")")
@@ -41,10 +36,7 @@ func (c VaultConfig) Validate() error {
 	return nil
 }
 
-// withDefaults returns a copy with zero-value fields filled in, so a config
-// JSON that omits kv_version (e.g. a direct API POST) resolves to the default
-// KV v2 rather than failing Validate. The CLI defaults the flag to 2, so both
-// entry points land on the same value.
+// withDefaults fills zero-value fields so a config omitting kv_version resolves to KV v2.
 func (c VaultConfig) withDefaults() VaultConfig {
 	if c.KVVersion == 0 {
 		c.KVVersion = DefaultKVVersion
@@ -52,7 +44,6 @@ func (c VaultConfig) withDefaults() VaultConfig {
 	return c
 }
 
-// MarshalConfigJSON returns the canonical JSON form persisted in the DB.
 func MarshalConfigJSON(c VaultConfig) (string, error) {
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -61,8 +52,7 @@ func MarshalConfigJSON(c VaultConfig) (string, error) {
 	return string(b), nil
 }
 
-// ParseConfigJSON inverts MarshalConfigJSON. Trims whitespace and applies
-// defaults so a row written before kv_version existed still resolves.
+// ParseConfigJSON inverts MarshalConfigJSON, trimming and applying defaults so older rows still resolve.
 func ParseConfigJSON(raw string) (VaultConfig, error) {
 	var c VaultConfig
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {

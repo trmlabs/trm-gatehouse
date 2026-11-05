@@ -38,9 +38,7 @@ automations:
 
 var tokenLine = regexp.MustCompile(`(?m)^(example-agent\.[A-Za-z0-9_-]{43})$`)
 
-// The mint command prints the token once and a catalog block that the broker's
-// own validator accepts and that the token verifies against. Nothing is
-// written: the only place the token exists is the output.
+// Mint prints the token once and a catalog block the broker's validator accepts; nothing is stored.
 func TestMintAgentTokenPrintsATokenAndItsBlock(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -61,7 +59,6 @@ func TestMintAgentTokenPrintsATokenAndItsBlock(t *testing.T) {
 	if !strings.Contains(block, "expires: ") || strings.Contains(block, "write") {
 		t.Fatalf("unrequested fields:\n%s", block)
 	}
-	// The paste goes under "automations:" in a catalog the validator accepts.
 	if err := validateBrokerCatalog([]byte(agentCatalogHead+block), nil, true, &bytes.Buffer{}); err != nil {
 		t.Fatalf("validator refused the printed block: %v\n%s", err, block)
 	}
@@ -76,7 +73,6 @@ func TestMintAgentTokenPrintsATokenAndItsBlock(t *testing.T) {
 	if _, err := (agenttoken.Static{Catalog: catalog}).Verify(context.Background(), token); err != nil {
 		t.Fatalf("the minted token is refused by its own block: %v", err)
 	}
-	// Nothing was stored.
 	if files, _ := filepath.Glob(filepath.Join(dir, "*")); len(files) != 0 {
 		t.Fatalf("mint wrote files: %v", files)
 	}
@@ -91,8 +87,6 @@ func TestMintAgentTokenPrintsATokenAndItsBlock(t *testing.T) {
 	}
 }
 
-// Rotation keeps the old hash beside the new for the overlap, with an expiry
-// and a write list when asked for, and the block still validates.
 func TestMintAgentTokenRotationExpiryAndWrite(t *testing.T) {
 	old := strings.Repeat("a", 64)
 	var out bytes.Buffer
@@ -135,10 +129,7 @@ func TestMintAgentTokenRefusals(t *testing.T) {
 	}
 }
 
-// A token always expires: the command defaults to the longest life the catalog
-// accepts, refuses anything longer or not positive, and the block it prints
-// loads. A block with no expiry, or one the catalog would refuse, is never
-// printed.
+// A token always expires: the default is the longest life the catalog accepts.
 func TestTokenExpiryDefaultAndCap(t *testing.T) {
 	now := time.Date(2030, 1, 1, 12, 0, 0, 500, time.UTC)
 	flag := brokerCatalogMintAgentTokenCmd.Flags().Lookup("expires-in")
@@ -158,7 +149,6 @@ func TestTokenExpiryDefaultAndCap(t *testing.T) {
 			t.Errorf("%s accepted", in)
 		}
 	}
-	// No expiry on the spec: the block would be refused, so nothing prints.
 	var out bytes.Buffer
 	err = mintAgentToken(agentBlock{ID: "example-agent", Owner: "platform-team", Entries: []string{"serpapi"}}, &out)
 	if err == nil || out.Len() != 0 {
@@ -166,8 +156,7 @@ func TestTokenExpiryDefaultAndCap(t *testing.T) {
 	}
 }
 
-// The static-token listener starts only with the credential proxy and a PROXY
-// header on the HTTP listener, on a real port.
+// The static-token listener starts only with the credential proxy and a PROXY header.
 func TestStaticTokenPortNeedsItsPrerequisites(t *testing.T) {
 	for name, tc := range map[string]struct{ port, proxyHeader string }{
 		"no credential proxy": {"14326", "true"},
@@ -190,7 +179,6 @@ func TestStaticTokenPortNeedsItsPrerequisites(t *testing.T) {
 	}
 }
 
-// blockOf is the catalog block in mint's output.
 func blockOf(t *testing.T, out string) string {
 	t.Helper()
 	_, block, ok := strings.Cut(out, "\n  - id:")

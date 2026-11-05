@@ -10,8 +10,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// mintedTokens stands in for httpcatalog.ClientTokens: it hands out a token,
-// or an error, and counts invalidations.
 type mintedTokens struct {
 	mu          sync.Mutex
 	value       string
@@ -30,9 +28,7 @@ func (m *mintedTokens) Token(context.Context, *httpcatalog.Entry) (httpcatalog.S
 
 func (m *mintedTokens) Invalidate(*httpcatalog.Entry) { m.mu.Lock(); m.invalidated++; m.mu.Unlock() }
 
-// newClientCredentialsFixture is the adapter fixture with its entry's key
-// minted instead of stored. The minted token is adapterKeyV1, so the
-// fixture's vendor accepts it and its echo paths echo it.
+// newClientCredentialsFixture is the adapter fixture with its entry's key minted (adapterKeyV1) instead of stored.
 func newClientCredentialsFixture(t *testing.T, tokens *mintedTokens) *adapterFixture {
 	t.Helper()
 	return newAdapterFixture(t, func(o *Options) {
@@ -62,16 +58,13 @@ func TestAdapterSendsAMintedToken(t *testing.T) {
 			t.Fatalf("chat: %d %q %v", code, body, err)
 		}
 	}
-	// The token is screened like a stored key.
 	if code, _, _ := f.do(t, "GET", "/v1/echo-header", "", nil); code != 502 || f.audit.last().Outcome != "response_refused" {
 		t.Fatalf("header echo: %d %+v", code, f.audit.last())
 	}
-	// A worker's own token is refused.
 	code, _, _ := f.do(t, "POST", "/v1/chat/completions", `{}`, func(r *http.Request) { r.Header.Set("Authorization", "Bearer worker-own") })
 	if code != 400 || f.audit.last().Outcome != "credential_header" {
 		t.Fatalf("worker token: %d %+v", code, f.audit.last())
 	}
-	// A vendor refusal asks for a new token.
 	f.acceptsV = adapterKeyV2
 	if code, _, _ := f.do(t, "POST", "/v1/chat/completions", `{}`, nil); code != 401 || tokens.invalidated != 1 || f.keys.invalidated != 0 {
 		t.Fatalf("refusal: %d invalidated=%d, stored key invalidated=%d", code, tokens.invalidated, f.keys.invalidated)
@@ -100,7 +93,6 @@ func TestAdapterRefusesWithoutAMintedToken(t *testing.T) {
 			t.Fatalf("%v: %d %q Retry-After %q, vendor calls %d", tc.err, resp.StatusCode, resp.Header.Get(RefusalHeader), resp.Header.Get("Retry-After"), f.calls.Load())
 		}
 	}
-	// A broker without a minter refuses the entry as misconfigured.
 	f := newClientCredentialsFixture(t, nil)
 	r, _ := http.NewRequest("POST", f.url("/v1/chat/completions"), nil)
 	resp, err := f.client.Do(r)

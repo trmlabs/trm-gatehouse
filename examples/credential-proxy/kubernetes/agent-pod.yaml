@@ -1,5 +1,4 @@
-# Substitute an approved image digest before applying. Supply the actual task
-# command separately. This example intentionally contains no standing token.
+# Substitute an approved image digest before applying; the example holds no standing token.
 apiVersion: v1
 kind: Pod
 metadata:

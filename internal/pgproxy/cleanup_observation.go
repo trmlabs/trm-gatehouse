@@ -8,11 +8,7 @@ import (
 )
 
 // CleanupSnapshot observes the dedicated broker after admission is withdrawn.
-// It serializes with mint/reconciliation, checks the existing cleanup-owner
-// heartbeat without extending it, and verifies the parent login. It never issues or revokes a lease.
-// A consistent empty snapshot means broker reconciliation is idle, not proof
-// that an external database has no residual role or session. New admission must
-// remain withdrawn throughout the manager's handover, including after return.
+// It never issues or revokes a lease.
 func CleanupSnapshot(b *Broker, m *DurableLeaseMinter) runtimestatus.Snapshot {
 	return func(ctx context.Context) (runtimestatus.Observation, error) {
 		var result runtimestatus.Observation
@@ -26,8 +22,6 @@ func CleanupSnapshot(b *Broker, m *DurableLeaseMinter) runtimestatus.Snapshot {
 		if m.closed || m.ctx.Err() != nil {
 			return result, fmt.Errorf("cleanup authority unavailable")
 		}
-		// An empty actor (unauthenticated connection, legacy record) is
-		// unattributed and counts against every actor.
 		attributed := make(map[runtimestatus.Attribution]runtimestatus.Counts)
 		var unattributed runtimestatus.Counts
 		tally := func(owner runtimestatus.Attribution, change func(*runtimestatus.Counts)) {

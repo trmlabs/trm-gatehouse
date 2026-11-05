@@ -64,9 +64,6 @@ func TestSourceSwapsValidVersionsAndKeepsLastGood(t *testing.T) {
 			t.Error("rejection carried catalog content")
 		}
 	})
-	// A version that cannot be decoded is refused once and the previous
-	// catalog stays. (One bad entry only drops that entry; see
-	// TestSourceDropsBadEntriesAndAppliesTheRest.)
 	loader.set(`{"entries":[{"name":"x","host":"*.synthetic.example"}],"futureSection":true}`, 2, nil)
 	waitFor(t, "rejection", func() bool { mu.Lock(); defer mu.Unlock(); return len(rejected) > 0 })
 	time.Sleep(30 * time.Millisecond)
@@ -78,15 +75,12 @@ func TestSourceSwapsValidVersionsAndKeepsLastGood(t *testing.T) {
 	if source.Version() != 1 || !source.Current().HasHost("serpapi.com", 443) {
 		t.Fatal("a broken version replaced the last good catalog")
 	}
-	// A valid version is swapped in.
 	loader.set(strings.Replace(v1, `"serpapi.com"`, `"api.serpapi.com"`, 1), 3, nil)
 	waitFor(t, "swap", func() bool { return source.Version() == 3 })
 	if !source.Current().HasHost("api.serpapi.com", 443) || source.Current().HasHost("serpapi.com", 443) {
 		t.Fatal("new catalog not in force")
 	}
-	// Each swapped-in version is announced once; the refused one is not.
 	waitFor(t, "change hook", func() bool { return changes.Load() == 1 })
-	// Vault unreachable: reported, catalog kept.
 	loader.set("", 0, errors.New("sealed"))
 	waitFor(t, "load failure", func() bool { mu.Lock(); defer mu.Unlock(); return len(rejected) > 1 })
 	if source.Version() != 3 {
@@ -158,9 +152,6 @@ func TestPoolsAndPostgresEntries(t *testing.T) {
 	}
 }
 
-// Catalog databases are reached with verify-full only: the other modes skip
-// the certificate check, so someone on the path could relay SCRAM. Only a
-// test harness with a TLS-less fixture may allow disable, and never require.
 func TestCatalogDatabasesUseVerifyFull(t *testing.T) {
 	doc := `{"pools":[{"name":"pool-a","namespace":"agents","serviceAccount":"worker"}],"entries":[` + validEntry + `,
 		{"name":"core","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["pool-a"],"postgres":{"database":"core","mount":"database","role":"r-readonly","sslmode":"MODE"}}]}`
@@ -190,7 +181,6 @@ func TestCatalogDatabasesUseVerifyFull(t *testing.T) {
 	}
 }
 
-// A ";" in a prefix would let a granted prefix name a path parameter.
 func TestPathPrefixesRefuseSemicolons(t *testing.T) {
 	bad := strings.Replace(`{"entries":[`+validEntry+`]}`, `"pathPrefixes":["`, `"pathPrefixes":["/v1;x`, 1)
 	if !strings.Contains(bad, "/v1;x") {
@@ -201,8 +191,6 @@ func TestPathPrefixesRefuseSemicolons(t *testing.T) {
 	}
 }
 
-// Git grants answer per installation, repository and scope, so cached tokens
-// can follow a catalog change.
 func TestGitGranted(t *testing.T) {
 	doc := `{"entries":[
 		{"name":"git","kind":"git","host":"github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/a","access":"write"},{"repo":"example-org/b","access":"read"}]}},
@@ -231,8 +219,6 @@ func TestGitGranted(t *testing.T) {
 	}
 }
 
-// GitScope lists every repository an installation's entries name, for the
-// broker's installation scope check.
 func TestGitScope(t *testing.T) {
 	doc := `{"entries":[
 		{"name":"git","kind":"git","host":"github.com","pools":["pool-a"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/a","access":"write"},{"repo":"example-org/b","access":"read"}]}},
@@ -253,8 +239,6 @@ func TestGitScope(t *testing.T) {
 	}
 }
 
-// The catalog refuses strings that are unsafe inside a Vault policy path,
-// since they end up in the broker's Vault policy.
 func TestCatalogRefusesPolicyUnsafeStrings(t *testing.T) {
 	keyDoc := func(mount, path string) string {
 		return `{"entries":[{"name":"serpapi","host":"serpapi.com","pathPrefixes":["/search"],"methods":["GET"],"header":"X-Api-Key",
@@ -280,8 +264,6 @@ func TestCatalogRefusesPolicyUnsafeStrings(t *testing.T) {
 	}
 }
 
-// With an environment set, roles must be that environment's named roles, and
-// access is write exactly for -readwrite roles.
 func TestCatalogDatabaseRolesAndAccess(t *testing.T) {
 	doc := func(mount, role, access string) string {
 		a := ""
@@ -326,8 +308,7 @@ func TestCatalogDatabaseRolesAndAccess(t *testing.T) {
 			}
 		}
 	}
-	// Without an environment, a database entry is refused: an optional rule
-	// fails closed. Only the e2e build keeps plain roles such as "readonly".
+	// Without an environment a database entry is refused: an optional rule fails closed.
 	Environment.Store("")
 	rolesWithoutEnvironment = false
 	t.Cleanup(func() { rolesWithoutEnvironment = true })

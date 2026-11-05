@@ -17,7 +17,6 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// Synthetic test-user values; never real credentials.
 var browserSecrets = map[string]string{"email": "qa-user@example.test", "password": "synthetic-password-9c1",
 	"client_id": "synthetic-confidential-client", "client_secret": "synthetic-client-secret-4f2"}
 
@@ -196,8 +195,6 @@ func TestAuth0TokensRefuseBadLogins(t *testing.T) {
 	}
 }
 
-// The login body holds the test user's password and the client secret; a
-// redirect, even a 307 that would re-send it, is never followed.
 func TestAuth0LoginNeverFollowsARedirect(t *testing.T) {
 	var elsewhere atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

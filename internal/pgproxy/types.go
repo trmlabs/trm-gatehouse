@@ -1,11 +1,4 @@
-// Package pgproxy is Agent Vault's TCP credential-brokering path for
-// PostgreSQL. It is the database-facing sibling of the HTTP MITM proxy: an
-// agent opens a Postgres connection to this listener carrying only its Agent
-// Vault identity token — never a database credential — and the broker mints a
-// short-lived credential from HashiCorp Vault's database secrets engine,
-// authenticates to the real upstream on the agent's behalf, and transparently
-// relays the session. The database password is never exposed to the agent (the
-// ephemeral username is necessarily visible to any SQL the agent runs).
+// Package pgproxy brokers agent database connections with short-lived Vault credentials the agent never sees.
 package pgproxy
 
 import (
@@ -32,17 +25,14 @@ type AgentScope struct {
 	AttestedRequester string
 }
 
-// AgentAuthenticator validates the agent's Agent Vault token (presented in the
-// Postgres password field) and returns the vault scope it grants. This is the
-// same identity check the HTTP path performs; the server adapts its
-// SessionResolver to this interface. It must fail closed.
+// AgentAuthenticator validates the agent's Agent Vault token (presented in the Postgres password field) and
+// returns the vault scope it grants.
 type AgentAuthenticator interface {
 	Authenticate(ctx context.Context, token, vaultHint string) (*AgentScope, error)
 }
 
-// PeerAuthenticator also binds admission to the connection's peer address, as
-// pool workers require. renewal is true for the periodic recheck of an open
-// session: the token may have expired, but its Pod must still qualify.
+// PeerAuthenticator also binds admission to the connection's peer address, as pool workers require. renewal
+// is true for the periodic recheck of an open session: the token may have expired.
 type PeerAuthenticator interface {
 	AuthenticatePeer(ctx context.Context, token, vaultHint string, peer netip.Addr, renewal bool) (*AgentScope, error)
 }
@@ -58,27 +48,21 @@ type DatabaseService struct {
 	SSLMode  string // upstream TLS mode: "disable" | "prefer" (default) | "require" | "verify-full"
 	MaxConns int    // per-database connection budget (0 = the broker's default); bounds this upstream so a burst to one database cannot starve the others
 	ReadOnly bool   // a read-only login: statements that could create temporary objects are refused
-	// CA, with verify-full, is the only trust for the server certificate:
-	// PEM certificates, each a CA or the server's own self-signed one.
-	// Empty uses the system roots.
+	// CA, with verify-full, is the only trust for the server certificate: PEM certificates, each a CA or the
+	// server's own self-signed one.
 	CA string
 	// ServerName is the name verify-full checks when it is not the host.
 	ServerName string
 }
 
-// DatabaseResolver selects the database service an authorized agent is asking
-// for within its vault. scope is the authorized agent scope; requestedDatabase
-// is the database name from the startup packet. A resolver may key on the
-// requested database; unknown and ambiguous selectors must be rejected.
+// DatabaseResolver selects the database service an authorized agent is asking for within its vault. scope is
+// the authorized agent scope; requestedDatabase is the database name from the startup packet.
 type DatabaseResolver interface {
 	ResolveDatabase(ctx context.Context, scope AgentScope, requestedDatabase string) (*DatabaseService, error)
 }
 
 // Lease is a minted dynamic database credential and its lifecycle metadata.
-// Password is confidential from the agent and must never be logged or sent to
-// it. Username is the ephemeral role name; it is necessarily visible to any SQL
-// the agent runs (e.g. SELECT current_user) and is not a secret on its own, but
-// it is still never logged.
+// Password is confidential from the agent and must never be logged or sent to it.
 type Lease struct {
 	ID        string
 	Username  string
@@ -87,22 +71,16 @@ type Lease struct {
 	Renewable bool
 }
 
-// LeaseMinter mints, renews, and revokes dynamic database credentials. The
-// concrete implementation backs onto Vault's database secrets engine. Calls
-// must honor context cancellation. Production uses DurableLeaseMinter to retain
-// revocation accessors across restarts; passwords remain memory-only.
+// LeaseMinter mints, renews, and revokes dynamic database credentials.
+// Calls must honor context cancellation.
 type LeaseMinter interface {
-	// Mint issues a fresh credential for svc within scope.VaultID. Durable
-	// cleanup records scope.ActorID and scope.WorkloadID for per-actor and
-	// per-instance accounting.
+	// Mint issues a fresh credential for svc within scope.VaultID.
 	Mint(ctx context.Context, scope AgentScope, svc *DatabaseService) (*Lease, error)
 	// Renew extends a lease and returns its new expiry. minRemaining is a hint
 	// for how much additional lifetime the caller wants.
 	Renew(ctx context.Context, leaseID string, minRemaining time.Duration) (time.Time, error)
-	// Revoke invalidates a lease immediately. It is called once per lease when
-	// the connection ends (and on shutdown); an empty lease id is a no-op and a
-	// returned error is logged. The durable implementation retains the cleanup
-	// record and prevents the binding from reopening until it is reconciled.
+	// Revoke invalidates a lease immediately. It is called once per lease when the connection ends (and on
+	// shutdown); an empty lease id is a no-op and a returned error is logged.
 	Revoke(ctx context.Context, leaseID string) error
 }
 
@@ -117,13 +95,10 @@ const (
 	// defaultHandshakeTimeout bounds the post-startup handshake (auth, mint,
 	// upstream connect, SCRAM), which can be slow when role DDL serializes.
 	defaultHandshakeTimeout = 15 * time.Second
-	// defaultStartupTimeout bounds the pre-auth phase (reading the startup packet
-	// and the token). Kept short so a client that opens a socket and stalls does
-	// not tie up resources — mitigating a half-open (slowloris) flood.
+	// defaultStartupTimeout bounds the pre-auth phase (reading the startup packet and the token).
 	defaultStartupTimeout = 5 * time.Second
-	// leaseRevokeTimeout bounds a per-connection revoke so shutdown, which waits
-	// on in-flight handlers within the server's shutdown budget, is not starved
-	// by a slow Vault. Kept below the server's 5s shutdown deadline.
+	// leaseRevokeTimeout bounds a per-connection revoke so shutdown, which waits on in-flight handlers within
+	// the server's shutdown budget, is not starved by a slow Vault.
 	leaseRevokeTimeout = 4 * time.Second
 	// renewLeadFraction renews a lease once this fraction of its lifetime
 	// remains, so an in-flight session is never interrupted by expiry.
@@ -131,33 +106,18 @@ const (
 	// defaultMinRenewInterval floors the renew cadence so a very short TTL does
 	// not spin the renew loop. Overridable via Options.MinRenewInterval.
 	defaultMinRenewInterval = 5 * time.Second
-	// defaultMaxConns caps concurrent SERVING connections across every
-	// database. Each database's own ceiling is its catalog entry's maxConns,
-	// sized there against its max_connections, so this only bounds broker
-	// memory and defaults to fleet scale (AGENT_VAULT_DB_MAX_CONNS).
+	// defaultMaxConns caps concurrent SERVING connections across every database.
+	// Each database's own ceiling is its catalog entry's maxConns, sized there against its max_connections.
 	defaultMaxConns = 10000
-	// defaultDatabaseConns is the ceiling for a database whose catalog entry
-	// states no maxConns, in both modes. A database's size is unknown then,
-	// and a small Postgres allows about 100 connections in all, so the
-	// fallback stays below that rather than risk exhausting a database other
-	// services share. Set maxConns in the catalog, or override with
-	// AGENT_VAULT_DB_DEFAULT_DATABASE_CONNS.
+	// defaultDatabaseConns is the ceiling for a database whose catalog entry states no maxConns, in both modes.
 	defaultDatabaseConns = 50
-	// defaultMaxPendingConns caps accepted-but-not-yet-serving connections
-	// (handshake in progress). Generous and independent of MaxConns so a flood of
-	// stalled handshakes cannot starve the serving capacity real agents use.
+	// defaultMaxPendingConns caps accepted-but-not-yet-serving connections (handshake in progress).
 	defaultMaxPendingConns = 512
-	// defaultMaxLeasesPerActor caps how many live credentials (= live serving
-	// connections) a single agent identity may hold at once. It bounds credential
-	// amplification and, kept below MaxConns, prevents one noisy or compromised
-	// agent from monopolizing the serving cap and starving other agents.
+	// defaultMaxLeasesPerActor caps how many live credentials (= live serving connections) a single agent
+	// identity may hold at once.
 	defaultMaxLeasesPerActor = 16
-	// With pooling, a client session holds no database connection or
-	// credential of its own: the per-database budget protects the database.
-	// The session caps then only bound broker memory (a goroutine and small
-	// buffers per session), so they default to fleet scale. All are
-	// overridable (AGENT_VAULT_DB_MAX_CONNS, _MAX_PENDING_CONNS,
-	// _MAX_LEASES_PER_ACTOR).
+	// With pooling, a client session holds no database connection or credential of its own: the per-database
+	// budget protects the database.
 	defaultPooledMaxConns          = defaultMaxConns
 	defaultPooledMaxLeasesPerActor = 1024
 )
@@ -166,11 +126,8 @@ const (
 // at its cap.
 var ErrSessionLimit = errors.New("workload session limit reached")
 
-// SessionLedger records live sessions in shared storage so a Pod's cap, and a
-// database's connection budget, hold across broker replicas. Each is counted
-// under its own key: a workload ID, or databaseLedgerKey. Add must be atomic
-// per key and return ErrSessionLimit at the cap; any other error refuses the
-// session.
+// SessionLedger records live sessions in shared storage so a Pod's cap, and a database's connection budget,
+// hold across broker replicas.
 type SessionLedger interface {
 	Add(ctx context.Context, sessionID, workload string, limit int) error
 	Remove(ctx context.Context, sessionID string) error

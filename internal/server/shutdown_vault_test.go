@@ -17,7 +17,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/hashicorp"
 )
 
-// shutdownVault answers a JWT login and records revocations.
 type shutdownVault struct {
 	mu      sync.Mutex
 	revoked []string
@@ -46,8 +45,6 @@ func (v *shutdownVault) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// vaultOrderProbe is the database cleanup: it records whether the Vault login
-// was already revoked when it ran, since it revokes sessions with it.
 type vaultOrderProbe struct {
 	vault        *shutdownVault
 	revokedFirst bool
@@ -60,8 +57,6 @@ func (p *vaultOrderProbe) Close(context.Context) error {
 	return nil
 }
 
-// A graceful stop revokes the broker's Vault login, after the database
-// cleanup that still needs it, and before Start returns.
 func TestGracefulShutdownRevokesVaultLogins(t *testing.T) {
 	vault := &shutdownVault{}
 	vaultSrv := httptest.NewServer(vault)
@@ -92,10 +87,7 @@ func TestGracefulShutdownRevokesVaultLogins(t *testing.T) {
 	s.AttachDatabaseCleanup(probe)
 	done := make(chan error, 1)
 	go func() { done <- s.Start() }()
-	// The management server answers only once the signal handler is in place.
-	// A TCP connect is not enough: the socket accepts into its backlog from
-	// the moment it is bound, before the handler exists, and a SIGTERM then
-	// ends the test binary.
+	// A TCP connect is not enough: the socket accepts before the signal handler exists, and an early SIGTERM ends the test binary.
 	probeClient := &http.Client{Timeout: 200 * time.Millisecond}
 	deadline := time.Now().Add(10 * time.Second)
 	for {

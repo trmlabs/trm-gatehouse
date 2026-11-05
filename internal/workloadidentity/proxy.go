@@ -15,48 +15,32 @@ import (
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
-// ProxyBinding makes a Binding a shared proxy's: the binding's namespace,
-// account and account UID name exactly one proxy service account, and the
-// broker admits the agent Pods that proxy attests, within these limits. The
-// proxy runs the Pod check in its own cluster (source address, live Pod,
-// controller owner, images); the broker never sees the agent's address.
+// ProxyBinding makes a Binding a shared proxy's: namespace, account and account UID name one proxy service account, and the broker admits the agent Pods it attests;
+// the proxy runs the Pod check in its own cluster and the broker never sees the agent's address.
 type ProxyBinding struct {
-	// Profiles maps each namespace the proxy serves to its harness profile
-	// and catalog pool. A namespace not listed is refused, so one proxy can
-	// serve customer and developer sandboxes without either reaching the
-	// other's entries.
+	// Profiles maps each namespace the proxy serves to its harness profile and catalog pool; an unlisted namespace is refused, so one proxy cannot cross sandboxes.
 	Profiles []ProxyProfile `json:"profiles"`
 	// CatalogPools also serves each namespace a catalog proxy-attested profile claims; one binding per trust domain.
 	CatalogPools bool `json:"catalogPools,omitempty"`
 	// OwnerKind is the controller kind that must own each agent Pod (Sandbox).
 	OwnerKind string `json:"ownerKind"`
-	// ImageDigests are exact digests any attested Pod may run, for containers
-	// the platform injects (such as a storage sidecar). Optional when every
-	// profile names an image prefix.
+	// ImageDigests are exact digests any attested Pod may run, for platform-injected containers; optional when every profile names an image prefix.
 	ImageDigests []string `json:"imageDigests,omitempty"`
-	// SourceCIDRs the proxy's connections must come from: the private link's
-	// address range. A connection from anywhere else is refused.
+	// SourceCIDRs are the ranges the proxy's connections must come from; others are refused.
 	SourceCIDRs []string `json:"sourceCIDRs"`
-	// MaxSessionSeconds caps a session from the proxy token's issue time (60
-	// s up to the policy's maxSessionSeconds, which is also the default). A
-	// remote proxy token cannot be revoked by a live Pod read, so this bounds
-	// how long an open session outlives it; the proxy itself ends a session
-	// within a second of its Pod no longer qualifying.
+	// MaxSessionSeconds caps a session from the proxy token's issue time (60 s up to the policy's maxSessionSeconds, also the default); a remote proxy token cannot be revoked by a live Pod read, so this bounds how long a session outlives it.
 	MaxSessionSeconds int64 `json:"maxSessionSeconds,omitempty"`
 }
 
-// ProxyProfile is one namespace a proxy serves: the harness profile its
-// attestation must name, and the catalog pool its agents are admitted into.
+// ProxyProfile is one namespace a proxy serves: the harness profile its attestation must name and the catalog pool its agents join.
 type ProxyProfile struct {
 	Namespace string `json:"namespace"`
 	Profile   string `json:"profile"`
 	Pool      string `json:"pool"`
-	// ImagePrefix, when set, admits any image pulled from under this
-	// repository path in the agent image registry (see imagerule.ValidPrefix).
+	// ImagePrefix, when set, admits any image from under this repository path (see imagerule.ValidPrefix).
 	ImagePrefix string `json:"imagePrefix,omitempty"`
 }
 
-// profileFor returns the namespace's profile, or false.
 func (p *ProxyBinding) profileFor(namespace string) (ProxyProfile, bool) {
 	for _, pp := range p.Profiles {
 		if pp.Namespace == namespace {
@@ -66,26 +50,19 @@ func (p *ProxyBinding) profileFor(namespace string) (ProxyProfile, bool) {
 	return ProxyProfile{}, false
 }
 
-// Attestation is what a shared proxy states about the agent Pod behind one
-// connection. It is trusted only from the proxy binding's own authenticated
-// account, on the same connection as that account's token.
+// Attestation is what a shared proxy states about the agent Pod behind a connection; it is trusted only from the proxy binding's own account on the same connection as its token.
 type Attestation struct {
 	Namespace string `json:"namespace"`
 	PodName   string `json:"podName"`
 	PodUID    string `json:"podUID"`
 	OwnerKind string `json:"ownerKind"`
 	OwnerUID  string `json:"ownerUID"` // the controller object, such as the Sandbox
-	// Images are the references every container and init container pulled
-	// (repository@sha256:...), as the node reported them.
+	// Images are the references every container and init container pulled (repository@sha256:...), as the node reported them.
 	Images   []string `json:"images"`
 	NotAfter int64    `json:"notAfter"` // Unix seconds: when the agent's admission ends
-	// Profile is the harness profile the proxy maps the namespace to; the
-	// broker refuses it unless its own map agrees.
+	// Profile is the profile the proxy maps the namespace to; the broker refuses it unless its own map agrees.
 	Profile string `json:"profile"`
-	// Requester is the person who created the agent's controller, from the
-	// Pod's gatehouse.trmlabs.com/requester annotation, which admission
-	// policy fixes to the creator's login. The proxy sets it only for a
-	// namespace configured to carry it; elsewhere it is empty.
+	// Requester is the person who created the agent's controller, from the Pod's gatehouse.trmlabs.com/requester annotation (admission policy fixes it to the creator's login); empty unless the namespace is configured to carry it.
 	Requester string `json:"requester,omitempty"`
 }
 
@@ -104,8 +81,7 @@ var (
 	objectUID      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`)
 )
 
-// EncodeAttestation is the wire form: unpadded base64url JSON, safe in an
-// HTTP header and a PostgreSQL preamble line.
+// EncodeAttestation is the wire form: unpadded base64url JSON, safe in an HTTP header and a PostgreSQL preamble line.
 func EncodeAttestation(a Attestation) (string, error) {
 	b, err := json.Marshal(a)
 	if err != nil {
@@ -145,7 +121,6 @@ func decodeAttestation(s string) (Attestation, error) {
 	return a, nil
 }
 
-// validate checks a proxy binding at load.
 func (p *ProxyBinding) validate(ceiling int64) error {
 	if (len(p.Profiles) == 0 && !p.CatalogPools) || len(p.Profiles) > maxProxyProfiles {
 		return errors.New("proxy binding needs 1 to 10,000 namespace profiles, or catalogPools")
@@ -206,9 +181,7 @@ func (p *ProxyBinding) fromSource(peer netip.Addr) bool {
 	return false
 }
 
-// attestProxied admits the agent Pod a proxy attests. The proxy's token was
-// verified by attest; here the connection's source, the attestation and the
-// profile are checked, and the scope is the attested Pod's.
+// attestProxied admits the agent Pod a proxy attests; attest verified the proxy's token, and here the source, attestation and profile are checked and the scope is the attested Pod's.
 func (r *Resolver) attestProxied(ctx context.Context, binding *Binding, c claims, d *domain, peer netip.Addr, encoded string, renewal bool) (*brokercore.ProxyScope, error) {
 	p := binding.Proxy
 	if !p.fromSource(peer) {
@@ -225,8 +198,7 @@ func (r *Resolver) attestProxied(ctx context.Context, binding *Binding, c claims
 	if a.OwnerKind != p.OwnerKind {
 		return nil, brokercore.Denied("attestation_owner_kind")
 	}
-	// The namespace picks the profile and pool; the proxy must name the same
-	// profile, and an unlisted namespace is refused.
+	// The namespace picks the profile and pool; the proxy must name the same profile.
 	profile, ok := p.profileFor(a.Namespace)
 	if !ok && p.CatalogPools {
 		// A watched namespace no catalog pool claims: alert on this reason.
@@ -259,32 +231,30 @@ func (r *Resolver) attestProxied(ctx context.Context, binding *Binding, c claims
 	if err != nil {
 		return nil, err
 	}
-	if ctx.Err() != nil || (c.Expires <= r.now().Unix() && !renewal) || !r.now().Before(notAfter) {
+	if (c.Expires <= r.now().Unix() && !renewal) || !r.now().Before(notAfter) {
 		return nil, brokercore.Denied("deadline")
+	}
+	if ctx.Err() != nil {
+		return nil, unfinished(ctx, brokercore.Denied("deadline"))
 	}
 	scope.WorkloadID, scope.NotAfter, scope.Pool, scope.IdentityKind = a.PodUID, notAfter, profile.Pool, brokercore.KindProxyAttested
 	scope.AttestedRequester = a.Requester
 	return scope, nil
 }
 
-// VerifyProxy admits a shared proxy itself, not an agent behind it: a current
-// token from a proxy binding's own account, from the binding's source ranges.
-// It is how a proxy asks the broker for its serving certificate.
+// VerifyProxy admits a shared proxy itself, not an agent behind it: a current token from the binding's account and source ranges; it is how a proxy fetches its serving certificate.
 func (r *Resolver) VerifyProxy(ctx context.Context, token string, peer netip.Addr) error {
 	_, err := r.IdentifyProxy(ctx, token, peer)
 	return err
 }
 
-// ProxyBinding names the proxy binding a shared proxy's token and source
-// address belong to, for the certificate endpoint's audit row and limit.
+// ProxyBinding names the proxy binding a token and source address belong to, for the certificate endpoint's audit row and limit.
 func (r *Resolver) ProxyBinding(ctx context.Context, token string, peer netip.Addr) (string, error) {
 	id, err := r.IdentifyProxy(ctx, token, peer)
 	return id.Scope, err
 }
 
-// ProxyIdentity is the shared proxy VerifyProxy admitted: Scope names its
-// binding (trust domain, namespace and service account UID), and Namespaces
-// are the agent namespaces it serves.
+// ProxyIdentity is the proxy VerifyProxy admitted: Scope names its binding and Namespaces the agent namespaces it serves.
 type ProxyIdentity struct {
 	Scope      string
 	Namespaces []string

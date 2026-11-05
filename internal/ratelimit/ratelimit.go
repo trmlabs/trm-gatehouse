@@ -1,7 +1,4 @@
-// Package ratelimit is Agent Vault's tiered rate limiter. It groups
-// endpoints into tiers by attack surface and cost, keys each tier on
-// the principal being defended (IP, hashed token, actor, scope-host),
-// and exposes one Registry that owns all in-memory state.
+// Package ratelimit is Agent Vault's tiered rate limiter, keyed per tier on the defended principal, with one Registry owning all state.
 package ratelimit
 
 import (
@@ -15,46 +12,26 @@ import (
 type Tier int
 
 const (
-	// TierAuth covers unauthenticated endpoints (login, register,
-	// forgot/reset password, email verification, invite redemption,
-	// approval-token lookups) and proxy auth failures (CONNECT and
-	// forward-proxy requests where authentication fails). Sliding
-	// window. The caller picks the keyer — IPKey for IP-flood
-	// defense, IPTokenKey for token-enumeration, and the login
-	// handler uses both an IP and email key against this tier (reject
-	// if either is exhausted). On the MITM proxy path, only auth
-	// failures are recorded; successful requests skip this tier.
+	// TierAuth covers unauthenticated endpoints and proxy auth failures; sliding window, the caller picks the keyer (login uses IP and email).
+	// On the MITM path only auth failures are recorded; successes skip this tier.
 	TierAuth Tier = iota
 
-	// TierProxy is the /proxy and MITM rate limit keyed on
-	// (actor, vault). Token bucket for smooth traffic + a per-scope
-	// concurrency semaphore for slow upstream calls.
+	// TierProxy is the /proxy and MITM limit keyed on (actor, vault): token bucket plus a per-scope concurrency semaphore.
 	TierProxy
 
-	// TierAuthed is the catch-all for authenticated endpoints (CRUD,
-	// reads, admin, expensive fan-out ops). Token bucket keyed on
-	// actor. Defaults accommodate the heaviest workload in the tier;
-	// if a specific endpoint needs tighter protection, add it inline.
+	// TierAuthed is the catch-all for authenticated endpoints: token bucket keyed on actor, sized for the heaviest workload.
 	TierAuthed
 
-	// TierGlobal is the server-wide backstop: requests-per-second
-	// ceiling + total in-flight cap. Rate/Burst drive the RPS token
-	// bucket; Concurrency drives the in-flight semaphore.
+	// TierGlobal is the server-wide backstop: Rate/Burst drive the RPS bucket, Concurrency the in-flight cap.
 	TierGlobal
 
-	// TierVerifyFailure is an internal failure counter — not a rate
-	// limit — for email-verification and password-reset codes. The
-	// counter increments on bad codes per email and resets on success;
-	// hitting the cap invalidates the outstanding code. Not exposed in
-	// the operator UI because there is nothing useful to tune.
+	// TierVerifyFailure counts bad verification and reset codes per email, not a rate limit; the cap invalidates the code.
 	TierVerifyFailure
 
 	tierCount
 )
 
-// tierNames is the authoritative mapping between the stable wire
-// name (also the env-var suffix) and the internal Tier constant.
-// Exposed via String and TierByName so callers never duplicate it.
+// tierNames maps each stable wire name (also the env-var suffix) to its Tier; String and TierByName use it.
 var tierNames = [tierCount]string{
 	TierAuth:          "AUTH",
 	TierProxy:         "PROXY",
@@ -72,9 +49,7 @@ func (t Tier) String() string {
 	return tierNames[t]
 }
 
-// TierByName returns the Tier matching name, or (0, false) if name is
-// not recognized. Case-sensitive — callers that accept user input
-// should upper-case the name first.
+// TierByName returns the Tier for name, or (0, false); case-sensitive, so upper-case user input first.
 func TierByName(name string) (Tier, bool) {
 	for i, n := range tierNames {
 		if n == name {
@@ -84,10 +59,7 @@ func TierByName(name string) (Tier, bool) {
 	return 0, false
 }
 
-// AllTiers returns the list of valid Tier values in declaration order.
-// Use in UI enumeration and config serialization; do not rely on slice
-// index matching Tier value (that's only guaranteed today because
-// Tier is a simple iota).
+// AllTiers returns valid Tier values in declaration order; do not assume slice index equals Tier value.
 func AllTiers() []Tier {
 	out := make([]Tier, 0, tierCount)
 	for i := 0; i < int(tierCount); i++ {
@@ -117,9 +89,7 @@ const (
 	AlgFailureCounter
 )
 
-// Decision is the outcome of an Allow/Acquire check. A Decision with
-// Allow=false carries a RetryAfter and Reason so the caller can emit a
-// well-formed 429.
+// Decision is the outcome of Allow/Acquire; a denial carries RetryAfter and Reason for the 429.
 type Decision struct {
 	Allow      bool
 	RetryAfter time.Duration

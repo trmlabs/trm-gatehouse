@@ -28,8 +28,7 @@ func (s *Server) handleDatabaseCleanupList(w http.ResponseWriter, r *http.Reques
 		jsonError(w, http.StatusServiceUnavailable, "Database cleanup storage unavailable")
 		return
 	}
-	// An unknown issuance is checked and cleared by the broker; only one whose
-	// orphan lease Vault cannot revoke closes its database and needs a fix.
+	// An unknown issuance is cleared by the broker; only an orphan lease Vault cannot revoke needs a fix.
 	type view struct {
 		Accessor string `json:"accessor"`
 		Binding  string `json:"binding"`
@@ -44,8 +43,7 @@ func (s *Server) handleDatabaseCleanupList(w http.ResponseWriter, r *http.Reques
 	jsonOK(w, map[string]any{"records": rows})
 }
 
-// Confirmation records an owner's assertion based on external database
-// evidence. It never represents an automated role/session verification.
+// Confirmation is an owner's assertion from external database evidence, not an automated verification.
 func (s *Server) handleDatabaseCleanupConfirm(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.requireOwnerActor(w, r)
 	if err != nil {

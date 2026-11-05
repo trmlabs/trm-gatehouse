@@ -72,9 +72,8 @@ func citusCert(t *testing.T) testCert {
 		NotBefore: now, NotAfter: now}, nil)
 }
 
-// connectPinned dials a fake upstream that asks for a cleartext password:
-// connectUpstream sends it only over verified TLS, so success proves the
-// certificate was verified.
+// connectPinned dials a fake upstream that asks for a cleartext password: connectUpstream sends it only over
+// verified TLS, so success proves the certificate was verified.
 func connectPinned(t *testing.T, server *tls.Config, svc DatabaseService) error {
 	t.Helper()
 	lease := newLease()
@@ -158,9 +157,8 @@ func TestPinnedCARefusesBadPEM(t *testing.T) {
 	}
 }
 
-// AlloyDB's direct port serves one self-signed certificate per instance:
-// CN unused, CA:TRUE, named only localhost. Pinned as itself it verifies
-// with no serverName, and another instance's certificate does not.
+// AlloyDB's direct port serves one self-signed certificate per instance: CN unused, CA:TRUE, named only
+// localhost.
 func TestPinnedAlloyDBShapedCertificate(t *testing.T) {
 	alloydb := func() testCert {
 		return issue(t, &x509.Certificate{SerialNumber: big.NewInt(5), Subject: pkix.Name{CommonName: "unused"},

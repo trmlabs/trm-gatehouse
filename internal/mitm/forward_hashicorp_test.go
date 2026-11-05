@@ -20,30 +20,19 @@ import (
 	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
-// credStoreAdapter layers the typed UnmatchedHostPolicy lookup onto the store
-// so it satisfies brokercore.CredentialStore, mirroring the server package's
-// production adapter. The fixed policy is only consulted when no service
-// matches; this test always matches.
+// credStoreAdapter adds the UnmatchedHostPolicy lookup so the store satisfies brokercore.CredentialStore.
 type credStoreAdapter struct{ *store.SQLStore }
 
 func (credStoreAdapter) UnmatchedHostPolicy(_ context.Context, _ string) (brokercore.UnmatchedHostPolicy, error) {
 	return brokercore.PolicyDeny, nil
 }
 
-// TestMITMForward_HashicorpSyncedCredentialInjected is the full end-to-end
-// confirmation for the HashiCorp credential store: a secret living in a
-// HashiCorp Vault KV mount is pulled by the real vault/api client + syncer into
-// a real SQLite store, and then — when an agent sends a request through the
-// actual MITM forward proxy — the broker injects that secret as the upstream
-// Authorization header. The only stub is the Vault HTTP endpoint; everything
-// downstream (client, syncer, crypto, store, broker matching, auth resolution,
-// proxy transport) is production code.
+// End to end: a secret in a HashiCorp Vault KV mount is synced into a real SQLite store and injected as the upstream Authorization header; only the Vault endpoint is stubbed.
 func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 	ctx := context.Background()
 	const secretKey = "ANTHROPIC_API_KEY"
 	const secretValue = "sk-ant-from-hashicorp-vault"
 
-	// --- 1. Stand up a stub HashiCorp Vault holding the secret (KV v2). ---
 	vaultStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/token/lookup-self":
@@ -65,7 +54,6 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 	}))
 	defer vaultStub.Close()
 
-	// --- 2. Real HashiCorp client via the production NewClient (env-driven). ---
 	t.Setenv("VAULT_ADDR", vaultStub.URL)
 	t.Setenv("VAULT_TOKEN", "stub-token")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -74,7 +62,6 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 		t.Fatalf("hashicorp.NewClient: %v", err)
 	}
 
-	// --- 3. Real store + vault; sync the secret in via the real syncer. ---
 	storePath := filepath.Join(t.TempDir(), "store.db")
 	storetest.Seed(t, storePath)
 	st, err := store.Open(storePath)
@@ -91,9 +78,7 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 		dek[i] = 0x42
 	}
 	syncer := hashicorp.NewSyncer(st, hcClient, dek, logger)
-	// Persist the external-store row so the syncer's config-gated write path
-	// (ReplaceVaultCredentialsForSync) applies; an in-memory-only row reads as
-	// disconnected and the snapshot is dropped without writing credentials.
+	// Persist the external-store row so the syncer's write path applies; an in-memory row reads as disconnected.
 	const hcConfigJSON = `{"mount":"secret","secret_path":"agent-vault/demo","kv_version":2}`
 	if _, err := st.SetVaultExternalStore(ctx, store.SetVaultExternalStoreParams{
 		VaultID:             vault.ID,
@@ -111,7 +96,6 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 		t.Fatalf("syncer.RefreshOnce: %v", err)
 	}
 
-	// --- 4. Upstream the agent will call; capture what it actually receives. ---
 	var gotAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -120,7 +104,6 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 	defer upstream.Close()
 	upstreamHost, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
 
-	// --- 5. Define a broker service: this host → Bearer <synced secret>. ---
 	svcs := []broker.Service{{
 		Host: upstreamHost,
 		Auth: broker.Auth{Type: "bearer", Token: secretKey},
@@ -130,11 +113,6 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 		t.Fatalf("SetBrokerConfig: %v", err)
 	}
 
-	// --- 6. Real provider + real proxy; send a request through the proxy. ---
-	// brokercore.CredentialStore needs UnmatchedHostPolicy, which production
-	// layers on via an adapter over vault settings. Our service matches the
-	// host, so the policy is never consulted; a trivial adapter satisfies the
-	// interface.
 	cp := brokercore.NewStoreCredentialProvider(credStoreAdapter{st}, dek)
 	sr := validTokenResolver("av_sess_ok",
 		&brokercore.ProxyScope{VaultID: vault.ID, VaultName: "demo-hc", VaultRole: "proxy"})
@@ -157,7 +135,6 @@ func TestMITMForward_HashicorpSyncedCredentialInjected(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	// --- 7. Confirm the upstream received the HashiCorp secret, injected. ---
 	if gotAuth != "Bearer "+secretValue {
 		t.Fatalf("upstream Authorization = %q, want %q (HashiCorp secret injected through the proxy)",
 			gotAuth, "Bearer "+secretValue)

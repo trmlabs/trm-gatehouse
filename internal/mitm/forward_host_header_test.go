@@ -37,9 +37,7 @@ func TestHostHeaderForScheme(t *testing.T) {
 	}
 }
 
-// TestHostHeaderForSchemeProducesPortlessWireHost closes the helper→wire
-// chain: prove that net/http's Request.Write emits the helper's output
-// verbatim as the Host: line, with no port re-introduced by Go.
+// TestHostHeaderForSchemeProducesPortlessWireHost proves Request.Write emits the helper's Host verbatim, with no port added.
 func TestHostHeaderForSchemeProducesPortlessWireHost(t *testing.T) {
 	cases := []struct {
 		name     string

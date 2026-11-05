@@ -12,9 +12,7 @@ import (
 	"time"
 )
 
-// CI has no Postgres, so these drive LockVault through a fake driver
-// implementing just the advisory-lock surface. Enough to cover the property
-// that matters: waiting must not hold a pooled connection.
+// CI has no Postgres, so a fake driver implements only the advisory-lock surface to test that waiting holds no pooled connection.
 
 type fakePGDriver struct {
 	mu   sync.Mutex
@@ -95,9 +93,7 @@ func newFakePGStore(t *testing.T, maxConns int) *SQLStore {
 	return &SQLStore{db: db, dialect: PostgresDialect{}}
 }
 
-// Regression guard for the old deadlock: waiters blocked in pg_advisory_lock
-// pinned the whole pool, so the holder could never borrow the connection it
-// needed to release the lock. More workers here than connections.
+// Regression guard: waiters in pg_advisory_lock used to pin the pool so the holder could not borrow a connection to release; use more workers than connections.
 func TestLockVaultPostgresContentionDoesNotExhaustPool(t *testing.T) {
 	const maxConns = 4
 	s := newFakePGStore(t, maxConns)
@@ -118,9 +114,7 @@ func TestLockVaultPostgresContentionDoesNotExhaustPool(t *testing.T) {
 			}
 			defer unlock()
 
-			// Borrowing a second connection while holding the lock is the
-			// shape of every real caller (handleSkillPatch, the service
-			// mutators) and the half that starves under the old behavior.
+			// Borrowing a second connection while holding the lock is what real callers do and what starved under the old behavior.
 			var v bool
 			if err := s.db.QueryRowContext(ctx, "SELECT 1").Scan(&v); err != nil {
 				t.Errorf("critical-section query: %v", err)

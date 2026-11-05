@@ -37,9 +37,7 @@ const (
 
 var serialLimit = new(big.Int).Lsh(big.NewInt(1), 128)
 
-// CAStore is the narrow persistence interface the CA needs to load/save
-// its root certificate and encrypted private key from a shared database.
-// When set on Options, the CA uses DB storage instead of local files.
+// CAStore persists the CA root certificate and encrypted key in a shared database instead of local files.
 type CAStore interface {
 	GetCAState(ctx context.Context) (*CAStateRecord, error)
 	SetCAState(ctx context.Context, state *CAStateRecord) error
@@ -58,32 +56,21 @@ type Options struct {
 	LeafTTL   time.Duration    // default: 24h
 	CacheSize int              // default: 1024
 	Clock     func() time.Time // default: time.Now
-	// Store, when non-nil, causes the CA to load/save its root from a
-	// shared database instead of local files. Used for HA deployments
-	// where multiple pods share one Postgres database.
+	// Store, when non-nil, keeps the root in a shared database (HA) instead of local files.
 	Store CAStore
-	// ExtraSANs are additional hostnames or IP literals added as
-	// SubjectAltNames to every minted leaf, alongside the per-request SNI.
-	// Typically populated with the server's own externally-reachable
-	// hostname so clients that verify the proxy-hop cert against that
-	// name (rather than the upstream SNI) succeed without a shim.
-	// Empty and malformed entries are silently dropped -- non-IP entries
-	// must satisfy the same label rules enforced on the per-request SNI.
+	// ExtraSANs are added as SubjectAltNames to every leaf; empty or malformed entries are dropped.
 	ExtraSANs []string
 }
 
-// SoftCA is a software-backed CA that persists its root to disk (with the
-// private key encrypted by the caller-supplied master key) and mints
-// short-lived ECDSA P-256 leaves on demand, cached by SNI.
+// SoftCA is a software-backed CA that mints short-lived ECDSA P-256 leaves on demand, cached by SNI.
 type SoftCA struct {
-	mu       sync.Mutex
-	dir      string
-	leafTTL  time.Duration
-	clock    func() time.Time
-	rootCert *x509.Certificate
-	rootKey  *ecdsa.PrivateKey
-	rootPEM  []byte
-	// The browser CA, derived from the root; see deriveBrowserCA.
+	mu          sync.Mutex
+	dir         string
+	leafTTL     time.Duration
+	clock       func() time.Time
+	rootCert    *x509.Certificate
+	rootKey     *ecdsa.PrivateKey
+	rootPEM     []byte
 	browserCert *x509.Certificate
 	browserKey  *ecdsa.PrivateKey
 	browserPEM  []byte
@@ -97,10 +84,7 @@ type encryptedKeyFile struct {
 	Ciphertext string `json:"ciphertext"`
 }
 
-// New loads an existing CA from opts.Dir (or opts.Store for DB-backed HA)
-// or generates a new one.
-// masterKey must be 32 bytes (AES-256-GCM); it encrypts/decrypts the root
-// private key at rest.
+// New loads the CA from opts.Dir or opts.Store, or generates one; masterKey must be 32 bytes (AES-256-GCM).
 func New(masterKey []byte, opts Options) (*SoftCA, error) {
 	if len(masterKey) != 32 {
 		return nil, fmt.Errorf("masterKey must be 32 bytes, got %d", len(masterKey))
@@ -184,9 +168,7 @@ func New(masterKey []byte, opts Options) (*SoftCA, error) {
 	return ca, nil
 }
 
-// initFromDB loads the CA from a shared database, or generates and stores
-// a new one if none exists. Used for HA deployments where multiple pods
-// share one database.
+// initFromDB loads the CA from the shared database, or generates and stores one if none exists.
 func (c *SoftCA) initFromDB(s CAStore, masterKey []byte) error {
 	ctx := context.Background()
 
@@ -399,9 +381,7 @@ func (c *SoftCA) RootPEM() []byte {
 	return out
 }
 
-// MintLeaf returns a leaf certificate for the given SNI. Results are cached;
-// cached entries are returned only if they remain valid beyond a clock-skew
-// buffer, so the caller never receives a cert that may expire mid-handshake.
+// MintLeaf returns a cached leaf for the SNI, reissuing when it is within a clock-skew buffer of expiry.
 func (c *SoftCA) MintLeaf(sni string) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -461,9 +441,7 @@ func (c *SoftCA) MintLeaf(sni string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing leaf cert: %w", err)
 	}
-	// The chain carries the root after the leaf. A browser that trusts this CA by
-	// its key hash (Chromium's --ignore-certificate-errors-spki-list) compares
-	// the hashes of the presented chain, so a leaf alone never matches.
+	// The chain carries the root after the leaf: a browser pinning the CA's key hash only sees the presented chain's hashes.
 	tlsCert := &tls.Certificate{
 		Certificate: [][]byte{der, c.rootCert.Raw},
 		PrivateKey:  leafKey,

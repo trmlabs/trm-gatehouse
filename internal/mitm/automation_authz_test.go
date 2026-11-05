@@ -15,7 +15,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// cursorRunner verifies Cursor run tokens from a fixed table.
 type cursorRunner map[string]runnerid.Session
 
 func (cursorRunner) Verify(context.Context, string) (runnerid.Session, error) {
@@ -31,11 +30,7 @@ func (c cursorRunner) VerifyCursor(_ context.Context, token string) (runnerid.Se
 	return s, nil
 }
 
-// Every audit row from an automation pool names the Automation and its
-// owning team, allowed or refused, and the row passes the chain's own
-// validation. The requester is the person the run names, if any, and decides
-// nothing: whoever's run it is, or no person's, the Automation is served its
-// own entries, with no directory answer in the row.
+// Every audit row from an automation pool names the Automation and its owning team; the requester decides nothing.
 func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"pools":[{"name":"automations","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],
 	 "entries":[{"name":"open","host":"api.vendor.example","pathPrefixes":["/open/"],"methods":["GET"],"header":"Authorization","placeholder":"__vault_KEY__","key":{"mount":"gatehouse","path":"vendors/p","field":"f"},"pools":["automations"]},
@@ -50,13 +45,11 @@ func TestAutomationAuditRowsNameTheAutomation(t *testing.T) {
 		"runner":   {Kind: runnerid.KindPerson, Subject: "bob@example.com", Owner: "user:2", Run: "bc-3", Source: "AUTOMATIONS", Automation: "auto-1"},
 		"svc":      {Kind: runnerid.KindAgent, Subject: "service_account:4", Owner: "service_account:4", Run: "bc-4", Source: "AUTOMATIONS", Automation: "auto-1"},
 	}
-	// The directory knows no one: an Automation never needs it.
 	p := &Proxy{adapter: &HeaderAdapter{Catalog: catalog, Runner: runner, Sessions: &authorizetest.MemBinder{},
 		Entitlements: &entitlement.Cache{Source: directory{}}}}
 	open, _ := catalog.Match("api.vendor.example", 443, "GET", "/open/x", "automations")
 	other, _ := catalog.Match("api.other.example", 443, "GET", "/x", "automations")
-	// A {requester} push prefix names the Automation, never the run's
-	// person, so every run of one Automation shares its branches.
+	// A {requester} push prefix names the Automation, never the run's person.
 	for _, c := range []struct {
 		token                                              string
 		entry                                              *httpcatalog.Entry

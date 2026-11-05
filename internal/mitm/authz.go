@@ -10,9 +10,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// SessionHeader carries the Claude runner's session token from the in-Pod
-// sidecar on the CONNECT request. The sidecar sets it; a worker cannot, since
-// the sidecar forwards only a fixed set of CONNECT headers.
+// SessionHeader carries the runner's session token from the in-Pod sidecar; a worker cannot set it.
 const SessionHeader = "Gatehouse-Session"
 
 type sessionTokenKey struct{}
@@ -26,10 +24,7 @@ func sessionToken(ctx context.Context) string {
 	return token
 }
 
-// authorize applies the authorization model to one matched catalog entry and
-// fills the audit event. It returns who stands behind the request, whose
-// branch segment narrows a git or github-api request's push prefixes
-// (httpcatalog.GitRequest.ForRequester), and a refusal code, or "".
+// authorize applies the authorization model to a matched entry and fills the audit event; it returns the requester and a refusal code, or "".
 func (p *Proxy) authorize(ctx context.Context, scope *brokercore.ProxyScope, entry *httpcatalog.Entry, event *auditchain.Event) (authorize.Requester, string) {
 	a := p.adapter
 	pool, _ := a.Catalog.Current().Pool(scope.Pool) // undefined pools: no identity, ceiling T0
@@ -71,9 +66,8 @@ func claimsOf(scope *brokercore.ProxyScope) authorize.Claims {
 		TokenSource: scope.TokenSource, TokenOwner: scope.TokenOwner, PodRef: scope.Pod, NotAfter: scope.NotAfter}
 }
 
-// attribute names the run behind a refusal that comes before any entry is
-// authorized, from its verified run token (authorize.Attribute), unless the
-// event already names one. The token is the session the CONNECT carried (ctx).
+// attribute names the run behind a refusal that comes before any entry is authorized, from its verified run token.
+// The token is the session the CONNECT carried (ctx); an event that already names a run is left alone.
 func (p *Proxy) attribute(ctx context.Context, scope *brokercore.ProxyScope, event *auditchain.Event) {
 	a := p.adapter
 	if scope == nil || event.Source != "" || event.Automation != "" || a == nil || a.Catalog == nil {
@@ -88,12 +82,7 @@ func (p *Proxy) attribute(ctx context.Context, scope *brokercore.ProxyScope, eve
 	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
 }
 
-// withWriteGrant is the match error to forward with a matched git or github-api
-// request: err when the match failed, and otherwise ErrAutomationReadOnly when
-// the request needs the write grant of an entry (GitRequest.WriteEntries) that
-// the requester does not hold (Requester.MayWrite), which only an Automation
-// can lack. It runs after the entry's authorization, which names who the
-// requester is, and before any token is minted or GitHub asked.
+// withWriteGrant returns err, or ErrAutomationReadOnly when the request needs a write grant the requester lacks.
 func withWriteGrant(who authorize.Requester, g httpcatalog.GitRequest, err error) error {
 	if err != nil {
 		return err
@@ -106,8 +95,7 @@ func withWriteGrant(who authorize.Requester, g httpcatalog.GitRequest, err error
 	return nil
 }
 
-// tokenAgent is the Automation a scope's static agent token names, or "".
-// Only a scope that came by that token carries one.
+// tokenAgent is the Automation named by a scope's static agent token, or "".
 func tokenAgent(scope *brokercore.ProxyScope) string {
 	if scope.IdentityKind != brokercore.KindStaticToken {
 		return ""

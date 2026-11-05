@@ -18,7 +18,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// GCPToken is a minted Google access or ID token. It prints as its expiry only.
 type GCPToken struct {
 	value   string
 	life    time.Duration
@@ -32,14 +31,9 @@ func (t GCPToken) String() string {
 func (t GCPToken) GoString() string           { return t.String() }
 func (t GCPToken) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(t.String())) }
 
-// GCPTokens mints per-entry Google tokens from the broker's own identity and
-// caches each until a quarter of its use remains.
 type GCPTokens struct {
-	// Root is the broker's own identity (Workload Identity on GKE).
-	Root oauth2.TokenSource
-	// Client reaches STS and IAM Credentials; it must dial only Google.
-	Client *http.Client
-	// STSURL and IAMCredentialsURL default to Google's endpoints.
+	Root                      oauth2.TokenSource
+	Client                    *http.Client
 	STSURL, IAMCredentialsURL string
 	Now                       func() time.Time
 
@@ -67,8 +61,6 @@ func gcpCacheKey(e *Entry) string {
 	return strings.Join([]string{e.Name, b.Bucket, b.Prefix, b.Role, b.ServiceAccount, strings.Join(b.Scopes, " "), b.Audience}, "\x00")
 }
 
-// Token returns the current token for a gcp entry. Concurrent misses for one
-// entry share a single mint.
 func (g *GCPTokens) Token(ctx context.Context, e *Entry) (GCPToken, error) {
 	if e == nil || e.GCP == nil || g.Root == nil || g.Client == nil {
 		return GCPToken{}, ErrGCPToken
@@ -118,17 +110,13 @@ func (g *GCPTokens) Token(ctx context.Context, e *Entry) (GCPToken, error) {
 	return t, nil
 }
 
-// Invalidate drops an entry's token after Google refused it.
 func (g *GCPTokens) Invalidate(e *Entry) {
 	g.mu.Lock()
 	delete(g.cache, gcpCacheKey(e))
 	g.mu.Unlock()
 }
 
-// AccessBoundary is the Credential Access Boundary for a downscoped entry:
-// one bucket, objects under one prefix (and listings of that prefix), one
-// object role. Bucket and prefix are validated to characters that cannot
-// break out of the CEL string literals.
+// AccessBoundary is the Credential Access Boundary for a downscoped entry; bucket and prefix are validated so they cannot break out of the CEL string literals.
 func AccessBoundary(b *GCPBinding) map[string]any {
 	bucket := "projects/_/buckets/" + b.Bucket
 	return map[string]any{"accessBoundary": map[string]any{"accessBoundaryRules": []any{map[string]any{
@@ -167,7 +155,6 @@ func (g *GCPTokens) downscope(ctx context.Context, b *GCPBinding, root *oauth2.T
 	if err := g.call(req, &out); err != nil || out.AccessToken == "" {
 		return GCPToken{}, ErrGCPToken
 	}
-	// A downscoped token lives no longer than the token it came from.
 	expires := root.Expiry
 	if out.ExpiresIn > 0 {
 		if e := g.now().Add(time.Duration(out.ExpiresIn) * time.Second); expires.IsZero() || e.Before(expires) {
@@ -193,11 +180,7 @@ func (g *GCPTokens) impersonate(ctx context.Context, b *GCPBinding, root *oauth2
 	return g.bounded(out.AccessToken, out.ExpireTime, b.LifetimeSeconds)
 }
 
-// identity mints an ID token for the entry's service account, bound to the
-// entry's audience, with the account's email for the verifying service's
-// allowlist. Google fixes the token's life at about an hour and takes no
-// lifetime; the token is used until a quarter of its own exp is left, or of
-// the entry's lifetime when exp cannot be read.
+// identity mints an ID token bound to the entry's audience, with the account's email; Google fixes its life at about an hour, so it is used until a quarter of its exp is left.
 func (g *GCPTokens) identity(ctx context.Context, b *GCPBinding, root *oauth2.Token) (GCPToken, error) {
 	body, _ := json.Marshal(map[string]any{"audience": b.Audience, "includeEmail": true})
 	req, err := g.iamCredentials(ctx, b, root, ":generateIdToken", body)
@@ -213,8 +196,6 @@ func (g *GCPTokens) identity(ctx context.Context, b *GCPBinding, root *oauth2.To
 	return g.bounded(out.Token, jwtExpiry(out.Token), b.LifetimeSeconds)
 }
 
-// iamCredentials is a call on the entry's service account at IAM
-// Credentials, as the broker's own identity.
 func (g *GCPTokens) iamCredentials(ctx context.Context, b *GCPBinding, root *oauth2.Token, method string, body []byte) (*http.Request, error) {
 	endpoint := g.IAMCredentialsURL
 	if endpoint == "" {
@@ -230,9 +211,7 @@ func (g *GCPTokens) iamCredentials(ctx context.Context, b *GCPBinding, root *oau
 	return req, nil
 }
 
-// jwtExpiry reads exp from a JWT's payload without verifying it: the broker
-// asked Google for this token over TLS, and only uses exp to decide when to
-// mint again. Zero when the token is not a JWT or carries no exp.
+// jwtExpiry reads exp from a JWT's payload without verifying it, only to decide when to mint again; zero when absent.
 func jwtExpiry(token string) time.Time {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -251,8 +230,6 @@ func jwtExpiry(token string) time.Time {
 	return time.Unix(claims.Exp, 0)
 }
 
-// bounded uses a token for at most the entry's lifetime, and never past its
-// own expiry.
 func (g *GCPTokens) bounded(value string, expires time.Time, lifetimeSeconds int) (GCPToken, error) {
 	now := g.now()
 	limit := now.Add(time.Duration(lifetimeSeconds) * time.Second)

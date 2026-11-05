@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// A browser-session entry names the API paths it needs, never "/", and none
-// may reach a credential or account-admin route; its route templates are
-// strict. Other kinds take no route templates.
 func TestBrowserPathGuardAtLoad(t *testing.T) {
 	entry := func(prefixes, extra string) string {
 		return strings.Replace(browserEntryJSON(extra), `"pathPrefixes":["/v1"]`, `"pathPrefixes":`+prefixes, 1)
@@ -47,9 +44,6 @@ func TestBrowserPathGuardAtLoad(t *testing.T) {
 	}
 }
 
-// Every API request is checked: credential and account-admin segments are
-// refused anywhere in the path, a denied template refuses itself and every
-// path below it, and membership and read-only templates admit only reads.
 func TestBrowserPathGuardPerRequest(t *testing.T) {
 	doc := strings.Replace(browserEntryJSON(`,"deniedPaths":["/v1/accounts/*/users","/v1/accounts/*/invitations",
 		"/v1/users/*/email","/v1/archive"],"readOnlyPaths":["/v1/reports"]`),
@@ -94,7 +88,6 @@ func TestBrowserPathGuardPerRequest(t *testing.T) {
 			t.Errorf("%s %s: %v, want %v", tc.method, tc.path, err, tc.err)
 		}
 	}
-	// Membership stays read-only for an entry that names no read-only paths.
 	plain, err := Parse([]byte(`{"entries":[` + browserEntryJSON("") + `]}`))
 	if err != nil {
 		t.Fatal(err)

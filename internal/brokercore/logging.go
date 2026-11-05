@@ -5,13 +5,7 @@ import (
 	"time"
 )
 
-// Ingress labels identify which entrypoint handled a proxied request.
-// Persisted into request logs and filterable by the Logs UI, so a typo
-// at any call site would silently desync filters from the real data.
-//
-// IngressExplicit is retained for backward compatibility with rows
-// persisted before the explicit /proxy endpoint was removed; new events
-// emit IngressMITM only.
+// Ingress labels are persisted and filtered by the Logs UI; IngressExplicit is kept only for old rows.
 const (
 	IngressExplicit = "explicit"
 	IngressMITM     = "mitm"
@@ -24,10 +18,7 @@ const (
 	ActorTypeAgent = "agent"
 )
 
-// ProxyEvent is the shape of a single structured per-request log line
-// emitted by the MITM forward handler. It is intentionally shallow and
-// contains only non-secret metadata — no header values, no bodies, no
-// query strings.
+// ProxyEvent is one per-request log line with non-secret metadata only: no header values, bodies or query strings.
 type ProxyEvent struct {
 	Ingress        string   // always IngressMITM for new events (IngressExplicit lingers only on legacy DB rows)
 	Method         string   // HTTP method from the agent request
@@ -55,9 +46,7 @@ func (e *ProxyEvent) Emit(logger *slog.Logger, start time.Time, status int, errC
 	LogProxyEvent(logger, *e)
 }
 
-// LogProxyEvent emits e at Debug level on logger. Handler-level filtering
-// in slog means info-level runs drop these lines at effectively zero cost.
-// Safe to call with a nil logger (no-op) so handlers don't have to guard.
+// LogProxyEvent emits e at Debug level; a nil logger is a no-op.
 func LogProxyEvent(logger *slog.Logger, e ProxyEvent) {
 	if logger == nil {
 		return
@@ -79,10 +68,7 @@ func LogProxyEvent(logger *slog.Logger, e ProxyEvent) {
 	)
 }
 
-// LogCredentialMissing emits the operator-visible Warn line when a host
-// matched a service but the referenced credential couldn't be resolved.
-// Kept at info-level (Warn) because it's a user-actionable misconfig, not
-// a debug signal. Secret-free: only vault id, service host, and key names.
+// LogCredentialMissing warns when a matched service's credential cannot be resolved; secret-free.
 func LogCredentialMissing(logger *slog.Logger, vaultID, service string, keys []string) {
 	if logger == nil {
 		return

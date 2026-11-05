@@ -2,13 +2,8 @@ package store
 
 import "gorm.io/gorm"
 
-// Record what an automatic check of an unknown issuance needs: the Vault
-// mount and role the credential was read from, when its child token expires,
-// and when this process revoked that token, both by the database clock.
-// Records from before this migration have no mount or role; the first request
-// for their binding adopts its current ones. The quarantine mark now means
-// only that Vault cannot revoke an orphan lease, so every older mark, set for
-// any unknown issuance, is lifted: those records stay and are checked.
+// Pre-migration records have no mount or role; the first request for their binding adopts the current ones.
+// Quarantine now means only that Vault cannot revoke an orphan lease, so older marks are lifted.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		for _, column := range []struct{ name, ddl string }{

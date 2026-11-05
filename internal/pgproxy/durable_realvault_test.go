@@ -205,13 +205,8 @@ func TestRealVault_DurableParentPolicyScope(t *testing.T) {
 	}
 }
 
-// A lost credential response whose child token could not revoke itself. The
-// database keeps issuing throughout the lost lease's life. The child token
-// expires, but a database dependency makes Vault's revocation fail, so the
-// lease stays listed. Once it is old enough to be an orphan the broker tries
-// to revoke it itself; that fails too, a real database fault, and only then is
-// the database closed. When the dependency is gone the revocation succeeds,
-// the list comes back empty, and the broker reopens it without an operator.
+// A lost credential response whose child token could not revoke itself.
+// Once it is old enough to be an orphan the broker tries to revoke it itself.
 func TestRealVault_DurableUnknownIssuanceClearsWhenVaultListsNoLease(t *testing.T) {
 	// The broker lists and revokes orphans only under gatehouse-* roles.
 	role := os.Getenv("AV_TEST_VAULT_GATEHOUSE_ROLE")
@@ -437,9 +432,8 @@ func TestRealVault_DurableInterruptedIssuance(t *testing.T) {
 	if orphanName.Load() == nil || orphanName.Load().(string) == "" {
 		t.Fatal("fixture did not observe actual issued role")
 	}
-	// The process still held the child token, so it revoked it with its own
-	// token: the lost credential is gone at once. The issuance stays unknown
-	// to the journal and stays recorded; the database keeps serving.
+	// The process still held the child token, so it revoked it with its own token: the lost credential is gone
+	// at once.
 	assertDatabaseRemoved(t, admin, orphanName.Load().(string))
 	if err = m.Close(ctx); err != nil {
 		t.Fatal("an unresolved unknown issuance failed the stop:", err)

@@ -53,9 +53,7 @@ func nullableString(s string) interface{} {
 	return s
 }
 
-// newPublicID returns a short, opaque, URL-safe handle (80 random bits as
-// 20 hex chars). Used as the {id} path parameter in /v1/auth/sessions/{id}
-// so the underlying token hash never appears in logs or URLs.
+// newPublicID returns a short opaque URL-safe handle so the token hash never appears in logs or URLs.
 func newPublicID() string {
 	var b [10]byte
 	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
@@ -161,24 +159,14 @@ func (s *SQLStore) DialectName() string {
 	return s.dialect.Name()
 }
 
-// Postgres advisory-lock polling schedule (see LockVault). lockPollMax stays
-// low because exponential backoff inverts fairness — the longer a caller has
-// waited, the less often it looks — so a high ceiling would let newcomers beat
-// a backed-off waiter. lockMaxWait bounds total wait.
+// Postgres advisory-lock polling schedule; lockPollMax stays low because a high ceiling lets newcomers beat a backed-off waiter.
 const (
 	lockPollMin = 2 * time.Millisecond
 	lockPollMax = 50 * time.Millisecond
 	lockMaxWait = 15 * time.Second
 )
 
-// LockVault acquires an exclusive advisory lock scoped to vaultID. SQLite uses
-// a per-vault in-memory mutex; Postgres pins a *sql.Conn so the lock spans the
-// caller's whole critical section.
-//
-// Postgres polls rather than blocking in pg_advisory_lock: a blocking wait
-// holds its pooled connection, and callers query again inside the critical
-// section, so enough waiters on one vault deadlock the pool against the holder.
-// Polling gives up FIFO ordering, acceptable for admin-only mutations.
+// LockVault acquires an exclusive advisory lock for vaultID; Postgres polls, since blocking holds a pooled connection and can deadlock the pool.
 func (s *SQLStore) LockVault(ctx context.Context, vaultID string) (func(), error) {
 	if s.dialect.Name() == "sqlite" {
 		v, _ := s.vaultMu.LoadOrStore(vaultID, &sync.Mutex{})
@@ -224,10 +212,7 @@ func (s *SQLStore) LockVault(ctx context.Context, vaultID string) (func(), error
 	}
 }
 
-// releaseAdvisoryLock unlocks key and returns conn to the pool. Closing a
-// pooled *sql.Conn recycles the session rather than ending it, so a failed
-// unlock would strand the session-scoped lock and wedge the vault; poison the
-// connection there so the pool discards it instead.
+// releaseAdvisoryLock unlocks key; a failed unlock poisons the conn so the pool discards the session-scoped lock.
 func releaseAdvisoryLock(conn *sql.Conn, key int64) {
 	// Background: the request context is usually already cancelled by the
 	// time a deferred unlock runs.
@@ -398,10 +383,7 @@ func (s *SQLStore) UpdateVaultCredentialStoreHealth(ctx context.Context, vaultID
 	return nil
 }
 
-// replaceCredentialsTx wipes and rewrites the vault's static credentials inside
-// an existing transaction; empty items just clears them. Shared by the
-// standalone replace and the external-store connect path. Non-static (e.g.
-// oauth) credentials are deliberately left untouched.
+// replaceCredentialsTx rewrites the vault's static credentials in a transaction; non-static (oauth) ones are left untouched.
 func (s *SQLStore) replaceCredentialsTx(ctx context.Context, tx *sql.Tx, vaultID string, nowStr interface{}, items []EncryptedKV) error {
 	if _, err := tx.ExecContext(ctx, s.dialect.Rebind("DELETE FROM credentials WHERE vault_id = ? AND type = 'static'"), vaultID); err != nil {
 		return fmt.Errorf("clearing credentials: %w", err)
@@ -427,12 +409,7 @@ func (s *SQLStore) replaceCredentialsTx(ctx context.Context, tx *sql.Tx, vaultID
 	return nil
 }
 
-// ReplaceVaultCredentialsForSync is the syncer's write path: it rewrites the
-// vault's credentials in one transaction, but only while the external-store row
-// still matches the config the snapshot was fetched against. A sync that races
-// a disconnect (row gone) or a reconfigure (config_json changed) reports
-// applied=false and writes nothing, so a stale snapshot can never clobber the
-// credentials a switch just installed. configJSON is the fetched config.
+// ReplaceVaultCredentialsForSync rewrites credentials only while the store row still matches configJSON, so a racing sync writes nothing (applied=false).
 func (s *SQLStore) ReplaceVaultCredentialsForSync(ctx context.Context, vaultID, configJSON string, items []EncryptedKV) (applied bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -458,11 +435,7 @@ func (s *SQLStore) ReplaceVaultCredentialsForSync(ctx context.Context, vaultID, 
 	return true, nil
 }
 
-// SetVaultExternalStore upserts the credential-store row and replaces the
-// vault's static credentials in one transaction — the connect path for an
-// existing built-in vault. The credential-store health is reset to a fresh
-// successful sync (the caller has just probed + fetched the snapshot). Returns
-// the resulting row so the caller can render it without a follow-up read.
+// SetVaultExternalStore upserts the store row and replaces static credentials in one transaction, resetting health to a fresh sync.
 func (s *SQLStore) SetVaultExternalStore(ctx context.Context, p SetVaultExternalStoreParams) (*VaultCredentialStore, error) {
 	if p.VaultID == "" || p.Kind == "" || p.ConfigJSON == "" {
 		return nil, fmt.Errorf("SetVaultExternalStore: vault_id, kind, and config required")
@@ -511,10 +484,7 @@ func (s *SQLStore) SetVaultExternalStore(ctx context.Context, p SetVaultExternal
 	}, nil
 }
 
-// DeleteVaultCredentialStore removes the external-store row so the syncer stops
-// polling the vault. The vault's credentials are intentionally left untouched —
-// the last synced snapshot becomes ordinary built-in credentials. Returns nil
-// when no row exists (the vault was already built-in).
+// DeleteVaultCredentialStore removes the store row and leaves credentials as built-in; nil if no row exists.
 func (s *SQLStore) DeleteVaultCredentialStore(ctx context.Context, vaultID string) error {
 	if _, err := s.db.ExecContext(ctx,
 		s.dialect.Rebind(`DELETE FROM vault_credential_stores WHERE vault_id = ?`), vaultID); err != nil {
@@ -523,9 +493,7 @@ func (s *SQLStore) DeleteVaultCredentialStore(ctx context.Context, vaultID strin
 	return nil
 }
 
-// InsertDynamicSecretLease records an outstanding dynamic-secret lease. The
-// lease_id is unique per Infisical, so a re-insert (e.g. after a renew that
-// kept the same id) just refreshes expire_at.
+// InsertDynamicSecretLease records a lease; re-inserting the same lease_id refreshes expire_at.
 func (s *SQLStore) InsertDynamicSecretLease(ctx context.Context, lease DynamicSecretLease) error {
 	expire := s.dialect.FormatNullableTime(utcTimePtr(lease.ExpireAt))
 	if _, err := s.db.ExecContext(ctx,
@@ -618,8 +586,6 @@ func (s *SQLStore) CreateVaultWithSetting(ctx context.Context, name, key, value 
 	return s.createVault(ctx, name, key, value)
 }
 
-// createVault creates a vault, its default broker config and, when key is
-// set, that setting, all in one transaction.
 func (s *SQLStore) createVault(ctx context.Context, name, key, value string) (*Vault, error) {
 	nsID := newUUID()
 	bcID := newUUID()
@@ -1323,9 +1289,7 @@ func (s *SQLStore) DeleteUser(ctx context.Context, userID string) error {
 	if _, err := tx.ExecContext(ctx, s.dialect.Rebind("DELETE FROM vault_grants WHERE actor_id = ?"), userID); err != nil {
 		return fmt.Errorf("cleaning up vault grants: %w", err)
 	}
-	// Revoke scoped tokens this user minted on behalf of others. Without
-	// this, an orphan token keeps proxying upstream APIs until its TTL
-	// expires (up to scopedSessionMaxTTL).
+	// Revoke scoped tokens this user minted, which would otherwise keep proxying until TTL.
 	if _, err := tx.ExecContext(ctx,
 		s.dialect.Rebind(`DELETE FROM sessions
 		 WHERE created_by_actor_id = ? AND created_by_actor_type = 'user'`),
@@ -1528,9 +1492,7 @@ func (s *SQLStore) DeleteUserSessions(ctx context.Context, userID string) error 
 
 // --- Sessions ---
 
-// CreateUserSession persists a user login session with sliding-expiry
-// metadata. Both ExpiresAt (absolute cap) and IdleTTL (inactivity window)
-// are enforced on read via Session.IsExpired.
+// CreateUserSession persists a login session; ExpiresAt and IdleTTL are enforced on read via IsExpired.
 func (s *SQLStore) CreateUserSession(ctx context.Context, p CreateUserSessionParams) (*Session, error) {
 	if p.UserID == "" {
 		return nil, fmt.Errorf("CreateUserSession: UserID is required")
@@ -1615,10 +1577,7 @@ func (s *SQLStore) CreateScopedSession(ctx context.Context, p CreateScopedSessio
 	}, nil
 }
 
-// ListScopedSessionsByVault returns active scoped tokens for the vault,
-// most recent first. Stale rows past their absolute expiry are filtered
-// in SQL; rows with a NULL public_id (legacy scoped rows from before
-// migration 044) are excluded so the UI can revoke every row it shows.
+// ListScopedSessionsByVault returns active scoped tokens newest first, excluding legacy rows with NULL public_id.
 func (s *SQLStore) ListScopedSessionsByVault(ctx context.Context, vaultID string) ([]Session, error) {
 	if vaultID == "" {
 		return nil, fmt.Errorf("ListScopedSessionsByVault: vaultID is required")
@@ -1664,10 +1623,7 @@ func (s *SQLStore) ListScopedSessionsByVault(ctx context.Context, vaultID string
 	return out, rows.Err()
 }
 
-// RevokeScopedSession deletes one scoped session by (vaultID, publicID).
-// Returns sql.ErrNoRows when no matching row exists. Vault scoping in the
-// WHERE clause prevents one vault's admin from revoking another vault's
-// token by guessing a public_id.
+// RevokeScopedSession deletes a scoped session by (vaultID, publicID); sql.ErrNoRows if absent, and vault scoping blocks cross-vault revokes.
 func (s *SQLStore) RevokeScopedSession(ctx context.Context, vaultID, publicID string) error {
 	if vaultID == "" || publicID == "" {
 		return sql.ErrNoRows
@@ -1730,21 +1686,10 @@ func (s *SQLStore) GetSession(ctx context.Context, rawToken string) (*Session, e
 	return &sess, nil
 }
 
-// TouchInterval is the minimum gap between last_used_at writes for a
-// single session. Per-request UPDATEs would serialize SQLite writes during
-// a proxy storm; collapsing to one write per minute keeps the idle window
-// accurate to within a minute while leaving headroom for concurrent reads.
-// Exported so callers (e.g. the server's in-memory touch cache) can stay
-// consistent with the store-side throttle.
+// TouchInterval is the minimum gap between last_used_at writes, to avoid serializing SQLite writes; exported for the server's touch cache.
 const TouchInterval = 60 * time.Second
 
-// TouchSession bumps last_used_at on a user session and refreshes
-// last_ip + last_user_agent so the auth-sessions view reflects the
-// caller's most recent request rather than only the login. Throttled by
-// TouchInterval so per-request calls collapse to one write per minute.
-// No-op for agent tokens and scoped sessions (rows with user_id IS NULL).
-// Empty ip/userAgent leave the existing column value untouched via
-// COALESCE — handy when a caller can't determine them.
+// TouchSession bumps last_used_at, last_ip and last_user_agent (empty values kept via COALESCE), throttled by TouchInterval; no-op for non-user sessions.
 func (s *SQLStore) TouchSession(ctx context.Context, rawToken, ip, userAgent string) error {
 	tokenHash := hashSessionToken(rawToken)
 	now := s.dialect.FormatTime(time.Now().UTC())
@@ -1765,9 +1710,7 @@ func (s *SQLStore) TouchSession(ctx context.Context, rawToken, ip, userAgent str
 	return nil
 }
 
-// ListUserSessions returns active (non-expired) user sessions for userID,
-// most recently used first. Idle expiry is enforced at the row level so
-// stale rows don't leak into the UI.
+// ListUserSessions returns active user sessions, most recently used first.
 func (s *SQLStore) ListUserSessions(ctx context.Context, userID string) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx,
 		s.dialect.Rebind(`SELECT id, expires_at, created_at, last_used_at, idle_ttl_seconds,
@@ -1818,10 +1761,7 @@ func (s *SQLStore) ListUserSessions(ctx context.Context, userID string) ([]Sessi
 	return out, rows.Err()
 }
 
-// RevokeUserSession deletes a single session by (userID, publicID).
-// Returns sql.ErrNoRows if no matching session exists — important so a
-// caller can distinguish "already gone" from a successful revoke without
-// a separate lookup.
+// RevokeUserSession deletes a session by (userID, publicID); sql.ErrNoRows tells "already gone" apart from a revoke.
 func (s *SQLStore) RevokeUserSession(ctx context.Context, userID, publicID string) error {
 	if userID == "" || publicID == "" {
 		return sql.ErrNoRows
@@ -2052,22 +1992,15 @@ func (s *SQLStore) GetBrokerConfig(ctx context.Context, vaultID string) (*Broker
 	return s.scanBrokerConfig(row)
 }
 
-// --- Database services ---
-
 const databaseServiceColumns = `id, vault_id, name, upstream, database, mount, role, sslmode, max_conns, created_at, updated_at`
 
-// UpsertDatabaseService creates or replaces a managed database service by
-// (vault_id, name). A re-upsert of an existing name overwrites its upstream and
-// Vault coordinates in place, so re-running an "add" is idempotent.
+// UpsertDatabaseService overwrites an existing (vault_id, name) in place, so re-running an add is idempotent.
 func (s *SQLStore) UpsertDatabaseService(ctx context.Context, svc DatabaseService) (*DatabaseService, error) {
 	id := svc.ID
 	if id == "" {
 		id = newUUID()
 	}
-	// Empty sslmode is the documented default ("prefer"); the column's DDL
-	// default never fires because the INSERT always supplies the value, so
-	// normalize here — the single write chokepoint — to satisfy the CHECK and
-	// keep the stored value concrete for both the API and config-seed paths.
+	// Normalize here, the single write chokepoint: the INSERT always supplies the value, so the column default never fires.
 	if svc.SSLMode == "" {
 		svc.SSLMode = "prefer"
 	}
@@ -2092,8 +2025,7 @@ func (s *SQLStore) UpsertDatabaseService(ctx context.Context, svc DatabaseServic
 	return s.GetDatabaseService(ctx, svc.VaultID, svc.Name)
 }
 
-// GetDatabaseService returns the named service in the vault, or sql.ErrNoRows
-// when absent.
+// GetDatabaseService returns sql.ErrNoRows when absent.
 func (s *SQLStore) GetDatabaseService(ctx context.Context, vaultID, name string) (*DatabaseService, error) {
 	row := s.db.QueryRowContext(ctx,
 		s.dialect.Rebind(`SELECT `+databaseServiceColumns+` FROM database_services WHERE vault_id = ? AND name = ?`),
@@ -2102,8 +2034,6 @@ func (s *SQLStore) GetDatabaseService(ctx context.Context, vaultID, name string)
 	return s.scanDatabaseService(row)
 }
 
-// ListDatabaseServices returns every service in the vault, ordered by name for
-// stable iteration and discovery.
 func (s *SQLStore) ListDatabaseServices(ctx context.Context, vaultID string) ([]DatabaseService, error) {
 	rows, err := s.db.QueryContext(ctx,
 		s.dialect.Rebind(`SELECT `+databaseServiceColumns+` FROM database_services WHERE vault_id = ? ORDER BY name`),
@@ -2124,21 +2054,18 @@ func (s *SQLStore) ListDatabaseServices(ctx context.Context, vaultID string) ([]
 	return out, rows.Err()
 }
 
-// DatabaseUpstreamLimit returns the strictest explicit limit across all
-// services using an endpoint. It exposes no cross-vault service metadata.
+// DatabaseUpstreamLimit returns the strictest explicit limit across services using an endpoint, without exposing cross-vault metadata.
 func (s *SQLStore) DatabaseUpstreamLimit(ctx context.Context, upstream string) (int, error) {
 	var limit int
 	err := s.db.QueryRowContext(ctx, s.dialect.Rebind(`SELECT COALESCE(MIN(NULLIF(max_conns, 0)), 0) FROM database_services WHERE upstream = ?`), upstream).Scan(&limit)
 	return limit, err
 }
 
-// DeleteDatabaseService removes the named service and reports whether a row was
-// deleted, so the API can distinguish a delete from a not-found.
+// DeleteDatabaseService reports whether a row was deleted, so the API can tell a delete from a not-found.
 func (s *SQLStore) DeleteDatabaseService(ctx context.Context, vaultID, name string) (bool, error) {
 	var removed bool
 	err := s.auditWrite(ctx, func(tx *sql.Tx) error {
-		// Serialize deletion with a first seed and remember removals even when
-		// the service was originally added through the API rather than config.
+		// Serialize deletion with a first seed and remember removals even for API-added services.
 		if _, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO database_service_seed_history (vault_id, name)
 			SELECT id, ? FROM vaults WHERE id = ? ON CONFLICT(vault_id, name) DO NOTHING`), name, vaultID); err != nil {
 			return err
@@ -3262,10 +3189,7 @@ func (s *SQLStore) RevokeAgent(ctx context.Context, id string) error {
 		return sql.ErrNoRows
 	}
 
-	// Cascade: delete tokens authenticating AS this agent and scoped
-	// tokens this agent minted on behalf of others. Without the second
-	// branch, a revoked agent's orphan token keeps proxying upstream APIs
-	// until its TTL expires (up to scopedSessionMaxTTL).
+	// Cascade to tokens for this agent and scoped tokens it minted, which would otherwise keep proxying until TTL.
 	_, err = tx.ExecContext(ctx,
 		s.dialect.Rebind(`DELETE FROM sessions
 		 WHERE agent_id = ?
@@ -3584,10 +3508,7 @@ func (s *SQLStore) SetCAState(ctx context.Context, state *CAState) error {
 
 // --- Request Logs ---
 
-// InsertRequestLogs persists a batch of request logs inside a single
-// transaction. Credential key names are stored as a JSON array.
-// Callers are expected to pre-filter out anything secret; the store does
-// not validate fields beyond the column types.
+// InsertRequestLogs persists a batch in one transaction; callers must pre-filter secrets.
 func (s *SQLStore) InsertRequestLogs(ctx context.Context, rows []RequestLog) error {
 	if len(rows) == 0 {
 		return nil
@@ -3637,9 +3558,7 @@ func (s *SQLStore) InsertRequestLogs(ctx context.Context, rows []RequestLog) err
 	return nil
 }
 
-// ListRequestLogs returns logs matching opts, newest first. Pagination is
-// cursor-based via opts.Before (historical) or opts.After (tailing).
-// opts.Limit is used as-is; callers must cap it.
+// ListRequestLogs returns logs newest first, paged by opts.Before or opts.After; callers must cap opts.Limit.
 func (s *SQLStore) ListRequestLogs(ctx context.Context, opts ListRequestLogsOpts) ([]RequestLog, error) {
 	var (
 		where []string
@@ -3689,10 +3608,7 @@ func (s *SQLStore) ListRequestLogs(ctx context.Context, opts ListRequestLogsOpts
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ") // #nosec G202 -- where entries are static predicate strings; all user input flows through args as ? placeholders
 	}
-	// Tailing (After > 0) scans ASC so bursts larger than the page are
-	// consumed oldest-first — a DESC LIMIT would skip the oldest new
-	// rows and silently lose them on the next poll. Historical paging
-	// (Before, or no cursor) stays DESC for newest-first display.
+	// Tailing (After > 0) scans ASC so a burst larger than the page is not skipped; historical paging stays DESC.
 	if opts.After > 0 {
 		query += " ORDER BY id ASC LIMIT ?"
 	} else {
@@ -3727,16 +3643,11 @@ func (s *SQLStore) ListRequestLogs(ctx context.Context, opts ListRequestLogsOpts
 	return out, rows.Err()
 }
 
-// ListUnmatchedHosts returns distinct hostnames from request_logs that did
-// not match any configured service and resulted in an auth failure (401/403)
-// or proxy denial (error_code 'no_match'). Results are ordered by most
-// recent failure first. Capped at 500 rows as a defense-in-depth limit.
+// ListUnmatchedHosts returns distinct hosts that matched no service and were denied, newest failure first, capped at 500.
 func (s *SQLStore) ListUnmatchedHosts(ctx context.Context, vaultID string) ([]UnmatchedHost, error) {
 	var query string
 	if s.dialect.Name() == "postgres" {
-		// PostgreSQL does not allow non-aggregated columns with GROUP BY
-		// unless they are functionally dependent. Use DISTINCT ON to pick
-		// the most recent row per host.
+		// PostgreSQL forbids non-aggregated columns with GROUP BY, so DISTINCT ON picks the latest row per host.
 		query = s.dialect.Rebind(`
 			SELECT host, request_count, last_seen, auth_scheme, auth_header
 			FROM (
@@ -3802,9 +3713,7 @@ func (s *SQLStore) DeleteOldRequestLogs(ctx context.Context, before time.Time) (
 	return n, nil
 }
 
-// TrimRequestLogsToCap keeps at most cap rows for vaultID, deleting the
-// oldest beyond that ceiling. Returns rows deleted. Short-circuits when
-// the vault is under the cap so steady-state calls do no index-walk work.
+// TrimRequestLogsToCap deletes the oldest rows beyond cap for vaultID and returns the count; skips work when under the cap.
 func (s *SQLStore) TrimRequestLogsToCap(ctx context.Context, vaultID string, cap int64) (int64, error) {
 	if cap <= 0 {
 		return 0, nil
@@ -3838,9 +3747,7 @@ func (s *SQLStore) TrimRequestLogsToCap(ctx context.Context, vaultID string, cap
 	return n, nil
 }
 
-// VaultIDsWithLogs returns the distinct vault IDs that have at least one
-// persisted request log. Used by the retention ticker to scope per-vault
-// trimming without iterating every vault.
+// VaultIDsWithLogs returns the vault IDs that have request logs, for the retention ticker.
 func (s *SQLStore) VaultIDsWithLogs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(`SELECT DISTINCT vault_id FROM request_logs`))
 	if err != nil {

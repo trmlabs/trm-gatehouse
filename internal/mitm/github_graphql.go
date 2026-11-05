@@ -22,31 +22,16 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// graphqlPermissions is every GraphQL token's base scope: pull requests, and no
-// contents. Below a mapped field GraphQL can reach a repository's files and
-// history, which only a git entry grants; without contents GitHub refuses
-// those fields. (REST's pull request token carries contents read for opening
-// pull requests, which GraphQL here never does.) The exceptions are the two
-// mutations GitHub refuses without contents: ready (contents write) and
-// create (contents read). Their tokens carry it, and their payload may read
-// back only the pull request's id, URL, number and draft state (httpcatalog
-// GitHubGraphQL.Contents). A check status read carries contents read too, but
-// only for a pool that may clone the repository (forwardGitHubGraphQL).
+// graphqlPermissions is every GraphQL token's base scope: pull requests and no contents, since below a mapped field GraphQL can reach files and history that only a git entry grants.
+// Ready and create carry contents and read back only id, URL, number and draft state; a check status read does too, only for a pool that may clone the repository.
 var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
 
-// forwardGitHubGraphQL serves POST /graphql on a github-api host. The request
-// is parsed and mapped to repository operations (httpcatalog
-// ParseGitHubGraphQL), so one catalog decides REST and GraphQL alike: the
-// repository must be listed for the pool and grant every operation, and a
-// mutation's pull request must be in reach exactly as for a REST write. Node
-// IDs are resolved to their repository with the broker's own lookup before
-// anything is sent, and any failed lookup refuses. GitHub receives the
-// rebuilt request with a token minted for that one repository.
+// forwardGitHubGraphQL serves POST /graphql on a github-api host: the request is parsed into repository operations so one catalog decides REST and GraphQL alike.
+// Node IDs are resolved to their repository by the broker's own lookup before anything is sent, and any failed lookup refuses.
 func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, target, host string, port int, scope *brokercore.ProxyScope, event auditchain.Event,
 	catalog httpcatalog.Catalog, granted []httpcatalog.GitRequest) {
 	a := p.adapter
-	// Every row names one operation: "graphql" until the request is parsed,
-	// then the write a mutation makes (req.AuditOperation).
+	// Every row names one operation: "graphql" until the request is parsed, then the write a mutation makes.
 	event.Operation = "graphql"
 	deny := func(status int, outcome string) { p.adapterDeny(w, event, target, status, outcome) }
 	var releases []func()
@@ -61,8 +46,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(http.StatusServiceUnavailable, "token_unavailable")
 		return
 	}
-	// GraphQL is opt-in per repository (the graphql operation), so a catalog
-	// entry written for REST does not widen when the broker serves GraphQL.
+	// GraphQL is opt-in per repository, so a REST catalog entry does not widen.
 	var optedIn []httpcatalog.GitRequest
 	for _, g := range granted {
 		if g.Repo.Allows("graphql") {
@@ -75,11 +59,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	granted = optedIn
-	// Only entries the request passes authorization for are considered,
-	// before any token is minted or GitHub asked (the rule forwardCatalog
-	// states for every credential). The first one authorizes into the logged
-	// event straight away, so even a refused request's row names the
-	// requester; the entry finally chosen authorizes into it again below.
+	// Only entries the request passes authorization for are considered, before any token is minted or GitHub asked; the first authorizes into the logged event, so even a refused row names the requester.
 	var authorized []httpcatalog.GitRequest
 	for _, g := range granted {
 		probe := event
@@ -87,11 +67,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 			authorized = append(authorized, g)
 		}
 	}
-	// authorizeInto runs the authorization model into the event this request
-	// logs, so its rows name the requester, tier and decision as REST rows do.
-	// It refuses (and reports false) when the entry does not authorize. who is
-	// the requester it last authorized, whose own branches a write's pull
-	// request must be on (ForRequester).
+	// authorizeInto runs the authorization model into the logged event and reports false when the entry does not authorize; who is the requester it last authorized (ForRequester).
 	var who authorize.Requester
 	authorizeInto := func(entry *httpcatalog.Entry) bool {
 		requester, outcome := p.authorize(r.Context(), scope, entry, &event)
@@ -105,8 +81,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	}
 	if len(authorized) == 0 {
 		if authorizeInto(granted[0].Entry) {
-			// Authorization changed since the filter ran: refuse anyway, with
-			// a row, rather than answer with nothing.
+			// Authorization changed since the filter ran: refuse anyway, with a row.
 			deny(http.StatusForbidden, "refused")
 		}
 		return
@@ -158,19 +133,13 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		p.answerGitHubGraphQL(w, event, authorized[0].Entry, req.Answer)
 		return
 	}
-	// An Automation holds a write grant per entry (Requester.MayWrite). A
-	// request that writes, when none of the entries that could serve it gives
-	// the requester one, is refused before any lookup or token. When some do,
-	// the pull request a node ID names may be in an entry that does not, so the
-	// lookup (a read) can run first and the entry finally chosen is checked
-	// again below.
+	// An Automation holds a write grant per entry (Requester.MayWrite). A write is refused before any lookup or token when no candidate entry grants it; when some do, the entry finally chosen is checked again below.
 	if slices.ContainsFunc(req.Operations, httpcatalog.GitHubOperationWrites) &&
 		!slices.ContainsFunc(authorized, func(g httpcatalog.GitRequest) bool { return who.MayWrite(g.Entry.Name) }) {
 		deny(http.StatusForbidden, "automation_read_only")
 		return
 	}
 
-	// The rate limit applies before any lookup too, per entry as for REST.
 	limited := map[string]bool{}
 	limit := func(name string) bool {
 		if limited[name] {
@@ -192,9 +161,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 
 	repo := req.Repo
 	if repo == "" {
-		// A file list needs the clone grant (below); for a request naming its
-		// repository only by node ID, repositories without it are dropped
-		// before any token is minted or GitHub asked.
+		// A file list needs the clone grant; for a request naming its repository only by node ID, repositories without it are dropped before any token.
 		candidates := authorized
 		if req.Code {
 			candidates = nil
@@ -228,13 +195,9 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	case !authorizeInto(api.Entry):
 		return
 	}
-	// A write's pull request must be on the requester's own branches where
-	// the pool gives each requester theirs.
 	api = api.ForRequester(who.BranchSegment())
 	if req.Code {
-		// A pull request's file list is code-adjacent: as for REST, only a
-		// pool whose git entry may clone the repository, for a requester that
-		// entry authorizes too.
+		// A pull request's file list is code-adjacent: only a pool whose git entry may clone the repository, for a requester that entry authorizes.
 		clone := catalog.GitHubCloneEntry(host, api.Repo.Repo, scope.Pool)
 		if clone == nil {
 			deny(http.StatusForbidden, "unlisted")
@@ -246,26 +209,21 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		event.GitEntry = clone.Name
 	}
 	entry := api.Entry
-	// The binding has exactly the REST form ("<entry>/<owner>/<repo>"), so
-	// alerts and dashboards that match on it see GraphQL traffic too. The
-	// operation belongs in the row's operation field (req.AuditOperation).
+	// The binding has exactly the REST form (<entry>/<owner>/<repo>), so alerts matching on it see GraphQL traffic too.
 	event.Binding = entry.Name + "/" + api.Repo.Repo
 	for _, op := range append([]string{"graphql"}, req.Operations...) {
 		if !api.Repo.Allows(op) {
 			deny(http.StatusForbidden, "unlisted")
 			return
 		}
-		// An Automation with no write grant on the entry reads only: every
-		// mutation, and a read that needs a write operation, is refused.
+		// An Automation with no write grant reads only: every mutation, and a read needing a write operation, is refused.
 		if httpcatalog.GitHubOperationWrites(op) && !who.MayWrite(entry.Name) {
 			deny(http.StatusForbidden, "automation_read_only")
 			return
 		}
 	}
 	if req.Head != "" {
-		// Opening a pull request holds to REST's pr.open, asked of the same
-		// route: its head a branch of this repository under the pool's own
-		// push prefixes, and its base a plain branch name.
+		// Opening a pull request holds to REST's pr.open: head under the pool's push prefixes, base a plain branch name.
 		open, _, err := catalog.GitHubAPIMatch(host, port, http.MethodPost, "/repos/"+api.Repo.Repo+"/pulls", "", scope.Pool)
 		open = open.ForRequester(who.BranchSegment())
 		event.Branch = auditchain.BranchField(req.Head)
@@ -290,10 +248,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	app := githubapp.App{AppID: entry.Git.AppID, InstallationID: entry.Git.InstallationID}
-	// Check status needs checks and statuses read, and a check suite's
-	// workflow run actions read, which a repository grants with actions.read
-	// (as for REST's check run, status and workflow run routes); a request
-	// that reads none gets the pull request scope alone.
+	// Check status needs checks and statuses read, and a check suite's workflow run needs actions read (actions.read); a request that reads none gets the pull request scope alone.
 	permissions := graphqlPermissions
 	if req.Checks && api.Repo.GrantsScope("checks") && api.Repo.GrantsScope("statuses") {
 		permissions.Checks, permissions.Statuses = "read", "read"
@@ -357,8 +312,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		out.Header.Set("GraphQL-Features", "merge_queue")
 	}
 	out.Header.Set("Content-Type", "application/json")
-	// The worker then holds only IDs that name their repository, which the
-	// next request's lookup needs (nodeRepositoryID).
+	// The worker then holds only IDs that name their repository, which the next lookup needs.
 	out.Header.Set("X-Github-Next-Global-ID", "1")
 	credential := "Bearer " + token.Value()
 	out.Header.Set("Authorization", credential)
@@ -398,9 +352,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 	}, screen))
 }
 
-// answerGitHubGraphQL replies to gh's schema feature detection without
-// reaching GitHub, for a pool granted any github-api repository on the host;
-// event has already passed authorization for entry.
+// answerGitHubGraphQL answers gh's schema feature detection without reaching GitHub.
 func (p *Proxy) answerGitHubGraphQL(w http.ResponseWriter, event auditchain.Event, entry *httpcatalog.Entry, answer []byte) {
 	event.Binding = entry.Name
 	admitted := event
@@ -415,9 +367,7 @@ func (p *Proxy) answerGitHubGraphQL(w http.ResponseWriter, event auditchain.Even
 	_ = p.adapter.Audit.Record(event)
 }
 
-// lookupStatus is the status a refused target answers with: 503 when GitHub
-// could not be asked, 400 for a label outside the repository's list (as for
-// REST), 403 otherwise.
+// lookupStatus is the status a refused target answers with: 503 when GitHub could not be asked, 400 for a label outside the list, 403 otherwise.
 func lookupStatus(outcome string) int {
 	switch outcome {
 	case "target_lookup":
@@ -430,8 +380,6 @@ func lookupStatus(outcome string) int {
 	return http.StatusForbidden
 }
 
-// targetOutcomeFor names a refused node target in the audit trail, as REST
-// names the same refusal.
 func targetOutcomeFor(req httpcatalog.GitHubGraphQL) string {
 	for _, t := range req.Targets {
 		if t.Kind == httpcatalog.TargetRepository {
@@ -446,13 +394,8 @@ func targetOutcomeFor(req httpcatalog.GitHubGraphQL) string {
 	return "pull_request_target"
 }
 
-// nodesRepository finds the one repository a request's node IDs belong to,
-// among the pool's repositories that grant every operation it needs. Each ID
-// names its repository's database ID (nodeRepositoryID); that is only a hint
-// for which token to check with, and checkGraphQLTargets then confirms every
-// ID with GitHub. An ID that names no such repository, or IDs naming more
-// than one, refuse; with no repository granting the operations at all, the
-// request is unlisted, as its REST route would be.
+// nodesRepository finds the one repository a request's node IDs belong to among the pool's repositories granting every operation. The ID's repository database ID is only a hint for which token to check with; checkGraphQLTargets confirms every ID.
+// An ID naming no such repository, or IDs naming more than one, refuse.
 func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []httpcatalog.GitRequest, req httpcatalog.GitHubGraphQL, limit func(string) bool) (string, string) {
 	refusal := targetOutcomeFor(req)
 	var want int64
@@ -473,8 +416,7 @@ func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []
 			continue
 		}
 		candidates++
-		// An entry's rate limit is charged before the broker asks GitHub on
-		// its behalf, and for the entry that matches; a known ID costs none.
+		// An entry's rate limit is charged before the broker asks GitHub; a known ID costs none.
 		if _, known := p.graphql.repository(repositoryKey{g.Entry.Git.InstallationID, g.Repo.Repo}); !known && !limit(g.Entry.Name) {
 			return "", "rate_limited"
 		}
@@ -499,11 +441,7 @@ func (p *Proxy) nodesRepository(r *http.Request, target, host string, granted []
 	return "", refusal
 }
 
-// nodeRepositoryID reads the repository database ID from a GitHub node ID of
-// a pull request or label in the current format: "PR_" or "LA_" and base64url
-// MessagePack [0, repository ID, object ID]. Older IDs carry no repository
-// and are refused; the broker asks GitHub for current IDs on every request it
-// relays, so gh holds no other kind.
+// nodeRepositoryID reads the repository database ID from a current-format "PR_" or "LA_" node ID (base64url MessagePack [0, repository ID, object ID]); older IDs carry no repository and are refused.
 func nodeRepositoryID(id string) (int64, bool) {
 	prefix, payload, ok := strings.Cut(id, "_")
 	if !ok || prefix != "PR" && prefix != "LA" && prefix != "R" || len(payload) > 64 {
@@ -534,7 +472,6 @@ func nodeRepositoryID(id string) (int64, bool) {
 	return repo, true
 }
 
-// msgpackUint reads one MessagePack unsigned integer.
 func msgpackUint(b []byte) (int64, []byte, bool) {
 	if len(b) == 0 {
 		return 0, nil, false
@@ -556,8 +493,7 @@ func msgpackUint(b []byte) (int64, []byte, bool) {
 	return 0, nil, false
 }
 
-// repositoryDatabaseID is a granted repository's GitHub database ID, read
-// once with its own token and kept for an hour.
+// repositoryDatabaseID is a granted repository's database ID, read once and kept for an hour.
 func (p *Proxy) repositoryDatabaseID(r *http.Request, target, host string, g httpcatalog.GitRequest) (int64, bool) {
 	key := repositoryKey{g.Entry.Git.InstallationID, g.Repo.Repo}
 	if id, ok := p.graphql.repository(key); ok {
@@ -579,7 +515,6 @@ func (p *Proxy) repositoryDatabaseID(r *http.Request, target, host string, g htt
 	return repo.ID, true
 }
 
-// nodeFact is what GitHub says one node is.
 type nodeFact struct {
 	Type     string // "PullRequest", "Label" or "Repository"
 	Repo     string // owner/name: the node's repository, or the repository itself
@@ -588,18 +523,13 @@ type nodeFact struct {
 	Name     string // a label's name
 }
 
-// nodesLookup reads what each node is, with the request's own repository
-// token: a node outside that repository comes back empty.
+// nodesLookup reads what each node is with the request's repository token; a node outside that repository comes back empty.
 const nodesLookup = `query($ids: [ID!]!) { nodes(ids: $ids) { __typename ` +
 	`... on PullRequest { headRefName repository { nameWithOwner } headRepository { nameWithOwner } } ` +
 	`... on Label { name repository { nameWithOwner } } ` +
 	`... on Repository { nameWithOwner } } }`
 
-// checkGraphQLTargets confirms every node ID with GitHub: a pull request in
-// the repository (and, for a write, its head in reach), or a label in the
-// repository that the catalog lists. It returns the refusal's outcome, or "",
-// and the head branch of the first pull request a write targets, as GitHub
-// named it, for the audit row.
+// checkGraphQLTargets confirms every node ID with GitHub (a pull request in the repository, with its head in reach for a write, or a listed label) and returns the refusal outcome or "", plus the first written pull request's head branch.
 func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app githubapp.App, api httpcatalog.GitRequest, token string, req httpcatalog.GitHubGraphQL) (string, string) {
 	if len(req.Targets) == 0 {
 		return "", ""
@@ -686,9 +616,7 @@ func (p *Proxy) checkGraphQLTargets(r *http.Request, target, host string, app gi
 	return "", branch
 }
 
-// githubGraphQL makes one of the broker's own GraphQL reads with token. ok
-// needs a 200 with data; GitHub's per-node errors (a node the token cannot
-// see) leave that node null.
+// githubGraphQL makes one of the broker's own GraphQL reads; ok needs a 200 with data, and per-node errors leave that node null.
 func (p *Proxy) githubGraphQL(r *http.Request, target, host, token, query string, variables map[string]any, v any) (int, bool) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -714,17 +642,14 @@ func (p *Proxy) githubGraphQL(r *http.Request, target, host, token, query string
 	return resp.StatusCode, err == nil && resp.StatusCode == http.StatusOK && json.Unmarshal(data, v) == nil
 }
 
-// graphqlLookups caches what the broker learned from GitHub: node facts for
-// five minutes (so a renamed label keeps its old name in the check for up to
-// that long) and repository database IDs for an hour. Only answers GitHub gave are kept, never a failure, and each map is
-// bounded, so a flood of IDs costs lookups, not memory.
+// graphqlLookups caches node facts for five minutes (a renamed label keeps its old name that long) and repository database IDs for an hour.
+// Only answers GitHub gave are kept and each map is bounded, so a flood of IDs costs lookups, not memory.
 type graphqlLookups struct {
 	mu    sync.Mutex
 	nodes map[nodeKey]cachedNode
 	repos map[repositoryKey]cachedRepository
 }
 
-// nodeKey is a node ID on one GitHub host (host:port).
 type nodeKey struct{ host, id string }
 
 type repositoryKey struct {
@@ -790,8 +715,7 @@ func (c *graphqlLookups) storeRepository(key repositoryKey, id int64) {
 	c.repos[key] = cachedRepository{id: id, expires: time.Now().Add(repositoryIDTTL)}
 }
 
-// makeRoom keeps a full map under limit: it drops expired entries among the
-// first graphqlCacheSweep it visits, and if none had expired, one entry.
+// makeRoom keeps a full map under limit by dropping expired entries among the first graphqlCacheSweep it visits, else one entry.
 func makeRoom[K comparable, V any](m map[K]V, limit int, expires func(V) time.Time) {
 	if len(m) < limit {
 		return

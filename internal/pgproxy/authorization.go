@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// authorizationLoop bounds the lifetime of an already-open session after token
-// revocation/expiry, grant removal, or a binding change. Store unavailability
-// fails closed. Capacity changes alone affect admission, not existing sessions.
+// authorizationLoop bounds the lifetime of an already-open session after token revocation/expiry, grant
+// removal, or a binding change.
 func (b *Broker) authorizationLoop(ctx context.Context, token, hint, requested string, scope AgentScope, svc DatabaseService, terminate func(), peer netip.Addr) {
 	b.authorizationLoopWith(ctx, token, hint, scope, svc.Name, func(ctx context.Context, current AgentScope) bool {
 		next, err := b.opts.Databases.ResolveDatabase(ctx, current, requested)
@@ -16,9 +15,8 @@ func (b *Broker) authorizationLoop(ctx context.Context, token, hint, requested s
 	}, terminate, peer)
 }
 
-// authorizationLoopWith is authorizationLoop for any destination: confirm
-// resolves it again for the rechecked scope and reports whether it is still
-// the same binding.
+// authorizationLoopWith is authorizationLoop for any destination: confirm resolves it again for the rechecked
+// scope and reports whether it is still the same binding.
 func (b *Broker) authorizationLoopWith(ctx context.Context, token, hint string, scope AgentScope, service string, confirm func(context.Context, AgentScope) bool, terminate func(), peer netip.Addr) {
 	defer func() {
 		if recover() != nil {

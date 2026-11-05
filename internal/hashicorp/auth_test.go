@@ -40,8 +40,6 @@ func TestDetectAuthMethod(t *testing.T) {
 	}
 }
 
-// TestLogin_AppRole exercises the AppRole login path: login() POSTs RoleID +
-// SecretID to auth/approle/login and adopts the returned client token.
 func TestLogin_AppRole(t *testing.T) {
 	var gotPath string
 	var gotBody map[string]interface{}
@@ -78,8 +76,6 @@ func TestLogin_AppRole(t *testing.T) {
 	}
 }
 
-// TestLogin_AppRoleNoToken: a login response without a client token is an error,
-// not a silent success with an empty token.
 func TestLogin_AppRoleNoToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -96,8 +92,6 @@ func TestLogin_AppRoleNoToken(t *testing.T) {
 	}
 }
 
-// TestLogin_AppRoleCustomMount: VAULT_APPROLE_MOUNT overrides the login path for
-// Enterprise/HCP setups that mount AppRole at a non-default location.
 func TestLogin_AppRoleCustomMount(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,8 +116,6 @@ func TestLogin_AppRoleCustomMount(t *testing.T) {
 	}
 }
 
-// TestLogin_Token: token auth probes lookup-self so an invalid token fails fast
-// at startup rather than surfacing on the first sync tick.
 func TestLogin_Token(t *testing.T) {
 	var lookedUp bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,8 +143,6 @@ func TestLogin_Token(t *testing.T) {
 	}
 }
 
-// TestLogin_TokenInvalid: a token that fails lookup-self (e.g. expired) errors
-// at login rather than silently succeeding.
 func TestLogin_TokenInvalid(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -168,8 +158,6 @@ func TestLogin_TokenInvalid(t *testing.T) {
 	}
 }
 
-// Token and AppRole logins report their lifetime, so readiness ends when the
-// login lapses: neither mode renews it.
 func TestLoginReportsItsLifetime(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

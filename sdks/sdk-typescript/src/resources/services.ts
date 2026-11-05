@@ -8,10 +8,6 @@ import type {
   WireCredentialUsageResult,
 } from "../types.js";
 
-// ---------------------------------------------------------------------------
-// Auth discriminated union
-// ---------------------------------------------------------------------------
-
 /** Bearer token auth — references a credential key. */
 export interface BearerAuth {
   type: "bearer";
@@ -59,10 +55,6 @@ export type ServiceAuth =
   | CustomAuth
   | PassthroughAuth;
 
-// ---------------------------------------------------------------------------
-// Substitution
-// ---------------------------------------------------------------------------
-
 /** Surfaces where a substitution may be applied. */
 export type SubstitutionSurface = "path" | "query" | "header" | "body" | "websocket";
 
@@ -76,24 +68,7 @@ export interface Substitution {
   in?: SubstitutionSurface[];
 }
 
-// ---------------------------------------------------------------------------
-// Service type
-// ---------------------------------------------------------------------------
-
-/**
- * Write shape for a vault service (proxy rule).
- *
- * Identity is `name` — a unique-per-vault slug. Required on write; pick
- * a deliberate identifier (e.g. `stripe`, `slack-bot`). The server does
- * not derive a name from `host`.
- *
- * `host` is the single matcher field on the wire. Accepts a bare
- * hostname (`api.stripe.com`), a one-level wildcard (`*.github.com`),
- * or an inline path-scoped form (`slack.com/api/*`). The server splits
- * the path off the host on ingest and resolves overlapping rules
- * deterministically: exact-host beats wildcard-host, then longer
- * literal path prefix wins, with declaration order as the final tiebreak.
- */
+/** Write shape for a vault service; `name` is a required unique slug, `host` the single matcher (most specific wins). */
 export interface ServiceInput {
   /** Service name (slug, 3–64 chars, lowercase alphanumeric and hyphens). Required on write. */
   name?: string;
@@ -107,15 +82,7 @@ export interface ServiceInput {
   substitutions?: Substitution[];
 }
 
-/**
- * Read shape for a vault service.
- *
- * Mirrors {@link ServiceInput} symmetrically: `host` carries the joined
- * inline form on reads (`slack.com/api/*`) just as it does on writes,
- * so callers see the same single-field matcher pattern they sent.
- * Composed (not extended) from `ServiceInput` so a read value can't be
- * passed to a write method without an explicit conversion.
- */
+/** Read shape for a vault service; composed, not extended, from `ServiceInput` so it cannot be passed to a write method unconverted. */
 export interface Service {
   /** Service name (slug). Server populates this on reads. */
   name?: string;
@@ -128,10 +95,6 @@ export interface Service {
   /** Optional placeholder→credential substitutions applied before forwarding. */
   substitutions?: Substitution[];
 }
-
-// ---------------------------------------------------------------------------
-// Result types
-// ---------------------------------------------------------------------------
 
 /** Result of listing services. */
 export interface ListServicesResult {
@@ -193,16 +156,7 @@ export interface CredentialUsageResult {
   services: CredentialUsageEntry[];
 }
 
-// ---------------------------------------------------------------------------
-// Resource class
-// ---------------------------------------------------------------------------
-
-/**
- * Resource for managing vault services (proxy rules).
- *
- * Maps to `GET/POST/PUT/DELETE /v1/vaults/{name}/services`.
- * Only available when the vault name is known (i.e. created via `AgentVault.vault(name)`).
- */
+/** Resource for vault services (proxy rules), mapping to `GET/POST/PUT/DELETE /v1/vaults/{name}/services`. */
 export class ServicesResource {
   private readonly basePath: string;
 
@@ -213,12 +167,7 @@ export class ServicesResource {
     this.basePath = `/v1/vaults/${encodeURIComponent(vaultName)}/services`;
   }
 
-  /**
-   * List all services configured in this vault.
-   *
-   * @throws {ApiError} 403 if the caller lacks vault access.
-   * @throws {ApiError} 404 if the vault is not found.
-   */
+  /** List all services in this vault. */
   async list(): Promise<ListServicesResult> {
     const res = await this.httpClient.get<ServicesList>(this.basePath);
     return {
@@ -227,17 +176,7 @@ export class ServicesResource {
     };
   }
 
-  /**
-   * Upsert one or more services by canonical name (slug).
-   *
-   * Identity is `name` and is required on every entry. Resubmitting the
-   * same name replaces the stored entry. Requires vault admin role.
-   *
-   * @param services - Services to add or update.
-   * @throws {ApiError} 400 if services are empty or fail validation.
-   * @throws {ApiError} 403 if the caller is not a vault admin.
-   * @throws {ApiError} 404 if the vault is not found.
-   */
+  /** Upsert services by canonical name; resubmitting a name replaces it (vault admin). */
   async set(services: ServiceInput[]): Promise<SetServicesResult> {
     const res = await this.httpClient.post<ServicesUpserted>(this.basePath, {
       services,
@@ -249,36 +188,12 @@ export class ServicesResource {
     };
   }
 
-  /**
-   * Remove a specific service by host.
-   *
-   * Convenience wrapper that targets `DELETE /services/{host}`. The server
-   * tries to match by canonical name first; if no name matches, it falls
-   * back to host. When more than one service shares the host, the server
-   * returns 409 with the candidate list — surfaced here as an `ApiError`.
-   * For path-scoped services, prefer {@link removeByName}.
-   *
-   * Requires vault admin role.
-   *
-   * @param host - Exact host pattern to remove.
-   * @throws {ApiError} 403 if the caller is not a vault admin.
-   * @throws {ApiError} 404 if the vault or service is not found.
-   * @throws {ApiError} 409 if multiple services share the host (use {@link removeByName}).
-   */
+  /** Remove a service by host; the server returns 409 if several share it, so prefer {@link removeByName} for path-scoped ones. */
   async remove(host: string): Promise<RemoveServiceResult> {
     return this.removeByRef(host);
   }
 
-  /**
-   * Remove a specific service by canonical name (slug).
-   *
-   * Recommended for path-scoped services: a name is unambiguous and
-   * never returns 409. Requires vault admin role.
-   *
-   * @param name - The service's canonical name.
-   * @throws {ApiError} 403 if the caller is not a vault admin.
-   * @throws {ApiError} 404 if the vault or service is not found.
-   */
+  /** Remove a service by canonical name; unambiguous, never 409 (vault admin). */
   async removeByName(name: string): Promise<RemoveServiceResult> {
     return this.removeByRef(name);
   }
@@ -295,18 +210,7 @@ export class ServicesResource {
     };
   }
 
-  /**
-   * Replace ALL services in the vault.
-   *
-   * This is a destructive operation that removes all existing services
-   * and sets the provided list. Use {@link set} for non-destructive upsert.
-   * Requires vault admin role.
-   *
-   * @param services - Complete list of services to set.
-   * @throws {ApiError} 400 if services fail validation.
-   * @throws {ApiError} 403 if the caller is not a vault admin.
-   * @throws {ApiError} 404 if the vault is not found.
-   */
+  /** Replace ALL services in the vault; destructive, use {@link set} to upsert (vault admin). */
   async replaceAll(services: ServiceInput[]): Promise<ReplaceAllServicesResult> {
     const res = await this.httpClient.put<ServicesReplaced>(this.basePath, {
       services,
@@ -317,14 +221,7 @@ export class ServicesResource {
     };
   }
 
-  /**
-   * Clear ALL services from the vault.
-   *
-   * Requires vault admin role.
-   *
-   * @throws {ApiError} 403 if the caller is not a vault admin.
-   * @throws {ApiError} 404 if the vault is not found.
-   */
+  /** Clear ALL services from the vault (vault admin). */
   async clear(): Promise<ClearServicesResult> {
     const res = await this.httpClient.del<ServicesCleared>(this.basePath);
     return {
@@ -333,14 +230,7 @@ export class ServicesResource {
     };
   }
 
-  /**
-   * Find which services reference a given credential key.
-   *
-   * @param key - Credential key name (UPPER_SNAKE_CASE).
-   * @throws {ApiError} 400 if key is missing.
-   * @throws {ApiError} 403 if the caller lacks vault access.
-   * @throws {ApiError} 404 if the vault is not found.
-   */
+  /** Find which services reference a credential key. */
   async credentialUsage(key: string): Promise<CredentialUsageResult> {
     const res = await this.httpClient.get<WireCredentialUsageResult>(
       `${this.basePath}/credential-usage`,

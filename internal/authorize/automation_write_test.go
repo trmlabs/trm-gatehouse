@@ -8,10 +8,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// writeCatalog has one pool deciding per Automation, a git entry, a github-api
-// entry and a header entry, and three Automations that list all three: auto-1
-// names the two GitHub entries in write, auto-2 has an empty write list, and
-// auto-3 has no write key.
+// writeCatalog lists a git, a github-api and a header entry for three Automations: auto-1 names the two GitHub entries in write, auto-2 has an empty write list, auto-3 has no write key.
 func writeCatalog(t *testing.T) httpcatalog.Catalog {
 	t.Helper()
 	c, err := httpcatalog.Parse([]byte(`{
@@ -33,20 +30,15 @@ func writeCatalog(t *testing.T) httpcatalog.Catalog {
 	return c
 }
 
-// A listed Automation whose block has a write list holds the pool's write
-// grant only on the entries the list names, none for an empty list. One whose
-// block has no write key, and everyone else, keep the pool's grant, which is
-// all that limits a person's or a workload's push, so a catalog that sets no
-// write list decides as it did before the field existed. A requester that
-// claims to be an Automation and carries no block holds none.
+// An Automation with a write list holds the write grant only on the entries it names, none for an empty list.
+// One with no write key, and everyone else, keep the pool's grant; a requester claiming to be an Automation with no block holds none.
 func TestMayWriteFollowsTheAutomationsBlock(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := writeCatalog(t).Pool("automations")
 	for token, want := range map[string]map[string]bool{
 		"explorer": {"repo-git": true, "repo-api": true, "tracker": false, "unlisted": false},
 		"auditor":  {"repo-git": false, "repo-api": false, "tracker": false, "unlisted": false},
-		// No write key: the pool's grant, on every entry.
-		"reader": {"repo-git": true, "repo-api": true, "tracker": true, "unlisted": true},
+		"reader":   {"repo-git": true, "repo-api": true, "tracker": true, "unlisted": true},
 	} {
 		run := automationRuns[token]
 		who, refusal := Resolve(ctx, pool, token, Claims{Pod: "pod-" + token, ClaimedRun: run.Run}, automationRuns, &authorizetest.MemBinder{})
@@ -60,13 +52,11 @@ func TestMayWriteFollowsTheAutomationsBlock(t *testing.T) {
 		}
 	}
 
-	// A person, on a person pool or any other, keeps the pool's grant.
 	who, refusal := Resolve(ctx, cursorPool, "alice-1", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, &authorizetest.MemBinder{})
 	if refusal != "" || who.Kind != "person" || !who.MayWrite("repo-git") || !who.MayWrite("repo-api") {
 		t.Errorf("person: %q %+v", refusal, who)
 	}
-	// An Automation's run served as its person (a person pool that opts in)
-	// is that person's access, not the Automation's block.
+	// An Automation's run served as its person (opted-in person pool) has that person's access.
 	optedIn := httpcatalog.Pool{Identity: "cursor-session", AutomationRunsAsPerson: true}
 	who, refusal = Resolve(ctx, optedIn, "auditor", Claims{Pod: "pod-c", ClaimedRun: "bc-2"}, automationRuns, &authorizetest.MemBinder{})
 	if refusal != "" || who.Kind != "person" || !who.MayWrite("repo-git") {

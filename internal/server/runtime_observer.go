@@ -11,9 +11,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/runtimestatus"
 )
 
-// EnableCleanupObserver is startup-only and opt-in. It accepts no owner session
-// or proxy permission as observer authority. A separate loopback-only listener
-// contains no management routes and requires verified, restricted TLS transport.
+// EnableCleanupObserver is startup-only and opt-in: a loopback-only listener with no management routes, requiring verified restricted TLS; no owner session or proxy permission is observer authority.
 func (s *Server) EnableCleanupObserver(authorize runtimestatus.Authorize, port int, grants ...runtimestatus.Grants) error {
 	if !s.credentialProxy || s.pgBroker == nil {
 		return fmt.Errorf("cleanup observer requires strict database broker")

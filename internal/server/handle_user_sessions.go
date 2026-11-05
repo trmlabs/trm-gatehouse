@@ -19,9 +19,7 @@ type userSessionView struct {
 	Current       bool   `json:"current"`
 }
 
-// handleListUserSessions returns active sessions for the calling user. The
-// session that issued this request is flagged with current=true so a UI
-// can warn before revoking it.
+// handleListUserSessions returns the caller's active sessions, flagging the current one.
 func (s *Server) handleListUserSessions(w http.ResponseWriter, r *http.Request) {
 	caller := sessionFromContext(r.Context())
 	if caller == nil || caller.UserID == "" {
@@ -52,9 +50,7 @@ func (s *Server) handleListUserSessions(w http.ResponseWriter, r *http.Request) 
 	jsonOK(w, map[string]interface{}{"sessions": out})
 }
 
-// handleRevokeUserSession deletes one session (by public id) belonging to
-// the calling user. Same-account scoping is enforced in the store; this
-// handler only exposes 404 vs 200 to the caller.
+// handleRevokeUserSession deletes one of the caller's sessions by public id; the store enforces same-account scoping.
 func (s *Server) handleRevokeUserSession(w http.ResponseWriter, r *http.Request) {
 	caller := sessionFromContext(r.Context())
 	if caller == nil || caller.UserID == "" {
@@ -76,10 +72,7 @@ func (s *Server) handleRevokeUserSession(w http.ResponseWriter, r *http.Request)
 		jsonError(w, http.StatusInternalServerError, "Failed to revoke session")
 		return
 	}
-	// Self-revoke handling: clear the av_session cookie so a browser
-	// drops the dead cookie immediately, and signal `current: true` in
-	// the JSON body so non-cookie clients (the CLI) can clear their own
-	// on-disk session.json without a follow-up sniffing call.
+	// On self-revoke clear the av_session cookie and set current: true so non-cookie clients (the CLI) drop their session.json.
 	selfRevoke := caller.PublicID == publicID
 	if selfRevoke {
 		http.SetCookie(w, sessionCookie(r, s.baseURL, "", -1))
@@ -87,10 +80,7 @@ func (s *Server) handleRevokeUserSession(w http.ResponseWriter, r *http.Request)
 	jsonOK(w, revokeSessionResponse{Status: "revoked", Current: selfRevoke})
 }
 
-// revokeSessionResponse is the JSON shape returned by
-// DELETE /v1/auth/sessions/{id}. Current indicates whether the caller
-// just revoked their own session; CLI clients use it to decide whether
-// to drop their on-disk session.json.
+// revokeSessionResponse is the DELETE /v1/auth/sessions/{id} body; Current tells CLI clients to drop their session.json.
 type revokeSessionResponse struct {
 	Status  string `json:"status"`
 	Current bool   `json:"current"`

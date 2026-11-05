@@ -12,9 +12,7 @@ import (
 	"time"
 )
 
-// Each isolated runner owns a handler; one handler admits only one active action.
-// The authority below is shared but synthetic. This test does not exercise the
-// credential proxy, a real identity provider, or deployed runner isolation.
+// One handler per isolated runner; the shared authority is synthetic and no proxy or real identity provider is exercised.
 func TestActorRevocationIsolationAcrossHandlerInstances(t *testing.T) {
 	for _, revoke := range []string{"identity", "policy"} {
 		t.Run(revoke, func(t *testing.T) {

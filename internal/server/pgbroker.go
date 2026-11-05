@@ -21,17 +21,8 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// This file adapts Agent Vault's existing subsystems to the pgproxy broker's
-// three dependency interfaces, so the PostgreSQL path reuses the same identity
-// check as the HTTP proxy and the same HashiCorp Vault client, and resolves
-// upstream databases from declarative configuration.
-
-// agentAuthAdapter bridges the shared session resolver to pgproxy's
-// AgentAuthenticator. Both entry points verify the same identity proof, using
-// projected workload tokens when that resolver is configured.
 type agentAuthAdapter struct{ resolver brokercore.SessionResolver }
 
-// NewAgentAuthAdapter wraps the session resolver for the PostgreSQL broker.
 func NewAgentAuthAdapter(resolver brokercore.SessionResolver) pgproxy.AgentAuthenticator {
 	return agentAuthAdapter{resolver: resolver}
 }
@@ -44,8 +35,7 @@ func (a agentAuthAdapter) Authenticate(ctx context.Context, token, vaultHint str
 	return agentScope(scope), nil
 }
 
-// AuthenticatePeer admits pool workers by token plus peer address. A loopback
-// peer (no PROXY header from the TLS terminator) keeps the token-only check.
+// AuthenticatePeer: a loopback peer (no PROXY header) keeps the token-only check.
 func (a agentAuthAdapter) AuthenticatePeer(ctx context.Context, token, vaultHint string, peer netip.Addr, renewal bool) (*pgproxy.AgentScope, error) {
 	attestor, ok := a.resolver.(brokercore.Attestor)
 	if !ok || !peer.IsValid() || peer.IsLoopback() {
@@ -72,8 +62,6 @@ func agentScope(scope *brokercore.ProxyScope) *pgproxy.AgentScope {
 		IdentityKind: scope.IdentityKind, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester}
 }
 
-// DatabaseServiceConfig is one configured upstream database within a vault, as
-// it appears in the declarative broker configuration.
 type DatabaseServiceConfig struct {
 	Name     string `json:"name"`                // service slug the agent selects by
 	Upstream string `json:"upstream"`            // upstream host:port
@@ -84,16 +72,11 @@ type DatabaseServiceConfig struct {
 	MaxConns int    `json:"max_conns,omitempty"` // per-database connection budget (0 = broker default)
 }
 
-// staticDatabaseResolver resolves database services from a vault-name-keyed map
-// built from configuration. Onboarding a database is a configuration change,
-// not a code change.
 type staticDatabaseResolver struct {
 	byVault map[string][]pgproxy.DatabaseService
 }
 
-// NewStaticDatabaseResolver builds a resolver over a vault-name-keyed service
-// map. Exact service names take precedence over unique upstream database aliases.
-// Unknown names are rejected even when a vault has only one service.
+// NewStaticDatabaseResolver: exact service names beat unique upstream database aliases; unknown names are rejected even when a vault has one service.
 func NewStaticDatabaseResolver(byVault map[string][]pgproxy.DatabaseService) pgproxy.DatabaseResolver {
 	return staticDatabaseResolver{byVault: byVault}
 }
@@ -113,19 +96,13 @@ func (r staticDatabaseResolver) ResolveDatabase(_ context.Context, scope pgproxy
 	return svc, nil
 }
 
-// databaseServiceLister is the store capability the live resolver needs; the
-// server's Store satisfies it, and it keeps the resolver unit-testable.
 type databaseServiceLister interface {
 	ListDatabaseServices(ctx context.Context, vaultID string) ([]store.DatabaseService, error)
 	DatabaseUpstreamLimit(ctx context.Context, upstream string) (int, error)
 }
 
-// storeDatabaseResolver resolves database services from the store on each
-// connection, so services added or removed through the management API take
-// effect immediately without restarting the broker.
 type storeDatabaseResolver struct{ store databaseServiceLister }
 
-// NewStoreDatabaseResolver builds a live resolver backed by the store.
 func NewStoreDatabaseResolver(lister databaseServiceLister) pgproxy.DatabaseResolver {
 	return storeDatabaseResolver{store: lister}
 }
@@ -152,8 +129,7 @@ func (r storeDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgprox
 	if err != nil {
 		return nil, err
 	}
-	// All aliases/vaults pointing at one endpoint share its strictest explicit
-	// limit. The broker's global cap also applies when every limit is default.
+	// Aliases and vaults on one endpoint share its strictest explicit limit.
 	svc.MaxConns, err = r.store.DatabaseUpstreamLimit(ctx, svc.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("reading database budget: %w", err)
@@ -161,10 +137,7 @@ func (r storeDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgprox
 	return svc, nil
 }
 
-// selectDatabaseService picks the service an agent is asking for within its
-// vault. Exact names win; a database alias must be unique. The same strict
-// selection applies to single-service vaults, so deleting a service cannot
-// silently redirect reconnecting clients to another database.
+// selectDatabaseService applies strict selection even to single-service vaults, so deleting a service cannot redirect reconnecting clients.
 func selectDatabaseService(services []pgproxy.DatabaseService, vaultName, requestedDatabase string) (*pgproxy.DatabaseService, error) {
 	for _, svc := range services {
 		if svc.Name == requestedDatabase {
@@ -191,21 +164,11 @@ func selectDatabaseService(services []pgproxy.DatabaseService, vaultName, reques
 	return nil, fmt.Errorf("no database service named %q in vault %q (available: %s)", requestedDatabase, vaultName, strings.Join(available, ", "))
 }
 
-// DatabaseResolver returns a live, store-backed resolver for the PostgreSQL
-// broker so database services added or removed through the management API take
-// effect without a restart.
 func (s *Server) DatabaseResolver() pgproxy.DatabaseResolver {
 	return NewStoreDatabaseResolver(s.store)
 }
 
-// SeedDatabaseServices bootstraps the store from configuration (the
-// AGENT_VAULT_DB_SERVICES map, keyed by vault name) on startup. Each entry is
-// applied once and durably remembered, including after deletion.
-// On first use, a service already present in the store — including one
-// edited through the management API — is left untouched, so config seeds an
-// empty store without clobbering runtime changes on every restart. It returns
-// the number of services newly seeded. A configured vault name that does not
-// exist is skipped with a warning rather than failing startup.
+// SeedDatabaseServices seeds the store from AGENT_VAULT_DB_SERVICES once per service, leaving services already in the store (even after deletion or API edits) untouched; unknown vaults are skipped with a warning.
 func (s *Server) SeedDatabaseServices(ctx context.Context, byVault map[string][]pgproxy.DatabaseService) (int, error) {
 	seeded := 0
 	for vaultName, services := range byVault {
@@ -251,12 +214,8 @@ func (s *Server) SeedDatabaseServices(ctx context.Context, byVault map[string][]
 	return seeded, nil
 }
 
-// vaultLeaseMinter adapts the HashiCorp Vault client to pgproxy's LeaseMinter.
 type vaultLeaseMinter struct{ client *hashicorp.Client }
 
-// NewVaultLeaseMinter builds a minter over the Vault database secrets engine:
-// each Mint issues a fresh dynamic credential, and Renew/Revoke manage its
-// lease.
 func NewVaultLeaseMinter(client *hashicorp.Client) pgproxy.LeaseMinter {
 	return vaultLeaseMinter{client: client}
 }
@@ -289,12 +248,8 @@ func (m vaultLeaseMinter) Revoke(ctx context.Context, leaseID string) error {
 	return m.client.RevokeLease(ctx, leaseID)
 }
 
-// LoadDatabaseServices reads the vault-name-keyed database-service map from the
-// AGENT_VAULT_DB_SERVICES environment variable (inline JSON) or, when that is
-// empty, from the file named by AGENT_VAULT_DB_SERVICES_FILE. It returns an
-// empty map when neither is set. The wire form is:
-//
-//	{"<vault>": [{"name","upstream","database","mount","role"}, ...]}
+// LoadDatabaseServices reads AGENT_VAULT_DB_SERVICES (inline JSON) or, when empty, the file named by AGENT_VAULT_DB_SERVICES_FILE.
+// The wire form is {"<vault>": [{"name","upstream","database","mount","role"}, ...]}.
 func LoadDatabaseServices(getenv func(string) string) (map[string][]pgproxy.DatabaseService, error) {
 	raw := strings.TrimSpace(getenv("AGENT_VAULT_DB_SERVICES"))
 	if raw == "" {
@@ -340,14 +295,11 @@ func LoadDatabaseServices(getenv func(string) string) (map[string][]pgproxy.Data
 	return out, nil
 }
 
-// readOnlyRole reports whether a Vault role is a read-only login. Services
-// outside the catalog carry no access setting, so the role's name decides,
-// under the naming the catalog enforces (<name>-readonly or -readwrite).
+// readOnlyRole infers read-only from the catalog naming (<name>-readonly or -readwrite) for services outside the catalog.
 func readOnlyRole(role string) bool { return strings.HasSuffix(role, "-readonly") }
 
 var databaseServiceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
-// Validate checks the shared API, CLI and bootstrap input contract.
 func (e DatabaseServiceConfig) Validate(vault string) error {
 	switch {
 	case strings.TrimSpace(e.Name) == "":
@@ -376,8 +328,7 @@ func (e DatabaseServiceConfig) Validate(vault string) error {
 	if e.MaxConns < 0 {
 		return fmt.Errorf("database service %q in vault %q: max_conns %d must be >= 0 (0 = broker default)", e.Name, vault, e.MaxConns)
 	}
-	// Reject an unrecognized sslmode at config load rather than silently
-	// downgrading to "prefer" — a typo must not quietly disable TLS.
+	// Reject an unrecognized sslmode: a typo must not silently disable TLS.
 	switch e.SSLMode {
 	case "", "disable", "prefer", "require", "verify-full":
 	default:

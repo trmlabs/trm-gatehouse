@@ -63,9 +63,8 @@ func setFixture(f *durableVaultFixture, change func(*durableVaultFixture)) {
 	change(f)
 }
 
-// stuckDatabase loses a response whose lease stays live, then has Vault refuse
-// the orphan's revocation on two checks in a row: only the second closes the
-// database.
+// stuckDatabase loses a response whose lease stays live, then has Vault refuse the orphan's revocation on two
+// checks in a row: only the second closes the database.
 func stuckDatabase(t *testing.T, m *DurableLeaseMinter, st *store.SQLStore, f *durableVaultFixture) {
 	t.Helper()
 	lostWithLiveLease(t, m, f)
@@ -122,9 +121,8 @@ func TestAStuckDatabaseStaysClosedWhileTheLeaseListIsRefused(t *testing.T) {
 	reopens(t, m, st)
 }
 
-// A graceful stop is not a check: the database stays closed through it, and
-// the replica that takes the record over keeps it closed until its own check
-// succeeds.
+// A graceful stop is not a check: the database stays closed through it, and the replica that takes the record
+// over keeps it closed until its own check succeeds.
 func TestAStuckDatabaseStaysClosedAcrossAGracefulStop(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := checkOnlyMinter(t, client, st)
@@ -150,9 +148,8 @@ func TestAStuckDatabaseStaysClosedAcrossAGracefulStop(t *testing.T) {
 	reopens(t, next, st)
 }
 
-// A revocation that fails because Vault is overloaded or unreachable is a
-// blip, never proof that the database refuses to drop the role: however many
-// checks meet it, the database stays open.
+// A revocation that fails because Vault is overloaded or unreachable is a blip, never proof that the database
+// refuses to drop the role: however many checks meet it, the database stays open.
 func TestOrphanRevokeBlipsNeverCloseTheDatabase(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := checkOnlyMinter(t, client, st)
@@ -185,10 +182,8 @@ func (c *countingJournal) ListDatabaseCleanup(ctx context.Context) ([]store.Data
 	return c.SQLStore.ListDatabaseCleanup(ctx)
 }
 
-// A Vault outage can leave thousands of unknown issuances. Requests for their
-// databases never run the check, and one pass reads the settled set and the
-// fleet's journal once and lists each mount and role once, however many
-// records share them.
+// A Vault outage can leave thousands of unknown issuances.
+// Requests for their databases never run the check.
 func TestUnknownChecksStayLinearInTheBacklog(t *testing.T) {
 	client, st, f := durableFixture(t)
 	journal := &countingJournal{SQLStore: st}
@@ -236,10 +231,7 @@ func TestUnknownChecksStayLinearInTheBacklog(t *testing.T) {
 	t.Logf("one pass cleared %d unknown issuances in %v", records, elapsed)
 }
 
-// Orphan listing and revocation touch only roles named gatehouse-*. A lease
-// under a shared role, here old enough to be an orphan and still live, is
-// never listed or revoked, even when a list that held it reached the check:
-// its record stays unresolved and its database stays open.
+// Orphan listing and revocation touch only roles named gatehouse-*.
 func TestASharedRolesLeaseIsNeverRevoked(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := checkOnlyMinter(t, client, st)

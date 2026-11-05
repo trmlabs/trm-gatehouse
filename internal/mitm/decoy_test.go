@@ -21,7 +21,6 @@ const (
 	decoyLLM    = "synthetic_decoy_llm_key_5d29f7a1e3"
 )
 
-// plantDecoys puts a set in force on a running proxy's source.
 func plantDecoys(t *testing.T, s *decoy.Source) {
 	t.Helper()
 	values := map[string]string{"pool-a/github_token": decoyGitHub, "pool-a/llm_master_key": decoyLLM}
@@ -37,7 +36,6 @@ func withDecoys(s *decoy.Source) func(*Options) {
 	return func(o *Options) { o.HeaderAdapter.Decoys = s }
 }
 
-// asTranscript marks the fixture's entry as a model API.
 func asTranscript(t *testing.T) func(*Options) {
 	return func(o *Options) {
 		entries := o.HeaderAdapter.Catalog.Current().Entries()
@@ -68,10 +66,7 @@ func checkDecoyRow(t *testing.T, e auditchain.Event, label, surface, pool, targe
 	}
 }
 
-// A decoy wherever a request can carry a credential is refused before it
-// reaches the vendor, and the row names the decoy, the surface and the
-// session. The check runs before routing and before every other request
-// check, so an unlisted path or a misplaced placeholder still records it.
+// A decoy wherever a request can carry a credential is refused before routing and every other check; the row names the decoy, surface and session.
 func TestAdapterRefusesDecoyCredentials(t *testing.T) {
 	src := decoy.NewSource(nil)
 	f := newAdapterFixture(t, withDecoys(src))
@@ -107,7 +102,6 @@ func TestAdapterRefusesDecoyCredentials(t *testing.T) {
 	}
 }
 
-// With decoys loaded, ordinary traffic and near misses pass untouched.
 func TestAdapterAdmitsTrafficWithoutADecoy(t *testing.T) {
 	src := decoy.NewSource(nil)
 	f := newAdapterFixture(t, withDecoys(src))
@@ -124,8 +118,7 @@ func TestAdapterAdmitsTrafficWithoutADecoy(t *testing.T) {
 	}
 }
 
-// A model API's body quotes whatever the agent read, so a decoy there passes;
-// the same decoy in a header of that call is still refused.
+// A model API's body quotes what the agent read, so a decoy there passes; the same decoy in a header is refused.
 func TestTranscriptEntryBodyMayQuoteADecoy(t *testing.T) {
 	src := decoy.NewSource(nil)
 	f := newAdapterFixture(t, withDecoys(src), asTranscript(t))
@@ -140,9 +133,7 @@ func TestTranscriptEntryBodyMayQuoteADecoy(t *testing.T) {
 	checkDecoyRow(t, f.audit.last(), "pool-a/llm_master_key", decoy.SurfaceHeader, "pool-agent", "example.com:"+strconv.Itoa(f.port))
 }
 
-// A decoy sent as the proxy credential is refused at CONNECT, before any
-// identity exists, so the row names no pool. A decoy in an admitted CONNECT's
-// own headers is refused with the session named.
+// A decoy as the proxy credential is refused at CONNECT before any identity exists, so the row names no pool.
 func TestDecoyOnTheConnectIsRefused(t *testing.T) {
 	src := decoy.NewSource(nil)
 	f := newAdapterFixture(t, withDecoys(src))
@@ -170,8 +161,6 @@ func TestDecoyOnTheConnectIsRefused(t *testing.T) {
 	}
 }
 
-// A plain-HTTP request carrying a decoy records the decoy, not just the
-// plain-HTTP refusal.
 func TestDecoyOnAPlainHTTPRequestIsRecorded(t *testing.T) {
 	src := decoy.NewSource(nil)
 	f := newAdapterFixture(t, withDecoys(src))
@@ -191,9 +180,7 @@ func TestDecoyOnAPlainHTTPRequestIsRecorded(t *testing.T) {
 	checkDecoyRow(t, f.audit.last(), "pool-a/github_token", decoy.SurfaceHeader, "pool-agent", "example.com:"+strconv.Itoa(f.port))
 }
 
-// git sending a decoy token as its Basic password, as a credential helper
-// would, is refused as a decoy rather than as a stray credential, and no
-// token is minted.
+// git sending a decoy as its Basic password is refused as a decoy and no token is minted.
 func TestGitDecoyCredentialIsRefused(t *testing.T) {
 	f := newGitFixture(t)
 	plantDecoys(t, f.decoys)
@@ -209,13 +196,10 @@ func TestGitDecoyCredentialIsRefused(t *testing.T) {
 	}
 }
 
-// A decoy in a GitHub write body (a comment carrying it out) is refused before
-// a token is minted or GitHub sees it.
 func TestGitHubAPIBodyDecoyIsRefused(t *testing.T) {
 	f := newAPIFixture(t)
 	plantDecoys(t, f.decoys)
-	// GitHub decodes JSON escapes, and the broker rebuilds the body decoded,
-	// so an escaped decoy is still one.
+	// GitHub decodes JSON escapes, so an escaped decoy is still one.
 	for _, body := range []string{`{"body":"found it: ` + decoyGitHub + `"}`, `{"body":"\u0073` + decoyGitHub[1:] + `"}`} {
 		if code, _ := f.post(t, "POST", "/repos/example-org/example-app/issues/12/comments", "", body); code != http.StatusForbidden {
 			t.Fatalf("%s: status %d", body, code)

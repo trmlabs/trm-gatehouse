@@ -138,10 +138,7 @@ func GenerateSalt(n int) ([]byte, error) {
 	return salt, nil
 }
 
-// WipeBytes zeros out a byte slice. This is best-effort — Go's garbage
-// collector may have copied the underlying data before this call.
-// Avoid converting sensitive []byte to string, as strings are immutable
-// and cannot be wiped.
+// WipeBytes zeros b on a best-effort basis; the GC may already have copied the data.
 func WipeBytes(b []byte) {
 	for i := range b {
 		b[i] = 0

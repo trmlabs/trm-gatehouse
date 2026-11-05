@@ -12,9 +12,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// Attempt contains only approved identifiers. Callers must source actor, vault,
-// service, mapping and destination from verified identity and configuration,
-// never from request headers, URLs, bodies, or workload tokens.
+// Attempt contains only approved identifiers: callers must source actor, vault, service, mapping and destination from verified identity and configuration, never from request headers, URLs, bodies or workload tokens.
 // A request path is deliberately absent: even a path can contain a credential.
 type Attempt struct {
 	VaultID     string
@@ -34,9 +32,7 @@ type Outcome struct {
 	Status int
 }
 
-// Durable acknowledges storage before the caller opens an outbound connection.
-// Finish failure cannot undo a destination action. The attempt remains unknown;
-// callers must never replay an outbound request to repair an audit record.
+// Durable acknowledges storage before the caller opens an outbound connection. A Finish failure leaves the attempt unknown; callers must never replay an outbound request to repair an audit record.
 type Durable interface {
 	Begin(context.Context, Attempt) (string, error)
 	Finish(context.Context, string, Outcome) error
@@ -49,8 +45,7 @@ type auditStore interface {
 
 type durableSink struct{ store auditStore }
 
-// NewDurable uses the application's persistent SQL store rather than the lossy
-// request-log batch queue. Unsupported stores fail closed at Begin.
+// NewDurable uses the persistent SQL store, not the lossy request-log batch queue; unsupported stores fail closed at Begin.
 func NewDurable(s any) Durable {
 	a, _ := s.(auditStore)
 	return &durableSink{store: a}

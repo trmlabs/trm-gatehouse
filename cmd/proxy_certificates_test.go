@@ -8,8 +8,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/server"
 )
 
-// Proxy certificates are all-or-nothing, and need the cross-cluster
-// listener, workload identity and Vault: a half setting fails startup.
 func TestProxyCertificateSettingsAreAllOrNothing(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	s := server.New("127.0.0.1:0", nil, make([]byte, 32), nil, false, "", logger)
@@ -29,8 +27,6 @@ func TestProxyCertificateSettingsAreAllOrNothing(t *testing.T) {
 	}
 }
 
-// Proxy activity turns on with the cross-cluster listener and workload
-// identity; its retention setting alone, or a bad one, fails startup.
 func TestProxyActivitySettings(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	s := server.New("127.0.0.1:0", nil, make([]byte, 32), nil, false, "", logger)

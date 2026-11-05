@@ -99,9 +99,8 @@ func (f *durableVaultFixture) liveSessions() int {
 	return len(f.live)
 }
 
-// A replica partitioned from the store fences itself, closing its sessions,
-// while its owner row is still live by the database clock. Only after the row
-// expires does a survivor claim the record and revoke the credential.
+// A replica partitioned from the store fences itself, closing its sessions, while its owner row is still live
+// by the database clock.
 func TestDurableLeaseFencesBeforeTakeoverWhenPartitioned(t *testing.T) {
 	client, st, vault := durableFixture(t)
 	cut := &partitionJournal{CleanupJournal: st}
@@ -419,9 +418,8 @@ func TestReplicaGuardHelperProcess(t *testing.T) {
 	os.Exit(4)
 }
 
-// A planned restart: the broker process gets SIGTERM, revokes its leases and
-// releases its owner row, so a new process under the same replica name
-// registers at once instead of waiting out the row.
+// A planned restart: the broker process gets SIGTERM, revokes its leases and releases its owner row, so a new
+// process under the same replica name registers at once instead of waiting out the row.
 func TestGracefulRestartReRegistersAtOnce(t *testing.T) {
 	if os.Getenv("GH_REPLICA_RESTART_DB") != "" {
 		t.Skip("helper process")

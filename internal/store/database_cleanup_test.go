@@ -11,8 +11,7 @@ import (
 	"time"
 )
 
-// resetFleetTables empties the fleet tables, so a reused PostgreSQL test
-// database starts clean.
+// resetFleetTables lets a reused PostgreSQL test database start clean.
 func resetFleetTables(t *testing.T, s *SQLStore) {
 	t.Helper()
 	for _, table := range []string{"database_cleanup", "database_cleanup_replica", "broker_sessions"} {
@@ -30,7 +29,6 @@ func checkDatabaseCleanupJournal(t *testing.T, s *SQLStore) {
 	if err := s.ClaimDatabaseCleanupOwner(ctx, "owner-a", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	// Replicas coexist; each owns only what it wrote.
 	if err := s.ClaimDatabaseCleanupOwner(ctx, "owner-b", time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +61,7 @@ func checkDatabaseCleanupJournal(t *testing.T, s *SQLStore) {
 	if err := s.ReleaseDatabaseCleanupOwner(ctx, "owner-a"); err != nil {
 		t.Fatal(err)
 	}
-	// A released owner cannot renew itself into authority; its records move.
+	// A released owner cannot renew itself back into authority.
 	if err := s.RenewDatabaseCleanupOwner(ctx, "owner-a", time.Minute); !errors.Is(err, ErrDatabaseCleanupOwnershipLost) {
 		t.Fatalf("released owner renewed: %v", err)
 	}
@@ -90,8 +88,7 @@ func checkDatabaseCleanupJournal(t *testing.T, s *SQLStore) {
 	checkPodSessionCap(t, s)
 }
 
-// Expiry is decided by the database clock. The API takes no replica time, and
-// an expired owner never comes back.
+// Expiry is decided by the database clock; an expired owner never comes back.
 func checkOwnerExpiresByDatabaseClock(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -122,8 +119,7 @@ func checkOwnerExpiresByDatabaseClock(t *testing.T, s *SQLStore) {
 	}
 }
 
-// Two survivors claim a dead replica's records at the same moment. Each record
-// moves exactly once: the claimed counts add up to the record count.
+// Two survivors race for a dead replica's records: each record moves exactly once.
 func checkSurvivorsRaceToClaim(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -169,7 +165,6 @@ func checkSurvivorsRaceToClaim(t *testing.T, s *SQLStore) {
 		if claimed[0]+claimed[1] != records || len(one)+len(two) != records || len(one) != claimed[0] {
 			t.Fatalf("round %d: claimed %v, owned %d+%d of %d", round, claimed, len(one), len(two), records)
 		}
-		// Hand everything back to a dead owner for the next round.
 		if _, err := s.db.Exec("UPDATE database_cleanup SET owner = 'dead' WHERE accessor LIKE 'race-%'"); err != nil {
 			t.Fatal(err)
 		}
@@ -183,8 +178,7 @@ func checkPodSessionCap(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
 	const limit, attempts = 5, 20
-	// survivor-2 holds one session for certain, so its release below always
-	// lowers the count, however the race spreads the rest.
+	// survivor-2 certainly holds one session, so its release always lowers the count.
 	if err := s.AddBrokerSession(ctx, "survivor-2", "session-first", "pod-uid-1", limit); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +216,7 @@ func checkPodSessionCap(t *testing.T, s *SQLStore) {
 	if n, err := s.CountPodSessions(ctx, "pod-uid-1"); err != nil || n != limit {
 		t.Fatalf("count = %d, %v", n, err)
 	}
-	// A dead replica's sessions stop counting at once and are swept later.
+	// A dead replica's sessions stop counting at once; they are swept later.
 	if err := s.ReleaseDatabaseCleanupOwner(ctx, "survivor-2"); err != nil {
 		t.Fatal(err)
 	}
@@ -285,8 +279,7 @@ func TestDatabaseCleanupOperatorConfirmationIsExactAndRetained(t *testing.T) {
 	}
 }
 
-// An unknown issuance quarantines its binding for every replica, not only for
-// the owner that found it.
+// An unknown issuance quarantines its binding for every replica, not only the finder.
 func TestDatabaseCleanupQuarantineIsFleetWide(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -347,7 +340,7 @@ func TestDatabaseCleanupJournalSurvivesReopen(t *testing.T) {
 	if err != nil || len(records) != 1 {
 		t.Fatalf("lost durable record: %v", err)
 	}
-	// A restarted process is a new owner. It waits for the old row to expire.
+	// A restarted process is a new owner and waits for the old row to expire.
 	if err = s.ClaimDatabaseCleanupOwner(ctx, "new", time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -356,9 +349,7 @@ func TestDatabaseCleanupJournalSurvivesReopen(t *testing.T) {
 	}
 }
 
-// The fleet migration runs on an existing SQLite store with live records from
-// the single-owner schema. Records survive, have no owner, and the first live
-// broker claims them.
+// Records from the single-owner schema survive the fleet migration with no owner; the first live broker claims them.
 func TestDatabaseCleanupFleetMigrationKeepsLiveRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "upgrade.db")
 	s, err := Open(path)
@@ -399,9 +390,7 @@ func TestDatabaseCleanupFleetMigrationKeepsLiveRecords(t *testing.T) {
 	}
 }
 
-// Confirmation must not let a subsequently delivered issuance response hide a
-// real lease behind retained reconciliation evidence. The minter treats a
-// rejected lease update as a cleanup-required admission failure.
+// Confirmation must not let a later issuance response hide a real lease behind retained evidence; a rejected lease update is a cleanup-required failure.
 func TestDatabaseCleanupRejectsLeaseAfterOperatorConfirmation(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -465,15 +454,13 @@ func checkDatabaseCleanupRecordsActor(t *testing.T, s *SQLStore) {
 	}
 }
 
-// The live SQLite store predates actor attribution. Its pending records must
-// survive the upgrade unchanged and read back as unattributed.
+// Pending records from before actor attribution survive the upgrade and read back as unattributed.
 func TestDatabaseCleanupActorMigrationKeepsLegacyRecordsUnattributed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	checkDatabaseCleanupActorMigration(t, func() (*SQLStore, error) { return Open(path) })
 }
 
-// checkDatabaseCleanupActorMigration rewinds the journal to its pre-attribution
-// shape with pending records, then proves reopening upgrades it exactly once.
+// checkDatabaseCleanupActorMigration proves reopening an old-shape journal upgrades it exactly once.
 func checkDatabaseCleanupActorMigration(t *testing.T, open func() (*SQLStore, error)) {
 	t.Helper()
 	s, err := open()
@@ -524,8 +511,7 @@ func checkDatabaseCleanupActorMigration(t *testing.T, open func() (*SQLStore, er
 	}
 }
 
-// One replica name, two live processes: the second is refused, and if a race
-// ever registered both, neither renews (both fence).
+// One replica name, two live processes: the second is refused, and if a race registered both, neither renews.
 func TestDatabaseCleanupReplicaNameIsExclusive(t *testing.T) {
 	checkReplicaNameExclusive(t, openTestDB(t))
 }
@@ -576,8 +562,7 @@ func checkReplicaNameExclusive(t *testing.T, s *SQLStore) {
 	}
 }
 
-// Boots that start at the same moment under one replica name: exactly one
-// registers, however the claims interleave.
+// Simultaneous boots under one replica name: exactly one registers.
 func checkConcurrentReplicaClaims(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -611,9 +596,7 @@ func TestDatabaseCleanupSettledUnknownIssuance(t *testing.T) {
 	checkSettledUnknownIssuance(t, openTestDB(t))
 }
 
-// checkSettledUnknownIssuance: an unknown issuance qualifies for the automatic
-// check only once its child token has been dead for the settle time, by
-// revocation or expiry, and only when it names its credential path.
+// checkSettledUnknownIssuance: an issuance qualifies for the automatic check only after its token has been dead for the settle time and it names its credential path.
 func checkSettledUnknownIssuance(t *testing.T, s *SQLStore) {
 	t.Helper()
 	resetFleetTables(t, s)

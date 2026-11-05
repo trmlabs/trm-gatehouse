@@ -14,18 +14,12 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// stubVault stands up a minimal HashiCorp Vault HTTP API that answers the KV
-// reads the real vault/api client issues, so these tests exercise the actual
-// client + response parsing (Client.FetchSecrets) end-to-end without Docker or
-// a live Vault. KV v2 reads hit /v1/{mount}/data/{path}; KV v1 reads hit
-// /v1/{mount}/{path}.
+// stubVault is a minimal Vault HTTP API answering KV v1 and v2 reads, so tests run the real client without Docker.
 func stubVault(t *testing.T, kvData map[string]map[string]interface{}) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Trim the /v1/ API prefix the client always sends.
 		logical := strings.TrimPrefix(r.URL.Path, "/v1/")
-		// KV v2 read: {mount}/data/{path}
 		if data, ok := kvData[logical]; ok {
 			if strings.Contains(logical, "/data/") {
 				writeJSON(w, map[string]interface{}{
@@ -36,7 +30,6 @@ func stubVault(t *testing.T, kvData map[string]map[string]interface{}) *httptest
 				})
 				return
 			}
-			// KV v1 read: {mount}/{path}
 			writeJSON(w, map[string]interface{}{"data": data})
 			return
 		}
@@ -53,9 +46,6 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// newClientForServer builds a Client whose underlying vault/api client points
-// at the stub server. Mirrors what NewClient does after auth, minus the env
-// reads, so tests stay hermetic.
 func newClientForServer(t *testing.T, url string) *Client {
 	t.Helper()
 	cfg := vaultapi.DefaultConfig()
@@ -82,7 +72,6 @@ func TestClientFetchSecrets_KVv2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchSecrets: %v", err)
 	}
-	// Keys come back sorted.
 	want := []Secret{
 		{Key: "ANTHROPIC_API_KEY", Value: "sk-ant-x"},
 		{Key: "GITHUB_PAT", Value: "ghp_x"},
@@ -121,10 +110,6 @@ func TestClientFetchSecrets_NotFound(t *testing.T) {
 	}
 }
 
-// TestSyncerWithRealClient_PopulatesStore drives the real vault/api client
-// through the syncer against the stub Vault and asserts the fetched secrets are
-// encrypted and handed to ReplaceVaultCredentials — the full fetch→encrypt→store
-// path that the demo exercised, now as an automated test.
 func TestSyncerWithRealClient_PopulatesStore(t *testing.T) {
 	srv := stubVault(t, map[string]map[string]interface{}{
 		"secret/data/agent-vault/demo": {

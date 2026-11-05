@@ -3,9 +3,7 @@ import { Link, Outlet, useLocation, useNavigate, useRouteContext } from "@tansta
 import type { AuthContext, VaultContext } from "../router";
 import Navbar from "./Navbar";
 
-// Source of truth for vault tab ids: the union and active-tab lookup derive
-// from it. An id must equal its route path segment. New tab = entry here plus
-// a NavItem.
+// Source of truth for vault tab ids; an id must equal its route path segment.
 const VAULT_TABS = [
   "services",
   "credentials",
@@ -36,11 +34,7 @@ export default function VaultLayout() {
   const [pendingCount, setPendingCount] = useState(0);
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
-  // The Members section (Users / Agents / Tokens) is only meaningful at
-  // vault `member` or higher: a `proxy`-role caller can only proxy
-  // requests through Agent Vault — they have no read or mutation rights
-  // on the people/agents/tokens lists, and the underlying GET endpoints
-  // require `member`+ anyway.
+  // The Members section needs vault `member` or higher; `proxy`-role callers have no read rights on those lists.
   const showMembersNav = vaultContext.vault_role !== "proxy";
 
   useEffect(() => {

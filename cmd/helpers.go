@@ -23,18 +23,10 @@ import (
 	"golang.org/x/term"
 )
 
-// errSessionExpired marks an error as recoverable by re-authenticating.
-// It is returned by HTTP helpers whenever the server replies with 401 to
-// an admin-token-bearing request; withReauthRetry uses errors.Is to detect
-// it. Match on status (not the error string) so all three 401 messages
-// the server emits — "Session expired", "Invalid or expired session",
-// "Authorization required" — are handled the same way.
+// errSessionExpired marks a 401 from the server as recoverable by re-authenticating; matched with errors.Is.
 var errSessionExpired = &sessionExpiredError{msg: "session expired"}
 
-// sessionExpiredError carries a server- or caller-supplied message while
-// still matching errSessionExpired via errors.Is. Wrapping the sentinel
-// through fmt.Errorf("%s: %w", body, errSessionExpired) would stutter
-// ("Session expired: session expired"); this type renders only `msg`.
+// sessionExpiredError carries a message and still matches errSessionExpired, avoiding a stuttering wrapped error.
 type sessionExpiredError struct{ msg string }
 
 func (e *sessionExpiredError) Error() string { return e.msg }
@@ -55,12 +47,7 @@ const (
 	hostingSelfHosting = "self-hosting"
 )
 
-// httpClient is used for control-plane HTTP calls (discover, proposals,
-// sessions) with a reasonable timeout. The custom proxy function skips
-// the proxy for calls to AGENT_VAULT_ADDR (the broker's own server) so
-// control-plane traffic goes direct even when the child process inherits
-// MITM proxy env vars. All other destinations fall through to the
-// system proxy, so corporate proxies still work for direct CLI usage.
+// httpClient bypasses the proxy for AGENT_VAULT_ADDR so control-plane calls go direct even with MITM proxy env vars inherited.
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &clientHeaderTransport{
@@ -150,10 +137,7 @@ func checkServerStatus(address string) (*serverStatus, error) {
 	return &status, nil
 }
 
-// registerResult holds the parsed register API response. Token and
-// ExpiresAt are populated only when the server auto-logs the caller in
-// (currently: the first-user register path). Other paths return them as
-// "" and the caller is expected to drive the verification flow.
+// registerResult holds the register response; Token and ExpiresAt are set only on first-user auto-login.
 type registerResult struct {
 	Email                string `json:"email"`
 	Role                 string `json:"role"`
@@ -164,11 +148,7 @@ type registerResult struct {
 	ExpiresAt            string `json:"expires_at,omitempty"`
 }
 
-// doRegister posts credentials to /v1/auth/register. When the response
-// includes a token (first-user auto-login), the session is also saved
-// to disk and returned so the caller can use it directly without a
-// follow-up /v1/auth/login. Returns (result, sess, err); sess is nil
-// when verification is required.
+// doRegister posts to /v1/auth/register and saves the session when the server auto-logs in; sess is nil otherwise.
 func doRegister(address, email, password, deviceLabel string) (*registerResult, *session.ClientSession, error) {
 	body, err := json.Marshal(map[string]string{
 		"email":        email,
@@ -216,11 +196,7 @@ func doRegister(address, email, password, deviceLabel string) (*registerResult, 
 	return &result.registerResult, sess, nil
 }
 
-// doLogin posts credentials to /v1/auth/login, saves the session on
-// success, and returns it. deviceLabel is sent as `device_label` so the
-// server records this login in the user's active-sessions list. Callers
-// resolve the label themselves (the cobra command honors --device-label;
-// internal callers default to defaultDeviceLabel()).
+// doLogin posts credentials, saves the session, and sends deviceLabel so the server lists this login.
 func doLogin(address, email, password, deviceLabel string) (*session.ClientSession, error) {
 	body, err := json.Marshal(map[string]string{
 		"email":        email,
@@ -274,10 +250,7 @@ func doLogin(address, email, password, deviceLabel string) (*session.ClientSessi
 	return sess, nil
 }
 
-// reauthInteractive prompts the user to log in again on the same address as
-// sess and returns the freshly-saved session. Skips the email prompt when
-// sess.Email is already known (i.e. session was minted by a doLogin call
-// after the Email field was added).
+// reauthInteractive prompts for a fresh login on sess's address, skipping the email prompt when it is already known.
 func reauthInteractive(sess *session.ClientSession) (*session.ClientSession, error) {
 	fmt.Fprintln(os.Stderr, "\nYour session has expired. Please log in again.")
 
@@ -297,9 +270,7 @@ func reauthInteractive(sess *session.ClientSession) (*session.ClientSession, err
 		return nil, err
 	}
 
-	// Preserve the operator's original --device-label choice across
-	// silent re-auth; fall back to hostname only when the saved session
-	// pre-dates the DeviceLabel field.
+	// Keep the operator's --device-label across re-auth; fall back to hostname for older sessions.
 	label := sess.DeviceLabel
 	if label == "" {
 		label = defaultDeviceLabel()
@@ -312,16 +283,8 @@ func reauthInteractive(sess *session.ClientSession) (*session.ClientSession, err
 	return newSess, nil
 }
 
-// withReauthRetry runs op once. If op fails with errSessionExpired and
-// stdin is a TTY, prompts the user to re-authenticate, updates *sess in
-// place so callers holding the pointer pick up the new token, and runs op
-// exactly once more. Non-interactive callers see the original error
-// untouched so CI/scripts can detect and handle it themselves.
-//
-// addr is the server the failing request was sent to; reauth is skipped
-// when it differs from sess.Address, because the saved login is tied to
-// sess.Address and a fresh token for that server would still be useless
-// against a different one (e.g. `--address=B` with a session for A).
+// withReauthRetry re-authenticates and retries op once on errSessionExpired when stdin is a TTY; others see the original error.
+// Reauth is skipped when addr differs from sess.Address, since that login would not work there.
 func withReauthRetry(sess *session.ClientSession, addr string, op func(*session.ClientSession) error) error {
 	err := op(sess)
 	if err == nil || !errors.Is(err, errSessionExpired) {
@@ -521,22 +484,12 @@ func resolveVault(cmd *cobra.Command) string {
 const (
 	envVarToken = "AGENT_VAULT_TOKEN"
 
-	// discoverRespMaxBytes caps JSON parsing of the /discover response so
-	// a hostile or misbehaving server can't make `vault run` hang on a
-	// multi-GB body. 1 MiB comfortably covers a vault with thousands of
-	// services + credential keys.
+	// Cap /discover parsing at 1 MiB so a hostile server cannot hang `vault run` with a huge body.
 	discoverRespMaxBytes = 1 << 20
 )
 
-// resolveSession returns a client session from env vars (agent mode) or falls
-// back to ensureSession (human mode). When the session came from env, the
-// returned string is envVarToken; "" when the session came from ensureSession.
-// Callers branch on `tokenSource != ""` to distinguish agent mode from admin
-// mode.
-//
-// If a token is set but AGENT_VAULT_ADDR is missing, returns a clear error
-// rather than silently falling through to interactive login — masking that
-// misconfig produces "why don't my creds work" tickets.
+// resolveSession returns a session from env vars (agent mode, with envVarToken) or ensureSession (human mode, "").
+// A token without AGENT_VAULT_ADDR is an error, not a fallback to interactive login.
 func resolveSession() (*session.ClientSession, string, error) {
 	token := os.Getenv(envVarToken)
 	addr := os.Getenv("AGENT_VAULT_ADDR")
@@ -550,17 +503,8 @@ func resolveSession() (*session.ClientSession, string, error) {
 	return sess, "", err
 }
 
-// validateEnvToken probes /discover with the env-supplied token before
-// `vault run` execs the child, so a bad/expired token fails fast at startup
-// instead of producing 401s on every proxied call. /discover is the same
-// auth path the proxy will use a moment later, so success here means the
-// token works end-to-end.
-//
-// Also catches a quiet footgun: if a vault-scoped session token is supplied
-// but AGENT_VAULT_VAULT names a different vault, the broker silently uses
-// the session's baked-in vault and ignores X-Vault. The discover response
-// echoes the actual vault, so we compare and reject the mismatch — otherwise
-// the child would see a misleading AGENT_VAULT_VAULT in its environment.
+// validateEnvToken probes /discover so a bad token fails at startup, and rejects a token whose vault differs from AGENT_VAULT_VAULT.
+// The broker silently uses the session's own vault and ignores X-Vault, so the child would see a misleading value.
 func validateEnvToken(addr, token, vault, tokenSource string) error {
 	if tokenSource == "" {
 		tokenSource = envVarToken
@@ -596,9 +540,7 @@ func validateEnvToken(addr, token, vault, tokenSource string) error {
 	// stops at the first JSON value's closing brace).
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if vault != "" && dr.Vault != "" && dr.Vault != vault {
-		// resolveVaultForAgentMode prioritizes --vault over AGENT_VAULT_VAULT,
-		// so name both surfaces in the remediation rather than hardcoding the
-		// env var (which may not even be set if the user passed --vault).
+		// Name both --vault and AGENT_VAULT_VAULT; the env var may be unset when --vault was passed.
 		return fmt.Errorf("vault mismatch: requested vault %q does not match the supplied token's vault %q — set AGENT_VAULT_VAULT (or --vault) to %q, or use a token for %q",
 			vault, dr.Vault, dr.Vault, vault)
 	}
@@ -646,12 +588,7 @@ func doAdminRequestWithBody(method, url, token string, body []byte) ([]byte, err
 	return doVaultScopedRequestWithBody(method, url, token, "", body)
 }
 
-// doVaultScopedRequestWithBody is like doAdminRequestWithBody but also sends
-// X-Vault: vault. Required for vault-scoped endpoints (/discover, /v1/proposals)
-// when the token may be an instance-level agent token — the broker returns
-// HTTP 400 ("Agent tokens require X-Vault header") without it. Vault-scoped
-// session tokens carry their vault on the session row, so the header is
-// ignored in that case; passing it unconditionally is safe.
+// doVaultScopedRequestWithBody is doAdminRequestWithBody plus X-Vault, which instance-level agent tokens require.
 func doVaultScopedRequestWithBody(method, url, token, vault string, body []byte) ([]byte, error) {
 	var bodyReader io.Reader
 	if body != nil {

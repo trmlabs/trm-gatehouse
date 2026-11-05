@@ -45,18 +45,8 @@ func actorFromScope(scope *brokercore.ProxyScope) (string, string) {
 	return "", ""
 }
 
-// isAbsoluteForwardProxyRequest reports whether r is a well-formed
-// absolute-form forward-proxy request that handleForward can serve.
-//
-// Per RFC 7230 §5.3.2 a forward-proxy request looks like:
-//
-//	POST http://upstream.example/path HTTP/1.1
-//
-// We accept only http://. https:// is rejected because we will not
-// silently TLS-strip — clients must use CONNECT for HTTPS upstreams.
-// Origin-form (POST /path) lacks a scheme/host and is rejected so the
-// proxy ingress can never be used as if it were an origin server.
-// Other schemes (ws, ftp, file, gopher, …) are rejected likewise.
+// isAbsoluteForwardProxyRequest reports whether r is an absolute-form http:// request handleForward can serve.
+// https:// is rejected (clients must CONNECT, no silent TLS strip), as are origin-form and other schemes.
 func isAbsoluteForwardProxyRequest(r *http.Request) bool {
 	if r.URL == nil {
 		return false
@@ -75,13 +65,9 @@ func isAbsoluteForwardProxyRequest(r *http.Request) bool {
 	return true
 }
 
-// handleForward serves an absolute-form forward-proxy request for an
-// http:// upstream without hijacking or a client-side TLS tunnel.
-// Both ingress paths resolve scope per request.
+// handleForward serves an absolute-form http:// forward-proxy request without hijacking; scope is resolved per request.
 func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
-	// Read-only pre-gate: reject if this IP's auth-failure budget is
-	// exhausted. Only auth failures are recorded (below). Shares the
-	// TierAuth budget and key shape with CONNECT. Loopback is exempt.
+	// Pre-gate on the IP's TierAuth budget (shared with CONNECT, loopback exempt); only auth failures are recorded.
 	if p.preAuthGated(r) {
 		if d := p.rateLimit.Check(ratelimit.TierAuth, mitmIPKey(r)); !d.Allow {
 			if p.strictCredentialProxy {
@@ -93,15 +79,8 @@ func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Canonicalise host and target. URL.Hostname() strips brackets from
-	// IPv6 literals; URL.Port() returns "" when omitted. Default port to
-	// 80 (http scheme) so event.Host and outURL.Host stay consistent
-	// with the CONNECT-path invariant ("host:port present"). Going
-	// through Hostname()/Port() rather than net.SplitHostPort is what
-	// makes "http://[::1]/path" round-trip cleanly — SplitHostPort
-	// rejects bracketed hosts without a port and the fallback path
-	// would feed a still-bracketed string back through JoinHostPort,
-	// double-bracketing it.
+	// Use Hostname()/Port() (default port 80) rather than net.SplitHostPort, which fails on bracketed IPv6 hosts without a port.
+	// Keeps event.Host and outURL.Host as host:port, matching CONNECT.
 	host := r.URL.Hostname()
 	portStr := r.URL.Port()
 	if portStr == "" {
@@ -127,16 +106,12 @@ func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Some upstreams reject empty request-targets. Per RFC 7230 §5.3.1
-	// a client SHOULD send "/" when no path is present; normalise so
-	// the outbound URL we build always has one.
+	// Normalise an empty path to "/" since some upstreams reject empty request-targets.
 	if r.URL.Path == "" {
 		r.URL.Path = "/"
 	}
 
-	// Per RFC 7230 §5.4 a proxy receiving an absolute-form request MUST
-	// ignore the Host header — r.URL.Host is authoritative. We don't
-	// reject on mismatch; we just don't read r.Host for routing.
+	// r.URL.Host is authoritative for an absolute-form request; r.Host is deliberately not read.
 
 	token, hint, err := brokercore.ParseProxyAuth(r)
 	if err != nil {
@@ -152,11 +127,10 @@ func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peer, peerErr := peerFromContext(r.Context())
-	// An admitted request is checked for decoys with its identity, in the
-	// catalog adapter; a refused one is checked here.
+	// An admitted request is checked for decoys with its identity in the catalog adapter; a refused one is checked here.
 	scope, err := p.resolveScope(r.Context(), token, hint, peer, peerErr, false)
 	if err != nil {
-		p.recordAuthFailure(r)
+		p.recordIdentityFailure(r, err)
 		if p.refuseDecoyAtProxy(w, r, target, nil) {
 			return
 		}
@@ -171,9 +145,7 @@ func (p *Proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 	p.forwardRequest(w, r, target, host, portNum, false, scope)
 }
 
-// hostHeaderForScheme strips target's port when it matches the default for
-// scheme so SigV4/GCS/Azure-SAS signatures over Host match; non-default
-// ports are preserved for vhost routing on internal upstreams.
+// hostHeaderForScheme strips target's port when it is the scheme default so SigV4/GCS/Azure-SAS signatures match; other ports are kept.
 func hostHeaderForScheme(scheme, target string) string {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
@@ -197,22 +169,14 @@ func hostHeaderForScheme(scheme, target string) string {
 	return host
 }
 
-// forwardHandler returns an http.Handler that forwards each request to
-// target (the host:port captured from the original CONNECT line). Using
-// a closed-over target rather than r.Host defeats post-tunnel host
-// rewriting. host is the port-stripped form, already validated in
-// handleConnect; scope is the vault context resolved at CONNECT time.
+// forwardHandler forwards to the CONNECT-time target rather than r.Host, which defeats post-tunnel host rewriting.
 func (p *Proxy) forwardHandler(target, host string, port int, scope *brokercore.ProxyScope) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.forwardRequest(w, r, target, host, port, true, scope)
 	})
 }
 
-// forwardRequest is the shared body for both the CONNECT-tunnelled HTTPS
-// path (forwardHandler) and the plain-HTTP forward-proxy path
-// (handleForward). target is the canonical "host:port"; host is the
-// port-stripped form used for credential lookup. useTLSUpstream selects
-// https vs http for the outbound URL.
+// forwardRequest is the shared body for the CONNECT and plain-HTTP paths; target is host:port, host is port-stripped for credential lookup.
 func (p *Proxy) forwardRequest(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -385,9 +349,7 @@ func (p *Proxy) forwardRequest(
 		return
 	}
 
-	// OAuth 401 retry: if the upstream rejected the token and we have an
-	// OAuth credential, force-refresh and retry once. Only safe methods
-	// (GET/HEAD) are retried — the request body is consumed and cannot be replayed.
+	// Retry once with a forced OAuth refresh on 401, GET/HEAD only since the body cannot be replayed.
 	if resp.StatusCode == http.StatusUnauthorized && inject != nil && !inject.Passthrough &&
 		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		_ = resp.Body.Close()
@@ -468,9 +430,7 @@ func (p *Proxy) forwardRequest(
 // API keys. Checked by exact canonical match -- no heuristic scanning.
 var knownAPIKeyHeaders = []string{"X-Api-Key", "Api-Key"}
 
-// detectAuthFromHeaders inspects request headers to determine the auth
-// scheme and header name. Returns ("", "") when no recognizable auth
-// pattern is found.
+// detectAuthFromHeaders returns the auth scheme and header name, or ("", "") if none is recognizable.
 func detectAuthFromHeaders(h http.Header) (scheme, header string) {
 	if auth := h.Get("Authorization"); auth != "" {
 		switch {

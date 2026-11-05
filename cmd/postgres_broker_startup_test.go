@@ -10,8 +10,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/server"
 )
 
-// A database broker that was asked for but has no Vault login fails startup,
-// so the replica never reports ready without a way to mint credentials.
 func TestPostgresBrokerWithoutVaultFailsStartup(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	s := server.New("127.0.0.1:0", nil, make([]byte, 32), nil, false, "", logger)
@@ -28,8 +26,6 @@ func TestPostgresBrokerWithoutVaultFailsStartup(t *testing.T) {
 	}
 }
 
-// Admission settings are parsed strictly: a malformed value fails startup
-// instead of being ignored.
 func TestAdmissionSettings(t *testing.T) {
 	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
 	var opts pgproxy.Options
@@ -52,9 +48,6 @@ func TestAdmissionSettings(t *testing.T) {
 	}
 }
 
-// The broker's own PostgreSQL TLS listener needs a port and both files, keeps
-// the plain listener on loopback, and cannot be combined with the PROXY
-// header it replaces.
 func TestPostgresTLSSettings(t *testing.T) {
 	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
 	files := map[string]string{"AGENT_VAULT_DB_TLS_PORT": "15443", "AGENT_VAULT_DB_TLS_CERT_FILE": "/etc/gatehouse/tls/tls.crt",

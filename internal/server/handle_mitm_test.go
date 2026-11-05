@@ -32,9 +32,7 @@ func TestHandleMITMCA(t *testing.T) {
 		p := mitm.New("127.0.0.1:0", mitm.Options{CA: caProv, Sessions: srv.SessionResolver(), Credentials: srv.CredentialProvider(), BaseURL: srv.BaseURL(), Logger: srv.Logger(), RateLimit: srv.RateLimit()})
 		srv.AttachMITM(p)
 
-		// Start the proxy so IsListening() reports true. The handler gates
-		// the PEM response on listener state to avoid advertising a CA cert
-		// for a proxy that failed to bind.
+		// Start the proxy so IsListening() is true; the handler gates the PEM response on it.
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("listen: %v", err)
@@ -84,9 +82,7 @@ func TestHandleMITMCA(t *testing.T) {
 		}
 	})
 
-	// Guards the contract relied on by `vault run`: the listening port must
-	// be advertised so clients can build HTTPS_PROXY pointing at the *real*
-	// port (not the compile-time default) when --mitm-port is non-standard.
+	// Guards that the listening port is advertised so HTTPS_PROXY points at the real port when --mitm-port is non-standard.
 	t.Run("mitm_port_header", func(t *testing.T) {
 		srv := newTestServer()
 
@@ -178,9 +174,7 @@ func TestHandleMITMCA(t *testing.T) {
 	})
 }
 
-// waitForListening spins until the Proxy reports it has bound its listener,
-// or fails the test after a short timeout. Needed because Serve flips the
-// atomic flag on a background goroutine.
+// waitForListening waits for the Proxy to bind, since Serve sets the flag on a background goroutine.
 func waitForListening(t *testing.T, p *mitm.Proxy) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

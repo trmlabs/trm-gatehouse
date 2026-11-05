@@ -23,7 +23,7 @@ func TestAttachShutdownRunsWhenStartReturnsAnError(t *testing.T) {
 	}
 }
 
-// AttachShutdown functions run once, in order, after a graceful stop.
+// AttachShutdown functions run once, in order, after a graceful stop, then the final ones.
 func TestAttachShutdownRunsAfterAGracefulStop(t *testing.T) {
 	s := newTestServer()
 	held, err := net.Listen("tcp", "127.0.0.1:0")
@@ -37,6 +37,7 @@ func TestAttachShutdownRunsAfterAGracefulStop(t *testing.T) {
 	var order []int
 	s.AttachShutdown(func() { order = append(order, 1) })
 	s.AttachShutdown(func() { order = append(order, 2) })
+	s.AttachFinalShutdown(func() { order = append(order, 3) })
 	done := make(chan error, 1)
 	go func() { done <- s.Start() }()
 	// Answering means the signal handler is in place; a bare connect is not enough.
@@ -63,7 +64,7 @@ func TestAttachShutdownRunsAfterAGracefulStop(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("graceful shutdown did not finish")
 	}
-	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
-		t.Fatalf("shutdown functions ran %v, want [1 2]", order)
+	if len(order) != 3 || order[0] != 1 || order[1] != 2 || order[2] != 3 {
+		t.Fatalf("shutdown functions ran %v, want [1 2 3]", order)
 	}
 }

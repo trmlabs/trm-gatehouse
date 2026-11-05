@@ -9,7 +9,6 @@ import (
 	"testing"
 )
 
-// captureStderr returns what fn writes to os.Stderr.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	original := os.Stderr

@@ -1,6 +1,4 @@
-// Package httpcatalog holds the operator-owned list of HTTP destinations the
-// broker may reach on a worker's behalf, and the Vault-backed keys it injects.
-// A destination absent from the catalog is refused.
+// Package httpcatalog holds the operator-owned list of HTTP destinations the broker may reach for a worker; anything absent is refused.
 package httpcatalog
 
 import (
@@ -21,165 +19,97 @@ import (
 	"sync/atomic"
 )
 
-// Entry is one binding: an exact host, the paths and methods allowed on it,
-// where the key goes, where the key lives in Vault, and which pools may use it.
+// Entry is one binding: a host, the allowed paths and methods, where the key goes and lives in Vault, and which pools may use it.
 type Entry struct {
 	Name         string   `json:"name"`
 	Host         string   `json:"host"`
 	Port         int      `json:"port,omitempty"` // default 443
 	PathPrefixes []string `json:"pathPrefixes"`
-	// DeniedPaths and ReadOnlyPaths are browser-session path templates (see
-	// browser_paths.go): every method is refused at or below a denied one,
-	// and all but GET, HEAD and OPTIONS below a read-only one.
+	// DeniedPaths and ReadOnlyPaths are browser-session path templates (see browser_paths.go).
 	DeniedPaths   []string `json:"deniedPaths,omitempty"`
 	ReadOnlyPaths []string `json:"readOnlyPaths,omitempty"`
 	Methods       []string `json:"methods"`
-	// Header carries the key. Scheme, when set, prefixes it ("Bearer").
+	// Header carries the key; Scheme, when set, prefixes it ("Bearer").
 	Header string `json:"header"`
 	Scheme string `json:"scheme,omitempty"`
-	// BasicUser sends the key as an HTTP Basic user name with an empty
-	// password, the way clients such as axios and curl -u encode it. The
-	// header is Authorization and the scheme is Basic, so neither is set.
+	// BasicUser sends the key as an HTTP Basic user name with an empty password; header and scheme are fixed.
 	BasicUser bool `json:"basicUser,omitempty"`
 	// BasicPair keeps the password broker-only; its user must be non-secret.
 	// BasicPairs requires that public user to select a fixed Vault reference.
 	BasicPair  bool              `json:"basicPair,omitempty"`
 	BasicPairs BasicPairBindings `json:"basicPairs,omitempty"`
-	// PairUserHeader names a second header in which the client also sends a
-	// Basic pair's user name, such as Langfuse's X-Langfuse-Public-Key. Its
-	// value must be the stored user name. basicPair entries only.
+	// PairUserHeader names a second header in which the client also sends a Basic pair's user name, such as X-Langfuse-Public-Key.
+	// Its value must be the stored user name; basicPair entries only.
 	PairUserHeader string `json:"pairUserHeader,omitempty"`
 	// Placeholder is what a worker may send in Header instead of the key, so
 	// SDKs that insist on a key still work. Only BasicPairs requires Header.
 	Placeholder string `json:"placeholder"`
 	Key         KeyRef `json:"key"`
-	// ClientCertificate, header entries only, is a certificate and key in
-	// Vault the broker presents to the upstream in the TLS handshake, for a
-	// service that accepts only client certificates (mutual TLS). An entry
-	// with one may leave out header, placeholder and key, so the worker sends
-	// no credential at all. Neither the certificate nor the key reaches the
-	// worker. See ClientCertificateRef.
+	// ClientCertificate, header entries only, is a Vault certificate and key presented to the upstream in the TLS handshake; neither reaches the worker.
 	ClientCertificate *ClientCertificateRef `json:"clientCertificate,omitempty"`
-	// ClientCredentials, header entries only, makes the key an access token
-	// the broker mints from an OAuth client in Vault, in place of Key. See
-	// ClientCredentialsBinding.
+	// ClientCredentials, header entries only, makes the key an access token minted from an OAuth client in Vault.
 	ClientCredentials *ClientCredentialsBinding `json:"clientCredentials,omitempty"`
-	// Pools are the broker agent IDs of the worker pools granted this entry.
-	Pools []string `json:"pools"`
-	// ForwardHeaders are extra request headers the vendor needs, such as an
-	// API version. Every other caller header except a fixed safe set is dropped.
+	Pools             []string                  `json:"pools"`
+	// ForwardHeaders are extra request headers the vendor needs; every other caller header outside a fixed safe set is dropped.
 	ForwardHeaders   []string `json:"forwardHeaders,omitempty"`
 	MaxRequestBytes  int64    `json:"maxRequestBytes,omitempty"`  // default 1 MiB; git 1 GiB (a push)
 	MaxResponseBytes int64    `json:"maxResponseBytes,omitempty"` // default 32 MiB; git and github-api 4 GiB
-	// RequestFields limit request parameters to listed values (see
-	// RequestField). Header entries only; a Slack entry must limit channel.
+	// RequestFields limit request parameters to listed values; header entries only, and a Slack entry must limit channel.
 	RequestFields []RequestField `json:"requestFields,omitempty"`
-	// RequestHeaders limit request headers to listed values (see
-	// RequestHeader). Header entries only; a groundcover MCP entry must
-	// limit X-Backend-Id.
+	// RequestHeaders limit request headers to listed values; header entries only, and a groundcover MCP entry should limit X-Backend-Id.
 	RequestHeaders []RequestHeader `json:"requestHeaders,omitempty"`
-	// Transcript marks a model API: its request bodies carry an agent's
-	// conversation, which quotes whatever the agent read, so a decoy
-	// credential found only in one is not treated as presented. Headers and
-	// the URL are still checked. Header entries only.
+	// Transcript marks a model API: its bodies quote whatever the agent read, so a decoy credential found only in one is not treated as presented. Header entries only.
 	Transcript bool `json:"transcript,omitempty"`
-	// Kind "git" makes the entry a git smart-HTTP binding, and "github-api" a
-	// GitHub REST binding limited to pull request work and the reads and
-	// writes its repositories grant (GitHubAPIMatch). Paths, methods and the
-	// credential are derived from the kind; the
-	// key is a GitHub App installation token minted per repository.
-	// Kind "browser-session" lets an agent's own browser use a web app as a
-	// test user; see BrowserSessionBinding.
-	Kind     string           `json:"kind,omitempty"`
-	Git      *GitBinding      `json:"git,omitempty"`
-	Postgres *PostgresBinding `json:"postgres,omitempty"`
-	// Kind "memgraph" is a graph database reached over Bolt; see
-	// MemgraphBinding.
+	// Kind selects a derived binding: "git" (smart-HTTP), "github-api" (pull request work and the reads and writes the repositories grant, via an installation token minted per repository), "browser-session" (see BrowserSessionBinding).
+	Kind           string                 `json:"kind,omitempty"`
+	Git            *GitBinding            `json:"git,omitempty"`
+	Postgres       *PostgresBinding       `json:"postgres,omitempty"`
 	Memgraph       *MemgraphBinding       `json:"memgraph,omitempty"`
 	BrowserSession *BrowserSessionBinding `json:"browserSession,omitempty"`
-	// Kind "gcp" mints a short-lived Google token per entry; see GCPBinding.
-	GCP *GCPBinding `json:"gcp,omitempty"`
-	// HTTP2 lets workers speak HTTP/2 to the entry's host, which gRPC needs:
-	// the broker offers h2 on the tunnel and forwards over HTTP/2. Header and
-	// gcp entries only, and every entry on one host and port agrees, since
-	// the protocol is chosen before the first request names a path.
+	GCP            *GCPBinding            `json:"gcp,omitempty"`
+	// HTTP2 lets workers speak HTTP/2 to the host, which gRPC needs; header and gcp entries only, and every entry on one host and port must agree.
 	HTTP2 bool `json:"http2,omitempty"`
-	// Tier is T0 (data every worker allowed on the pool may read; the default),
-	// T1 (a verified person in every Requires group) or T2 (T1 with
-	// time-boxed groups granted through an access-request tool). Requires
-	// lists Entra group object IDs and is mandatory for T1 and T2.
+	// Tier is T0 (default; any worker on the pool), T1 (a verified person in every Requires group) or T2 (T1 with time-boxed groups). Requires lists Entra group object IDs, mandatory for T1 and T2.
 	Tier     string   `json:"tier,omitempty"`
 	Requires []string `json:"requires,omitempty"`
 }
 
-// GitBinding names the GitHub App installation that mints tokens and the
-// repositories a pool may reach, each read-only or read-write.
+// GitBinding names the GitHub App installation and the repositories a pool may reach, read-only or read-write.
 type GitBinding struct {
 	AppID          int64     `json:"appID"`
 	InstallationID int64     `json:"installationID"`
 	Repos          []GitRepo `json:"repos"`
-	// MaxPushCommandBytes, git entries only, bounds the command list the
-	// broker reads from each push to check and audit its refs (default
-	// DefaultMaxPushCommandBytes, at most the entry's maxRequestBytes); a push
-	// with a longer list is refused.
+	// MaxPushCommandBytes, git entries only, bounds the push command list the broker reads (default DefaultMaxPushCommandBytes, at most maxRequestBytes); a longer push is refused.
 	MaxPushCommandBytes int64 `json:"maxPushCommandBytes,omitempty"`
 }
 
-// DefaultMaxPushCommandBytes is the command list a push may send by default:
-// 16 MiB, about 75,000 refs or more at once (a command is two object IDs and a
-// ref name, under 220 bytes for most refs).
+// DefaultMaxPushCommandBytes is 16 MiB, about 75,000 refs at once.
 const DefaultMaxPushCommandBytes = 16 << 20
 
-// GitRepo is one repository. RefPrefixes, when set, restrict which refs a
-// push may create, update or delete (for example refs/heads/cursor/), for
-// every pool of the entry. PoolRefPrefixes give each pool its own besides
-// (see PushPrefixes): once a repository lists either, a pool may push only
-// under the shared prefixes and its own, and a pool with none pushes nothing,
-// so one entry serves many pools without any pushing to another's branches.
-// A prefix ending in {requester}/ (RequesterToken) goes further: each person
-// or Automation on the pool pushes only under their own branch segment there,
-// so requesters sharing a pool never write to each other's branches or pull
-// requests.
+// GitRepo is one repository. RefPrefixes limit which refs a push may touch for every pool; PoolRefPrefixes add per-pool ones (see PushPrefixes).
+// Once either is listed a pool pushes only under shared and its own prefixes; {requester}/ (RequesterToken) confines each requester to its own segment.
 type GitRepo struct {
 	Repo            string       `json:"repo"` // owner/name
 	Access          string       `json:"access"`
 	RefPrefixes     []string     `json:"refPrefixes,omitempty"`
 	PoolRefPrefixes PoolPrefixes `json:"poolRefPrefixes,omitempty"`
-	// The rest apply to github-api entries only.
-	// Operations are what the pool may do in this repository, from the
-	// vocabulary in githubOperations; unset means DefaultGitHubOperations.
+	// Operations (github-api entries only) are what the pool may do here, from githubOperations; unset means DefaultGitHubOperations.
 	Operations []string `json:"operations,omitempty"`
-	// PullRequestPrefixes are head branch names (refs/heads/ removed) of pull
-	// requests in this repository that the pool may also comment on, label,
-	// edit and mark ready, as its operations allow, besides its own (from its
-	// push prefixes). It never opens a pull request from them.
+	// PullRequestPrefixes are head branch names (refs/heads/ removed) of pull requests the pool may also comment on, label, edit and mark ready, besides its own. It never opens one from them.
 	PullRequestPrefixes []string `json:"pullRequestPrefixes,omitempty"`
-	// PoolPullRequestPrefixes are pull request prefixes for one pool of the
-	// entry each, besides the shared PullRequestPrefixes.
+	// PoolPullRequestPrefixes are PullRequestPrefixes for one pool each.
 	PoolPullRequestPrefixes PoolPrefixes `json:"poolPullRequestPrefixes,omitempty"`
-	// Labels are the only labels pr.label may add.
-	Labels []string `json:"labels,omitempty"`
-	// DispatchEvents are the only repository_dispatch event types dispatch may
-	// send. A dispatch runs workflows from the default branch, never the pool's,
-	// and names in its client_payload the pull request it acts on, which must
-	// be in the pool's reach like any other write's target.
+	Labels                  []string     `json:"labels,omitempty"`
+	// DispatchEvents are the only repository_dispatch event types dispatch may send; the run uses the default branch and its client_payload pull request must be in the pool's reach.
 	DispatchEvents []string `json:"dispatchEvents,omitempty"`
-	// PoolOperations narrow Operations for one pool of the entry each: a pool
-	// listed here may use only those, each one of the repository's. A pool not
-	// listed has the repository's operations, except a cursor-automation pool,
-	// which has none here until the repository lists it (see forPool).
+	// PoolOperations narrow Operations per pool; an unlisted pool gets the repository's operations, except a cursor-automation pool, which gets none until listed (see forPool).
 	PoolOperations PoolOperations `json:"poolOperations,omitempty"`
 }
 
-// PoolPrefixes maps each pool of an entry to prefixes of its own
-// (poolRefPrefixes, poolPullRequestPrefixes).
 type PoolPrefixes map[string][]string
 
-// PoolOperations maps a pool of a github-api entry to the repository
-// operations it may use there (poolOperations).
 type PoolOperations map[string][]string
 
-// UnmarshalJSON decodes the map and refuses null, as PoolPrefixes does.
 func (p *PoolOperations) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errors.New("poolOperations may not be null; list each pool with its operations, or leave the field out")
@@ -192,14 +122,9 @@ func (p *PoolOperations) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// errNullPoolPrefixes refuses a per-pool field written as null, which would
-// decode to no map, as if the field were absent. For poolRefPrefixes that
-// fails open: a repository that lists no push prefix holds no pool to any
-// branch, so an empty value rendered as null would let every pool of the
-// entry push anywhere. poolPullRequestPrefixes refuses it alike.
+// errNullPoolPrefixes refuses null, which decodes as absent and would fail open: a repository listing no push prefix would let every pool push anywhere.
 var errNullPoolPrefixes = errors.New("poolRefPrefixes and poolPullRequestPrefixes may not be null; list each pool with its prefixes, or leave the field out")
 
-// UnmarshalJSON decodes the map and refuses null (errNullPoolPrefixes).
 func (p *PoolPrefixes) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errNullPoolPrefixes
@@ -212,21 +137,11 @@ func (p *PoolPrefixes) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// DefaultGitHubOperations are a github-api repository's operations when it
-// lists none: open a pull request from the pool's own branch, read one, and
-// comment on the pool's own.
 var DefaultGitHubOperations = []string{"pr.open", "pr.read", "pr.comment"}
 
-// githubOperations is the reviewed vocabulary a github-api repository's
-// operations come from, and the token scope each needs (see GitGranted). The
-// routes each one opens are in githubAPIRoutes.
+// githubOperations is the reviewed vocabulary of github-api operations and the token scope each needs; routes are in githubAPIRoutes.
 var githubOperations = map[string]string{
-	// graphql opts a repository into POST /graphql (graphql.go), where each
-	// field still needs its own operation and pr.read also covers a pull
-	// request's comments, reviews and review threads. Opt-in, so no existing
-	// entry widens when the broker starts serving GraphQL. A broker without
-	// it drops any entry listing it, REST routes included: deploy the broker
-	// first.
+	// graphql opts a repository into POST /graphql; each field still needs its own operation. A broker without it drops any entry listing it, so deploy the broker first.
 	"graphql":          "pull-requests",
 	"pr.open":          "pull-requests",  // POST /pulls, head under the pool's push prefixes
 	"pr.read":          "pull-requests",  // GET /pulls/{n}, GET /issues/{n}/labels, GET /issues/comments/{id}
@@ -239,54 +154,35 @@ var githubOperations = map[string]string{
 	"actions.read":     "actions",        // workflow runs, jobs, logs and artifacts; a commit's check runs and statuses
 	"deployments.read": "deployments",    // deployments and their statuses
 
-	// CI restarts: each acts only on a branch of this repository the pool may
-	// push to, under the push prefixes of the git entry a push would use, for
-	// a requester that entry authorizes (see GitHubAPIMatch).
+	// CI restarts act only on a branch the pool may push to, for a requester the git entry authorizes (see GitHubAPIMatch).
 	"pr.update_branch":     "update-branch", // PUT /pulls/{n}/update-branch merges the base into the head
 	"actions.rerun":        "actions-write", // POST /actions/runs/{id}/rerun, a push or pull_request run
 	"actions.rerun_failed": "actions-write", // POST /actions/runs/{id}/rerun-failed-jobs, likewise
 }
 
-// githubReadOperations are the githubOperations that change nothing on
-// GitHub: reads of pull requests, Actions and deployments, and graphql, which
-// only opens POST /graphql, where every mutation field still needs its own
-// operation. An Automation without a write grant on a github-api entry
-// (Automation.Write) uses these and no other.
+// githubReadOperations change nothing on GitHub; an Automation without a write grant uses these and no other.
 var githubReadOperations = map[string]bool{
 	"pr.read": true, "pr.list": true, "actions.read": true, "deployments.read": true, "graphql": true,
 }
 
-// GitHubOperationWrites reports whether a github-api operation can change
-// something on GitHub: every one outside githubReadOperations, so an operation
-// added later counts as a write until it is listed as a read. A GraphQL read
-// of a repository's labels is such a write: it needs pr.label, as the
-// mutation does.
+// GitHubOperationWrites is true for every operation outside githubReadOperations, so a new operation is a write until listed as a read.
 func GitHubOperationWrites(op string) bool { return !githubReadOperations[op] }
 
-// githubRouteScopes are the scopes an operation's routes need besides its own
-// (githubOperations): actions.read also reads a commit's check runs and
-// statuses, the CI results GitHub keeps outside Actions, each with a token
-// holding only that permission.
+// githubRouteScopes are the scopes an operation's routes need besides its own; actions.read also reads a commit's check runs and statuses.
 var githubRouteScopes = map[string][]string{
 	"actions.read": {"checks", "statuses"},
 }
 
-// PushPrefixes returns the ref prefixes pool may push to in the repository:
-// the shared RefPrefixes, then the pool's own. limited is false when the
-// repository lists none for any pool, so only GitHub's branch protection
-// holds a push; when it is true, a pool with no prefixes may push nothing.
+// PushPrefixes returns the ref prefixes pool may push to: the shared RefPrefixes, then its own. limited is false when none are listed for any pool, so only branch protection holds a push.
 func (r GitRepo) PushPrefixes(pool string) (prefixes []string, limited bool) {
 	prefixes = append(append([]string(nil), r.RefPrefixes...), r.PoolRefPrefixes[pool]...)
 	return prefixes, len(r.RefPrefixes) > 0 || len(r.PoolRefPrefixes) > 0
 }
 
-// pullRequestHeads returns the head prefixes of pull requests pool may act on
-// besides its push prefixes: the shared PullRequestPrefixes, then its own.
 func (r GitRepo) pullRequestHeads(pool string) []string {
 	return append(append([]string(nil), r.PullRequestPrefixes...), r.PoolPullRequestPrefixes[pool]...)
 }
 
-// operations returns the repository's operations, the default when unset.
 func (r GitRepo) operations() []string {
 	if r.Operations == nil {
 		return DefaultGitHubOperations
@@ -294,13 +190,9 @@ func (r GitRepo) operations() []string {
 	return r.Operations
 }
 
-// Allows reports whether a github-api repository grants an operation.
 func (r GitRepo) Allows(op string) bool { return contains(r.operations(), op) }
 
-// forPool returns the repository as pool sees it, with Operations narrowed to
-// the pool's poolOperations line, or to none for a cursor-automation pool the
-// repository does not list there, so every check made of the returned
-// repository (Allows, GrantsScope) holds the pool to its own operations.
+// forPool returns the repository as pool sees it, with Operations narrowed to its poolOperations line, or none for an unlisted cursor-automation pool.
 func (c Catalog) forPool(r GitRepo, pool string) GitRepo {
 	ops, listed := r.PoolOperations[pool]
 	p, defined := c.Pool(pool)
@@ -313,11 +205,8 @@ func (c Catalog) forPool(r GitRepo, pool string) GitRepo {
 	return r
 }
 
-// GrantsScope is grantsScope for callers outside the catalog (GraphQL tokens).
 func (r GitRepo) GrantsScope(scope string) bool { return r.grantsScope(scope) }
 
-// grantsScope reports whether any of the repository's operations needs a
-// token scope.
 func (r GitRepo) grantsScope(scope string) bool {
 	for _, op := range r.operations() {
 		if githubOperations[op] == scope || contains(githubRouteScopes[op], scope) {
@@ -327,7 +216,6 @@ func (r GitRepo) grantsScope(scope string) bool {
 	return false
 }
 
-// KeyRef locates a key in a KV version 2 secret. A new KV version rotates it.
 type KeyRef struct {
 	Mount string `json:"mount"`
 	Path  string `json:"path"`
@@ -341,37 +229,18 @@ type Catalog struct {
 	automations map[string]Automation // by id
 }
 
-// Pool names a set of workers by their Kubernetes identity. When a catalog
-// defines pools, every entry may grant only defined pool names.
 type Pool struct {
 	Name           string `json:"name"`
 	Namespace      string `json:"namespace"`
 	ServiceAccount string `json:"serviceAccount"`
-	// Identity says who can stand behind a request: "none" (the default),
-	// "claude-session" (a runner session token naming the person),
-	// "cursor-session" (a Cursor run's identity token naming the person),
-	// "attested-person" (a shared proxy's attestation naming the person who
-	// created the agent, from its Pod's requester annotation),
-	// "cursor-automation" (a Cursor run's identity token naming the
-	// Automation that started it, decided per listed Automation) or
-	// "workload" (CI: Entitlements, never a person).
+	// Identity says who can stand behind a request: "none" (default), "claude-session", "cursor-session", "attested-person" (a shared proxy's attestation naming the Pod's requester), "cursor-automation" (decided per listed Automation) or "workload" (CI: Entitlements, never a person).
 	Identity string `json:"identity,omitempty"`
-	// Ceiling is the highest tier the pool may reach (default T0). "external"
-	// is below T0: the pool's workers may reach nothing, and no entry may
-	// grant it, until entries can be scoped to a tenant.
-	Ceiling string `json:"ceiling,omitempty"`
-	// CCPoolID is the runner pool a claude-session token must be issued for.
-	CCPoolID string `json:"ccpoolID,omitempty"`
-	// BaseGroup gates session start in the runner's spawn hook.
-	BaseGroup string `json:"baseGroup,omitempty"`
-	// Entitlements are a workload pool's fixed groups.
+	// Ceiling is the highest tier the pool may reach (default T0). "external" is below T0: the pool reaches nothing and no entry may grant it.
+	Ceiling      string   `json:"ceiling,omitempty"`
+	CCPoolID     string   `json:"ccpoolID,omitempty"`
+	BaseGroup    string   `json:"baseGroup,omitempty"`
 	Entitlements []string `json:"entitlements,omitempty"`
-	// AutomationRunsAsPerson, cursor-session only, serves a run a Cursor
-	// Automation started as the person its run token names, with this pool's
-	// entries and that person's groups, as if they had started it. Off by
-	// default: such a run is refused (automation_on_person_pool), so an
-	// Automation gets a person's access only through what the catalog lists
-	// for it, on a cursor-automation pool.
+	// AutomationRunsAsPerson, cursor-session only, serves a Cursor Automation's run as the person its token names, with this pool's entries and that person's groups. Off by default: the run is refused (automation_on_person_pool).
 	AutomationRunsAsPerson bool `json:"automationRunsAsPerson,omitempty"`
 
 	harness       *Harness              // the declared profile naming this pool, if any: its Kubernetes harness, else its static-token one
@@ -379,7 +248,6 @@ type Pool struct {
 	automations   map[string]Automation // the catalog's Automations, on a cursor-automation pool
 }
 
-// Pool returns the defined pool with this name.
 func (c Catalog) Pool(name string) (Pool, bool) {
 	for _, p := range c.pools {
 		if p.Name == name {
@@ -389,29 +257,22 @@ func (c Catalog) Pool(name string) (Pool, bool) {
 	return Pool{}, false
 }
 
-// PostgresBinding is a database the broker reaches with a Vault dynamic role.
 type PostgresBinding struct {
 	Database string `json:"database"`
 	Mount    string `json:"mount"`
 	Role     string `json:"role"`
 	SSLMode  string `json:"sslmode,omitempty"`  // default verify-full
 	MaxConns int    `json:"maxConns,omitempty"` // 0: the broker's default budget
-	// Access is "read" (the default) or "write", and must be "write" exactly
-	// when the role is a -readwrite role.
+	// Access is "read" (default) or "write", and must be "write" exactly when the role is a -readwrite role.
 	Access string `json:"access,omitempty"`
-	// CA, when set, is the only trust for this database's certificate: PEM
-	// certificates, public, in place of the broker's bundled roots. Each is a
-	// CA, or the server's own self-signed certificate (Citus makes one).
+	// CA, when set, is the only trust for the database's certificate: public PEM certificates, each a CA or the server's own self-signed certificate.
 	CA string `json:"ca,omitempty"`
-	// ServerName is the name the certificate must carry when it is not the
-	// host, as when the host is our own DNS name for a provider's endpoint.
+	// ServerName is the name the certificate must carry when it is not the host.
 	ServerName string `json:"serverName,omitempty"`
 }
 
-// Current lets a fixed Catalog stand wherever a live, reloading one can.
 func (c Catalog) Current() Catalog { return c }
 
-// Pools returns the defined pools.
 func (c Catalog) Pools() []Pool { return append([]Pool(nil), c.pools...) }
 
 var (
@@ -421,8 +282,7 @@ var (
 	ErrReadOnly = errors.New("repository binding is read-only")
 	repoPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$`)
 	refPattern  = regexp.MustCompile(`^refs/[A-Za-z0-9._/-]+$`)
-	// branchPrefixPattern is a pull request head prefix: a branch name ending
-	// in "/", so it names a directory of branches, never one branch's prefix.
+	// branchPrefixPattern is a pull request head prefix: a branch name ending in "/".
 	branchPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*/$`)
 	labelPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,49}$`)
 	eventPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
@@ -434,23 +294,14 @@ var (
 	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 	idPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	kvPattern           = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
-	// Shapes that are safe inside a Vault policy path, since these strings
-	// end up in the broker's Vault policy.
+	// Shapes that are safe inside a Vault policy path.
 	vendorKeyPath = regexp.MustCompile(`^vendors(/[a-z0-9][a-z0-9_-]*)+$`)
 	vaultMount    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$`)
 )
 
-// ValidMount reports whether a Vault mount path has the policy-safe shape
-// the catalog and broker settings share: lower-case segments, at most 127
-// characters.
 func ValidMount(mount string) bool { return len(mount) <= 127 && vaultMount.MatchString(mount) }
 
-// Environment, when set (AGENT_VAULT_CATALOG_ENVIRONMENT, such as staging),
-// requires every database role to be that environment's named role, by the
-// role naming rule (SetRolePattern; by default
-// <env>.<region>.<cluster>.<name>-readonly or -readwrite, or the
-// Gatehouse-only role for the same connection, the same name prefixed with
-// "gatehouse-").
+// Environment (AGENT_VAULT_CATALOG_ENVIRONMENT, such as staging), when set, requires every database role to follow the role naming rule (SetRolePattern), or its "gatehouse-" prefixed variant.
 var Environment atomic.Value // string
 
 func environment() string {
@@ -458,10 +309,7 @@ func environment() string {
 	return env
 }
 
-// rolesWithoutEnvironment keeps the plain role rule when no environment is
-// set. Only the e2e build (whose Kind fixture role is "readonly") and this
-// package's tests set it; anywhere else an unset environment refuses every
-// database entry, so the role rule cannot be skipped by leaving it out.
+// rolesWithoutEnvironment keeps the plain role rule when no environment is set; only the e2e build and tests set it, so the rule cannot be skipped by omission.
 var rolesWithoutEnvironment bool
 
 func validRole(role string) bool {
@@ -474,8 +322,7 @@ func validRole(role string) bool {
 
 var allowedMethods = map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
 
-// Headers a caller may never set, because they change routing, method,
-// identity or framing. ForwardHeaders cannot name them either.
+// Headers a caller may never set, because they change routing, method, identity or framing.
 var reservedHeaders = map[string]bool{
 	"Host": true, "Connection": true, "Proxy-Authorization": true, "Proxy-Connection": true, "Te": true, "Trailer": true,
 	"Transfer-Encoding": true, "Upgrade": true, "Keep-Alive": true, "Content-Length": true, "Content-Encoding": true,
@@ -484,11 +331,8 @@ var reservedHeaders = map[string]bool{
 	"Authorization": true, "X-Api-Key": true, "Accept-Encoding": true,
 }
 
-// maxCatalogFile bounds a catalog file only against a runaway read: a
-// 100,000-Automation catalog is about 12 MiB.
 const maxCatalogFile = 256 << 20
 
-// Load reads a catalog file, rejecting unknown fields and trailing data.
 func Load(path string) (Catalog, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -537,9 +381,7 @@ func Parse(data []byte) (Catalog, error) {
 		return Catalog{}, err
 	}
 	for i := range file.Pools {
-		// The pool's profile is its Kubernetes harness when it has one; a
-		// static-token harness sharing the pool is kept apart (staticHarness)
-		// so the Kubernetes checks never read it.
+		// A static-token harness sharing the pool is kept apart (staticHarness) so the Kubernetes checks never read it.
 		for _, h := range profiles[file.Pools[i].Name] {
 			if h.Identity.Kind == IdentityStaticToken {
 				file.Pools[i].staticHarness = &h
@@ -590,13 +432,10 @@ func Parse(data []byte) (Catalog, error) {
 		}
 		http2Hosts[hostKey] = e.HTTP2
 		if e.BrowserSession != nil {
-			// A test user signs in for one entry only, so its session and
-			// audit trail belong to that entry's pool.
 			if other, ok := users[e.BrowserSession.User]; ok {
 				return Catalog{}, fmt.Errorf("browser-session entries %q and %q share a test user", other, e.Name)
 			}
 			users[e.BrowserSession.User] = e.Name
-			// The app host belongs to its entry alone.
 			appKey := fmt.Sprintf("%s:%d", e.BrowserSession.AppHost, e.Port)
 			if _, ok := kinds[appKey]; ok {
 				return Catalog{}, fmt.Errorf("browser app host %s is already in the catalog", appKey)
@@ -707,8 +546,7 @@ func (e *Entry) normalize() error {
 		if e.Git != nil && e.Git.MaxPushCommandBytes != 0 {
 			return errors.New("maxPushCommandBytes is for git entries only")
 		}
-		// A write body is small JSON. A response keeps the git default, since
-		// a log or artifact download streams hundreds of MiB.
+		// A write body is small JSON; a response keeps the git default, since downloads stream hundreds of MiB.
 		if e.MaxRequestBytes == 0 {
 			e.MaxRequestBytes = 1 << 20
 		}
@@ -760,8 +598,6 @@ func (e *Entry) normalize() error {
 			return err
 		}
 	} else if e.ClientCertificate == nil || e.Scheme != "" || e.BasicUser || e.BasicPair || e.Placeholder != "" || e.Key != (KeyRef{}) {
-		// Only a client certificate stands in for the header credential, and
-		// then the credential's settings go with the header.
 		return errors.New("a header entry needs a header, placeholder and key, unless it has a clientCertificate and none of them")
 	}
 	if len(e.Pools) == 0 {
@@ -804,8 +640,6 @@ func (e *Entry) normalize() error {
 	return nil
 }
 
-// HeaderCredential reports whether the entry injects a key into a header.
-// Only a header entry with a client certificate may go without one.
 func (e *Entry) HeaderCredential() bool { return e.Header != "" }
 
 func (e *Entry) normalizeHeaderCredential() error {
@@ -859,8 +693,7 @@ func (e *Entry) normalizePostgres() error {
 	if (p.Access == "write") != writes {
 		return errors.New("access is write exactly when the role is a -readwrite role")
 	}
-	// Modes that skip the certificate check let anyone on the network path
-	// relay SCRAM and hold a session as the minted user.
+	// Modes that skip the certificate check let anyone on the network path relay SCRAM and hold a session as the minted user.
 	switch {
 	case p.SSLMode == "":
 		p.SSLMode = "verify-full"
@@ -896,8 +729,7 @@ func (e *Entry) normalizePostgres() error {
 	return nil
 }
 
-// Database returns the postgres entry a pool asks for by name. An unknown
-// name is ErrUnlisted; a pool without the grant is ErrPool.
+// Database returns the postgres entry a pool asks for; unknown is ErrUnlisted, no grant is ErrPool.
 func (c Catalog) Database(name, pool string) (*Entry, error) {
 	for i := range c.entries {
 		e := &c.entries[i]
@@ -912,9 +744,7 @@ func (c Catalog) Database(name, pool string) (*Entry, error) {
 	return nil, ErrUnlisted
 }
 
-// CheckHosts requires every host to end with one of suffixes (for example
-// ".example.com"), so CI can hold the catalog inside the ranges the
-// broker's network policy allows.
+// CheckHosts requires every host to end with one of suffixes, so CI can hold the catalog inside the ranges the network policy allows.
 func (c Catalog) CheckHosts(suffixes []string) error {
 	for _, e := range c.entries {
 		ok := false
@@ -997,8 +827,6 @@ func (e *Entry) normalizeGit() error {
 	return nil
 }
 
-// validRefPrefix is a push prefix: a ref prefix, or a branch prefix ending in
-// {requester}/ (validRequesterTemplate).
 func validRefPrefix(prefix string) bool {
 	if IsRequesterTemplate(prefix) {
 		return validRequesterTemplate(prefix)
@@ -1014,10 +842,7 @@ func validPullRequestPrefix(prefix string) bool {
 	return branchPrefixPattern.MatchString(prefix) && !strings.Contains(prefix, "..") && !strings.HasPrefix(prefix, "refs/")
 }
 
-// checkPoolPrefixes checks a repository's per-pool prefixes: a map that is
-// present names at least one pool (an empty one would read as no limit), each
-// pool is one the entry grants and lists distinct, valid prefixes, and no
-// prefix overlaps another holder's (overlappingPrefixes).
+// checkPoolPrefixes requires a present map to name at least one pool (empty reads as no limit), each pool granted by the entry, with distinct valid prefixes that overlap no other holder's.
 func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]string, pools []string, valid func(string) bool) error {
 	if byPool == nil {
 		return overlappingPrefixes(repo, what, shared, nil)
@@ -1043,19 +868,11 @@ func checkPoolPrefixes(repo, what string, shared []string, byPool map[string][]s
 	return overlappingPrefixes(repo, what, shared, byPool)
 }
 
-// overlappingPrefixes refuses a prefix that starts, or is started by, one
-// another holder holds (ignoring case): no pool's prefix may overlap another
-// pool's or a shared one, so each pool's branches are its own. A {requester}
-// prefix is compared by the part before the token and held apart from every
-// other prefix, its own pool's and the shared ones included: each requester's
-// branches are theirs alone, so no prefix anyone else holds may reach into
-// them. Sorting puts every prefix right before the ones it starts, so each is
-// compared only with those, never with every other prefix.
+// overlappingPrefixes refuses a prefix that starts or is started by another holder's (ignoring case), so each pool's branches are its own.
+// A {requester} prefix is compared by the part before the token and held apart from every other prefix, so each requester's branches are theirs alone.
 func overlappingPrefixes(repo, what string, shared []string, byPool map[string][]string) error {
 	type owned struct{ holder, prefix, spelled string } // prefix lowercased; spelled as written
 	var all []owned
-	// own keys a prefix by what it reaches: a {requester} prefix by the part
-	// before the token, under a holder of its own (see holder).
 	own := func(pool, prefix string) owned {
 		if static, ok := requesterTemplate(prefix); ok {
 			return owned{pool + requesterHolder + strings.ToLower(static), strings.ToLower(static), prefix}
@@ -1081,13 +898,8 @@ func overlappingPrefixes(repo, what string, shared []string, byPool map[string][
 	return nil
 }
 
-// requesterHolder separates a pool from the part before the token of one of
-// its {requester} prefixes, in the holder overlappingPrefixes gives that
-// prefix.
 const requesterHolder = "\x00"
 
-// holder names who holds a checked prefix: a pool, or "" for the shared list,
-// followed for a {requester} prefix by requesterHolder.
 func holder(key string) string {
 	pool, _, perRequester := strings.Cut(key, requesterHolder)
 	switch {
@@ -1101,33 +913,14 @@ func holder(key string) string {
 	return "pool " + strconv.Quote(pool)
 }
 
-// pullRequestCrossing is a github-api entry whose pull request prefixes reach
-// a pool's own push prefixes in another entry, the git entry a clone of the
-// repository would use (pairedGit).
+// pullRequestCrossing is a github-api entry whose pull request prefixes reach a pool's push prefixes in another entry (pairedGit).
 type pullRequestCrossing struct {
 	git string // the git entry's name
 	err error
 }
 
-// pullRequestCrossings checks each repository of a github-api entry against
-// every git entry listing it, on any host or port, since a pool's pull
-// request reach draws on each of them (pushBranchPrefixes): no pull request
-// prefix may start, or be started by, a push prefix there that a pool it
-// reaches does not hold (compared as refs,
-// ignoring case, as checkPoolPrefixes compares). Otherwise that pool's
-// comment, edit, label and ready routes would act on pull requests from
-// branches only other pools push to. A pool's own pull request prefixes reach
-// that pool only, the shared ones every pool of the github-api entry. A pool's
-// own push prefixes are held by that pool alone, the git entry's shared ones
-// by each pool of the git entry, so a shared push prefix crosses only a pool
-// outside it. A {requester} push prefix is held by each requester alone, so
-// no pool holds it whole: any pull request prefix that starts, or is started
-// by, the part before its token crosses, since it would let one requester act
-// on another's pull requests. A write repository with no push prefixes counts
-// as a shared push prefix of refs/heads/. It returns one crossing per
-// repository and git entry, each naming that entry. As in overlappingPrefixes, sorting
-// puts every prefix right before the ones it starts, so each is compared only
-// with those.
+// pullRequestCrossings checks each github-api repository against every git entry listing it, on any host or port: no pull request prefix may start or be started by a push prefix there that a pool it reaches does not hold.
+// Otherwise comment, edit, label and ready routes would act on branches only other pools push to. A {requester} push prefix is held by no pool whole; a write repository with no push prefixes counts as a shared refs/heads/.
 func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	if api.Kind != "github-api" || api.Git == nil {
 		return nil
@@ -1137,7 +930,6 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 		push            bool
 		pool            string // "": shared by every pool of its entry; for a {requester} prefix, followed by requesterHolder
 	}
-	// pushed keys a push prefix by what it reaches, as overlappingPrefixes does.
 	pushed := func(pool, prefix string) owned {
 		if static, ok := requesterTemplate(prefix); ok {
 			return owned{strings.ToLower(static), prefix, true, pool + requesterHolder}
@@ -1149,8 +941,7 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 		for _, listing := range gitListings(entries, r.Repo) {
 			git, gr := listing.entry, listing.repo
 			var all []owned
-			// A write repository that lists no push prefixes lets each pool of
-			// the git entry push any branch: a shared push prefix of refs/heads/.
+			// A write repository that lists no push prefixes lets each pool push any branch: a shared refs/heads/.
 			if gr.Access == "write" && len(gr.RefPrefixes) == 0 && len(gr.PoolRefPrefixes) == 0 {
 				all = append(all, owned{"refs/heads/", "refs/heads/", true, ""})
 			}
@@ -1217,14 +1008,11 @@ func pullRequestCrossings(api Entry, entries []Entry) []pullRequestCrossing {
 	return out
 }
 
-// gitListing is one git entry listing a repository, and its binding there.
 type gitListing struct {
 	entry *Entry
 	repo  *GitRepo
 }
 
-// gitListings are the git entries listing repo, on any host or port: each one
-// whose pools a pool's pull request reach draws on (pushBranchPrefixes).
 func gitListings(entries []Entry, repo string) []gitListing {
 	var out []gitListing
 	for i := range entries {
@@ -1241,13 +1029,7 @@ func gitListings(entries []Entry, repo string) []gitListing {
 	return out
 }
 
-// normalizeGitHubAPI checks a github-api repository's operations and their
-// parameters: every operation is in the vocabulary, each list holds distinct,
-// well-formed values, labels come exactly with pr.label, dispatch events
-// exactly with dispatch, pull request prefixes only with an operation that
-// acts on an existing pull request, and each pool's own operations
-// (poolOperations) name a pool the entry grants and only operations the
-// repository has.
+// normalizeGitHubAPI checks every operation is in the vocabulary, lists are distinct and well formed, labels come exactly with pr.label, dispatch events exactly with dispatch, and poolOperations name a granted pool and only the repository's operations.
 func (r *GitRepo) normalizeGitHubAPI(pools []string) error {
 	if r.Operations != nil && len(r.Operations) == 0 {
 		return fmt.Errorf("repository %s: list at least one operation, or leave operations unset for the default", r.Repo)
@@ -1315,36 +1097,22 @@ func (r *GitRepo) normalizeGitHubAPI(pools []string) error {
 	return nil
 }
 
-// GitRequest is a matched git smart-HTTP request.
 type GitRequest struct {
 	Entry *Entry
 	Repo  GitRepo
 	Write bool // receive-pack: the push service; for github-api, a POST
-	// RefPrefixes are, for a push, the refs it may create, update or delete:
-	// the repository's shared prefixes and the pool's own (PushPrefixes);
-	// none when the repository limits no ref. A {requester} prefix among them
-	// matches nothing until ForRequester narrows it to one requester's.
+	// RefPrefixes are the refs a push may touch: shared prefixes and the pool's own, none when unlimited. A {requester} prefix matches nothing until ForRequester narrows it.
 	RefPrefixes []string
-	// Limited marks a push to a repository that limits which refs a push may
-	// change: only refs under RefPrefixes, and none when ForRequester left no
-	// prefix (a requester with no branch segment of their own).
+	// Limited marks a push to a repository that limits refs: only RefPrefixes, none when ForRequester left no prefix.
 	Limited bool
-	// OpensPullRequest marks a github-api request that opens a pull request;
-	// its head must start with one of HeadPrefixes, the pool's own push
-	// prefixes (none: no pull request may be opened).
+	// OpensPullRequest marks a request that opens a pull request; its head must start with one of HeadPrefixes.
 	OpensPullRequest bool
 	HeadPrefixes     []string
-	// CommentsOn is the pull request number a comment request targets: the
-	// broker comments only on a pull request whose head is one of HeadPrefixes.
+	// CommentsOn is the pull request a comment targets; its head must be one of HeadPrefixes.
 	CommentsOn int64
-	// CloneEntry is the git entry a code-returning route (a pull request's
-	// files, a compare) or a CI restart relies on. The broker authorizes the
-	// requester against it as well as Entry, so a code read never reaches
-	// further than a clone, nor a CI restart further than a push.
+	// CloneEntry is the git entry a code-returning route or CI restart relies on; the requester is authorized against it too, so a read never reaches further than a clone.
 	CloneEntry *Entry
-	// The fields below describe every github-api request. Route names it
-	// (see githubAPIRoutes), Operation is the repository operation that opened
-	// it, and Method is the one method it was matched with.
+	// Route (see githubAPIRoutes), Operation and Method describe every github-api request.
 	Route     string
 	Operation string
 	Method    string
@@ -1352,41 +1120,21 @@ type GitRequest struct {
 	PullRequest int64
 	// Branch is the branch or ref a read route names, as the caller sent it.
 	Branch string
-	// Target is the pull request a write acts on (comment, label, body edit,
-	// ready, and a dispatch's, read from its body); the broker acts only when
-	// its head is under HeadPrefixes, which then also holds the repository's
-	// pull request prefixes, shared and the pool's own. CommentID is the comment an edit targets, which must be the
-	// App's own, or a read targets, which must be on a pull request in reach.
+	// Target is the pull request a write acts on; the broker acts only when its head is under HeadPrefixes.
+	// CommentID is the comment an edit or read targets: an edit must be the App's own, a read must be on a pull request in reach.
 	Target    int64
 	CommentID int64
-	// Query is the request's query string, rebuilt from its allowed keys.
-	Query string
-	// Permissions is the token scope the route needs: "pull-requests",
-	// "contents-write" (a repository dispatch), "actions", "deployments",
-	// "checks", "statuses", "update-branch" (pull requests and contents write,
-	// for a branch update or marking a draft ready) or "actions-write".
+	Query     string
+	// Permissions is the token scope the route needs, such as "pull-requests", "contents-write", "actions", "update-branch" or "actions-write".
 	Permissions string
-	// Download marks a route GitHub answers with a redirect to a signed
-	// download URL, which the broker follows itself without the token.
+	// Download marks a route GitHub answers with a redirect to a signed URL, which the broker follows without the token.
 	Download bool
-	// RestartOf is the pull request (pr.update_branch) or workflow run
-	// (actions.rerun, actions.rerun_failed) a CI restart acts on. The broker
-	// acts only when its head is a branch of this repository under
-	// HeadPrefixes, here the push prefixes of CloneEntry, the git entry a push
-	// to the repository would use.
+	// RestartOf is the pull request or workflow run a CI restart acts on, allowed only when its head is under HeadPrefixes (CloneEntry's push prefixes).
 	RestartOf int64
 }
 
-// WriteEntries returns the entries whose write grant a matched request needs,
-// which an Automation holds only for the entries its block lists in write
-// (Automation.Write): the git entry for a push (receive-pack, with or without a
-// body); the github-api entry for an operation that writes
-// (GitHubOperationWrites; one with no operation counts as a write, so a request
-// built outside the REST routes is held, not skipped); and, for a CI restart,
-// the git entry its branch relies on too, since a restart reaches no further
-// than a push. Nothing for a fetch or a read. A GraphQL request names its
-// operations only once parsed, so its caller asks GitHubOperationWrites for
-// each, not this.
+// WriteEntries returns the entries whose write grant a request needs: the git entry for a push, the github-api entry for a write (no operation counts as a write), and for a CI restart the git entry too.
+// A GraphQL request names its operations only once parsed, so its caller asks GitHubOperationWrites for each.
 func (g GitRequest) WriteEntries() []string {
 	if g.Entry == nil {
 		return nil
@@ -1403,10 +1151,7 @@ func (g GitRequest) WriteEntries() []string {
 	return nil
 }
 
-// GitMatch routes a request to a git entry. ok is false when the host has no
-// git entries, so the request belongs to header entries. Only the three
-// smart-HTTP endpoints exist: info/refs with exactly one service parameter,
-// and POST to git-upload-pack or git-receive-pack. A push needs write access.
+// GitMatch routes a request to a git entry; ok is false when the host has none. Only info/refs with one service parameter and POST to git-upload-pack or git-receive-pack exist; a push needs write access.
 func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -1453,8 +1198,7 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 			}
 			if write {
 				if matched.RefPrefixes, matched.Limited = r.PushPrefixes(pool); matched.Limited && len(matched.RefPrefixes) == 0 {
-					// The repository holds every pool to its own prefixes, and
-					// this pool has none: it may clone and fetch only.
+					// The repository holds every pool to its own prefixes and this pool has none: clone and fetch only.
 					return matched, true, ErrReadOnly
 				}
 			}
@@ -1464,28 +1208,8 @@ func (c Catalog) GitMatch(host string, port int, method, path, rawQuery, pool st
 	return GitRequest{}, true, ErrUnlisted
 }
 
-// GitHubAPIMatch routes a request to a github-api entry. ok is false when the
-// host has none. For a listed repository only the routes in githubAPIRoutes
-// exist. Every repository gets the pull request routes: open a pull request
-// from a branch under the pool's own push prefixes (HeadPrefixes), list and
-// read pull requests, read and post comments, and, on a pull request whose
-// head is under the pool's push prefixes or its pull request prefixes (see
-// pullRequestHeads), comment, edit the body, edit the App's own comment and
-// mark it ready. A pull request's files and a compare return code, so they
-// exist only for a pool whose git entry can clone the repository, which the
-// broker then authorizes too (CloneEntry), as does a file's contents. Branch,
-// branch rule, ruleset and pull request commit reads need only pr.read: they
-// return no code. Labels, repository dispatch, Actions
-// reads (with check runs and commit statuses), deployment reads and CI
-// restarts exist only where the repository grants them; a CI restart also
-// needs the git entry a push would use to grant the pool branch prefixes,
-// which then hold its target's head (HeadPrefixes), and authorizes the
-// requester against that entry too (CloneEntry). A repository dispatch names
-// its pull request in the body, which must be in the same reach. Reviews,
-// merging a pull request, pushes through the API other than a CI restart's
-// branch update (which merges the base into the head) and everything else are
-// unlisted. A pool uses only its own operations there (forPool): a route
-// whose operation the pool lacks is ErrPool.
+// GitHubAPIMatch routes a request to a github-api entry; ok is false when the host has none. Only routes in githubAPIRoutes exist.
+// A route whose operation the pool lacks is ErrPool (forPool); reviews, merging and other pushes are unlisted.
 func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, pool string) (GitRequest, bool, error) {
 	host = strings.ToLower(host)
 	var hostEntries []*Entry
@@ -1541,25 +1265,19 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 			if !contains(e.Pools, pool) {
 				return matched, true, ErrPool
 			}
-			// The pool's own operations (forPool) decide from here, so every
-			// check made of the request's repository holds the pool to them.
+			// The pool's own operations (forPool) decide from here.
 			if r = c.forPool(r, pool); !r.Allows(route.op) {
 				return matched, true, ErrPool
 			}
 			matched.Repo = r
 			if route.code {
-				// A file list or compare returns code: only for a pool whose git
-				// entry lets it clone the repository, and only for a requester
-				// that entry authorizes (its tier and groups).
+				// A file list or compare returns code: only for a pool whose git entry lets it clone, and a requester that entry authorizes.
 				if matched.CloneEntry = c.cloneEntry(host, repo, pool); matched.CloneEntry == nil {
 					return GitRequest{}, true, ErrUnlisted
 				}
 			}
 			if route.restart > 0 {
-				// A CI restart writes to, or runs again, a branch the pool could
-				// push to itself: only where the git entry a push would use lets
-				// the pool push to branch prefixes, only on those branches, and
-				// only for a requester that entry authorizes too.
+				// A CI restart acts only on a branch the pool could push to itself, for a requester the git entry authorizes.
 				git := c.cloneEntry(host, repo, pool)
 				if matched.HeadPrefixes = pushPrefixes(git, repo, pool); len(matched.HeadPrefixes) == 0 {
 					return GitRequest{}, true, ErrUnlisted
@@ -1576,8 +1294,7 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 					matched.CommentsOn = route.target
 				}
 			case route.name == "dispatch":
-				// The target comes from the body (client_payload.pr_number) and is
-				// held to the same reach as any other write's.
+				// The target comes from the body (client_payload.pr_number) and is held to the same reach as any write's.
 				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
 			case route.comment > 0:
 				matched.HeadPrefixes = append(c.pushBranchPrefixes(repo, pool), r.pullRequestHeads(pool)...)
@@ -1588,10 +1305,7 @@ func (c Catalog) GitHubAPIMatch(host string, port int, method, path, rawQuery, p
 	return GitRequest{}, true, ErrUnlisted
 }
 
-// GitHubAPIRepos returns, for a GraphQL request to a github-api host, every
-// repository its entries list that the pool is granted, each with its head
-// prefixes as for a REST write (its push prefixes, then pullRequestHeads). ok
-// is false when the host has no github-api entry.
+// GitHubAPIRepos returns every repository the host's entries list that the pool is granted, with head prefixes as for a REST write.
 func (c Catalog) GitHubAPIRepos(host string, port int, pool string) ([]GitRequest, bool) {
 	host = strings.ToLower(host)
 	var out []GitRequest
@@ -1613,10 +1327,7 @@ func (c Catalog) GitHubAPIRepos(host string, port int, pool string) ([]GitReques
 	return out, found
 }
 
-// GitHubAPIRepository is the GraphQL counterpart of GitHubAPIMatch: the
-// github-api entry listing repo on the host, with the pool's head prefixes
-// there. A repository no entry lists is ErrUnlisted; one listed only for
-// other pools is ErrPool.
+// GitHubAPIRepository is the GraphQL counterpart of GitHubAPIMatch; unlisted is ErrUnlisted, other pools only is ErrPool.
 func (c Catalog) GitHubAPIRepository(host string, port int, repo, pool string) (GitRequest, error) {
 	repo = strings.ToLower(repo)
 	var listed *Entry
@@ -1643,10 +1354,7 @@ func (c Catalog) GitHubAPIRepository(host string, port int, repo, pool string) (
 	return GitRequest{}, ErrUnlisted
 }
 
-// pushBranchPrefixes are the branch names (refs/heads/ removed) a pool may
-// push to in a repository, from its git entries' shared and per-pool ref
-// prefixes (PushPrefixes). A pull request may come only from one of them; none
-// means none may be opened.
+// pushBranchPrefixes are the branch names a pool may push to in a repository; a pull request may come only from one, and none means none may be opened.
 func (c Catalog) pushBranchPrefixes(repo, pool string) []string {
 	var out []string
 	for i := range c.entries {
@@ -1691,8 +1399,6 @@ func pathPullRequest(rest []string) int64 {
 	return n
 }
 
-// githubRoute is one GitHub REST route a github-api entry may serve, opened
-// by one operation.
 type githubRoute struct {
 	name, method, op string
 	target, comment  int64    // the pull request a write acts on; the comment an edit targets
@@ -1718,15 +1424,12 @@ var (
 	workflowFile    = regexp.MustCompile(`^([1-9][0-9]{0,11}|[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.ya?ml)$`)
 	queryValue      = regexp.MustCompile(`^[A-Za-z0-9 _.,:/+()-]{0,200}$`) // () for matrix job names such as `build (ubuntu-latest)`
 	commitSHA       = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
-	// contentSegment is one directory or file name in a contents path: no
-	// slash, and never "." or "..".
+	// contentSegment is one directory or file name in a contents path: no slash, never . or ..
 	contentSegment = regexp.MustCompile(`^([A-Za-z0-9_][A-Za-z0-9_.-]{0,99}|\.[A-Za-z0-9_][A-Za-z0-9_.-]{0,98})$`)
-	// compareRef is one side of a compare: a branch name or a commit, with no
-	// slash (a branch with one is not served) and never "..".
+	// compareRef is one side of a compare: a branch or commit with no slash and never "..".
 	compareRef = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$`)
 )
 
-// compareRange reports whether s is "base...head" with two plain refs.
 func compareRange(s string) bool {
 	base, head, ok := strings.Cut(s, "...")
 	return ok && compareRef.MatchString(base) && compareRef.MatchString(head) &&
@@ -1743,9 +1446,6 @@ func contentPath(segments []string) bool {
 	return true
 }
 
-// githubAPIRoutes returns the routes for a path below /repos/{owner}/{repo}
-// (empty rest is the repository itself), one per method, each naming the operation that opens it; none when the
-// path is unlisted.
 func githubAPIRoutes(rest []string) []githubRoute {
 	number := func(s string) int64 {
 		if s == "" || len(s) > 12 {
@@ -1802,8 +1502,7 @@ func githubAPIRoutes(rest []string) []githubRoute {
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "update-branch":
 		return []githubRoute{{name: "update-branch", method: http.MethodPut, op: "pr.update_branch", restart: number(rest[1])}}
 	case n == 3 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "ready":
-		// Not a GitHub REST route: GitHub marks a draft ready only through
-		// GraphQL, so the broker makes that one mutation for this path.
+		// Not a GitHub REST route: a draft is marked ready only through GraphQL, so the broker makes that mutation itself.
 		return []githubRoute{{name: "ready", method: http.MethodPost, op: "pr.ready", target: number(rest[1])}}
 	case n == 3 && rest[0] == "issues" && number(rest[1]) > 0 && rest[2] == "comments":
 		return []githubRoute{{name: "comment", method: http.MethodPost, op: "pr.comment", target: number(rest[1])},
@@ -1813,14 +1512,11 @@ func githubAPIRoutes(rest []string) []githubRoute {
 	case n == 5 && rest[0] == "pulls" && number(rest[1]) > 0 && rest[2] == "comments" && number(rest[3]) > 0 && rest[4] == "replies":
 		return []githubRoute{{name: "comment", method: http.MethodPost, op: "pr.comment", target: number(rest[1])}}
 	case n == 3 && rest[0] == "issues" && rest[1] == "comments" && number(rest[2]) > 0:
-		// Reading a comment by id is pr.read, not pr.list (listing is the
-		// collection). Like an edit, the broker holds it to a comment on a pull
-		// request in reach: a plain issue's comment is refused, not left to GitHub.
+		// Reading a comment by id is pr.read; like an edit it is held to a comment on a pull request in reach.
 		return []githubRoute{{name: "edit-comment", method: http.MethodPatch, op: "pr.edit", comment: number(rest[2])},
 			{name: "read-comment", method: http.MethodGet, op: "pr.read", comment: number(rest[2])}}
 	case n == 3 && rest[0] == "issues" && number(rest[1]) > 0 && rest[2] == "labels":
-		// Reading a pull request's labels shows no more than reading the pull
-		// request: its token holds pull requests only, so a plain issue's are refused by GitHub.
+		// Its token holds pull requests only, so GitHub refuses a plain issue's labels.
 		return []githubRoute{{name: "label", method: http.MethodPost, op: "pr.label", target: number(rest[1])},
 			{name: "list-labels", method: http.MethodGet, op: "pr.read", query: pageQuery}}
 	case n == 1 && rest[0] == "dispatches":
@@ -1872,9 +1568,7 @@ func githubAPIRoutes(rest []string) []githubRoute {
 	return nil
 }
 
-// githubQuery rebuilds a query string from its allowed keys, each at most
-// once with a plain value; ok is false for any other key, a repeated key or
-// a value outside queryValue.
+// githubQuery rebuilds a query string from its allowed keys; ok is false for another key, a repeated key or a value outside queryValue.
 func githubQuery(raw string, allowed []string) (string, bool) {
 	if raw == "" {
 		return "", true
@@ -1891,10 +1585,7 @@ func githubQuery(raw string, allowed []string) (string, bool) {
 	return values.Encode(), true
 }
 
-// Match returns the entry for a request, choosing the longest path prefix
-// that matches on a segment boundary. A host or path outside the catalog is
-// ErrUnlisted; a listed route with another method is ErrMethod; a pool
-// without the grant is ErrPool, reported only after the route matched.
+// Match returns the entry for a request by the longest path prefix on a segment boundary: ErrUnlisted for a host or path outside the catalog, ErrMethod for another method, ErrPool only after the route matched.
 func (c Catalog) Match(host string, port int, method, path, pool string) (*Entry, error) {
 	host = strings.ToLower(host)
 	var best *Entry
@@ -1922,8 +1613,6 @@ func (c Catalog) Match(host string, port int, method, path, pool string) (*Entry
 	return best, nil
 }
 
-// HasHost reports whether any entry names host and port, so a tunnel to an
-// unlisted host can be refused before it opens.
 func (c Catalog) HasHost(host string, port int) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
@@ -1937,9 +1626,7 @@ func (c Catalog) HasHost(host string, port int) bool {
 	return false
 }
 
-// HasHostForPool reports whether an entry granted to pool names host and
-// port. A tunnel is refused before it opens unless this holds, so a caller
-// learns nothing about hosts other pools may reach.
+// HasHostForPool reports whether an entry granted to pool names host and port, so a caller learns nothing about other pools' hosts.
 func (c Catalog) HasHostForPool(host string, port int, pool string) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
@@ -1956,8 +1643,6 @@ func (c Catalog) HasHostForPool(host string, port int, pool string) bool {
 	return false
 }
 
-// HTTP2Host reports whether the entries on host and port take HTTP/2, so a
-// tunnel to it offers h2 and every other host keeps HTTP/1.1.
 func (c Catalog) HTTP2Host(host string, port int) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
@@ -1968,8 +1653,7 @@ func (c Catalog) HTTP2Host(host string, port int) bool {
 	return false
 }
 
-// HasAuth0Domain reports whether host is the Auth0 domain of a
-// browser-session entry: the only hosts the broker's own logins may reach.
+// HasAuth0Domain reports whether host is a browser-session entry's Auth0 domain, one of the only hosts the broker's own logins may reach.
 func (c Catalog) HasAuth0Domain(host string) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
@@ -1980,9 +1664,7 @@ func (c Catalog) HasAuth0Domain(host string) bool {
 	return false
 }
 
-// HasAutomatedAuth reports whether addr (host:port) is the automated-auth
-// service of a browser-session entry: the only other place the broker's own
-// logins may reach.
+// HasAutomatedAuth reports whether addr is a browser-session entry's automated-auth service, the only other place the broker's own logins may reach.
 func (c Catalog) HasAutomatedAuth(addr string) bool {
 	addr = strings.ToLower(addr)
 	for _, e := range c.entries {
@@ -1993,15 +1675,9 @@ func (c Catalog) HasAutomatedAuth(addr string) bool {
 	return false
 }
 
-// Entries returns a copy of the catalog, for wiring and diagnostics.
 func (c Catalog) Entries() []Entry { return append([]Entry(nil), c.entries...) }
 
-// GitGranted reports whether some entry still lets the installation's tokens
-// reach repo at a scope: "contents-read" (a git entry), "contents-write" (a git
-// entry with write access, or a github-api repository with dispatch),
-// "pull-requests", "actions", "deployments", "checks", "statuses",
-// "update-branch" or "actions-write" (a github-api repository with an
-// operation that needs that scope).
+// GitGranted reports whether some entry still lets the installation's tokens reach repo at a scope, such as "contents-read", "contents-write", "pull-requests", "actions" or "actions-write".
 func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	for _, e := range c.entries {
 		if e.Git == nil || e.Git.InstallationID != installation {
@@ -2022,20 +1698,13 @@ func (c Catalog) GitGranted(installation int64, repo, scope string) bool {
 	return false
 }
 
-// GitHubScope is what the catalog lets one installation's tokens reach: its
-// repositories and whether any github-api entry on it needs each token scope.
 type GitHubScope struct {
 	Repos                                                []string
 	PullRequests, Actions, Deployments, Checks, Statuses bool
-	// ActionsWrite: a CI restart runs a workflow run again.
-	ActionsWrite bool
+	ActionsWrite                                         bool
 }
 
-// GitScope returns every repository the catalog lists for an installation,
-// and whether any github-api entry on it opens pull requests (or updates a
-// pull request's branch), reads Actions, reads deployments, reads check runs
-// or commit statuses (which actions.read also does), or runs a workflow run
-// again.
+// GitScope returns every repository the catalog lists for an installation and which token scopes its github-api entries need.
 func (c Catalog) GitScope(installation int64) GitHubScope {
 	var s GitHubScope
 	for _, e := range c.entries {
@@ -2057,21 +1726,15 @@ func (c Catalog) GitScope(installation int64) GitHubScope {
 	return s
 }
 
-// cloneGitPort is the port a clone uses: git over HTTPS on 443. An entry for
-// the same repository on another port is a different endpoint and never
-// stands in for it.
+// cloneGitPort is git over HTTPS on 443; an entry on another port is a different endpoint.
 const cloneGitPort = 443
 
-// GitHubCloneEntry is cloneEntry for a GraphQL request that reads a pull
-// request's files: the git entry the requester must also pass, or nil when
-// the pool may not clone the repository.
+// GitHubCloneEntry is cloneEntry for a GraphQL request that reads a pull request's files.
 func (c Catalog) GitHubCloneEntry(apiHost, repo, pool string) *Entry {
 	return c.cloneEntry(strings.ToLower(apiHost), strings.ToLower(repo), pool)
 }
 
-// cloneEntry returns the git entry a clone of repo would use (pairedGit), or
-// nil when there is none or it does not grant the pool (where a clone would
-// get ErrPool).
+// cloneEntry returns the git entry a clone of repo would use, or nil when none or it does not grant the pool.
 func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
 	e, _ := pairedGit(c.entries, apiHost, repo)
 	if e == nil || !contains(e.Pools, pool) {
@@ -2080,12 +1743,7 @@ func (c Catalog) cloneEntry(apiHost, repo, pool string) *Entry {
 	return e
 }
 
-// pairedGit returns the git entry a clone of repo would use for a github-api
-// entry on apiHost, and its listing of the repository, chosen the way
-// GitMatch chooses it: the git entry on the git host and port that lists the
-// repository (the catalog allows one per host and port), or nil when there is
-// none. The git host is the API host without its "api." label, as github.com
-// is for api.github.com, and the port is cloneGitPort.
+// pairedGit returns the git entry a clone of repo would use for a github-api entry, chosen as GitMatch does: the entry on the git host (the API host without "api.") and cloneGitPort that lists the repository.
 func pairedGit(entries []Entry, apiHost, repo string) (*Entry, *GitRepo) {
 	gitHost := strings.TrimPrefix(apiHost, "api.")
 	for i := range entries {
@@ -2102,10 +1760,7 @@ func pairedGit(entries []Entry, apiHost, repo string) (*Entry, *GitRepo) {
 	return nil, nil
 }
 
-// pushPrefixes are the branch names (refs/heads/ removed) git entry e lets
-// pool push to in repo, the shared prefixes and the pool's own
-// (PushPrefixes), never another pool's: none when e is nil, the repository is
-// read-only there, or the pool has no branch prefixes.
+// pushPrefixes are the branch names git entry e lets pool push to in repo; none when e is nil, read-only, or the pool has no prefixes.
 func pushPrefixes(e *Entry, repo, pool string) []string {
 	if e == nil || e.Git == nil {
 		return nil
@@ -2125,15 +1780,11 @@ func pushPrefixes(e *Entry, repo, pool string) []string {
 	return out
 }
 
-// clusterLocal reports whether host is a Kubernetes Service name, the only
-// kind of host a plaintext database entry may name.
 func clusterLocal(host string) bool {
 	return strings.HasSuffix(host, ".svc.cluster.local") || strings.HasSuffix(host, ".svc")
 }
 
-// plaintextDatabases lets a database entry for a Kubernetes Service host use
-// sslmode disable, and an automated-auth service on one use plain http. Only a binary built with the e2e tag can set it (see
-// plaintext_e2e.go), for the Kind fixture database, which serves no TLS.
+// plaintextDatabases lets a Kubernetes Service host use sslmode disable or plain http; only an e2e-tag binary can set it (plaintext_e2e.go).
 var plaintextDatabases atomic.Bool
 
 func pathWithin(path, prefix string) bool {
@@ -2152,8 +1803,6 @@ func contains(list []string, v string) bool {
 	return false
 }
 
-// ForwardsHeader reports whether a caller header is passed upstream: a fixed
-// set of content-negotiation headers plus the entry's ForwardHeaders.
 func (e *Entry) ForwardsHeader(name string) bool {
 	switch name = http.CanonicalHeaderKey(name); name {
 	case "Accept", "Accept-Language", "Content-Type", "User-Agent":
@@ -2162,10 +1811,7 @@ func (e *Entry) ForwardsHeader(name string) bool {
 	return e.forwardsGRPCHeader(name) || contains(e.ForwardHeaders, name)
 }
 
-// grpcForwardHeaders are the gRPC protocol headers a client sets and its
-// server reads: the call's deadline. The broker sets te and
-// grpc-accept-encoding itself and refuses a compressed request, so every
-// message it forwards or returns can be checked.
+// grpcForwardHeaders are the gRPC headers a client sets; the broker sets te and grpc-accept-encoding itself and refuses a compressed request so messages can be checked.
 var grpcForwardHeaders = []string{"Grpc-Timeout"}
 
 func (e *Entry) forwardsGRPCHeader(name string) bool {
@@ -2178,12 +1824,8 @@ var (
 	tierRank = map[string]int{"": 0, "T0": 0, "T1": 1, "T2": 2}
 )
 
-// ValidID reports whether s is a short identifier as the catalog uses for
-// names and ids.
 func ValidID(s string) bool { return idPattern.MatchString(s) }
 
-// CeilingExternal is the ceiling below T0, for workers serving people
-// outside the company.
 const CeilingExternal = "external"
 
 func (p Pool) validate() error {
@@ -2199,8 +1841,6 @@ func (p Pool) validate() error {
 			return fmt.Errorf("groups must be Entra object IDs")
 		}
 	}
-	// Only a cursor-session pool serves a Cursor run as its person; any
-	// other pool names no person for one or decides it per Automation.
 	if p.AutomationRunsAsPerson && p.Identity != "cursor-session" {
 		return fmt.Errorf("automationRunsAsPerson is for cursor-session pools only")
 	}
@@ -2214,20 +1854,16 @@ func (p Pool) validate() error {
 			return fmt.Errorf("a claude-session pool needs its ccpool_ ID and takes no fixed entitlements")
 		}
 	case "cursor-session":
-		// The broker's Cursor teams and audience bind the token; no session
-		// start gate exists for Cursor, so a base group would promise nothing.
+		// No session start gate exists for Cursor, so a base group would promise nothing.
 		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
 			return fmt.Errorf("a cursor-session pool takes no ccpool_ ID, base group or fixed entitlements")
 		}
 	case "attested-person":
-		// The person comes from the proxy's attestation; there is no runner
-		// pool, and a base group would gate nothing.
+		// The person comes from the proxy's attestation; a base group would gate nothing.
 		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
 			return fmt.Errorf("an attested-person pool takes no ccpool_ ID, base group or fixed entitlements")
 		}
 	case IdentityCursorAutomation:
-		// Each run is decided for its Automation, so the pool carries no
-		// entitlements of its own.
 		if p.CCPoolID != "" || p.BaseGroup != "" || len(p.Entitlements) != 0 {
 			return fmt.Errorf("a cursor-automation pool takes no ccpool_ ID, base group or fixed entitlements")
 		}
@@ -2261,10 +1897,7 @@ func (e *Entry) validateTier() error {
 	return nil
 }
 
-// grantable is the CI rule: an entry above T0 is never granted to a pool that
-// cannot carry it. Without defined pools only T0 entries may be granted. At
-// any tier, a git entry's {requester} push prefix goes only to a pool that
-// names who runs each request (requesterGrantable).
+// grantable is the CI rule: an entry above T0 never goes to a pool that cannot carry it, and a {requester} push prefix goes only to a pool that names who runs each request.
 func grantable(e Entry, name string, p Pool, defined bool) error {
 	if p.Ceiling == CeilingExternal {
 		return fmt.Errorf("a pool at the external ceiling holds no entries")
@@ -2303,9 +1936,6 @@ func grantable(e Entry, name string, p Pool, defined bool) error {
 	return fmt.Errorf("%s entries are never granted to a pool with no verified identity", e.Tier)
 }
 
-// Credential is the header value that carries v: v after Scheme, for a Basic
-// user "Basic " and the base64 of v and an empty password, or for a Basic
-// pair "Basic " and the base64 of v, which holds "user:password".
 func (e *Entry) Credential(v string) string {
 	switch {
 	case e.BasicUser:
@@ -2318,10 +1948,8 @@ func (e *Entry) Credential(v string) string {
 	return v
 }
 
-// CallerCredential is the value a worker sends in Header: the placeholder
-// encoded as the key would be, and for a Basic pair, the placeholder as both
-// user name and password for a single Key. BasicPairs instead requires a
-// listed public user with the placeholder password (CallerPairUser).
+// CallerCredential is the value a worker sends in Header: the placeholder encoded as the key would be.
+// For a Basic pair it is the placeholder as user name and password for a single Key; BasicPairs instead requires a listed public user.
 func (e *Entry) CallerCredential() string {
 	if e.BasicPair {
 		return e.Credential(e.Placeholder + ":" + e.Placeholder)
@@ -2329,11 +1957,7 @@ func (e *Entry) CallerCredential() string {
 	return e.Credential(e.Placeholder)
 }
 
-// CallerPairUser is the user name in value when value is Basic credentials
-// with a user name of the worker's own and the placeholder as password, as a
-// client given a pair's public key and, as its secret key, the placeholder
-// sends them. Basic pair entries only. The user half of a pair is not
-// secret; the broker serves the request only when it equals the stored one.
+// CallerPairUser is the user name when value is Basic credentials with the worker's own user and the placeholder as password; served only when it equals the stored one.
 func (e *Entry) CallerPairUser(value string) (string, bool) {
 	encoded, ok := strings.CutPrefix(value, "Basic ")
 	if !e.BasicPair || !ok {
@@ -2350,9 +1974,7 @@ func (e *Entry) CallerPairUser(value string) (string, bool) {
 	return user, true
 }
 
-// SplitPair is the user and password halves of a Basic pair key, and false
-// when v is not "user:password" with both halves set, so a malformed key is
-// never sent.
+// SplitPair splits a Basic pair key; false unless "user:password" with both halves set.
 func SplitPair(v string) (user, password string, ok bool) {
 	user, password, ok = strings.Cut(v, ":")
 	return user, password, ok && user != "" && password != ""

@@ -36,9 +36,7 @@ func (s rsaSigner) SignRS256(_ context.Context, input []byte) ([]byte, error) {
 	return rsa.SignPKCS1v15(rand.Reader, s.key, crypto.SHA256, digest[:])
 }
 
-// gitFixture runs real git through the broker against a fake GitHub: git
-// http-backend for the smart-HTTP endpoints and a token endpoint that mints
-// synthetic installation tokens and records what was requested.
+// gitFixture runs real git through the broker against a fake GitHub that mints synthetic installation tokens and records requests.
 type gitFixture struct {
 	root, work, home, caFile, proxyURL string
 	port                               int
@@ -65,8 +63,6 @@ func newGitFixture(t *testing.T) *gitFixture {
 	return newGitFixtureFor(t, `["pool-agent"]`, `"refPrefixes":["refs/heads/cursor/"]`)
 }
 
-// newGitFixtureFor serves the broker's pool, pool-agent, from a git entry
-// granting pools whose example-app binding carries push.
 func newGitFixtureFor(t *testing.T, pools, push string) *gitFixture {
 	t.Helper()
 	return newGitFixtureCatalog(t, func(port int) string {
@@ -77,9 +73,7 @@ func newGitFixtureFor(t *testing.T, pools, push string) *gitFixture {
 	}, nil)
 }
 
-// newGitFixtureCatalog serves the catalog catalogFor builds for the fake
-// GitHub's port, with configure (when set) adding to the broker's adapter,
-// such as the runner that verifies person sessions.
+// newGitFixtureCatalog serves the catalog catalogFor builds, with configure adding to the broker's adapter.
 func newGitFixtureCatalog(t *testing.T, catalogFor func(port int) string, configure func(*HeaderAdapter)) *gitFixture {
 	t.Helper()
 	backend := filepath.Join(strings.TrimSpace(mustOutput(t, "git", "--exec-path")), "git-http-backend")
@@ -204,8 +198,6 @@ func (f *gitFixture) env() []string {
 		"GIT_AUTHOR_NAME=worker", "GIT_AUTHOR_EMAIL=worker@example.invalid", "GIT_COMMITTER_NAME=worker", "GIT_COMMITTER_EMAIL=worker@example.invalid"}
 }
 
-// git runs as a worker would: through the broker, trusting its CA, with no
-// credential of its own.
 func (f *gitFixture) git(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	full := append([]string{"-c", "http.proxy=" + f.proxyURL, "-c", "http.proxyAuthMethod=basic", "-c", "http.sslCAInfo=" + f.caFile,
@@ -291,7 +283,6 @@ func TestGitCloneAndPushThroughBrokerWithoutAToken(t *testing.T) {
 	if completed < 4 {
 		t.Fatalf("audit recorded %d completed git calls", completed)
 	}
-	// Each row names its git service: the clone fetches, the push pushes.
 	if operations["git.fetch"] == 0 || operations["git.push"] == 0 || len(operations) != 2 {
 		t.Fatalf("operations %v, want git.fetch and git.push only", operations)
 	}
@@ -344,10 +335,7 @@ func TestGitPushesOutsideTheBindingAreRefused(t *testing.T) {
 	}
 }
 
-// One entry serves several pools, each pushing only under its own prefixes:
-// the broker's pool pushes its own branch and is refused on another pool's
-// before GitHub receives the pack. A pool the repository lists no prefixes
-// for may clone and never push.
+// One entry serves several pools, each pushing only under its own prefixes; a pool with no prefixes may clone and never push.
 func TestGitPushesStayOnThePoolsOwnPrefixes(t *testing.T) {
 	f := newGitFixtureFor(t, `["pool-agent","pool-other"]`,
 		`"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/"],"pool-other":["refs/heads/cursor/pool-other/"]}`)
@@ -374,7 +362,6 @@ func TestGitPushesStayOnThePoolsOwnPrefixes(t *testing.T) {
 		t.Fatalf("another pool's branch reached GitHub %d times", reached)
 	}
 
-	// The same repository, with no prefixes for the broker's pool.
 	f = newGitFixtureFor(t, `["pool-agent","pool-other"]`, `"poolRefPrefixes":{"pool-other":["refs/heads/cursor/pool-other/"]}`)
 	clone = filepath.Join(f.work, "example-app")
 	if out, err := f.git(t, f.work, "clone", f.remote("example-org/example-app"), clone); err != nil {
@@ -413,8 +400,7 @@ func TestReceivePackCommandParsing(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// The default clears 10,000 refs in one push; a list past the entry's
-	// limit is refused.
+	// The default clears 10,000 refs in one push; a list past the entry's limit is refused.
 	var many strings.Builder
 	for i := range 10000 {
 		many.WriteString(pkt(zero + " " + one + " refs/heads/cursor/pool-a/alice@example.com/branch-" + strconv.Itoa(i) + "\n"))

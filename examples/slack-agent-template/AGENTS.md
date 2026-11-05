@@ -1,6 +1,6 @@
 # Architecture Notes
 
-This is a template for custom Slack agents that run behind [Agent Vault](https://github.com/Infisical/agent-vault). Keep the repo generic unless a fork is intentionally becoming a single-purpose agent.
+This is a template for custom Slack agents that run behind Gatehouse. Keep the repo generic unless a fork is intentionally becoming a single-purpose agent.
 
 ## Entry Points
 

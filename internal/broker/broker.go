@@ -18,15 +18,7 @@ type Config struct {
 	Services []Service `yaml:"services" json:"services"`
 }
 
-// Service defines a credential-attachment rule. Name is the canonical
-// per-vault identifier; Host + Path are the matcher key consumed by
-// MatchService. JSON callers see a single Host field carrying the
-// joined inline form (`slack.com/api/*`); ingest splits it back into
-// Host + Path before validation. YAML retains the split form.
-//
-// Enabled is nullable so persisted services from before the field
-// existed stay live after upgrade — use IsEnabled() rather than
-// dereferencing the pointer.
+// Service defines a credential-attachment rule; use IsEnabled() since Enabled is nullable for pre-existing services.
 type Service struct {
 	Name          string         `yaml:"name" json:"name"`
 	Host          string         `yaml:"host" json:"host"`
@@ -60,29 +52,19 @@ func (s Service) MarshalJSON() ([]byte, error) {
 	return json.Marshal(a)
 }
 
-// Substitution declares a placeholder string the broker rewrites with a
-// credential value at request time, scanned only on surfaces listed in
-// In — that scoping is the security boundary.
+// Substitution declares a placeholder the broker rewrites with a credential, scanned only on surfaces listed in In.
 type Substitution struct {
 	Key         string   `yaml:"key" json:"key"`
 	Placeholder string   `yaml:"placeholder" json:"placeholder"`
 	In          []string `yaml:"in,omitempty" json:"in,omitempty"`
 }
 
-// IsEnabled reports whether the service should serve proxy traffic. A
-// nil Enabled field (missing from the stored JSON) is treated as enabled
-// so services persisted before this field existed stay live after upgrade.
+// IsEnabled reports whether the service serves traffic; a nil Enabled counts as enabled.
 func (s *Service) IsEnabled() bool {
 	return s.Enabled == nil || *s.Enabled
 }
 
-// Auth describes how credentials are attached for a broker service.
-// Each service must specify a Type and the fields relevant to that type.
-//
-// The "passthrough" type is a special case: no credential is looked up
-// and no credential is injected. The host is allowlisted, and the
-// client's request headers flow through (minus broker-scoped headers
-// like X-Vault and Proxy-Authorization, and hop-by-hop headers).
+// Auth describes how credentials are attached; the "passthrough" type injects nothing and forwards client headers.
 type Auth struct {
 	Type string `yaml:"type" json:"type"` // "bearer", "basic", "api-key", "custom", "passthrough"
 
@@ -112,22 +94,15 @@ var CredentialKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 // its In list.
 var SubstitutionSurfaces = []string{"path", "query", "header", "body", "websocket"}
 
-// DefaultSubstitutionSurfaces is applied when a substitution omits In.
-// "header" is a deliberate opt-in (CRLF guard required) so it is not
-// in the default set.
+// DefaultSubstitutionSurfaces applies when In is omitted; "header" is opt-in because it needs a CRLF guard.
 var DefaultSubstitutionSurfaces = []string{"path", "query"}
 
-// placeholderCharAllowed reports whether c may appear inside a
-// substitution placeholder. Restricted to RFC 3986 unreserved
-// characters so encoded and decoded forms are identical — the runtime
-// can match on the wire-encoded path without encoding round-trips.
+// placeholderCharAllowed restricts placeholders to RFC 3986 unreserved characters so encoded and decoded forms match.
 func placeholderCharAllowed(c byte) bool {
 	return placeholderWordChar(c) || c == '-' || c == '.' || c == '~'
 }
 
-// placeholderWordChar reports whether c is a word-class character
-// inside a placeholder: alphanumeric or underscore. Used by the
-// boundary check in validatePlaceholder.
+// placeholderWordChar reports whether c is alphanumeric or underscore.
 func placeholderWordChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
@@ -390,9 +365,7 @@ func Validate(cfg *Config) error {
 	return nil
 }
 
-// ValidateSubstitutions checks each substitution for length, character
-// set, surface allowlist, and intra-service uniqueness. Errors recommend
-// the __name__ convention by example.
+// ValidateSubstitutions checks length, character set, surfaces, and uniqueness within a service.
 func (s *Service) ValidateSubstitutions() error {
 	if len(s.Substitutions) == 0 {
 		return nil
@@ -419,11 +392,7 @@ func (s *Service) ValidateSubstitutions() error {
 	return nil
 }
 
-// validatePlaceholder enforces length, character set, a boundary
-// requirement (either "__" or a non-word character) so bare identifiers
-// like "account_sid" — which legitimately appear as URL path segments —
-// cannot be picked as placeholders, and at least one alphanumeric so
-// all-symbol strings like "____" or "~~~~" are rejected.
+// validatePlaceholder requires a "__" or non-word boundary and an alphanumeric, so bare names like "account_sid" are rejected.
 func validatePlaceholder(p string) error {
 	if p == "" {
 		return fmt.Errorf("\"placeholder\" is required (recommended convention: __name__)")
@@ -476,9 +445,7 @@ func validateSubstitutionSurfaces(in []string) error {
 	return nil
 }
 
-// NormalizedIn returns the surfaces this substitution applies to,
-// applying DefaultSubstitutionSurfaces when In is empty. Callers must
-// treat the returned slice as read-only.
+// NormalizedIn returns the applicable surfaces (defaults when In is empty); treat it as read-only.
 func (s *Substitution) NormalizedIn() []string {
 	if len(s.In) == 0 {
 		return DefaultSubstitutionSurfaces
@@ -522,9 +489,7 @@ type MatchScore struct {
 	DeclOrder      int  // index of the matched service in the input slice
 }
 
-// Better compares HostTier, then PortSpecific, then PathLiteralLen;
-// DeclOrder is excluded so MatchService's iteration order provides the
-// final tiebreak.
+// Better compares HostTier, PortSpecific, then PathLiteralLen; MatchService iteration order breaks ties.
 func (s MatchScore) Better(other MatchScore) bool {
 	if s.HostTier != other.HostTier {
 		return s.HostTier > other.HostTier
@@ -551,14 +516,7 @@ const (
 	HostTierExact    = 2
 )
 
-// MatchService returns the most specific service matching (host, targetPort, path).
-// Selection: (1) exact host beats wildcard, even if wildcard has a
-// longer path; (2) port-specific service beats port-nil within the same
-// host tier; (3) longest literal path prefix wins within a host+port
-// tier; (4) earlier declaration order breaks ties. host and service Host
-// patterns are both port-stripped. A service with Port=nil matches any
-// targetPort; a service with a specific Port matches only that port.
-// The MatchScore is meaningful only when the returned *Service is non-nil.
+// MatchService returns the most specific service for (host, targetPort, path): exact host, then port-specific, then longest path, then declaration order.
 func MatchService(host string, targetPort int, path string, services []Service) (*Service, MatchScore) {
 	var best *Service
 	var bestScore MatchScore
@@ -589,9 +547,7 @@ func MatchService(host string, targetPort int, path string, services []Service) 
 	return best, bestScore
 }
 
-// matchHostPattern reports the tier and whether pattern matches host.
-// "*." matches exactly one subdomain level (e.g. "*.github.com" matches
-// "api.github.com" but not "a.b.github.com" or the bare "github.com").
+// matchHostPattern reports the tier and whether pattern matches host; "*." matches exactly one subdomain level.
 func matchHostPattern(pattern, host string) (tier int, ok bool) {
 	if h, _, err := net.SplitHostPort(pattern); err == nil {
 		pattern = h
@@ -611,10 +567,7 @@ func matchHostPattern(pattern, host string) (tier int, ok bool) {
 	return 0, false
 }
 
-// AnyHostMatches reports whether any service's host pattern matches
-// host, ignoring paths. Used to filter discovered hosts against the
-// current service list so hosts that are already covered by a
-// configured service (even path-scoped or disabled) are excluded.
+// AnyHostMatches reports whether any service host pattern matches host, ignoring paths.
 func AnyHostMatches(host string, services []Service) bool {
 	for i := range services {
 		if _, ok := matchHostPattern(services[i].Host, host); ok {
@@ -624,9 +577,7 @@ func AnyHostMatches(host string, services []Service) bool {
 	return false
 }
 
-// matchPathGlob reports whether pattern matches path and returns the
-// literal-prefix length. Empty pattern is a catch-all. '*' is greedy
-// across '/'.
+// matchPathGlob reports whether pattern matches path and returns the literal-prefix length; '*' is greedy across '/'.
 func matchPathGlob(pattern, path string) (literalLen int, ok bool) {
 	if pattern == "" {
 		return 0, true
@@ -656,9 +607,7 @@ func matchPathGlob(pattern, path string) (literalLen int, ok bool) {
 	return literalLen, true
 }
 
-// Slugify derives a ValidateSlug-conformant identifier from host+path+port.
-// Distinct inputs can collide (e.g. `*.github.com` and `github.com` both
-// yield `github-com`); callers dedupe via DisambiguateSlug.
+// Slugify derives a ValidateSlug-conformant identifier from host+path+port; callers dedupe collisions via DisambiguateSlug.
 func Slugify(host, path string, port *int) string {
 	var b strings.Builder
 	write := func(s string) {
@@ -693,32 +642,12 @@ func Slugify(host, path string, port *int) string {
 	return raw
 }
 
-// AssignSlugNames is AssignSlugNamesAvoiding with no existing-state
-// context — intra-slice disambiguation only. Use this on read paths
-// or full-replace writes where no pre-existing services are merged
-// against.
+// AssignSlugNames is AssignSlugNamesAvoiding with no existing state, for read paths and full-replace writes.
 func AssignSlugNames(services []Service) {
 	AssignSlugNamesAvoiding(services, nil)
 }
 
-// AssignSlugNamesAvoiding fills empty Names with awareness of an
-// existing vault state:
-//
-//  1. An empty-Name entry whose (Host, Path) uniquely matches an
-//     existing service adopts that service's Name.
-//  2. Remaining empties auto-slug via Slugify + DisambiguateSlug,
-//     reserving existing Names alongside in-slice Names so a cross-
-//     host slug collision lands on a -2 suffix.
-//
-// Pass nil existing for intra-slice disambiguation only.
-//
-// Server write paths route through handle_services.adoptByHost
-// instead — that helper rejects empty Names with no unique host
-// match rather than auto-slugging. The (2) reservation branch here
-// is therefore defensive: production callers (read-path heals via
-// AssignSlugNames(svcs)) pass nil existing, so it isn't reached.
-// Kept for documentation + the broker-level unit tests that pin the
-// semantics if a future caller wants the full adopt-then-slug heal.
+// AssignSlugNamesAvoiding fills empty Names, adopting a uniquely matching existing service's Name or else auto-slugging.
 func AssignSlugNamesAvoiding(services, existing []Service) {
 	anyEmpty := false
 	for _, s := range services {
@@ -788,9 +717,7 @@ func DisambiguateSlug(base string, taken map[string]bool) string {
 	return name
 }
 
-// ValidateSlug enforces the per-vault identifier rule shared by vault,
-// agent, and service names: 3–64 chars, lowercase ASCII alphanumeric
-// and hyphens, no leading/trailing or consecutive hyphens.
+// ValidateSlug enforces the shared name rule: 3-64 lowercase alphanumerics and hyphens, no edge or doubled hyphens.
 func ValidateSlug(name string) error {
 	if name == "" {
 		return fmt.Errorf("name is required")
@@ -815,9 +742,7 @@ func ValidateSlug(name string) error {
 	return nil
 }
 
-// ValidatePath enforces the path-glob format. Empty is a catch-all;
-// non-empty paths must start with "/", be ≤256 chars, and contain no
-// "**", "?", control characters, whitespace, or regex/HTML tokens.
+// ValidatePath enforces the path-glob format; empty is a catch-all.
 func ValidatePath(p string) error {
 	if p == "" {
 		return nil
@@ -857,9 +782,7 @@ func ValidatePort(port *int) error {
 // hostLabelPattern matches a valid hostname (RFC 952 / RFC 1123 style).
 var hostLabelPattern = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
 
-// internalHosts are blocked by default to dodge SSRF against
-// cloud-metadata and Kubernetes-internal endpoints; AGENT_VAULT_DEV_MODE
-// opens them for localhost development.
+// internalHosts are blocked by default against SSRF; AGENT_VAULT_DEV_MODE allows them for localhost development.
 var internalHosts = []string{
 	"localhost", "localhost.localdomain", "internal",
 	"kubernetes", "kubernetes.default",
@@ -867,9 +790,7 @@ var internalHosts = []string{
 	"instance-data",
 }
 
-// ValidateHost accepts bare hostnames and one-level wildcards
-// (`*.github.com`). Rejects IPs, internal names (see internalHosts),
-// bare wildcards, and characters that would break URL parsing.
+// ValidateHost accepts bare hostnames and one-level wildcards; rejects IPs, internal names, and bare wildcards.
 func ValidateHost(host string) error {
 	h := strings.TrimSpace(host)
 	if h == "" {
@@ -922,10 +843,7 @@ func ValidateHost(host string) error {
 	return nil
 }
 
-// SplitInlineHost splits an inline host like `internal.corp.com:3000/api/*`
-// into bare host, path, and optional port. Returns the inputs unchanged when
-// host has no `/` or path is already populated, so callers can pipeline
-// split-form and inline-form alike.
+// SplitInlineHost splits `host:port/path` into host, path, and optional port; inputs are returned unchanged otherwise.
 func SplitInlineHost(host, path string) (string, string, *int) {
 	if path != "" {
 		h, port := splitHostPort(host)
@@ -939,10 +857,7 @@ func SplitInlineHost(host, path string) (string, string, *int) {
 	return h, path, port
 }
 
-// splitHostPort extracts a numeric port from "host:port", returning the bare
-// host and a *int port (nil when no port is present or the port is not
-// numeric). It does NOT use net.SplitHostPort so that wildcard hosts like
-// *.github.com:8080 work without bracket syntax.
+// splitHostPort extracts a numeric port without net.SplitHostPort so wildcard hosts work without brackets.
 func splitHostPort(host string) (string, *int) {
 	idx := strings.LastIndexByte(host, ':')
 	if idx < 0 {
@@ -956,9 +871,7 @@ func splitHostPort(host string) (string, *int) {
 	return host[:idx], &p
 }
 
-// NormalizePort calls SplitInlineHost on svc.Host/svc.Path and reconciles the
-// extracted port with svc.Port. It returns an error when a YAML-level Port
-// conflicts with a port embedded in Host (e.g. host: "foo.com:3000" + port: 4000).
+// NormalizePort reconciles a port embedded in Host with svc.Port and errors when they conflict.
 func NormalizePort(svc *Service) error {
 	host, path, inlinePort := SplitInlineHost(svc.Host, svc.Path)
 	svc.Host = host
@@ -982,9 +895,7 @@ func PortVal(p *int) int {
 	return *p
 }
 
-// resolveHeaders renders {{ credential_name }} placeholders in header values
-// by calling getCredential for each referenced name. Returns a new map with
-// all placeholders replaced, or an error if any credential lookup fails.
+// resolveHeaders renders {{ credential_name }} placeholders in header values, erroring if any lookup fails.
 func resolveHeaders(headers map[string]string, getCredential func(key string) (string, error)) (map[string]string, error) {
 	resolved := make(map[string]string, len(headers))
 	for k, v := range headers {

@@ -25,18 +25,14 @@ var _ brokercore.Attestor = (*Resolver)(nil)
 
 const (
 	jwksMaxAge = time.Hour
-	// jwksMaxStale bounds how long the last good keys stand while refetches
-	// fail: a key the cluster rotated out stops verifying within a day.
+	// jwksMaxStale bounds how long the last good keys stand while refetches fail.
 	jwksMaxStale       = 24 * time.Hour
 	jwksRefetchBackoff = 30 * time.Second
 	jwksFetchTimeout   = 10 * time.Second
 )
 
-// signingKeys caches the cluster's service-account signing keys, so a pool
-// worker's token is verified locally instead of by an API call per connection.
-// A failed fetch keeps the last good set, and one fetch runs at a time
-// outside the lock, so neither an unknown kid nor an API outage stalls or
-// fails the admissions the cached keys can still verify.
+// signingKeys caches the cluster's signing keys so tokens verify locally. A failed fetch keeps the last good set and one fetch runs at a time outside the lock,
+// so an unknown kid or an API outage never stalls admissions the cached keys can verify.
 type signingKeys struct {
 	mu        sync.Mutex
 	keys      map[string]crypto.PublicKey
@@ -45,13 +41,8 @@ type signingKeys struct {
 	flight    chan struct{} // closed when the running fetch ends
 }
 
-// signingKey returns the key for kid, or nil. The live set decides while it
-// is usable (fetched within jwksMaxStale); while none is, a remote domain's
-// fallback set stands in. A key either holds serves at once, and an old or
-// missing live set is refreshed behind it, so neither an outage nor an
-// unreachable issuer stalls a known key. An unknown kid waits for the running
-// fetch, or starts one (at most one per 30 s), so a rotation is picked up with
-// no configuration change.
+// signingKey returns the key for kid, or nil. The live set decides while fetched within jwksMaxStale, else a remote domain's fallback set; a known key serves at once and a stale set refreshes behind it.
+// An unknown kid waits for the running fetch or starts one (at most one per 30 s), so rotations need no configuration change.
 func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto.PublicKey {
 	j := d.keys
 	for waited := false; ; waited = true {
@@ -70,8 +61,7 @@ func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto
 			j.mu.Unlock()
 			return key
 		}
-		// An unknown kid joins a running fetch even inside the backoff, so a
-		// burst of tokens signed with a just-rotated key all wait for it.
+		// An unknown kid joins a running fetch even inside the backoff, so a burst signed with a just-rotated key waits once.
 		flight := j.flight
 		if flight == nil {
 			if !j.attempted.IsZero() && now.Sub(j.attempted) < jwksRefetchBackoff {
@@ -80,8 +70,7 @@ func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto
 			}
 			flight = make(chan struct{})
 			j.flight, j.attempted = flight, now
-			// The fetch serves every waiter, so the caller's cancellation
-			// does not end it.
+			// The fetch serves every waiter, so the caller's cancellation does not end it.
 			go r.fetchSigningKeys(context.WithoutCancel(ctx), d, flight)
 		}
 		j.mu.Unlock()
@@ -97,10 +86,7 @@ func (r *Resolver) signingKey(ctx context.Context, d *domain, kid string) crypto
 	}
 }
 
-// fetchSigningKeys replaces the key set on success and leaves it alone on
-// failure, then releases the waiters. A failure and a changed set are each
-// logged by kid, so an operator sees an outage, and every rotation, without
-// any part of a key.
+// fetchSigningKeys replaces the key set on success, keeps it on failure, then releases waiters; failures and changed sets are logged by kid, never any part of a key.
 func (r *Resolver) fetchSigningKeys(ctx context.Context, d *domain, flight chan struct{}) {
 	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
 	defer cancel()
@@ -116,8 +102,7 @@ func (r *Resolver) fetchSigningKeys(ctx context.Context, d *domain, flight chan 
 		}
 	}
 	if err == nil && len(keys) == 0 {
-		// A set with no usable key is an outage, not a revocation of every
-		// key: keep the last good set.
+		// A set with no usable key is an outage, not a revocation: keep the last good set.
 		err = errors.New("trust domain published no usable key")
 	}
 	j := d.keys
@@ -139,8 +124,7 @@ func (r *Resolver) fetchSigningKeys(ctx context.Context, d *domain, flight chan 
 	}
 	j.flight = nil
 	j.mu.Unlock()
-	// Log before releasing the waiters, so a waiter that returns has seen
-	// the line.
+	// Log before releasing waiters so a returned waiter has seen the line.
 	defer close(flight)
 	name := d.name
 	if name == "" {
@@ -168,9 +152,7 @@ func (r *Resolver) fetchSigningKeys(ctx context.Context, d *domain, flight chan 
 	}
 }
 
-// verifyLocally checks the token's signature against the keys of the trust
-// domain that issued it, and its claims against that domain's policy. It is
-// authentication, not a pre-filter.
+// verifyLocally checks the signature against the issuing trust domain's keys and the claims against its policy; it is authentication, not a pre-filter.
 func (r *Resolver) verifyLocally(ctx context.Context, token string, renewal bool) (claims, *domain, error) {
 	if len(token) == 0 || len(token) > 32768 {
 		return claims{}, nil, brokercore.Denied("token_format")
@@ -199,8 +181,7 @@ func (r *Resolver) verifyLocally(ctx context.Context, token string, renewal bool
 		return claims{}, nil, brokercore.Denied("token_issuer")
 	}
 	now := r.now().Unix()
-	// A renewal recheck of an open session accepts an expired token; its Pod
-	// must still qualify below. A new connection needs an unexpired token.
+	// A renewal recheck accepts an expired token (its Pod must still qualify below); a new connection needs an unexpired one.
 	if !exactly(c.Audience, d.audience) || (c.Expires <= now && !renewal) || c.Issued <= 0 || c.Issued > now+60 || c.NotBefore > now+60 || c.Expires <= c.Issued || c.Expires-c.Issued > d.maxLifetime {
 		return claims{}, nil, brokercore.Denied("token_claims")
 	}
@@ -208,13 +189,11 @@ func (r *Resolver) verifyLocally(ctx context.Context, token string, renewal bool
 	if k.Pod.UID == "" || !pathSegment(k.Pod.Name) || !pathSegment(k.Namespace) || k.ServiceAccount.UID == "" || c.Subject != "system:serviceaccount:"+k.Namespace+":"+k.ServiceAccount.Name {
 		return claims{}, nil, brokercore.Denied("token_pod_claims")
 	}
-	// Each key refusal names the token's kid, so an operator can tell a
-	// rotation from a forgery; each trust-domain mode has its own code.
+	// Each key refusal names the token's kid so an operator can tell a rotation from a forgery.
 	var key crypto.PublicKey
 	switch {
 	case d.pinned != nil:
-		// Pinned keys: no fetch. A kid outside the set is a rotation the
-		// configuration has not taken yet, and refuses until it does.
+		// Pinned keys: no fetch; a kid outside the set is a rotation the configuration has not taken yet.
 		if key = d.pinned[header.Kid]; key == nil {
 			return claims{}, nil, brokercore.DeniedKey("token_keys_pinned_mismatch", header.Kid)
 		}
@@ -276,10 +255,7 @@ type containerStatus struct {
 	} `json:"state"`
 }
 
-// refusedImage names the container that keeps the Pod out, or "" when every
-// container and init container (a native sidecar is one) runs an image whose
-// digest the binding lists and no ephemeral container was added. A container
-// not yet started has no imageID and is refused.
+// refusedImage names the container keeping the Pod out, or "" when every container and init container runs a listed digest and no ephemeral container was added; an unstarted container has no imageID and is refused.
 func (p *livePod) refusedImage(digests []string) string {
 	if len(p.Spec.EphemeralContainers) != 0 {
 		return "ephemeral:" + p.Spec.EphemeralContainers[0].Name
@@ -297,7 +273,6 @@ func (p *livePod) refusedImage(digests []string) string {
 	return ""
 }
 
-// controllerKind is the kind of the Pod's controller owner, or "".
 func (p *livePod) controllerKind() string {
 	for _, owner := range p.Metadata.OwnerReferences {
 		if owner.Controller != nil && *owner.Controller {
@@ -307,7 +282,6 @@ func (p *livePod) controllerKind() string {
 	return ""
 }
 
-// images lists the digest of every container and init container.
 func (p *livePod) images() []string {
 	var digests []string
 	for _, s := range append(append([]containerStatus(nil), p.Status.ContainerStatuses...), p.Status.InitContainerStatuses...) {
@@ -316,11 +290,8 @@ func (p *livePod) images() []string {
 	return digests
 }
 
-// deadline returns when the Pod's admission ends, or the zero time if it is
-// not an admissible pool Pod right now. refusedContainer names the container
-// when an unlisted image is the reason, for the operational log. A remote
-// Pod's address is not compared with the peer: across clusters the peer is a
-// load balancer (see RemotePods).
+// deadline returns when the Pod's admission ends, or zero if it is not admissible now; refusedContainer names an unlisted image's container for the log.
+// A remote Pod's address is not compared with the peer, which across clusters is a load balancer (see RemotePods).
 func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, remote bool, now time.Time) (end time.Time, refusedContainer string) {
 	k := c.Kubernetes
 	m := p.Metadata
@@ -342,17 +313,8 @@ func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, remote bool, n
 	if !matched {
 		return time.Time{}, ""
 	}
-	// ownerReferences are written by whoever creates or updates the Pod, and the
-	// owner is never looked up, so this is not proof the controller made it:
-	// anyone who may create Pods under this service account in this namespace
-	// can name an approved controller. That right is the boundary, and RBAC
-	// alone does not hold it, since a cluster-wide grant includes it. A
-	// deployment must hold it with admission policy: only the pool controller
-	// creates Pods in the worker namespace, and only it changes their owner
-	// references. Gatehouse does not ship that policy. Controllers always set
-	// blockOwnerDeletion, so it is required; it adds a check only where the
-	// OwnerReferencesPermissionEnforcement admission plugin is enabled, and the
-	// boundary does not depend on that.
+	// ownerReferences are not proof the controller made the Pod: whoever may create Pods under this account can name an approved controller, so deployments must restrict Pod creation and owner references with admission policy (not shipped here).
+	// blockOwnerDeletion is required, but the boundary does not depend on the plugin that enforces it.
 	owned := false
 	for _, owner := range m.OwnerReferences {
 		if owner.Controller != nil && *owner.Controller && owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion {
@@ -393,16 +355,13 @@ func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, remote bool, n
 	return end, ""
 }
 
-// Attest admits a pool worker: local token verification first, then the live
-// Pod must be the connection's peer, Running, owned by an approved controller
-// and inside its deadline. Bindings without approved owners keep the online
-// TokenReview path of ResolveForProxy.
+// Attest admits a pool worker: local token verification, then the live Pod must be the peer, Running, owned by an approved controller and inside its deadline.
+// Bindings without approved owners keep the online TokenReview path of ResolveForProxy.
 func (r *Resolver) Attest(ctx context.Context, token string, peer netip.Addr) (*brokercore.ProxyScope, error) {
 	return r.attest(ctx, token, peer, false)
 }
 
-// Reattest is the periodic recheck of an open session: the same checks, except
-// that the connection's original token may have expired since admission.
+// Reattest rechecks an open session: the same checks, but the original token may have expired.
 func (r *Resolver) Reattest(ctx context.Context, token string, peer netip.Addr) (*brokercore.ProxyScope, error) {
 	return r.attest(ctx, token, peer, true)
 }
@@ -434,8 +393,7 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 	if binding.Proxy != nil {
 		return r.attestProxied(ctx, binding, c, d, peer, attestation, renewal)
 	}
-	// Only a proxy binding may vouch for another Pod, and a remote cluster's
-	// sidecar is admitted only where the broker reads that cluster's Pods.
+	// Only a proxy binding may vouch for another Pod, and a remote cluster's sidecar only where the broker reads that cluster's Pods.
 	if attestation != "" || (d.remote && d.pods == nil) {
 		return nil, brokercore.Denied("attestation_not_proxy")
 	}
@@ -447,7 +405,10 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 		read = d.pods
 	}
 	var pod livePod
-	if read(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(k.Namespace)+"/pods/"+url.PathEscape(k.Pod.Name), nil, &pod) != nil {
+	if err := read(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(k.Namespace)+"/pods/"+url.PathEscape(k.Pod.Name), nil, &pod); err != nil {
+		if kubeUnavailable(err) {
+			return nil, errPodLookupUnavailable
+		}
 		return nil, brokercore.Denied("pod_unreadable")
 	}
 	notAfter, refusedContainer := pod.deadline(binding, c, peer, d.remote, r.now())
@@ -466,8 +427,11 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 	if err != nil {
 		return nil, err
 	}
-	if ctx.Err() != nil || (c.Expires <= r.now().Unix() && !renewal) || !r.now().Before(notAfter) {
+	if (c.Expires <= r.now().Unix() && !renewal) || !r.now().Before(notAfter) {
 		return nil, brokercore.Denied("deadline")
+	}
+	if ctx.Err() != nil {
+		return nil, unfinished(ctx, brokercore.Denied("deadline"))
 	}
 	scope.WorkloadID, scope.NotAfter, scope.Pool, scope.IdentityKind = k.Pod.UID, notAfter, binding.Pool, brokercore.KindPodToken
 	scope.ClaimedRun = pod.Metadata.Annotations[brokercore.CursorRunAnnotation]
@@ -522,9 +486,8 @@ func (r *Resolver) PodRunning(ctx context.Context, ref brokercore.PodRef, run st
 	return false, nil
 }
 
-// verifySignature checks a JWS signature with the algorithm the key's type
-// requires: RS256 for RSA, ES256 (r||s, 64 bytes) for EC P-256. A token whose
-// header names the other algorithm fails.
+// verifySignature checks a JWS signature with the algorithm the key's type requires:
+// RS256 for RSA, ES256 (r||s, 64 bytes) for EC P-256; a token whose header names the other fails.
 func verifySignature(alg string, key crypto.PublicKey, digest, signature []byte) bool {
 	switch k := key.(type) {
 	case *rsa.PublicKey:

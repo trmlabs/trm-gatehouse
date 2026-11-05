@@ -13,7 +13,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// fakeFetcher mocks the HashiCorp Vault surface our syncer uses.
 type fakeFetcher struct {
 	mu       sync.Mutex
 	secrets  []Secret
@@ -33,7 +32,6 @@ func (f *fakeFetcher) FetchSecrets(_ context.Context, cfg VaultConfig) ([]Secret
 
 func (f *fakeFetcher) AuthMethod() AuthMethod { return AuthToken }
 
-// fakeStore captures the calls the syncer makes against the application store.
 type fakeStore struct {
 	mu         sync.Mutex
 	rows       []store.VaultCredentialStore
@@ -65,8 +63,7 @@ func (f *fakeStore) ReplaceVaultCredentialsForSync(_ context.Context, vaultID, _
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.notApplied {
-		// Mirror the store gating: the row was disconnected/reconfigured mid-sync,
-		// so the snapshot is dropped without writing.
+		// Mirror the store gating: a mid-sync disconnect or reconfigure drops the snapshot.
 		return false, nil
 	}
 	f.replaceCh <- map[string][]store.EncryptedKV{vaultID: append([]store.EncryptedKV(nil), items...)}
@@ -133,10 +130,7 @@ func TestRefreshOnce_SuccessReplacesCredentials(t *testing.T) {
 	}
 }
 
-// TestRefreshOnce_NotAppliedDropsSnapshot covers the config-gated write path:
-// when the store reports applied=false (vault disconnected or reconfigured mid
-// sync), the syncer drops the snapshot without writing and treats it as a
-// non-failure — health is NOT marked error, and no credentials are replaced.
+// Config-gated write: when the store reports applied=false the syncer drops the snapshot and does not mark health error.
 func TestRefreshOnce_NotAppliedDropsSnapshot(t *testing.T) {
 	dek := makeDEK(t)
 	fs := newFakeStore(hashicorpRow("v1"))
@@ -189,8 +183,6 @@ func TestRefreshOnce_NilFetcherDisabled(t *testing.T) {
 	}
 }
 
-// TestTick_OnlyProcessesHashicorpRows verifies the syncer ignores rows owned by
-// other credential-store kinds (the Infisical syncer owns those).
 func TestTick_OnlyProcessesHashicorpRows(t *testing.T) {
 	dek := makeDEK(t)
 	fs := newFakeStore(
@@ -201,7 +193,6 @@ func TestTick_OnlyProcessesHashicorpRows(t *testing.T) {
 	s := NewSyncer(fs, ff, dek, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	s.tick(context.Background())
-	// Allow the per-vault goroutine to run.
 	s.wg.Wait()
 
 	ff.mu.Lock()

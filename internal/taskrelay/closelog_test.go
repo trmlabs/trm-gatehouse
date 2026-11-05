@@ -14,7 +14,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
-// syncBuffer is a log sink several goroutines write to.
 type syncBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -57,9 +56,6 @@ func waitUntil(t *testing.T, what string, ok func() bool) {
 	}
 }
 
-// Every ended tunnel is logged with why: the agent closing is INFO; the
-// broker side failing is WARN, and when it takes many sessions at once (its
-// TLS front killed) that is also one event with the count.
 func TestTunnelEndsAreLoggedWithTheirReason(t *testing.T) {
 	sink := captureLog(t)
 	broker := newActivityBroker(t)
@@ -72,7 +68,6 @@ func TestTunnelEndsAreLoggedWithTheirReason(t *testing.T) {
 		t.Fatalf("connect: %d", status)
 	}
 	c.Close()
-	// A normal end is counted, not logged alone: one summary per window.
 	waitUntil(t, "the close summary", func() bool { return len(sink.lines(t, "sessions_closed")) == 1 })
 	summary := sink.lines(t, "sessions_closed")[0]
 	if counts, _ := summary["counts"].(map[string]any); counts["connect:"+endClientClosed] != float64(1) || summary["level"] != "INFO" {
@@ -81,14 +76,12 @@ func TestTunnelEndsAreLoggedWithTheirReason(t *testing.T) {
 	if n := len(sink.lines(t, "session_closed")); n != 0 {
 		t.Fatalf("a normal end logged on its own line (%d)", n)
 	}
-	// Six tunnels open, then the broker's side drops them all at once.
 	for i := 0; i < 6; i++ {
 		if _, _, status := sf.connect(t, ""); status != 200 {
 			t.Fatalf("tunnel %d: %d", i, status)
 		}
 	}
 	broker.dropTunnels()
-	// A burst logs its first five ends on their own lines and counts the rest.
 	waitUntil(t, "the burst's own lines", func() bool { return len(sink.lines(t, "session_closed")) == massCloseMinimum })
 	for _, line := range sink.lines(t, "session_closed") {
 		if line["reason"] != endUpstreamReset || line["level"] != "WARN" {
@@ -106,8 +99,6 @@ func TestTunnelEndsAreLoggedWithTheirReason(t *testing.T) {
 	}
 }
 
-// An unreachable upstream is named once, not per refused connection, and its
-// return once.
 func TestUpstreamUnreachableIsLoggedOnce(t *testing.T) {
 	sink := captureLog(t)
 	broker := newActivityBroker(t)
@@ -160,7 +151,6 @@ func TestReadCause(t *testing.T) {
 	}
 }
 
-// TestMain keeps relay logs out of test output; captureLog redirects them.
 func TestMain(m *testing.M) {
 	logOutput = io.Discard
 	if err := imagerule.SetRegistry("registry.example.com/example-project/"); err != nil {
@@ -169,7 +159,6 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-// A PostgreSQL session's end is logged the same way.
 func TestPostgresSessionEndIsLogged(t *testing.T) {
 	sink := captureLog(t)
 	backend := newCatalogBackend(t)
@@ -188,8 +177,6 @@ func TestPostgresSessionEndIsLogged(t *testing.T) {
 	}
 }
 
-// At its limit the relay refuses new connections, leaves open ones alone, and
-// logs the refusals once per window with their count.
 func TestRefusalsAtTheLimitAreLoggedAndSpareOpenSessions(t *testing.T) {
 	sink := captureLog(t)
 	f := newRelayFixture(t)
@@ -216,8 +203,6 @@ func TestRefusalsAtTheLimitAreLoggedAndSpareOpenSessions(t *testing.T) {
 	}
 }
 
-// A broker restart drops thousands of sessions at once: only the first few
-// get their own line, and the window's single event counts the rest.
 func TestAMassDropLogsAFewLinesAndACount(t *testing.T) {
 	sink := captureLog(t)
 	var w upstreamWatch
@@ -235,14 +220,11 @@ func TestAMassDropLogsAFewLinesAndACount(t *testing.T) {
 	if e := sink.lines(t, "upstream_dropped_sessions")[0]; e["sessions"] != float64(2000) || e["suppressed"] != float64(2000-massCloseMinimum) {
 		t.Fatalf("event %v", e)
 	}
-	// After the window a lone end gets its own line again.
 	if !w.ended(log, "broker:16443", endUpstreamReset) {
 		t.Fatal("a lone end after the burst was suppressed")
 	}
 }
 
-// The relay logs the counts of normal ends that its next summary would have
-// carried when it stops, so none are lost at shutdown.
 func TestCloseCountsAreFlushedWhenTheRelayStops(t *testing.T) {
 	sink := captureLog(t)
 	sessionSummaryWindow = time.Hour // only a flush can log them

@@ -17,31 +17,23 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// PoolOptions turns on transaction-mode multiplexing: client sessions share a
-// small set of server connections per (worker pool, database binding) on this
-// replica, each set using one Vault credential that rotates in the background.
-// Nil keeps one upstream connection and credential per client session.
+// PoolOptions turns on transaction-mode multiplexing: client sessions share a small set of server connections
+// per (worker pool, database binding) on this replica.
 type PoolOptions struct {
 	// Replicas divides each database's budget (the catalog's maxConns, or the
 	// broker's MaxConns) between broker replicas. Default 1.
 	Replicas int
-	// LiveReplicas, when set and positive, replaces Replicas with the fleet's
-	// current size, so budgets follow replicas joining and leaving. The
-	// durable cleanup journal supplies it from live owner rows.
+	// LiveReplicas, when set and positive, replaces Replicas with the fleet's current size, so budgets follow
+	// replicas joining and leaving.
 	LiveReplicas func() int
 	// SessionShare caps, per pool key, the connections pinned to one client
 	// for session state, as a fraction of the budget. Default 0.1, minimum 1.
 	SessionShare float64
-	// DrainSessions makes Shutdown close each client session at its next idle
-	// point (no open transaction, nothing unanswered) with 57P01, and cut only
-	// sessions still busy at the deadline. Off, Shutdown closes every session
-	// at once.
+	// DrainSessions makes Shutdown close each client session at its next idle point (no open transaction,
+	// nothing unanswered) with 57P01, and cut only sessions still busy at the deadline.
 	DrainSessions bool
-	// QueueFactor bounds waiting checkouts at this multiple of the budget;
-	// QueueWait bounds how long one waits. Defaults 200 and 5 seconds, so
-	// 10,000 clients on a 50-connection budget queue rather than fail. A
-	// waiter costs only a goroutine. Overflow and timeouts are refused with
-	// SQLSTATE 53300.
+	// QueueFactor bounds waiting checkouts at this multiple of the budget; QueueWait bounds how long one waits.
+	// A waiter costs only a goroutine.
 	QueueFactor int
 	QueueWait   time.Duration
 	// RotateFraction of a credential's lifetime passes before its successor
@@ -49,10 +41,8 @@ type PoolOptions struct {
 	RotateFraction float64
 	// IdleTimeout closes server connections unused for this long. Default 5m.
 	IdleTimeout time.Duration
-	// IdleInTransaction is the server's idle_in_transaction_session_timeout
-	// on pooled connections: a client that holds a transaction open without
-	// sending anything for this long loses its session, so it cannot sit on
-	// a server connection. Default 5m.
+	// IdleInTransaction is the server's idle_in_transaction_session_timeout on pooled connections: a client that
+	// holds a transaction open without sending anything for this long loses its session.
 	IdleInTransaction time.Duration
 	// DefaultBudget is the server-connection budget for a database without a
 	// catalog maxConns. Default 50 (see defaultDatabaseConns).
@@ -94,11 +84,7 @@ var (
 	errPoolClosed  = errors.New("connection pool closed")
 )
 
-// poolKey names one credential's server connections. The replica is implicit:
-// each broker process has its own pools.
-// Every field that decides privileges is in the key: two entitlement tiers
-// are different bindings with different roles, so they never share a server
-// connection, and a binding whose role or target changes gets new ones.
+// poolKey names one credential's server connections.
 type poolKey struct {
 	pool     string // catalog pool name, or the actor when there is none
 	binding  string // vault/service, the identity the cleanup journal uses
@@ -124,9 +110,7 @@ func trustKey(svc *DatabaseService) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// credential is one Vault-issued database login shared by a pool key's
-// server connections. A retiring credential opens no new connections and is
-// revoked once its last connection closes, or at its expiry.
+// credential is one Vault-issued database login shared by a pool key's server connections.
 type credential struct {
 	lease    *Lease
 	issued   time.Time
@@ -154,9 +138,8 @@ type serverConn struct {
 	actual   map[string]string // the same, as the server normalized them
 	pinned   bool
 	idleAt   time.Time
-	// reported holds the server's last reported parameters as the broker left
-	// them; seen holds reports made while a client held the connection. A
-	// difference at check-in is session state the client left behind.
+	// reported holds the server's last reported parameters as the broker left them; seen holds reports made
+	// while a client held the connection.
 	reported map[string]string
 	seen     map[string]string
 }
@@ -206,9 +189,7 @@ func newServerPools(b *Broker, opts PoolOptions) *serverPools {
 }
 
 func (p *serverPools) budgetFor(svc *DatabaseService) *budget {
-	// The catalog's maxConns is the database's whole Gatehouse budget. In
-	// pooled mode MaxConns caps client sessions instead, so an unset budget
-	// falls back to the conservative default, not to that cap.
+	// The catalog's maxConns is the database's whole Gatehouse budget.
 	limit := svc.MaxConns
 	if limit <= 0 {
 		limit = p.opts.DefaultBudget
@@ -267,9 +248,8 @@ func (bud *budget) notify() {
 	bud.changed = make(chan struct{})
 }
 
-// acquire returns a server connection for key, reusing an idle one, opening a
-// new one within the database's budget, or waiting in a bounded queue. A
-// pinned checkout also counts against the key's session-mode share.
+// acquire returns a server connection for key, reusing an idle one, opening a new one within the database's
+// budget, or waiting in a bounded queue.
 func (p *serverPools) acquire(ctx context.Context, key poolKey, vaultID string, svc *DatabaseService, pinned bool) (*serverConn, error) {
 	deadline := time.Now().Add(p.opts.QueueWait)
 	waiting := false
@@ -431,10 +411,8 @@ func (p *serverPools) credentialFor(ctx context.Context, pool *serverPool, svc D
 	return nil, errors.New("pooled credential unavailable")
 }
 
-// mint issues a new credential for the key and makes it current. The previous
-// one retires: it opens nothing more and is revoked when its last connection
-// closes, so a rotation never cuts a running transaction.
-// mintLocked requires pool.mintMu.
+// mint issues a new credential for the key and makes it current.
+// The previous one retires: it opens nothing more and is revoked when its last connection closes.
 func (p *serverPools) mintLocked(ctx context.Context, pool *serverPool, svc DatabaseService) (*credential, error) {
 	// A pooled credential serves the whole pool, so its cleanup record names
 	// the pool, not any one agent or Pod.
@@ -510,9 +488,8 @@ func (p *serverPools) closeLocked(conn *serverConn) {
 	p.retireIfDrainedLocked(conn.pool, conn.cred)
 }
 
-// retire stops a credential's use at once: it opens and reuses no more
-// connections and is revoked when its last one closes. Used when a client
-// changed the login itself, such as its role-level defaults.
+// retire stops a credential's use at once: it opens and reuses no more connections and is revoked when its
+// last one closes.
 func (p *serverPools) retire(cred *credential) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -590,9 +567,8 @@ func (p *serverPools) maintain() {
 				}
 				live = append(live, cred)
 				if !now.Before(cred.lease.ExpiresAt) {
-					// Expired with connections open: close them here, rather
-					// than trust the Vault role's revocation to end them, and
-					// revoke. A session on one loses its server and ends.
+					// Expired with connections open: close them here, rather than trust the Vault role's revocation to end
+					// them, and revoke.
 					cred.retiring, cred.revoked = true, true
 					if pool.cur == cred {
 						pool.cur = nil
@@ -652,8 +628,6 @@ func (p *serverPools) close() {
 	<-p.done
 }
 
-// stats reports open server connections per upstream, for tests and status.
-//
 //nolint:unused // used by the realpg tests
 func (p *serverPools) stats(addr string) (open, idle int) {
 	p.mu.Lock()

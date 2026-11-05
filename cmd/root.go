@@ -34,9 +34,7 @@ func Execute() {
 	if err == nil {
 		return
 	}
-	// An ExitCodeError carries the wrapped subprocess's exit status —
-	// propagate it verbatim. The subprocess already wrote to stderr;
-	// we stay quiet and exit with its code.
+	// Propagate the subprocess exit code verbatim; it already wrote to stderr.
 	var ece *ExitCodeError
 	if errors.As(err, &ece) {
 		os.Exit(ece.Code)

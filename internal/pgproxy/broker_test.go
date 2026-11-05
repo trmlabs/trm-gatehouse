@@ -443,9 +443,8 @@ func scramField(msg, prefix string) (string, error) {
 
 // --- fake agent client ---
 
-// runAgentQuery drives an agent connection through the broker: startup with the
-// given token as the password, then a single query, returning the first cell of
-// the first row.
+// runAgentQuery drives an agent connection through the broker: startup with the given token as the password,
+// then a single query, returning the first cell of the first row.
 func runAgentQuery(t *testing.T, brokerAddr, token, database, query string) (string, error) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", brokerAddr, 5*time.Second)

@@ -19,9 +19,7 @@ type ResolvedSubstitution struct {
 	In          []string // subset of {"path","query","header","body","websocket"} — security boundary
 }
 
-// HasBodySubstitutions reports whether any substitution targets the
-// "body" surface — used to decide whether the request body must be
-// materialized in RAM.
+// HasBodySubstitutions reports whether any substitution targets the "body" surface.
 func HasBodySubstitutions(subs []ResolvedSubstitution) bool {
 	for _, sub := range subs {
 		for _, s := range sub.In {
@@ -33,10 +31,7 @@ func HasBodySubstitutions(subs []ResolvedSubstitution) bool {
 	return false
 }
 
-// ApplySubstitutions rewrites declared surfaces of an outbound request
-// in-place. Path uses url.PathEscape, query uses url.QueryEscape, header
-// uses the raw value with a CRLF guard. On error, callers must not
-// forward the request — partial mutations may have been applied.
+// ApplySubstitutions rewrites declared surfaces in place; on error callers must not forward the request.
 func ApplySubstitutions(u *url.URL, headers http.Header, subs []ResolvedSubstitution) error {
 	if len(subs) == 0 {
 		return nil
@@ -48,11 +43,7 @@ func ApplySubstitutions(u *url.URL, headers http.Header, subs []ResolvedSubstitu
 				if u == nil {
 					continue
 				}
-				// Operate on the wire-encoded path so PathEscape'd values
-				// land in the URL exactly once and don't get re-encoded
-				// by String(). Placeholder characters are restricted to
-				// RFC 3986 unreserved by the validator, so they appear
-				// identically in encoded and decoded forms.
+				// Operate on the wire-encoded path so escaped values are not re-encoded; placeholders are unreserved characters.
 				escaped := u.EscapedPath()
 				rewritten := strings.ReplaceAll(escaped, sub.Placeholder, url.PathEscape(sub.Value))
 				if rewritten == escaped {
@@ -86,12 +77,7 @@ func ApplySubstitutions(u *url.URL, headers http.Header, subs []ResolvedSubstitu
 	return nil
 }
 
-// ApplyBodySubstitutions rewrites the request body in-place for any
-// substitution declaring the "body" surface. Encoding is content-type-aware:
-// form-urlencoded values are QueryEscaped, JSON values are string-escaped,
-// multipart bodies are skipped, and everything else uses raw replacement.
-// Returns the (possibly new) body, its byte length, whether anything changed,
-// and any error.
+// ApplyBodySubstitutions rewrites the body by content type (form, JSON, raw; multipart skipped) and returns the body, length, and whether it changed.
 func ApplyBodySubstitutions(body io.ReadCloser, contentLength int64, contentType string, subs []ResolvedSubstitution) (io.ReadCloser, int64, bool, error) {
 	var bodySubs []ResolvedSubstitution
 	for _, sub := range subs {

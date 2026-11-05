@@ -27,10 +27,7 @@ var (
 	gormMigMu      sync.Mutex
 )
 
-// RegisterGORMMigration adds a GORM-based migration to the global registry.
-// The migration name is automatically derived from the caller's filename
-// (e.g., "20260617143022_add_ca_state.go" becomes "20260617143022_add_ca_state").
-// Call this from init() in each migration file.
+// RegisterGORMMigration adds a GORM migration to the registry, named from the caller's filename; call from init().
 func RegisterGORMMigration(fn func(db *gorm.DB) error) {
 	_, file, _, ok := runtime.Caller(1)
 	if !ok {
@@ -43,9 +40,7 @@ func RegisterGORMMigration(fn func(db *gorm.DB) error) {
 	gormMigrations = append(gormMigrations, GORMMigration{Name: name, Fn: fn})
 }
 
-// runGORMMigrations applies any pending GORM-based migrations.
-// On Postgres, it acquires an advisory lock on a pinned connection
-// to prevent concurrent migration runs across pods.
+// runGORMMigrations applies pending migrations, holding a Postgres advisory lock on a pinned connection.
 func runGORMMigrations(sqlDB *sql.DB, dialectName string) error {
 	if len(gormMigrations) == 0 {
 		return nil
@@ -107,9 +102,7 @@ func runGORMMigrations(sqlDB *sql.DB, dialectName string) error {
 		return nil
 	}
 
-	// Disable FK checks for SQLite migrations. Many legacy migrations
-	// do DROP TABLE + RENAME which would cascade-delete FK-referenced
-	// rows if FKs are enforced. PRAGMA must be set outside transactions.
+	// Disable FK checks for SQLite: legacy DROP TABLE + RENAME migrations would cascade-delete rows; PRAGMA must be set outside transactions.
 	if dialectName == "sqlite" {
 		if _, err := sqlDB.Exec("PRAGMA foreign_keys = OFF"); err != nil {
 			return fmt.Errorf("disabling foreign keys: %w", err)
@@ -135,10 +128,7 @@ func runGORMMigrations(sqlDB *sql.DB, dialectName string) error {
 			if err := m.Fn(tx); err != nil {
 				return err
 			}
-			// Extract integer version from name prefix for backward compat
-			// with older binaries that read MAX(version). Only for small
-			// sequential versions (001-999); timestamp-prefixed names
-			// overflow int4 on Postgres.
+			// Extract an integer version for older binaries that read MAX(version); only for 001-999 since timestamps overflow int4.
 			var version *int
 			var v int
 			if _, err := fmt.Sscanf(m.Name, "%d_", &v); err == nil && v < 1000 {
@@ -156,12 +146,7 @@ func runGORMMigrations(sqlDB *sql.DB, dialectName string) error {
 	return nil
 }
 
-// upgradeSchemamigrationsTable transitions from the old format
-// (version INTEGER PRIMARY KEY, applied_at) to the new format
-// (id auto-increment, name TEXT UNIQUE, migration_time).
-//
-// For existing databases, it renames the old table, creates the new
-// one, and backfills the old version-based entries with their names.
+// upgradeSchemamigrationsTable migrates the old (version, applied_at) format to the new name-based one, backfilling names.
 func upgradeSchemamigrationsTable(db *sql.DB, dialect string) error {
 	// Check if the table exists at all.
 	tableExists, err := tableExists(db, dialect, "schema_migrations")
@@ -170,9 +155,7 @@ func upgradeSchemamigrationsTable(db *sql.DB, dialect string) error {
 	}
 
 	if !tableExists {
-		// Fresh install -- create the new format directly.
-		// Includes version and applied_at columns for backward compat
-		// with older binaries that query SELECT MAX(version).
+		// Fresh install: create the new format with version and applied_at for older binaries that query MAX(version).
 		switch dialect {
 		case "sqlite":
 			_, err = db.Exec(`CREATE TABLE schema_migrations (
@@ -233,9 +216,7 @@ func upgradeSchemamigrationsTable(db *sql.DB, dialect string) error {
 		return fmt.Errorf("creating new table: %w", err)
 	}
 
-	// 3. Backfill old entries: version N -> name from the embedded SQL filenames.
-	// Read all versions first, then close rows before inserting (SQLite
-	// MaxOpenConns=1 deadlocks if rows are open during INSERT).
+	// 3. Backfill old entries from the embedded SQL filenames; close rows before inserting (SQLite MaxOpenConns=1 deadlocks otherwise).
 	rows, err := db.Query("SELECT version FROM schema_migrations_old ORDER BY version")
 	if err != nil {
 		return fmt.Errorf("reading old migrations: %w", err)
@@ -296,9 +277,7 @@ func loadAppliedMigrations(db *sql.DB) (map[string]bool, error) {
 	return applied, rows.Err()
 }
 
-// buildVersionToNameMap creates a version -> name mapping from the registered
-// GORM migrations. Old migrations (001_init, etc.) have names that start with
-// zero-padded numbers which parse to the original version integers.
+// buildVersionToNameMap maps version to name from registered migrations; old names start with zero-padded version numbers.
 func buildVersionToNameMap() map[int]string {
 	m := make(map[int]string)
 	for _, gm := range gormMigrations {

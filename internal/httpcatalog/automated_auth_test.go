@@ -27,8 +27,7 @@ var automatedSecrets = map[string]string{"email": "qa-user@example.test", "passw
 
 const syntheticRefresh = "synthetic-refresh-token-5d8"
 
-// namespacedEmail is the fake access token's namespaced email claim. It
-// differs from the plain email claim, so a test sees which one was read.
+// namespacedEmail differs from the plain email claim, so a test sees which one was read.
 const namespacedEmail = "qa-user+namespaced@example.test"
 
 type automatedVault struct{ down bool }
@@ -97,8 +96,6 @@ func TestAutomatedAuthEntry(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// A realm is harmless with automated-auth: the catalog module's own test
-	// entry carries one.
 	if err := parseOne(strings.Replace(base, `"login":"automated-auth"`, `"login":"automated-auth","realm":"Username-Password-Authentication"`, 1)); err != nil {
 		t.Errorf("realm with automated-auth: %v", err)
 	}
@@ -107,7 +104,6 @@ func TestAutomatedAuthEntry(t *testing.T) {
 	}
 }
 
-// One pool per entry, and a test user in one entry only.
 func TestBrowserEntryPoolsAndUsers(t *testing.T) {
 	base := automatedEntryJSON(automatedSettings)
 	if parseOne(strings.Replace(base, `"pools":["database-developers"]`, `"pools":["database-developers","other-pool"]`, 1)) == nil {
@@ -156,15 +152,12 @@ func TestBrowserPathRules(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// The templates belong to browser-session entries.
 	if parseOne(`{"name":"vendor","host":"vendor.example.com","pathPrefixes":["/v1"],"methods":["GET"],"header":"Authorization",
 		"placeholder":"__vault_V__","key":{"mount":"gatehouse","path":"v","field":"k"},"pools":["p"],"deniedPaths":["/v1/x"]}`) == nil {
 		t.Error("deniedPaths on an HTTP entry accepted")
 	}
 }
 
-// The runtime guard: built-in segments anywhere and in any spelling, and
-// templates covering their path and everything below it.
 func TestBrowserPathGuard(t *testing.T) {
 	e := &Entry{DeniedPaths: []string{"/v1/accounts/*/users", "/v1/users/*/email", "/v1/archive"},
 		ReadOnlyPaths: []string{"/v1/reports"}}
@@ -222,11 +215,9 @@ func TestBrowserPathGuard(t *testing.T) {
 			t.Errorf("%s %s: %v, want %v", tc.method, tc.path, err, tc.want)
 		}
 	}
-	// The built-in read-only segment holds for an entry with no templates.
 	if err := (&Entry{}).guardBrowserPath("POST", "/v1/users-organizations"); !errors.Is(err, ErrReadOnlyPath) {
 		t.Errorf("built-in read-only: %v", err)
 	}
-	// Through the catalog: the seed path is not guarded; API paths are.
 	c, err := Parse([]byte(`{"entries":[` + strings.Replace(automatedEntryJSON(automatedSettings), `"pathPrefixes":["/v1/lookups"]`,
 		`"pathPrefixes":["/v1","/users-organizations"]`, 1) + `]}`))
 	if err != nil {
@@ -335,7 +326,6 @@ func automatedEntry(t *testing.T) *Entry {
 		t.Fatal(err)
 	}
 	e := &c.Entries()[0]
-	// Each test gets its own binding to change.
 	binding := *e.BrowserSession
 	settings := *binding.AutomatedAuth
 	binding.AutomatedAuth = &settings
@@ -362,8 +352,6 @@ func (r *revocations) all() []string {
 	return append([]string(nil), r.seen...)
 }
 
-// reachableStrings is every string and byte slice reachable from v,
-// unexported fields included.
 func reachableStrings(v reflect.Value, seen map[uintptr]bool, out *[]string) {
 	switch v.Kind() {
 	case reflect.String:
@@ -418,7 +406,6 @@ func TestAutomatedAuthSignInCachesAndRevokes(t *testing.T) {
 	if err != nil || !strings.HasSuffix(first.Value(), ".synthetic-access-token-1") {
 		t.Fatalf("sign-in: %v", err)
 	}
-	// The ID token supplies the claims, protocol claims dropped.
 	if first.Claims["sub"] != "auth0|qa-user" || first.Claims["org_id"] != "org_synthetic" || first.Claims["email"] != automatedSecrets["email"] ||
 		first.Claims["nonce"] != nil || first.Claims["sid"] != nil {
 		t.Fatalf("claims: %v", first.Claims)
@@ -432,11 +419,7 @@ func TestAutomatedAuthSignInCachesAndRevokes(t *testing.T) {
 	if s := fmt.Sprintf("%v %+v %#v %s", first, first, first, first); strings.Contains(s, "synthetic-access-token") {
 		t.Fatal("token printed")
 	}
-	// The refresh token is held nowhere, the key cache included; the
-	// password and service key only in the shared key cache. Every request
-	// closes its connection, so no idle connection's read buffer keeps the
-	// answer either (the HTTP clients are left out of the walk: their
-	// transports change under it).
+	// The refresh token is held nowhere, the key cache included; the password and service key only in the shared key cache.
 	if fake.kept.Load() != 0 {
 		t.Fatalf("%d requests kept their connection", fake.kept.Load())
 	}
@@ -464,8 +447,7 @@ func TestAutomatedAuthSignInCachesAndRevokes(t *testing.T) {
 	if renewed, _ := tokens.Token(context.Background(), entry); !strings.HasSuffix(renewed.Value(), ".synthetic-access-token-2") {
 		t.Fatal("token not renewed before expiry")
 	}
-	// A refused token younger than the relogin interval is kept, so a worker
-	// cannot force sign-ins; an older one is dropped.
+	// A refused token younger than the relogin interval is kept; an older one is dropped.
 	tokens.Invalidate(entry)
 	if kept, _ := tokens.Token(context.Background(), entry); fake.logins.Load() != 2 || !strings.HasSuffix(kept.Value(), "-2") {
 		t.Fatal("fresh token dropped")
@@ -477,18 +459,13 @@ func TestAutomatedAuthSignInCachesAndRevokes(t *testing.T) {
 	}
 }
 
-// Without a top-level ID token (automated-auth's password sign-in returns
-// none), the claims come from the access token and the seed is not read.
 func TestAutomatedAuthClaimsFromAccessToken(t *testing.T) {
 	t.Cleanup(func() { EmailClaim.Store("") })
 	for claim, want := range map[string]map[string]any{
-		// The fake sets a different email in the plain and the namespaced
-		// claim, so each case shows which claim was read.
 		"":                          {"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": automatedSecrets["email"]},
 		"https://example.com/email": {"sub": "auth0|qa-user", "org_id": "org_synthetic", "email": namespacedEmail},
-		// A claim that is absent or is not a string is left out.
-		"permissions": {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
-		"missing":     {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
+		"permissions":               {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
+		"missing":                   {"sub": "auth0|qa-user", "org_id": "org_synthetic"},
 	} {
 		EmailClaim.Store(claim)
 		fake, client := fakeAutomatedAuth(t)
@@ -507,7 +484,6 @@ func TestAutomatedAuthRefusals(t *testing.T) {
 		logins  int32
 		revokes int32
 	}{
-		// The binding's org is checked again at sign-in, after the catalog.
 		"org missing":     {func(_ *automatedFake, e *Entry, _ *Auth0Tokens) { e.BrowserSession.AutomatedAuth.OrgID = "" }, 0, 0},
 		"no client":       {func(_ *automatedFake, _ *Entry, a *Auth0Tokens) { a.AutomatedAuth = nil }, 0, 0},
 		"vault error":     {func(_ *automatedFake, _ *Entry, a *Auth0Tokens) { a.Keys = &Keys{Vault: automatedVault{down: true}} }, 0, 0},
@@ -540,8 +516,6 @@ func TestAutomatedAuthRefusals(t *testing.T) {
 	}
 }
 
-// A refused revocation is tried once more, then reported revoke_failed;
-// the sign-in itself succeeds.
 func TestAutomatedAuthRevokeRetriesThenReports(t *testing.T) {
 	old := revokeBackoff
 	revokeBackoff = time.Millisecond
@@ -563,8 +537,7 @@ func TestAutomatedAuthRevokeRetriesThenReports(t *testing.T) {
 	}
 }
 
-// The sign-in body holds the user's password and the service key; a
-// redirect, even a 307 that would re-send it, is never followed.
+// The sign-in body holds secrets; a redirect, even a 307, is never followed.
 func TestAutomatedAuthNeverFollowsARedirect(t *testing.T) {
 	var elsewhere atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -586,15 +559,12 @@ func TestAutomatedAuthNeverFollowsARedirect(t *testing.T) {
 	}
 }
 
-// clock is a test clock safe to read from sign-ins running in the background.
 type clock struct{ at atomic.Int64 }
 
 func newClock() *clock                   { c := &clock{}; c.at.Store(time.Now().UnixNano()); return c }
 func (c *clock) now() time.Time          { return time.Unix(0, c.at.Load()) }
 func (c *clock) advance(d time.Duration) { c.at.Add(int64(d)) }
 
-// Concurrent requests share one sign-in, and after any attempt the entry
-// makes no other for a minute: a failure answers at once without a login.
 func TestSignInCapAfterFailure(t *testing.T) {
 	fake, client := fakeAutomatedAuth(t)
 	fake.status.Store(http.StatusBadGateway)
@@ -627,8 +597,6 @@ func TestSignInCapAfterFailure(t *testing.T) {
 	}
 }
 
-// Successful sign-ins are shared and capped too; a failed renewal keeps the
-// last token serving until it expires, without a second attempt that minute.
 func TestSignInCapAfterSuccess(t *testing.T) {
 	fake, client := fakeAutomatedAuth(t)
 	c := newClock()
@@ -684,8 +652,6 @@ func TestSignInCapAfterSuccess(t *testing.T) {
 	}
 }
 
-// A request that gives up ends only its own wait: the sign-in it started
-// runs on, and its result serves the requests after it.
 func TestSignInSurvivesACancelledRequest(t *testing.T) {
 	fake, client := fakeAutomatedAuth(t)
 	tokens := &Auth0Tokens{Keys: &Keys{Vault: automatedVault{}}, Client: client, AutomatedAuth: client}
@@ -719,8 +685,6 @@ func TestSignInSurvivesACancelledRequest(t *testing.T) {
 	}
 }
 
-// A catalog reload drops the token and sign-in state of entries it removed
-// or changed, and keeps the rest.
 func TestPruneDropsRemovedEntries(t *testing.T) {
 	fake, client := fakeAutomatedAuth(t)
 	tokens := &Auth0Tokens{Keys: &Keys{Vault: automatedVault{}}, Client: client, AutomatedAuth: client}

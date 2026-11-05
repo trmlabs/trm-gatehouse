@@ -12,9 +12,7 @@ import (
 	"time"
 )
 
-// Why a Pod cache sync failed, by class only: never a token, a response
-// body or a header. A sync that keeps failing is otherwise silent until the
-// shared proxy gives up on its first sync and exits.
+// Sync failures are logged by class only: never a token, a response body or a header.
 const (
 	syncFailToken   = "token"   // the API token file is unreadable or empty
 	syncFailDNS     = "dns"     // the API server's name did not resolve
@@ -25,12 +23,9 @@ const (
 	syncFailOther   = "other"   // a request, read or decode failure
 )
 
-// syncLogInterval spaces repeat lines for a namespace whose sync keeps
-// failing the same way; a change of class is logged at once.
 var syncLogInterval = time.Minute
 
-// syncError is a failed Pod cache request: its class and, for an HTTP
-// answer, the status. It is errDenied to every caller.
+// syncError is a failed Pod cache request: its class and, for an HTTP answer, the status; it is errDenied to every caller.
 type syncError struct {
 	class  string
 	status int
@@ -40,7 +35,6 @@ type syncError struct {
 func (e *syncError) Error() string { return errDenied.Error() }
 func (e *syncError) Unwrap() error { return errDenied }
 
-// classifyTransport names a transport failure without its message.
 func classifyTransport(e error) *syncError {
 	var dns *net.DNSError
 	var unknown x509.UnknownAuthorityError
@@ -63,9 +57,7 @@ func classifyTransport(e error) *syncError {
 	return &syncError{class: syncFailOther}
 }
 
-// syncWatch logs each namespace's failed syncs: the first, any change of
-// class or status, then at most one line per syncLogInterval with the count
-// since; and one line when a sync succeeds again.
+// syncWatch logs the first failure, any change of class or status, then at most one line per syncLogInterval with the count since, and one line when a sync succeeds again.
 type syncWatch struct {
 	mu    sync.Mutex
 	state map[string]*syncState

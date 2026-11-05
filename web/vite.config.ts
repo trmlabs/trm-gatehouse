@@ -6,9 +6,7 @@ import tailwindcss from "@tailwindcss/vite";
 const API_TARGET = process.env.VITE_API_URL ?? "http://localhost:14321";
 const OUT_DIR = "../internal/server/webdist";
 
-// emptyOutDir also deletes webdist/.gitkeep, the tracked placeholder that lets
-// go:embed compile before any build; put it back once the bundle is written,
-// so a build leaves the Git tree clean.
+// emptyOutDir deletes the tracked webdist/.gitkeep that go:embed needs; restore it after the build.
 function keepGitkeep(): Plugin {
   return {
     name: "keep-gitkeep",
@@ -31,10 +29,7 @@ export default defineConfig({
     emptyOutDir: true,
     rolldownOptions: {
       output: {
-        // Split the framework out of the app bundle. Roughly half of the
-        // output is React + the router, which only changes when we bump those
-        // deps; keeping them in their own chunks means a new agent-vault
-        // release only invalidates the app chunk in the browser cache.
+        // Split React and the router into their own chunks so releases only invalidate the app chunk in the browser cache.
         codeSplitting: {
           groups: [
             {

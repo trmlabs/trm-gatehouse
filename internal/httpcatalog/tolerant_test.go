@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// entryNamed is validEntry under another name, host and path, so it conflicts
-// with nothing.
 func entryNamed(name, host string) string {
 	e := strings.Replace(validEntry, `"name":"serpapi"`, `"name":"`+name+`"`, 1)
 	return strings.Replace(e, `"host":"serpapi.com"`, `"host":"`+host+`"`, 1)
@@ -76,7 +74,6 @@ func TestTolerantDropsEveryPartOfAConflict(t *testing.T) {
 	if got := droppedNames(dropped); got != "entry:copycat,entry:serpapi,entry:twin,entry:twin" {
 		t.Fatalf("dropped %q", got)
 	}
-	// Two browser-session entries sharing a test user both go.
 	browserA := browserEntryJSON("")
 	browserB := strings.NewReplacer(`"name":"staging-app"`, `"name":"staging-app-2"`, `"host":"api.example.com"`, `"host":"api2.example.com"`,
 		`"appHost":"app.example.com"`, `"appHost":"app2.example.com"`).Replace(browserA)
@@ -87,7 +84,6 @@ func TestTolerantDropsEveryPartOfAConflict(t *testing.T) {
 	if entryNames(c) != "other" || droppedNames(dropped) != "entry:staging-app,entry:staging-app-2" {
 		t.Fatalf("shared test user: kept %q, dropped %q", entryNames(c), droppedNames(dropped))
 	}
-	// Plain entries may share a host on different paths, as before.
 	shared := strings.Replace(entryNamed("account", "serpapi.com"), `"pathPrefixes":["/search","/account/"]`, `"pathPrefixes":["/v2/"]`, 1)
 	c, dropped, err = ParseTolerant([]byte(`{"entries":[` + validEntry + `,` + shared + `]}`))
 	if err != nil || entryNames(c) != "account,serpapi" || len(dropped) != 0 {
@@ -128,16 +124,12 @@ func TestTolerantHarnessesNeverFailOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The cursor pool loses its harness, so it goes, and so does the entry
-	// that grants it; the entry on the sandbox pool alone stays.
 	if entryNames(c) != "sandbox-only" || droppedNames(dropped) != "entry:vendor,harness:cursor,pool:example-workers" {
 		t.Fatalf("kept %q, dropped %q", entryNames(c), droppedNames(dropped))
 	}
 	if hs := c.Harnesses(); len(hs) != 2 || len(c.Pools()) != 2 {
 		t.Fatalf("harnesses %d pools %d in force, want the two intact pairs", len(hs), len(c.Pools()))
 	}
-	// With every harness dropped, every pool and entry goes: dropping
-	// harnesses never turns the harness check off.
 	for i := range 3 {
 		harnessAt(cat, i)["futureSetting"] = true
 	}
@@ -177,8 +169,6 @@ func TestSourceDropsBadEntriesAndAppliesTheRest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go source.Watch(ctx, 5*time.Millisecond, loader.load, func(int, error) {})
-	// Version 2 removes "other" and adds a broken entry: the removal applies,
-	// the broken entry is left out.
 	loader.set(`{"entries":[`+validEntry+`,`+entryNamed("broken", "*.broken.example.com")+`]}`, 2, nil)
 	waitFor(t, "version 2", func() bool { return source.Version() == 2 })
 	if entryNames(source.Current()) != "serpapi" || droppedNames(source.Dropped()) != "entry:broken" {
@@ -191,10 +181,6 @@ func TestSourceDropsBadEntriesAndAppliesTheRest(t *testing.T) {
 	}
 }
 
-// Entries on one host that disagree on http2 conflict like any other pair:
-// both are left out and the rest of the version, a removal included, takes
-// effect. Parse refuses the disagreement, so without this the watcher would
-// refuse the whole version and keep a removed grant in force.
 func TestSourceDropsAnHTTP2DisagreementAndAppliesTheRest(t *testing.T) {
 	rpc := func(name, prefix, h2 string) string {
 		e := strings.Replace(entryNamed(name, "rpc.example.com"), `"/search","/account/"`, `"`+prefix+`"`, 1)
@@ -218,8 +204,6 @@ func TestSourceDropsAnHTTP2DisagreementAndAppliesTheRest(t *testing.T) {
 		rejected = append(rejected, err)
 		mu.Unlock()
 	})
-	// Version 2 removes retired and adds a second rpc.example.com entry that
-	// leaves http2 out.
 	v2 := `{"entries":[` + validEntry + `,` + reads + `,` + rpc("writes", "/example.v1.Writes/", ``) + `]}`
 	if _, err := Parse([]byte(v2)); err == nil {
 		t.Fatal("strict parse accepted entries that disagree on http2")
@@ -262,7 +246,6 @@ func TestSourceStartsFromTheStoredCatalogOrEmpty(t *testing.T) {
 	if source.Version() != 0 {
 		t.Fatal("a stored copy must not hide the primary's version from Watch")
 	}
-	// Nothing stored either: empty, not loaded, then Watch recovers.
 	source, err = Start(context.Background(), down.load, (&scriptedLoader{err: errors.New("none stored")}).load, nil)
 	if err == nil || source.Loaded() || len(source.Current().Entries()) != 0 {
 		t.Fatalf("empty start: err %v loaded %v", err, source.Loaded())
@@ -274,11 +257,6 @@ func TestSourceStartsFromTheStoredCatalogOrEmpty(t *testing.T) {
 	waitFor(t, "recovery", func() bool { return source.Loaded() && source.Version() == 5 })
 }
 
-// Every cross-entry check Parse makes has a claim or crossing in
-// ParseTolerant, so two entries that conflict are dropped and never refuse
-// the version, and two entries Parse accepts together are both kept. Each
-// ordered pair of entry kinds is tried as written, on one host, on one host
-// with distinct paths, and on distinct hosts.
 func TestTolerantMirrorsEveryCrossEntryCheck(t *testing.T) {
 	pools := `"pools":[{"name":"pool-a","namespace":"a","serviceAccount":"w"},{"name":"pool-b","namespace":"b","serviceAccount":"w"},
 		{"name":"pool-c","namespace":"c","serviceAccount":"w"},{"name":"database-developers","namespace":"d","serviceAccount":"w"},

@@ -24,10 +24,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// restartFixture fronts a fake GitHub for a repository that opts into the CI
-// restart operations, with a git entry that lets the pool push under
-// cursor/pool-agent/. Each route answers only to a token minted with exactly
-// the scope it needs, and the fake records every write GitHub received.
+// restartFixture fronts a fake GitHub for a repository that opts into CI restarts; each route answers only to a token with exactly its scope.
 type restartFixture struct {
 	*apiFixture
 	received []string // "METHOD path body" for every write
@@ -46,17 +43,11 @@ func newRestartFixture(t *testing.T, operations, refPrefixes string) *restartFix
 	return newRestartFixtureFor(t, operations, `"pool-agent"`, `"refPrefixes":[`+refPrefixes+`]`)
 }
 
-// newRestartFixtureFor is newRestartFixture with the pools both entries grant
-// and the git repository's prefix fields given whole.
 func newRestartFixtureFor(t *testing.T, operations, pools, prefixFields string) *restartFixture {
 	t.Helper()
 	f := &restartFixture{apiFixture: &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}}}
-	// Pull requests: 12 the pool's own, 13 from a person's branch, 14 from a
-	// fork, 15 unreadable, 16 another pool's. Runs: 21 a push and 22 a pull
-	// request from the pool's branch; 23 a push to the default branch (a
-	// deploy); 24 a dispatch, 25 a pull request from a fork, 27 a
-	// pull_request_target, 28 a workflow_run and 29 a schedule, each naming
-	// the pool's branch; 26 unreadable; 30 a push to another pool's branch.
+	// Pull requests: 12 the pool's own, 13 a person's branch, 14 a fork, 15 unreadable, 16 another pool's.
+	// Runs: 21 push, 22 pull request, 23 push to the default branch, 24 dispatch, 25 fork pull request, 26 unreadable, 27 pull_request_target, 28 workflow_run, 29 schedule, 30 another pool's branch.
 	same, fork := `{"full_name":"example-org/example-repo"}`, `{"full_name":"someone/example-repo"}`
 	run := func(event, branch, head string) string {
 		return fmt.Sprintf(`{"event":%q,"head_branch":%q,"repository":%s,"head_repository":%s}`, event, branch, same, head)
@@ -184,9 +175,6 @@ func (f *restartFixture) writes() []string {
 	return append([]string(nil), f.received...)
 }
 
-// A pull request or run on the pool's own branch is updated or run again, with
-// a token holding only the scope the route needs; the audit row names the
-// operation and the branch, and GitHub receives the body rebuilt.
 func TestCIRestartOnThePoolsBranch(t *testing.T) {
 	f := newRestartFixture(t, allRestarts, `"refs/heads/cursor/pool-agent/"`)
 	for _, tc := range []struct {
@@ -223,9 +211,7 @@ func TestCIRestartOnThePoolsBranch(t *testing.T) {
 	}
 }
 
-// A body need not be labelled JSON (curl -d sends a form Content-Type, a bare
-// client none): the broker checks it as JSON, and GitHub receives it rebuilt
-// and labelled application/json.
+// A body need not be labelled JSON (curl -d sends a form Content-Type): the broker checks it as JSON and GitHub receives it rebuilt as application/json.
 func TestCIRestartSendsTheRebuiltBodyAsJSON(t *testing.T) {
 	f := newRestartFixture(t, allRestarts, `"refs/heads/cursor/pool-agent/"`)
 	want := "PUT " + restartRepo + `/pulls/12/update-branch application/json {"expected_head_sha":"` + restartCommit + `"}`
@@ -248,9 +234,7 @@ func TestCIRestartSendsTheRebuiltBodyAsJSON(t *testing.T) {
 	}
 }
 
-// Anything outside the pool's own branches is refused before GitHub sees a
-// write: a person's branch, a fork, a run of the default branch (a deploy), a
-// run not started by a push or pull request, and any lookup that fails.
+// Anything outside the pool's own branches is refused before GitHub sees a write.
 func TestCIRestartRefusesOtherTargets(t *testing.T) {
 	f := newRestartFixture(t, allRestarts, `"refs/heads/cursor/pool-agent/"`)
 	for _, tc := range []struct {
@@ -285,10 +269,7 @@ func TestCIRestartRefusesOtherTargets(t *testing.T) {
 	}
 }
 
-// One git entry serves two pools, each on its own branches: a CI restart
-// reads only the requesting pool's push prefixes, so pool-agent restarts its
-// own pull request and run and is refused on pool-other's before GitHub sees
-// a write.
+// A CI restart reads only the requesting pool's push prefixes, so one git entry serving two pools refuses the other pool's branch.
 func TestCIRestartStaysOnThePoolsOwnBranches(t *testing.T) {
 	f := newRestartFixtureFor(t, allRestarts, `"pool-agent","pool-other"`,
 		`"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/"],"pool-other":["refs/heads/cursor/pool-other/"]}`)
@@ -311,8 +292,7 @@ func TestCIRestartStaysOnThePoolsOwnBranches(t *testing.T) {
 	}
 }
 
-// The operations are opt-in, and a CI restart needs a git entry that lets the
-// pool push to branch prefixes: without either the routes do not exist.
+// The operations are opt-in and need a git entry that lets the pool push: without either the routes do not exist.
 func TestCIRestartNeedsTheOptInAndPushPrefixes(t *testing.T) {
 	for name, f := range map[string]*restartFixture{
 		"not opted in":        newRestartFixture(t, `"pr.read","actions.read"`, `"refs/heads/cursor/pool-agent/"`),
@@ -338,9 +318,7 @@ func TestCIRestartNeedsTheOptInAndPushPrefixes(t *testing.T) {
 	}
 }
 
-// A CI restart relies on the git entry a push would use, so that entry must
-// authorize the requester too. Here it is T1 and needs a group: a person
-// outside the group cannot run the pool's CI again, a member can.
+// The git entry a push would use must authorize the requester too: a person outside its group cannot run CI again.
 func TestCIRestartNeedsTheGitEntrysAuthorization(t *testing.T) {
 	audit := &adapterAudit{}
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

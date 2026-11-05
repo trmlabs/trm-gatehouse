@@ -10,12 +10,7 @@ import (
 	"time"
 )
 
-// DurableActivityConfig, in shared mode with adminListen, keeps activity in
-// the broker's shared store so it outlives this replica. Every PushSeconds
-// (default 15) the replica reports its Sandboxes' newer last-seen times, if
-// any, and once more on shutdown; the activity report then merges the broker's view of
-// every replica, past and present, with this replica's own. Both calls go over
-// the CONNECT upstream, as the proxy itself.
+// DurableActivityConfig keeps activity in the broker's shared store so it outlives this replica; reports go over the CONNECT upstream.
 type DurableActivityConfig struct {
 	PushSeconds int64 `json:"pushSeconds,omitempty"`
 }
@@ -23,10 +18,8 @@ type DurableActivityConfig struct {
 const (
 	activityRecordPath = "/v1/proxy/activity"
 	activityReadPath   = "/v1/proxy/activity/read"
-	// activityRecordRows is the broker's limit on one report.
 	activityRecordRows = 5000
-	// finalPushTimeout bounds the report sent on shutdown.
-	finalPushTimeout = 5 * time.Second
+	finalPushTimeout   = 5 * time.Second
 )
 
 func (d *DurableActivityConfig) interval() time.Duration {
@@ -36,60 +29,42 @@ func (d *DurableActivityConfig) interval() time.Duration {
 	return time.Duration(d.PushSeconds) * time.Second
 }
 
-// durable reports to and reads from the broker's shared store.
 type durable struct {
 	activity *activity
 	upstream UpstreamConfig
 	interval time.Duration
 
 	mu sync.Mutex
-	// replica names this replica's report stream in the broker, chosen at
-	// start; acked is the stream sequence the broker last acknowledged to this
-	// replica (0 until its first accepted report); firstAcked is when that
-	// first acknowledgment came. A replica with no acknowledgment cannot
-	// vouch that the broker's history is whole, so the janitor holds while
-	// no live replica has one older than its idle window.
+	// A replica with no acknowledgment cannot vouch the broker's history is whole, so the janitor holds until one has.
 	replica    string
 	acked      int64
 	firstAcked time.Time
-	// lastAcked is when the last report was acknowledged and keep how long
-	// the broker said it keeps rows. An acknowledgment older than keep, or
-	// than this replica's own retention, is forgotten: everything it covered
-	// is past retention, and the broker may have pruned the stream.
+	// An acknowledgment older than keep or the replica's retention is forgotten: the broker may have pruned the stream.
 	lastAcked time.Time
 	keep      time.Duration
-	// lossOwed is set when this replica reads that the store no longer
-	// reaches its acknowledged sequence: its next report goes even with
-	// nothing new, so the broker restarts the history. Once per loss.
-	lossOwed bool
-	// unreachableAt is when a report to, or a read from, the broker last
-	// failed (no answer, a timeout, or a refusal); zero if none has.
+	// lossOwed forces the next report even with nothing new, once per loss, so the broker restarts the history.
+	lossOwed      bool
 	unreachableAt time.Time
 }
 
-// failed records a failed call to the broker's store.
 func (d *durable) failed() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.unreachableAt = time.Now().UTC()
 }
 
-// unreachable is when a call to the broker's store last failed.
 func (d *durable) unreachable() time.Time {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.unreachableAt
 }
 
-// oweLoss marks that the store lost writes acknowledged to this replica.
 func (d *durable) oweLoss() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lossOwed = true
 }
 
-// verification is this replica's acknowledged sequence and when it first got
-// one, for its activity report.
 func (d *durable) verification() (int64, time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -99,16 +74,12 @@ func (d *durable) verification() (int64, time.Time) {
 	return d.acked, d.firstAcked
 }
 
-// newReplicaID names a replica's report stream: random, so a restarted
-// replica starts a stream of its own.
 func newReplicaID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// run reports every interval until ctx ends, then once more. It sends
-// nothing when nothing is new and no loss is owed.
 func (d *durable) run(ctx context.Context) {
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
@@ -125,12 +96,7 @@ func (d *durable) run(ctx context.Context) {
 	}
 }
 
-// push reports every Sandbox whose last use is newer than what the broker
-// last accepted from this replica, with the sequence last acknowledged. If
-// the broker says it lost acknowledged writes, every entry this replica holds
-// is marked to report again: at most its retained entries, once per loss. A
-// loss this replica read in the broker's view is reported once, rows or
-// none. A failed report is retried next time.
+// push reports Sandboxes newer than the broker's last acceptance; after a reported loss every held entry is re-sent, once per loss.
 func (d *durable) push(ctx context.Context) error {
 	rows := d.activity.pending()
 	d.mu.Lock()
@@ -166,7 +132,6 @@ func (d *durable) push(ctx context.Context) error {
 		}
 		d.mu.Unlock()
 		if answer.Lost {
-			// What this replica holds goes back on the next report.
 			d.activity.repushAll()
 			return nil
 		}
@@ -174,17 +139,13 @@ func (d *durable) push(ctx context.Context) error {
 	return nil
 }
 
-// durableView is the broker's whole view for this proxy's binding.
 type durableView struct {
-	sandboxes []SandboxActivity
-	retention int64
-	// historyStarted is when the binding's history began; zero if none.
+	sandboxes      []SandboxActivity
+	retention      int64
 	historyStarted time.Time
-	// streams is each replica stream's current sequence.
-	streams map[string]int64
+	streams        map[string]int64
 }
 
-// read returns the broker's whole view for this proxy's binding.
 func (d *durable) read(ctx context.Context) (durableView, error) {
 	var view durableView
 	for after := ""; ; {

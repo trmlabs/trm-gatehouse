@@ -9,15 +9,12 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// kvMountEnv names the KV version 2 mount for the broker's own documents
-// (the audit HMAC key, the GitHub App key fallback) when no more specific
-// setting names one.
+// kvMountEnv names the KV v2 mount for the broker's own documents (audit HMAC key, GitHub App key fallback).
 const (
 	kvMountEnv     = "AGENT_VAULT_KV_MOUNT"
 	defaultKVMount = "gatehouse"
 )
 
-// kvMount returns AGENT_VAULT_KV_MOUNT, or gatehouse when it is unset.
 func kvMount(getenv func(string) string) (string, error) {
 	mount := getenv(kvMountEnv)
 	if mount == "" {
@@ -29,9 +26,7 @@ func kvMount(getenv func(string) string) (string, error) {
 	return mount, nil
 }
 
-// catalogSettings applies every catalog setting: the environment, the
-// naming rules for HTTP key paths and database roles, and the size limit for
-// an Automation's settings.
+// catalogSettings applies every catalog setting: the environment, the naming rules and the settings size limit.
 func catalogSettings(getenv func(string) string) error {
 	if err := catalogEnvironment(getenv); err != nil {
 		return err
@@ -45,9 +40,7 @@ func catalogSettings(getenv func(string) string) error {
 	return httpcatalog.SetRolePattern(getenv(httpcatalog.RolePatternEnv))
 }
 
-// validateSettings reads the catalog's naming settings from validate's
-// flags, which default to the broker's own settings, so validate applies the
-// rules the broker will.
+// validateSettings reads naming settings from validate's flags, defaulting to the broker's own so validate applies the same rules.
 func validateSettings(cmd *cobra.Command) func(string) string {
 	flags := map[string]string{
 		"AGENT_VAULT_CATALOG_ENVIRONMENT": "environment",

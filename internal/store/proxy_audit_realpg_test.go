@@ -29,8 +29,7 @@ func TestRealPostgres_ProxyAuditPersistenceAndUnknownOutcome(t *testing.T) {
 			s.db.ExecContext(ctx, s.dialect.Rebind(`DELETE FROM credential_proxy_audit WHERE request_id=?`), id)
 		}
 	}()
-	// Verify the writer forces a synchronous commit even if the connection's
-	// session default explicitly permits asynchronous durability.
+	// The writer must force a synchronous commit even if the session default is asynchronous.
 	s.db.SetMaxOpenConns(1)
 	if _, err := s.db.ExecContext(ctx, `SET synchronous_commit = off`); err != nil {
 		t.Fatal(err)

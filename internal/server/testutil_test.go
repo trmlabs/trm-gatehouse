@@ -9,12 +9,7 @@ import (
 // testServerOption configures a Server created by newTestServer.
 type testServerOption func(*Server)
 
-// newTestServer creates a Server with sensible test defaults:
-//
-//	addr: "127.0.0.1:0", store: newMockStore(), encKey: 32 zero bytes,
-//	notifier: nil, initialized: true, baseURL: "http://127.0.0.1:14321".
-//
-// Use option functions (withStore, withEncKey, etc.) to override defaults.
+// newTestServer creates a Server with test defaults; use option functions (withStore, withEncKey) to override.
 func newTestServer(opts ...testServerOption) *Server {
 	srv := New("127.0.0.1:0", newMockStore(), make([]byte, 32), nil, true, "http://127.0.0.1:14321", slog.New(slog.DiscardHandler))
 	for _, opt := range opts {

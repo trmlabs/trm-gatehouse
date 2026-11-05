@@ -13,8 +13,6 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// fakeKV answers like a Vault KV v2 mount holding one secret, in the state
-// set, through the real Vault client so its handling of a 404 is covered.
 type fakeKV struct {
 	state  atomic.Value // string
 	reads  atomic.Int32
@@ -80,8 +78,6 @@ func newFakeKV(t *testing.T) *fakeKV {
 	return kv
 }
 
-// A key deleted in Vault is refused within one minute, and the refusal is
-// cached so a deleted destination does not cost a Vault read per request.
 func TestDeletedKeyIsRefusedWithinOneMinute(t *testing.T) {
 	ref := KeyRef{Mount: "gatehouse", Path: "vendors/example", Field: "key"}
 	for _, state := range []string{"version deleted", "version destroyed", "secret deleted", "field removed", "value emptied"} {
@@ -109,14 +105,12 @@ func TestDeletedKeyIsRefusedWithinOneMinute(t *testing.T) {
 				t.Fatalf("1000 refused requests made %d Vault reads", got-reads)
 			}
 
-			// A later outage does not bring the deleted key back as stale.
 			kv.state.Store("sealed")
 			now = now.Add(time.Minute)
 			if s, err := get(); err == nil || s.Value() != "" {
 				t.Fatalf("deleted key served during an outage: v%d", s.Version)
 			}
 
-			// A key written again is served within the TTL.
 			kv.state.Store("live v2")
 			now = now.Add(time.Minute)
 			if s, err := get(); err != nil || s.Version != 2 {
@@ -126,8 +120,6 @@ func TestDeletedKeyIsRefusedWithinOneMinute(t *testing.T) {
 	}
 }
 
-// A Vault that does not answer keeps the cached key in use for MaxStale past
-// its TTL, then requests fail without calling the key deleted.
 func TestUnreachableVaultKeepsGracePeriod(t *testing.T) {
 	ref := KeyRef{Mount: "gatehouse", Path: "vendors/example", Field: "key"}
 	for _, state := range []string{"sealed", "permission denied", "connection dropped"} {
@@ -154,7 +146,6 @@ func TestUnreachableVaultKeepsGracePeriod(t *testing.T) {
 				t.Fatalf("after the grace period: %v", err)
 			}
 
-			// Vault back with the same key: served again.
 			kv.state.Store("live v1")
 			if s, err := get(); err != nil || s.Version != 1 {
 				t.Fatalf("key not served once Vault answered: %v", err)
@@ -163,10 +154,6 @@ func TestUnreachableVaultKeepsGracePeriod(t *testing.T) {
 	}
 }
 
-// A stored key no header may carry (a byte outside printable ASCII, or too
-// long) is refused like a deleted one (at once, cached, never served stale),
-// but named as such, so the operator fixes the value instead of looking for a
-// deletion. A deleted key is never named not header-safe.
 func TestKeyNotHeaderSafeIsNamed(t *testing.T) {
 	ref := KeyRef{Mount: "gatehouse", Path: "vendors/example", Field: "key"}
 	for _, state := range []string{"trailing newline", "inner space", "non-ascii", "too long"} {

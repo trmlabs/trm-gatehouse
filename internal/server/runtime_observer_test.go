@@ -58,7 +58,6 @@ func TestRuntimeObserverDoesNotAcceptOwnerSession(t *testing.T) {
 }
 
 func TestCleanupListenerExcludesManagementOnColdStore(t *testing.T) {
-	// No owner or store is needed: this listener has only the observer handler.
 	h, err := runtimestatus.New(func(_ context.Context, proof string) (runtimestatus.Access, error) {
 		if proof != "observer-proof" {
 			return runtimestatus.Access{}, errors.New("denied")

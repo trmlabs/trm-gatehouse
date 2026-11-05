@@ -30,8 +30,7 @@ type combinedPublicConfig struct {
 	RootsPEM    string
 }
 
-// Direct fixture ports provide positive controls before NetworkPolicy is applied.
-// They forward to real services, all colocated in the trusted broker test pod.
+// Direct fixture ports are positive controls before NetworkPolicy applies.
 func combinedDirectPort(t *testing.T, port, target string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "0.0.0.0:"+port)
@@ -105,7 +104,6 @@ func combinedInPodGate(t *testing.T, ctx context.Context, destination string, pr
 		t.Fatal(err)
 	}
 	// Build privately, then publish without overwriting an existing file or symlink.
-	// The hard link exposes only the complete configuration to the fixture runner.
 	publicConfig, err := os.CreateTemp("/tmp", "combined-public-*.json")
 	if err != nil {
 		t.Fatal(err)
@@ -138,8 +136,7 @@ func combinedInPodGate(t *testing.T, ctx context.Context, destination string, pr
 	t.Log("actual caller pod completed permitted HTTP/PG work; direct HTTP/PG/Vault routes passed before policy and failed on pod/service IPs after policy")
 }
 
-// This helper runs only inside the separately created caller pod. Its proof is
-// read from that pod's projected volume, not provided by the broker process.
+// Runs only inside the separately created caller pod; its proof is read from that pod's projected volume.
 func TestRealCombinedAgentClient(t *testing.T) {
 	action := os.Getenv("AV_COMBINED_CLIENT_ACTION")
 	if action == "" {

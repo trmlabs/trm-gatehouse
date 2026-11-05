@@ -12,8 +12,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// recordingAttestor admits everything and records the attestation each
-// admission and recheck saw.
 type recordingAttestor struct {
 	fakeAttestor
 	mu   sync.Mutex
@@ -27,8 +25,7 @@ func (a *recordingAttestor) Attest(ctx context.Context, token string, peer netip
 	return a.fakeAttestor.Attest(ctx, token, peer)
 }
 
-// A shared proxy's CONNECT attestation reaches the admission and every
-// per-request recheck; a request inside the tunnel cannot replace it.
+// A shared proxy's CONNECT attestation reaches every recheck; a request inside the tunnel cannot replace it.
 func TestConnectAttestationReachesEveryCheck(t *testing.T) {
 	attestor := &recordingAttestor{}
 	f := newAdapterFixture(t, func(o *Options) {

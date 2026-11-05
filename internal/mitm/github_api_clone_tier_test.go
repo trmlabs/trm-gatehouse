@@ -24,11 +24,8 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// A pull request's file list and a compare return code, so they need the git
-// entry they rely on to authorize the requester too. Here the git entry is T1
-// and needs a group; the github-api entry is T0, and a T0 git entry for the
-// same repository on another port (listed first) must not stand in for it. A person outside the group
-// reads the pull request but not its files or a compare; a member reads all.
+// A pull request's file list and a compare return code, so they need the git entry to authorize the requester too: a T0 git entry for the same repository on another port must not stand in for the T1 one.
+// A person outside the group reads the pull request but not its files or a compare.
 func TestGitHubAPICodeReadsNeedTheCloneEntrysAuthorization(t *testing.T) {
 	audit := &adapterAudit{}
 	github := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

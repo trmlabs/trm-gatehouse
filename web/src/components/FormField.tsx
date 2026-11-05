@@ -15,9 +15,7 @@ interface FormFieldProps {
 export default function FormField({ label, helperText, tooltip, required, error, className = "", children }: FormFieldProps) {
   return (
     <div className={className}>
-      {/* shrink-0 is inert unless the wrapper is a flex column, where it
-          keeps the label and helper/error text from being squeezed by a
-          flex-grow field. */}
+      {/* shrink-0 only matters in a flex column, where it stops a growing field squeezing the label. */}
       <label className="flex shrink-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-text-muted mb-2">
         <span>
           {label}

@@ -19,8 +19,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// drainFixture is a proxy in front of an upstream whose /slow handler waits
-// for release, so a test can hold a request in flight across Shutdown.
+// drainFixture's /slow handler waits for release, so a test can hold a request in flight across Shutdown.
 type drainFixture struct {
 	proxyURL *url.URL
 	roots    *x509.CertPool
@@ -58,7 +57,6 @@ func newDrainFixture(t *testing.T, drain bool) *drainFixture {
 	return f
 }
 
-// tunnel opens a CONNECT tunnel and the worker's TLS session inside it.
 func (f *drainFixture) tunnel(t *testing.T) (*tls.Conn, *bufio.Reader) {
 	t.Helper()
 	raw := openMITMTunnel(t, f.proxyURL, f.roots, f.target, "av_sess_ok")
@@ -79,8 +77,6 @@ func send(t *testing.T, conn *tls.Conn, target, path string) {
 	}
 }
 
-// receive reads one response: its status, whether it closes the
-// connection, and its body.
 func receive(t *testing.T, reader *bufio.Reader) (int, bool, string) {
 	t.Helper()
 	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
@@ -92,8 +88,7 @@ func receive(t *testing.T, reader *bufio.Reader) (int, bool, string) {
 	return resp.StatusCode, resp.Close, string(body)
 }
 
-// closedByProxy is true for an error from the proxy ending the connection,
-// not from the test's own read deadline.
+// closedByProxy is true for an error from the proxy ending the connection, not the test's read deadline.
 func closedByProxy(err error) bool {
 	var timeout net.Error
 	return err != nil && (!errors.As(err, &timeout) || !timeout.Timeout())
@@ -197,8 +192,7 @@ func TestShutdownDrainRefusesNewTunnel(t *testing.T) {
 	}
 }
 
-// Without DrainTunnels, Shutdown keeps its old behavior: it does not wait for
-// tunnels, and an open tunnel keeps working until the process ends.
+// Without DrainTunnels, Shutdown does not wait for tunnels.
 func TestShutdownWithoutDrainLeavesTunnels(t *testing.T) {
 	f := newDrainFixture(t, false)
 	conn, reader := f.tunnel(t)

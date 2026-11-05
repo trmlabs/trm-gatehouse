@@ -20,12 +20,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	for _, c := range s.liveness {
+		if !c.check() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": c.name + " failed"})
+			return
+		}
+	}
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// handleReady is the readiness gate. Unlike handleHealth it also requires a
-// listening database broker that holds a fresh cleanup owner row, so a
-// restarted broker takes no traffic until it has registered as a new owner.
+// handleReady also requires a listening database broker with a fresh cleanup owner row, so a restarted broker takes no traffic until it re-registers.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	unready := func(reason string) {
 		w.Header().Set("Content-Type", "application/json")
@@ -65,9 +71,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"needs_first_user": !s.initialized.Load(),
 	}
 
-	// Expose base_url only when the operator has explicitly set
-	// AGENT_VAULT_ADDR. Auto-derived fallbacks may not be reachable from a
-	// remote agent, so we suppress them and let the client show a placeholder.
+	// Expose base_url only when AGENT_VAULT_ADDR is set; auto-derived values may be unreachable from a remote agent.
 	if os.Getenv("AGENT_VAULT_ADDR") != "" {
 		resp["base_url"] = s.BaseURL()
 	}

@@ -7,16 +7,14 @@ import (
 	"fmt"
 )
 
-// AuditBoot is a replica's previous audit boot and the last checkpoint row it
-// persisted. A zero Boot means the replica has never booted.
+// AuditBoot is a replica's previous boot and last persisted checkpoint; zero Boot means it never booted.
 type AuditBoot struct {
 	Boot          uint64
 	CheckpointSeq uint64
 	CheckpointMAC string
 }
 
-// BeginAuditBoot advances the replica's boot counter and returns the boot it
-// replaces. Concurrent starts under one replica name cannot share a number.
+// BeginAuditBoot advances the replica's boot counter; concurrent starts under one name cannot share a number.
 func (s *SQLStore) BeginAuditBoot(ctx context.Context, replica string) (uint64, AuditBoot, error) {
 	if replica == "" {
 		return 0, AuditBoot{}, fmt.Errorf("audit replica name is required")
@@ -49,8 +47,7 @@ func (s *SQLStore) BeginAuditBoot(ctx context.Context, replica string) (uint64, 
 	return previous.Boot + 1, previous, nil
 }
 
-// RecordAuditCheckpoint persists the newest checkpoint row of the current
-// boot. It fails if another process has since taken the replica name.
+// RecordAuditCheckpoint fails if another process has since taken the replica name.
 func (s *SQLStore) RecordAuditCheckpoint(ctx context.Context, replica string, boot, seq uint64, mac string) error {
 	if replica == "" || boot == 0 || mac == "" {
 		return fmt.Errorf("incomplete audit checkpoint")
@@ -67,8 +64,7 @@ func (s *SQLStore) RecordAuditCheckpoint(ctx context.Context, replica string, bo
 	})
 }
 
-// AuditHead is a replica's current boot and the newest checkpoint row it
-// persisted: where its exported chain must reach.
+// AuditHead is a replica's current boot and newest checkpoint: where its exported chain must reach.
 type AuditHead struct {
 	Replica       string `json:"replica"`
 	Boot          uint64 `json:"boot"`
@@ -76,7 +72,6 @@ type AuditHead struct {
 	CheckpointMAC string `json:"checkpointMac"`
 }
 
-// ListAuditHeads returns every replica's head, ordered by replica name.
 func (s *SQLStore) ListAuditHeads(ctx context.Context) ([]AuditHead, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT replica, boot, checkpoint_seq, checkpoint_mac FROM audit_chain_replica ORDER BY replica`)
 	if err != nil {

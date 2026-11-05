@@ -162,7 +162,6 @@ func TestFivePostgresBindingsRoutingCancellationAndWithdrawal(t *testing.T) {
 		clients = append(clients, c)
 		keys = append(keys, key)
 	}
-	// A valid key from another binding must never be routed through this listener.
 	cancelBinding(t, f, f.c.PostgresBindings[1], keys[0])
 	for _, b := range backends {
 		select {
@@ -177,7 +176,6 @@ func TestFivePostgresBindingsRoutingCancellationAndWithdrawal(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("same-binding cancellation failed")
 	}
-	// Wrong database on an otherwise permitted listener fails before upstream admission.
 	wrong := f.dial(t, f.c.PostgresBindings[0].Listen)
 	packet, _ := (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber, Parameters: map[string]string{"user": "workload", "database": "database-1"}}).Encode(nil)
 	_, _ = wrong.Write(packet)
@@ -187,7 +185,6 @@ func TestFivePostgresBindingsRoutingCancellationAndWithdrawal(t *testing.T) {
 		t.Fatal("wrong binding reached upstream")
 	}
 	for i, c := range clients {
-		// The backend echoes; the relay passes whole frames.
 		_, _ = c.Write(encodePGFrame('d', []byte{'x'}))
 		if typ, b, e := readPGFrame(c, 16); e != nil || typ != 'd' || string(b) != "x" {
 			t.Fatalf("binding %d did not remain usable", i)
@@ -239,14 +236,12 @@ func TestPostgresBindingsShareConnectionLimit(t *testing.T) {
 		_ = extra.Close()
 		t.Fatal("extra binding multiplied task connection capacity")
 	}
-	// Releasing a slot restores capacity across a different binding.
 	_ = clients[0].Close()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		c, e := tls.DialWithDialer(&net.Dialer{Timeout: 100 * time.Millisecond}, "tcp", f.c.PostgresBindings[4].Listen, tc)
 		if e == nil {
 			clients[0] = c
-			// Withdrawal is independent of listener capacity, including at the cap.
 			f.state.Store(1)
 			select {
 			case <-f.done:
@@ -292,8 +287,6 @@ func TestPostgresBindingBindFailureClosesTask(t *testing.T) {
 	}
 }
 
-// A sidecar's connection cap comes from its config (the pool render sets it
-// from sessionsPerWorker), well past the old fixed 32.
 func TestSidecarConnectionCapIsConfigured(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
@@ -339,8 +332,6 @@ func TestConnectionCapAndHandshakeValidation(t *testing.T) {
 	}
 }
 
-// The configured handshake bound is the one applied: a client that sends no
-// startup is dropped after it.
 func TestHandshakeBoundIsConfigured(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)

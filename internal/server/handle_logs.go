@@ -87,9 +87,7 @@ func (s *Server) handleVaultLogsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tail queries come back ASC (so bursts > page size don't lose the
-	// oldest rows); flip to DESC so the response contract stays
-	// newest-first regardless of cursor direction.
+	// Tail queries come back ASC; flip to DESC so the response stays newest-first.
 	if opts.After > 0 {
 		for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
 			rows[i], rows[j] = rows[j], rows[i]
@@ -143,16 +141,12 @@ func (s *Server) handleVaultLogsList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// When the caller is tailing (passed after=) and no new rows exist, we
-	// echo back their cursor so the next poll stays on the same high-water
-	// mark without a separate round-trip to learn "still nothing new".
+	// When tailing with no new rows, echo the caller cursor so the next poll keeps its high-water mark.
 	if latestID == 0 {
 		latestID = opts.After
 	}
 
-	// next_cursor is the id to pass as `before` on the next page going back
-	// in time. Nil when we don't have a full page (end of history) or when
-	// the caller is tailing forward (`after` set).
+	// next_cursor is nil at end of history or when tailing forward.
 	var nextCursor any
 	if opts.After == 0 && len(rows) == limit {
 		nextCursor = rows[len(rows)-1].ID

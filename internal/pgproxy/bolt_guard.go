@@ -5,20 +5,8 @@ import (
 	"unicode"
 )
 
-// A graph login cannot be made read-only on Memgraph's Community edition: it
-// has no roles, any user may create users, and a session's read access mode
-// does not stop writes. Rolling every transaction back is not enough either:
-// periodic.iterate, USING PERIODIC COMMIT and CALL { } IN TRANSACTIONS commit
-// on their own, and procedures such as export_util write files on the server.
-// So the broker decides each query itself before it runs, from Memgraph's own
-// plan for it (EXPLAIN), and refuses unless every step of the plan is one the
-// entry's access allows. Memgraph cannot plan anything but a Cypher query, so
-// user, privilege, setting and other system queries never run. A procedure
-// call is one step, refused unless the entry lists the procedure. Functions
-// never show in a plan, and a module function can reach the network
-// (llm.complete), so a call to any module function is refused unless the
-// entry lists it. A read entry's transactions open in read mode and are
-// rolled back, so a mistake in this list cannot commit.
+// A graph login cannot be made read-only on Memgraph's Community edition: it has no roles, any user may
+// create users, and a session's read access mode does not stop writes.
 
 // readPlanSteps are the plan operators that only read the graph. Anything
 // else, including an operator a later Memgraph adds, is refused.
@@ -32,10 +20,7 @@ var readPlanSteps = map[string]bool{
 	"WeightedShortestPath": true, "AllShortestPaths": true, "KShortestPaths": true,
 }
 
-// writePlanSteps are the plan operators that change the graph, which a write
-// entry also allows. Loading files (LoadCsv, LoadParquet, LoadJsonl), a commit
-// of its own (PeriodicCommit, PeriodicSubquery) and every operator not named
-// here stay refused.
+// writePlanSteps are the plan operators that change the graph, which a write entry also allows.
 var writePlanSteps = map[string]bool{
 	"CreateNode": true, "CreateExpand": true, "Merge": true, "Delete": true, "Foreach": true,
 	"SetProperty": true, "SetProperties": true, "SetNestedProperty": true, "SetLabels": true,
@@ -43,10 +28,7 @@ var writePlanSteps = map[string]bool{
 	"EmptyResult": true, "Accumulate": true,
 }
 
-// planVerdict checks the lines EXPLAIN returned. It returns "" when every step
-// is one the entry's access allows (reads, and graph writes when write is
-// true), or the step that is not (a procedure as "CALL name"), naming the
-// write itself rather than the steps that only wrap a write.
+// planVerdict checks the lines EXPLAIN returned.
 func planVerdict(lines []string, procedures []string, write bool) string {
 	if len(lines) == 0 {
 		return "empty plan"
@@ -115,12 +97,8 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// moduleCalls returns every call in query to a function whose name has a
-// namespace (module.function), so built-in functions such as count() pass.
-// It reads Cypher the way Memgraph's lexer does: strings, comments and
-// backquoted names are tokens, so a name split by spaces, comments or
-// backquotes is still one name. ok is false when the text cannot be read
-// (an unterminated string, comment or name): the query is then refused.
+// moduleCalls returns every call in query to a function whose name has a namespace (module.function), so
+// built-in functions such as count() pass.
 func moduleCalls(query string) (calls []string, ok bool) {
 	type token struct {
 		kind byte // 'n' name, 'q' backquoted name, 'p' punctuation, 'o' other
@@ -183,9 +161,8 @@ func moduleCalls(query string) (calls []string, ok bool) {
 			tokens = append(tokens, token{'q', string(name)})
 			i = j + 1
 		case unicode.IsDigit(r):
-			// A number is never part of a name and never takes what follows
-			// it: in [1..f(x)] a range runs straight into a call. A number
-			// run straight into a letter is not Cypher, so it is refused.
+			// A number is never part of a name and never takes what follows it: in [1..f(x)] a range runs straight
+			// into a call.
 			j := numberEnd(rs, i)
 			if j < len(rs) && (unicode.IsLetter(rs[j]) || unicode.IsDigit(rs[j]) || rs[j] == '_') {
 				return nil, false
@@ -228,16 +205,14 @@ func moduleCalls(query string) (calls []string, ok bool) {
 	return calls, true
 }
 
-// cypherSpace is a character Memgraph's lexer skips between tokens: Go's
-// white space, and the separators U+001C to U+001F and U+180E, which Memgraph
-// 3.11 also skips (measured against a real Memgraph) and Go does not.
+// cypherSpace is a character Memgraph's lexer skips between tokens: Go's white space, and the separators
+// U+001C to U+001F and U+180E.
 func cypherSpace(r rune) bool {
 	return unicode.IsSpace(r) || r >= 0x1c && r <= 0x1f || r == 0x180e
 }
 
-// numberEnd returns the end of the number starting at rs[i]: 0x hex or 0o
-// octal digits, or digits with an optional fraction (a dot followed by a
-// digit) and exponent. Two dots are a range, never a fraction.
+// numberEnd returns the end of the number starting at rs[i]: 0x hex or 0o octal digits, or digits with an
+// optional fraction (a dot followed by a digit) and exponent.
 func numberEnd(rs []rune, i int) int {
 	digits := func(j int, is func(rune) bool) int {
 		for j < len(rs) && is(rs[j]) {

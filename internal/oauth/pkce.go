@@ -8,9 +8,7 @@ import (
 	"net/url"
 )
 
-// GenerateCodeVerifier returns a cryptographically random code verifier
-// per RFC 7636 §4.1: 32 random bytes, base64url-encoded without padding,
-// yielding a 43-character string.
+// GenerateCodeVerifier returns a 43-character base64url verifier from 32 random bytes (RFC 7636 section 4.1).
 func GenerateCodeVerifier() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -26,11 +24,7 @@ func CodeChallengeS256(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
-// BuildAuthorizationURL constructs a full authorization endpoint URL with the
-// required OAuth 2.0 query parameters.
-//
-// If disablePKCE is false, code_challenge and code_challenge_method=S256 are
-// included. The scopes string, if non-empty, is sent as-is in the "scope" param.
+// BuildAuthorizationURL builds the authorization URL; code_challenge (S256) is included unless disablePKCE, and scopes is sent as-is.
 func BuildAuthorizationURL(baseURL, clientID, redirectURI, state, codeChallenge, scopes, scopeSeparator string, disablePKCE bool) string {
 	u, err := url.Parse(baseURL)
 	if err != nil {

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Disposable identity acceptance only, not deployment or network-policy proof.
 set -euo pipefail
 
 docker_host=${1:?Usage: verify-local.sh unix:///path/to/disposable/docker.sock}
@@ -33,8 +32,7 @@ trap cleanup EXIT
 "$kind" create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" \
   --image kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5 --wait 180s
 
-# Preload through the trusted host Docker daemon. This also works when the
-# disposable node lacks an organization's registry-proxy CA. Do not skip TLS.
+# Preload through the host Docker daemon, which already trusts the registry; never skip TLS.
 image=busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
 docker pull "$image"
 architecture=$(docker info --format '{{.Architecture}}')

@@ -13,22 +13,14 @@ import (
 	"time"
 )
 
-// maxAutomatedAuthResponse bounds a sign-in answer: tokens and a browser
-// seed, a few kilobytes in practice.
+// maxAutomatedAuthResponse bounds a sign-in answer.
 const maxAutomatedAuthResponse = 256 << 10
 
 // revokeBackoff is the wait before the one retry of a failed revocation.
 var revokeBackoff = 500 * time.Millisecond
 
-// automatedAuthLogin signs the test user in through an automated-auth
-// service, which drives the app's Universal Login with the entry's Auth0
-// organization. The service key and the user's email and password come from
-// Vault on each sign-in and are never cached here. The broker keeps the
-// access token and the user's non-secret claims. It revokes the refresh
-// token the service also returns and keeps it nowhere: the request and
-// response buffers are zeroed and the connection is closed. The request is
-// never redirected, and the service's error answer, which can name the user,
-// is neither logged nor passed on.
+// automatedAuthLogin signs the test user in through an automated-auth service; secrets come from Vault on each sign-in.
+// It revokes the returned refresh token and keeps it nowhere; the service's error answer can name the user and is never logged or passed on.
 func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (BrowserToken, error) {
 	b := e.BrowserSession
 	s := b.AutomatedAuth
@@ -55,8 +47,7 @@ func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (Browser
 		return BrowserToken{}, ErrBrowserLogin
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// An idle connection would keep the answer, refresh token included, in
-	// its read buffer. Sign-ins are minutes apart, so none is kept.
+	// An idle connection would keep the answer, refresh token included, in its read buffer.
 	req.Close = true
 	client := *a.AutomatedAuth
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -73,8 +64,7 @@ func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (Browser
 		resp.StatusCode != http.StatusOK {
 		return BrowserToken{}, ErrBrowserLogin
 	}
-	// Only top-level fields are read. The browser seed the service also
-	// returns repeats both tokens and is never parsed.
+	// Only top-level fields are read; the browser seed repeats both tokens and is never parsed.
 	var out struct {
 		AccessToken  string `json:"accessToken"`
 		RefreshToken string `json:"refreshToken"`
@@ -90,8 +80,7 @@ func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (Browser
 		return BrowserToken{}, ErrBrowserLogin
 	}
 	access, err := accessTokenClaims(out.AccessToken)
-	// The access token is what the API checks, so it must carry the entry's
-	// organization and audience; a token for any other is refused.
+	// The token must carry the entry's organization and audience; a token for any other is refused.
 	if err != nil || access.Sub == "" || access.OrgID != s.OrgID || !access.hasAudience(b.Auth0.Audience) || access.Exp <= 0 {
 		return BrowserToken{}, ErrBrowserLogin
 	}
@@ -103,10 +92,7 @@ func (a *Auth0Tokens) automatedAuthLogin(ctx context.Context, e *Entry) (Browser
 	if life < 2*time.Minute {
 		return BrowserToken{}, ErrBrowserLogin
 	}
-	// The seed's ID token needs sub and org_id, which the app reads. They
-	// come from the access token because automated-auth's password sign-in
-	// returns no idToken; one, when present, must name the same user and
-	// organization.
+	// The seed needs sub and org_id, taken from the access token because password sign-in returns no idToken; one, when present, must name the same user and organization.
 	claims := map[string]any{"sub": access.Sub, "org_id": access.OrgID}
 	if access.Email != "" {
 		claims["email"] = access.Email // shown in the app's header
@@ -129,10 +115,7 @@ type accessClaims struct {
 	Exp   int64           `json:"exp"`
 }
 
-// EmailClaim, when set (AGENT_VAULT_AUTOMATED_AUTH_EMAIL_CLAIM), names the
-// access token claim that holds the user's email; unset, it is "email". A
-// tenant that adds the email through a login action usually namespaces it,
-// such as "https://example.com/email".
+// EmailClaim (AGENT_VAULT_AUTOMATED_AUTH_EMAIL_CLAIM) names the access token claim holding the user's email; unset, "email".
 var EmailClaim atomic.Value // string
 
 func emailClaim() string {
@@ -160,8 +143,7 @@ func (c accessClaims) hasAudience(audience string) bool {
 	return false
 }
 
-// accessTokenClaims reads the access token's payload. The token came from
-// the broker's own sign-in over verified TLS; the API checks its signature.
+// accessTokenClaims reads the access token's payload; the API checks its signature.
 func accessTokenClaims(token string) (accessClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -185,11 +167,7 @@ func accessTokenClaims(token string) (accessClaims, error) {
 	return c, nil
 }
 
-// revoke revokes a refresh token at the app's Auth0 tenant, through the
-// Auth0 client the password-realm login uses. The app's client is public,
-// so the request carries its client ID and no secret. It is tried twice; a
-// failure is audited and does not fail the sign-in, since the broker keeps
-// the token nowhere.
+// revoke revokes a refresh token at the app's Auth0 tenant with the public client ID, retrying once; a failure is audited, not fatal.
 func (a *Auth0Tokens) revoke(ctx context.Context, e *Entry, token string) {
 	outcome, status, started := "revoke_failed", 0, time.Now()
 	defer func() {

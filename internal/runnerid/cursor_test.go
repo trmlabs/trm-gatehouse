@@ -180,8 +180,7 @@ func TestCursorRunCarriesSourceAndAutomation(t *testing.T) {
 	}
 }
 
-// A source or automation id that is not a plain value refuses the token, as
-// any other claim the broker keys on or logs does.
+// A source or automation id that is not a plain value refuses the token, like any other claim the broker keys on or logs.
 func TestCursorRunRefusesAnUnsafeSourceOrAutomation(t *testing.T) {
 	v, key, now := cursorSetup(t)
 	for _, bad := range []map[string]any{{"source": "AUTO MATIONS"}, {"automation_id": "a\"b"}, {"automation_id": 1}} {

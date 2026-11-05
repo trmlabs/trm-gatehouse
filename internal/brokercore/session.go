@@ -7,19 +7,13 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// DefaultMaxRequestBytes is the default cap for request bodies forwarded
-// on the MITM proxy ingress. Distinct from the generic 1 MB limitBody
-// wrapper used on control-plane endpoints.
+// DefaultMaxRequestBytes is the default request body cap on the MITM ingress, separate from the control-plane limitBody.
 const DefaultMaxRequestBytes int64 = 1 << 30 // 1 GiB
 
-// MaxMaterializeBytes caps request bodies that must be buffered in RAM
-// for body-surface substitutions. Kept small because body substitutions
-// target API payloads (JSON, form-encoded), not large file uploads.
+// MaxMaterializeBytes caps request bodies buffered in RAM for body substitutions; small because they target API payloads.
 const MaxMaterializeBytes int64 = 64 << 20 // 64 MiB
 
 // ProxyScope is the resolved identity + vault context for a proxy request.
-// It is resolved at proxy admission and for each HTTP request, then carried
-// through to credential injection.
 type ProxyScope struct {
 	WorkloadID string // verified runtime instance UID; empty for legacy sessions
 	AgentID    string // non-empty for agent tokens
@@ -29,11 +23,9 @@ type ProxyScope struct {
 	VaultRole  string
 	NotAfter   time.Time // zero, or the instant the session must end (a pool Pod's deadline)
 	Pool       string    // catalog pool name, set by the Attestor for pool workers; empty matches no catalog grant
-	// IdentityKind is how the workload proved itself (KindPodToken,
-	// KindTokenReview, KindProxyAttested or KindStaticToken); empty for a legacy session.
+	// IdentityKind is how the workload proved itself (a Kind constant); empty for a legacy session.
 	IdentityKind string
-	// ClaimedRun is the Cursor run the spawn hook recorded on the live Pod
-	// (CursorRunAnnotation), read at attestation; empty when there is none.
+	// ClaimedRun is the Cursor run recorded on the live Pod (CursorRunAnnotation); empty when none.
 	ClaimedRun string
 	// Pod locates the attested pool Pod for a later liveness check; zero for any other identity.
 	Pod PodRef
@@ -49,14 +41,10 @@ type ProxyScope struct {
 	AttestedRequester string
 }
 
-// CursorRunAnnotation is where Cursor's spawn hook records the claimed run
-// (CURSOR_REQUEST_ID, the run's bc- ID) on the worker Pod it creates. The
-// worker cannot change its own Pod, so this is the controller's word.
+// CursorRunAnnotation is where the spawn hook records the claimed Cursor run on the worker Pod, which cannot change it.
 const CursorRunAnnotation = "gatehouse.trmlabs.com/cursor-request-id"
 
-// ActorID returns the non-empty principal ID — UserID for user
-// sessions, AgentID for agent tokens. Used as the actor dimension in
-// per-scope rate-limit keys.
+// ActorID returns the non-empty principal ID (UserID or AgentID), used as the rate-limit actor dimension.
 func (s *ProxyScope) ActorID() string {
 	if s.UserID != "" {
 		return s.UserID
@@ -64,9 +52,7 @@ func (s *ProxyScope) ActorID() string {
 	return s.AgentID
 }
 
-// SessionResolver collapses bearer-token validation and vault selection
-// into one call. The MITM ingress passes a vault hint parsed from
-// Proxy-Authorization. An empty hint means "infer from session".
+// SessionResolver validates the bearer token and selects the vault; an empty hint means infer from session.
 type SessionResolver interface {
 	ResolveForProxy(ctx context.Context, token, vaultHint string) (*ProxyScope, error)
 }
@@ -88,9 +74,7 @@ type StoreSessionResolver struct {
 	Now   func() time.Time
 }
 
-// NewStoreSessionResolver constructs a resolver backed by s. If s is nil
-// the returned resolver will panic on use; the constructor is permissive
-// to match existing server construction patterns.
+// NewStoreSessionResolver constructs a resolver backed by s; a nil s panics on use.
 func NewStoreSessionResolver(s SessionStore) *StoreSessionResolver {
 	return &StoreSessionResolver{Store: s, Now: time.Now}
 }

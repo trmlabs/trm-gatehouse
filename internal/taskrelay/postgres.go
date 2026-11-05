@@ -36,28 +36,13 @@ type cancelTarget struct {
 	binding string
 }
 
-// PostgreSQL uses outer TLS (the sandbox's public-CA stunnel can provide it).
-// Only the fixed database/user and a public placeholder are accepted. The relay
-// substitutes proof and replaces the broker cancellation key with a local one.
-//
-// Admission (the live Kubernetes check plus the durable "admitted" row) happens
-// only after the peer, the TLS handshake, the startup message and the
-// placeholder have all been validated. Before that point a connection costs no
-// API request. The paired sandbox can make the relay write a "denied:<reason>"
-// row by sending a rejected startup or placeholder; a peer that closes without
-// sending a startup packet leaves nothing.
-//
-// On a routed listener (route non-nil) the startup's database parameter
-// picks the binding: a name route accepts fixes Database to it, and any other
-// name is refused with the no_database words before admission.
+// PostgreSQL uses outer TLS; only the fixed database/user and a public placeholder are accepted, and the relay substitutes the proof.
+// Admission runs only after peer, TLS, startup and placeholder validate, so earlier failures cost no API request.
 func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(database string) bool) {
 	_ = conn.SetDeadline(minTime(r.config.Deadline, time.Now().Add(r.handshake())))
 	peer := conn.RemoteAddr().String()
-	// The listener hands over the connection before the TLS handshake, so a
-	// foreign address is refused before the relay reads a byte from it. Only
-	// the first foreign address is journaled: an unauthenticated network
-	// neighbour must not be able to drive one fsync per connect, and one row
-	// is enough to show the network isolation the operator attested to failed.
+	// The listener hands over the connection before TLS, so a foreign address is refused unread.
+	// Only the first is journaled: a network neighbour must not drive one fsync per connect.
 	if !r.pair.peerMatches(peer) {
 		if r.foreignPeer.CompareAndSwap(false, true) {
 			_ = r.record("postgres", "denied:peer")
@@ -71,11 +56,7 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 		}
 		return
 	}
-	// With a broker-issued certificate the listener is TCP: GSS encryption is
-	// declined, an SSLRequest is answered 'S' and the session continues in
-	// TLS, and anything else in plaintext, a cancellation included, is
-	// refused. The next packet inside TLS must be the startup or a
-	// cancellation.
+	// With a broker-issued certificate GSS is declined, an SSLRequest gets 'S' and plaintext (cancellation included) is refused; the next packet inside TLS must be startup or cancellation.
 	if r.pgTLS != nil {
 		if len(packet) == 8 && binary.BigEndian.Uint32(packet[4:8]) == gssRequestCode {
 			if _, e = conn.Write([]byte{'N'}); e != nil {
@@ -105,10 +86,7 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 			return
 		}
 	}
-	// A shared proxy's plaintext listener, and a sidecar's loopback one,
-	// declines TLS and GSS encryption, so a client set to sslmode=prefer (the
-	// libpq default) goes on in plaintext; one that requires TLS stops. The
-	// next packet must be the startup.
+	// Plaintext listeners decline TLS and GSS, so sslmode=prefer goes on in plaintext and a client that requires TLS stops.
 	plaintext := r.config.Self || (r.config.Shared != nil && r.config.TLSCertFile == "")
 	if code := binary.BigEndian.Uint32(packet[4:8]); r.pgTLS == nil && plaintext && len(packet) == 8 && (code == sslRequestCode || code == gssRequestCode) {
 		if _, e = conn.Write([]byte{'N'}); e != nil {
@@ -141,8 +119,7 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 			startupParameterList+" startup parameters, with bounded values (set others with SET after connecting)"))
 		return
 	}
-	// Preserve validated client behavior while fixing connection authority to the
-	// operator's database/user. Never forward arbitrary backend options.
+	// Never forward arbitrary backend options; connection authority is fixed to the operator's database and user.
 	parameters := map[string]string{"user": c.User, "database": c.Database}
 	for key, value := range startup.Parameters {
 		if name, v, valid := brokercore.StartupParameter(key, value); valid {
@@ -170,15 +147,12 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 		_, _ = conn.Write(errorFrame("28P01", "Gatehouse: wrong placeholder password for this binding"))
 		return
 	}
-	// Everything the sandbox can influence has been validated. Admit: live pair
-	// check, then the durable "admitted" row, before any proof is read or used.
+	// Admit (live pair check, then the durable "admitted" row) before any proof is read.
 	if r.admit(r.ctx, peer, "postgres") != nil {
 		return
 	}
 	defer func() { _ = r.record("postgres", "terminal") }()
-	// From here on the worker is always told why, in fixed words. Only a
-	// withdrawn task (the pair check, or a relay that is stopping) closes
-	// silently.
+	// From here the worker is always told why, in fixed words; only a withdrawn task closes silently.
 	tell := func(frame []byte) { _, _ = conn.Write(frame) }
 	refused := func() { tell(errorFrame("08004", genericRefusalMessage)) }
 	if !r.config.Deadline.After(time.Now()) {
@@ -205,8 +179,6 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 	stop := context.AfterFunc(r.ctx, func() { _ = up.Close() })
 	defer stop()
 	_ = up.SetDeadline(minTime(expiry, time.Now().Add(r.handshake())))
-	// A shared proxy states which agent Pod is behind this connection, first
-	// on the broker-side stream, and drops it when that Pod stops qualifying.
 	attestation, agent, e := r.attest(peer)
 	if e != nil {
 		return
@@ -220,8 +192,7 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 	end := &ending{}
 	stopWatch := r.watchPeer(peer, agent, func() { end.set(endWithdrawn); _ = conn.Close(); _ = up.Close() })
 	defer stopWatch()
-	// The runner session rides the broker-side stream ahead of the startup
-	// packet this sidecar authors; the worker's own bytes never carry it.
+	// The session rides the broker-side stream ahead of the startup this sidecar authors; the worker's bytes never carry it.
 	if session := readSession(r.log, c.Upstream); session != "" {
 		if _, e = io.WriteString(up, "GHSESS1 "+session+"\n"); e != nil {
 			tell(errorFrame("08001", unreachableMessage))
@@ -258,8 +229,7 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 		tell(errorFrame("08001", unreachableMessage))
 		return
 	}
-	// Accumulate the bounded startup response before disclosing anything. Broker
-	// refusals are rewritten in fixed words; never relay their error text.
+	// Accumulate the bounded response before disclosing anything; broker refusals are rewritten in fixed words, never relayed.
 	var response []byte
 	var remove func()
 	defer func() {
@@ -333,9 +303,7 @@ func (r *relay) postgres(conn net.Conn, binding PostgresConfig, route func(datab
 	copyPostgres(r.ctx, conn, up, expiry, end)
 }
 
-// validStartup fixes database and user to the binding and allows only the
-// startup parameters brokercore.StartupValue accepts, the same rule the broker
-// applies, so a client that passes here is never refused there.
+// validStartup fixes database and user and allows only the parameters brokercore.StartupValue accepts, so a client passing here is never refused there.
 func validStartup(parameters map[string]string, c *PostgresConfig) bool {
 	if parameters["database"] != c.Database || parameters["user"] != c.User {
 		return false
@@ -351,7 +319,6 @@ func validStartup(parameters map[string]string, c *PostgresConfig) bool {
 	return true
 }
 
-// startupParameterList names the accepted parameters for the refusal message.
 var startupParameterList = strings.Join(brokercore.StartupParameters[:len(brokercore.StartupParameters)-1], ", ") +
 	" and " + brokercore.StartupParameters[len(brokercore.StartupParameters)-1]
 
@@ -419,9 +386,7 @@ func (r *relay) registerCancel(coreKey []byte, address string, expiry time.Time,
 	}
 }
 
-// cancelPostgres is reached without admission: a cancel carries no session to
-// admit, only a key that must match an established one. It journals its own
-// outcome so a rejected key is as visible as a rejected startup.
+// cancelPostgres is reached without admission: it needs a key matching an established session, and journals its own outcome.
 func (r *relay) cancelPostgres(peer string, packet []byte, binding PostgresConfig) {
 	if len(packet) != 16 {
 		_ = r.record("postgres", "denied:cancel")
@@ -462,7 +427,6 @@ func (r *relay) cancelPostgres(peer string, packet []byte, binding PostgresConfi
 	}
 }
 
-// errorField returns one field of a PostgreSQL ErrorResponse body.
 func errorField(body []byte, want byte) string {
 	for len(body) > 0 && body[0] != 0 {
 		field := body[0]
@@ -478,7 +442,6 @@ func errorField(body []byte, want byte) string {
 	return ""
 }
 
-// sqlState returns the SQLSTATE field of a PostgreSQL ErrorResponse body.
 func sqlState(body []byte) string { return errorField(body, 'C') }
 
 const (
@@ -488,39 +451,36 @@ const (
 	workerCapMessage      = "this worker reached its session cap"
 	databaseBudgetMessage = "the database's Gatehouse connection budget is full; retry shortly"
 	genericRefusalMessage = "Gatehouse: the broker refused this connection"
-	// A PostgreSQL error field is plain text, so this is readable even to a
-	// client that sent no SSLRequest.
+	// A PostgreSQL error field is plain text, readable even to a client that sent no SSLRequest.
 	plaintextRefusedMessage = "Gatehouse requires TLS on this port: connect with sslmode=require or stricter"
 )
 
 type refusal struct{ code, message string }
 
-// refusalsByReason maps the broker's reason code (brokercore.RefusalReasonField)
-// to the relay's fixed words. Broker message text is never forwarded.
+// refusalsByReason maps the broker's reason code to the relay's fixed words; broker message text is never forwarded.
 var refusalsByReason = map[string]refusal{
-	"actor_limit":         {"53300", workerCapMessage},
-	"database_limit":      {"53300", databaseBudgetMessage},
-	"pool_budget":         {"53300", databaseBudgetMessage},
-	"capacity":            {"53300", "Gatehouse is at capacity; retry shortly"},
-	"pinned_share":        {"53300", "no session-mode database connection is free for session state (SET, temp tables, LISTEN, advisory locks); retry shortly"},
-	"not_ready":           {"57P03", "Gatehouse is starting; retry in a few seconds"},
-	"no_database":         {"3D000", "this database isn't in the Gatehouse catalog for your pool"},
-	"authentication":      {"28000", notVerifiedMessage},
-	"upstream":            {"08006", "Gatehouse could not reach the database; retry"},
-	"credential":          {"08006", "Gatehouse could not get a database credential; retry shortly"},
-	"restarting":          {"57P01", "Gatehouse is restarting; reconnect"},
-	"restart_cut":         {"08006", "Gatehouse restarted while a transaction was open; it was rolled back, reconnect and retry"},
-	"authorization_ended": {"08006", "Gatehouse ended the session: access was revoked or could not be confirmed"},
-	"deadline":            {"08006", "Gatehouse ended the session: this worker reached its deadline"},
-	"credential_expired":  {"08006", "Gatehouse ended the session: its database credential expired; reconnect"},
-	"role_change":         {"42501", "Gatehouse refuses ALTER ROLE, ALTER USER and ALTER DATABASE on a shared database connection"},
-	"read_only":           {"25006", "this database login is read-only: Gatehouse allows only reads, transaction control and a few settings such as search_path, and refuses temporary tables"},
-	"encoding_change":     {"42501", "Gatehouse refuses changing standard_conforming_strings or client_encoding mid-session; only on and UTF8 at connect"},
-	"pipelined_escape":    {"0A000", "Gatehouse refuses a statement with a backslash after an Execute in the same batch; send Sync first"},
-	"statement_limit":     {"54000", "this session holds too many prepared statements; deallocate some"},
-	"audit_unavailable":   {"08004", "Gatehouse could not write its audit record, so it refused the connection; retry shortly"},
-	"ledger_unavailable":  {"08004", "Gatehouse could not record the session in its accounting, so it refused the connection; retry shortly"},
-	// Authorization decisions (42501): which check refused.
+	"actor_limit":              {"53300", workerCapMessage},
+	"database_limit":           {"53300", databaseBudgetMessage},
+	"pool_budget":              {"53300", databaseBudgetMessage},
+	"capacity":                 {"53300", "Gatehouse is at capacity; retry shortly"},
+	"pinned_share":             {"53300", "no session-mode database connection is free for session state (SET, temp tables, LISTEN, advisory locks); retry shortly"},
+	"not_ready":                {"57P03", "Gatehouse is starting; retry in a few seconds"},
+	"no_database":              {"3D000", "this database isn't in the Gatehouse catalog for your pool"},
+	"authentication":           {"28000", notVerifiedMessage},
+	"upstream":                 {"08006", "Gatehouse could not reach the database; retry"},
+	"credential":               {"08006", "Gatehouse could not get a database credential; retry shortly"},
+	"restarting":               {"57P01", "Gatehouse is restarting; reconnect"},
+	"restart_cut":              {"08006", "Gatehouse restarted while a transaction was open; it was rolled back, reconnect and retry"},
+	"authorization_ended":      {"08006", "Gatehouse ended the session: access was revoked or could not be confirmed"},
+	"deadline":                 {"08006", "Gatehouse ended the session: this worker reached its deadline"},
+	"credential_expired":       {"08006", "Gatehouse ended the session: its database credential expired; reconnect"},
+	"role_change":              {"42501", "Gatehouse refuses ALTER ROLE, ALTER USER and ALTER DATABASE on a shared database connection"},
+	"read_only":                {"25006", "this database login is read-only: Gatehouse allows only reads, transaction control and a few settings such as search_path, and refuses temporary tables"},
+	"encoding_change":          {"42501", "Gatehouse refuses changing standard_conforming_strings or client_encoding mid-session; only on and UTF8 at connect"},
+	"pipelined_escape":         {"0A000", "Gatehouse refuses a statement with a backslash after an Execute in the same batch; send Sync first"},
+	"statement_limit":          {"54000", "this session holds too many prepared statements; deallocate some"},
+	"audit_unavailable":        {"08004", "Gatehouse could not write its audit record, so it refused the connection; retry shortly"},
+	"ledger_unavailable":       {"08004", "Gatehouse could not record the session in its accounting, so it refused the connection; retry shortly"},
 	"pool_external":            {"42501", "Gatehouse: this pool may reach only external destinations, not this database"},
 	"pool_ceiling":             {"42501", "Gatehouse: this database is above your pool's tier ceiling"},
 	"entitlement_config":       {"42501", "Gatehouse: this database's entitlement settings are incomplete; tell the Gatehouse owners"},
@@ -542,12 +502,9 @@ var refusalsByReason = map[string]refusal{
 	"requester_unverifiable":   {"42501", "Gatehouse could not verify the person behind this session"},
 }
 
-// brokerReason is the broker's reason code on a refusal, if it has the shape
-// of one: a fixed identifier, safe to log and to name to the client.
+// brokerReason is a fixed-identifier shape, safe to log and to name to the client.
 var brokerReason = regexp.MustCompile(`^[a-z][a-z_]{0,47}$`)
 
-// refusalReason is a refusal's reason for the relay log: the broker's code,
-// or its SQLSTATE when it gave none.
 func refusalReason(body []byte) string {
 	if reason := errorField(body, brokercore.RefusalReasonField); brokerReason.MatchString(reason) {
 		return reason
@@ -558,11 +515,9 @@ func refusalReason(body []byte) string {
 	return "unknown"
 }
 
-// sqlStateShape is a SQLSTATE: five digits or capital letters.
 var sqlStateShape = regexp.MustCompile(`^[0-9A-Z]{5}$`)
 
-// refusalsByCode covers a broker refusal whose reason has no entry of its own:
-// every authorization decision is a 42501, whatever its reason.
+// refusalsByCode covers a refusal whose reason has no entry: every authorization decision is a 42501.
 var refusalsByCode = map[string]string{
 	"42501": "Gatehouse: this session's person is not authorized for this database",
 	"53300": workerCapMessage,
@@ -571,9 +526,7 @@ var refusalsByCode = map[string]string{
 	"28000": notVerifiedMessage,
 }
 
-// brokerRefusal is the relay's fixed rewrite of an ErrorResponse the broker
-// authored, keeping its severity (ERROR leaves the session open). A known
-// reason or code keeps its code; anything else is one generic refusal.
+// brokerRefusal rewrites a broker ErrorResponse in fixed words, keeping its severity; anything unknown is one generic refusal.
 func brokerRefusal(severity string, body []byte) []byte {
 	if s := errorField(body, 'S'); s == "ERROR" {
 		severity = s
@@ -581,8 +534,7 @@ func brokerRefusal(severity string, body []byte) []byte {
 	if r, ok := refusalsByReason[errorField(body, brokercore.RefusalReasonField)]; ok {
 		return severityFrame(severity, r.code, r.message)
 	}
-	// A reason this relay has no words for still reaches the client by name,
-	// so one failure under load can be told from another.
+	// A reason with no words still reaches the client by name.
 	named := ""
 	if reason := errorField(body, brokercore.RefusalReasonField); brokerReason.MatchString(reason) {
 		named = " (" + reason + ")"
@@ -594,18 +546,13 @@ func brokerRefusal(severity string, body []byte) []byte {
 	return severityFrame(severity, "08004", genericRefusalMessage+named)
 }
 
-// refusalFrame is the relay-authored FATAL error for a broker startup refusal.
 func refusalFrame(body []byte) []byte { return brokerRefusal("FATAL", body) }
 
-// copyPostgres relays an established session. Broker frames are relayed
-// whole, so when the broker ends the session (deadline, revocation, a failed
-// recheck) at a frame boundary while the worker is still connected, the
-// worker gets one relay-authored FATAL frame instead of a silent close.
+// copyPostgres relays frames whole, so when the broker ends the session at a frame boundary the worker gets one relay-authored FATAL instead of a silent close.
 func copyPostgres(ctx context.Context, client, up net.Conn, deadline time.Time, end *ending) {
 	_ = client.SetDeadline(deadline)
 	_ = up.SetDeadline(deadline)
-	// At the task deadline the worker is told; a withdrawn task (cancelled)
-	// closes both sides at once.
+	// At the task deadline the worker is told; a withdrawn task closes both sides at once.
 	stop := context.AfterFunc(ctx, func() {
 		end.set(stopCause(ctx))
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -617,9 +564,7 @@ func copyPostgres(ctx context.Context, client, up net.Conn, deadline time.Time, 
 	var quiet atomic.Bool
 	done := make(chan struct{}, 1)
 	go func() {
-		// The worker closing its side, or the relay closing it (a withdrawn
-		// task), ends the session quietly; a deadline or a broker close ends
-		// it with the relay's frame.
+		// The worker closing, or the relay closing it, ends quietly; a deadline or broker close ends with the relay's frame.
 		if _, e := io.Copy(up, watch(client, false, end)); e == nil || errors.Is(e, net.ErrClosed) {
 			quiet.Store(true)
 		}
@@ -638,14 +583,10 @@ func copyPostgres(ctx context.Context, client, up net.Conn, deadline time.Time, 
 	<-done
 }
 
-// maxBrokerErrorBytes bounds an ErrorResponse the relay inspects. Broker
-// refusals are far smaller; larger errors come from the database and stream.
+// maxBrokerErrorBytes bounds an ErrorResponse the relay inspects; larger errors come from the database.
 const maxBrokerErrorBytes = 16 << 10
 
-// relayFrames copies whole PostgreSQL backend frames from src to dst. It
-// returns true when src ended between frames, the only point where the relay
-// may add a frame of its own, and the session has not already been told why
-// it ends (a FATAL error was the last thing relayed).
+// relayFrames returns true when src ended between frames, the only point the relay may add a frame, and no FATAL was already relayed.
 func relayFrames(dst io.Writer, src *bufio.Reader) bool {
 	w := bufio.NewWriterSize(dst, 32<<10)
 	var head [5]byte
@@ -663,8 +604,7 @@ func relayFrames(dst io.Writer, src *bufio.Reader) bool {
 			return false
 		}
 		if head[0] == 'E' && length <= maxBrokerErrorBytes {
-			// A database server error passes unchanged; one the broker
-			// authored (it carries a reason) is replaced with fixed words.
+			// A database server error passes unchanged; one the broker authored is replaced with fixed words.
 			body := make([]byte, length-4)
 			if _, e := io.ReadFull(src, body); e != nil {
 				return false
@@ -688,10 +628,8 @@ func relayFrames(dst io.Writer, src *bufio.Reader) bool {
 	}
 }
 
-// errorFrame builds a FATAL ErrorResponse with relay-authored text only.
 func errorFrame(code, message string) []byte { return severityFrame("FATAL", code, message) }
 
-// severityFrame builds an ErrorResponse with relay-authored text only.
 func severityFrame(severity, code, message string) []byte {
 	var body []byte
 	for _, f := range []struct {
@@ -703,9 +641,7 @@ func severityFrame(severity, code, message string) []byte {
 	return encodePGFrame('E', append(body, 0))
 }
 
-// brokerRouteDatabase is the shape a database name must have to be forwarded
-// under broker routing: 1 to 63 printable ASCII bytes with no space, within
-// PostgreSQL's identifier length. The broker's catalog decides the rest.
+// brokerRouteDatabase accepts 1 to 63 printable ASCII bytes with no space; the broker's catalog decides the rest.
 func brokerRouteDatabase(name string) bool {
 	if len(name) == 0 || len(name) > 63 {
 		return false

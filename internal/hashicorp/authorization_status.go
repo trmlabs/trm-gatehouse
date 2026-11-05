@@ -5,8 +5,7 @@ import (
 	"fmt"
 )
 
-// CheckAuthorization verifies the current parent login without returning its
-// token metadata. It does not establish each destination role's permissions.
+// CheckAuthorization verifies the parent login; it does not establish each destination role's permissions.
 func (c *Client) CheckAuthorization(ctx context.Context) error {
 	if c == nil || c.api == nil {
 		return fmt.Errorf("vault authorization unavailable")

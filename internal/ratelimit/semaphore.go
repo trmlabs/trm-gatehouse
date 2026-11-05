@@ -7,10 +7,7 @@ import (
 	"time"
 )
 
-// semaphore is a counting semaphore with context-aware acquire and a
-// short wait budget. Callers must invoke the returned release once when
-// they no longer hold the slot, even if the decision was a denial
-// (release is nil on denial — handled by the caller).
+// semaphore is a counting semaphore with a short wait budget; callers must call release once, and it is nil on denial.
 type semaphore struct {
 	slots   chan struct{}
 	held    atomic.Int64
@@ -30,9 +27,7 @@ func newSemaphore(capacity int, waitBudget time.Duration) *semaphore {
 	}
 }
 
-// acquire attempts to take a slot. It tries non-blocking first, then
-// waits up to the configured budget (bounded further by ctx). Returns
-// (release, Decision). release is non-nil only when Allow is true.
+// acquire tries non-blocking, then waits up to the budget or ctx; release is non-nil only when Allow is true.
 func (s *semaphore) acquire(ctx context.Context) (func(), Decision) {
 	// Fast path: slot available immediately.
 	select {
@@ -70,9 +65,7 @@ func (s *semaphore) releaseOnce() func() {
 // held returns the current number of in-flight holders (for gauges).
 func (s *semaphore) holders() int64 { return s.held.Load() }
 
-// keyedSemaphore is a map of per-key semaphores, each with the same
-// capacity. Used for TierProxy per-scope concurrency caps. maxKeys evicts
-// idle (fully-released) semaphores to bound memory.
+// keyedSemaphore holds per-key semaphores of equal capacity; maxKeys evicts idle ones to bound memory.
 type keyedSemaphore struct {
 	mu         sync.Mutex
 	sems       map[string]*semaphore
@@ -98,9 +91,7 @@ func newKeyedSemaphore(cfg TierConfig, waitBudget time.Duration) *keyedSemaphore
 	}
 }
 
-// reconfigure updates the per-key capacity. Existing semaphores keep
-// their old capacity until the last holder releases (at which point
-// they may be evicted); new keys get the new cap.
+// reconfigure sets the per-key capacity; existing semaphores keep their old capacity until released.
 func (k *keyedSemaphore) reconfigure(cfg TierConfig) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -125,10 +116,7 @@ func (k *keyedSemaphore) acquire(ctx context.Context, key string) (func(), Decis
 	return sem.acquire(ctx)
 }
 
-// evictLocked keeps the sems map bounded. Preferred: drop entries
-// with no holders (cheap, fair). If every entry has holders, abandon
-// the weakest-claim semaphore — under adversarial new-key traffic
-// this loses one queued slot but bounds memory. Called under k.mu.
+// evictLocked bounds the sems map, dropping idle entries first, else the weakest-claim one. Called under k.mu.
 func (k *keyedSemaphore) evictLocked(skipKey string) {
 	if k.maxKeys <= 0 || len(k.sems) <= k.maxKeys {
 		return
@@ -144,10 +132,7 @@ func (k *keyedSemaphore) evictLocked(skipKey string) {
 			}
 		}
 	}
-	// Hard fallback: drop an arbitrary non-skip entry. New requests
-	// on that key rebuild a fresh semaphore on next acquire; in-flight
-	// holders still release on the (now-orphaned) sem — safe because
-	// each holder captured the sem pointer at acquire time.
+	// Hard fallback: holders captured the sem pointer, so dropping an arbitrary entry is safe.
 	for kk := range k.sems {
 		if kk == skipKey {
 			continue

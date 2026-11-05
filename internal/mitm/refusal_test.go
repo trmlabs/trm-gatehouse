@@ -23,11 +23,7 @@ type failingAudit struct{}
 func (failingAudit) Admit() error                  { return nil }
 func (failingAudit) Record(auditchain.Event) error { return auditchain.ErrCheckpointOverdue }
 
-// Every refusal names its reason in a header and the body, a passing one
-// answers 503 or 429 with Retry-After, a lasting one keeps its 4xx or answers
-// 503 without Retry-After, and the audit row records the status the agent was
-// sent. Each lasting cause behind a code that is otherwise passing has its own
-// lasting code.
+// Every refusal names its reason in a header and the body; a passing one answers 503 or 429 with Retry-After, a lasting one keeps its 4xx or answers 503 without it, and the audit row records the status sent.
 func TestRefusalNamesItsReason(t *testing.T) {
 	cases := []struct {
 		name, outcome, as string // as: the code given apart from the outcome
@@ -89,10 +85,7 @@ func TestRefusalNamesItsReason(t *testing.T) {
 	}
 }
 
-// An outcome a later change builds from an error or a reason, which has no
-// entry in the table, never reaches the agent: it sees "refused" and the
-// generic next step, by every path a refusal is written, and the audit row
-// keeps the specific outcome.
+// An outcome with no table entry never reaches the agent: it sees "refused" and the generic next step, and the audit row keeps the specific outcome.
 func TestUnknownOutcomeStaysInTheAuditRow(t *testing.T) {
 	outcome := "lookup_failed:alice@example.test"
 	audit := &adapterAudit{}
@@ -116,8 +109,6 @@ func TestUnknownOutcomeStaysInTheAuditRow(t *testing.T) {
 	}
 }
 
-// The browser seed's deadline refusal is its own lasting code: the deadline
-// only gets closer.
 func TestSeedDeadlineLasts(t *testing.T) {
 	now := time.Now()
 	_, err := browserSeed(&httpcatalog.Entry{}, httpcatalog.BrowserToken{}, &brokercore.ProxyScope{NotAfter: now.Add(time.Minute)}, now)
@@ -131,7 +122,6 @@ func TestSeedDeadlineLasts(t *testing.T) {
 	}
 }
 
-// A key read names the cause an operator must fix apart from one that clears.
 func TestKeyOutcome(t *testing.T) {
 	for err, want := range map[error]string{
 		httpcatalog.ErrKeyNotHeaderSafe: "key_not_header_safe",
@@ -145,8 +135,7 @@ func TestKeyOutcome(t *testing.T) {
 	}
 }
 
-// A refusal whose row cannot be written tells the agent only that the audit
-// trail is down, never the refusal it could not record.
+// A refusal whose row cannot be written tells the agent only that the audit trail is down.
 func TestRefusalWithoutAuditSaysOnlyAuditUnavailable(t *testing.T) {
 	p := &Proxy{adapter: &HeaderAdapter{Audit: failingAudit{}}}
 	rec := httptest.NewRecorder()
@@ -156,15 +145,13 @@ func TestRefusalWithoutAuditSaysOnlyAuditUnavailable(t *testing.T) {
 	}
 }
 
-// A refusal made before the request reached the catalog is named by the check
-// that made it; its row keeps the outcome "refused".
 func TestIdentityRefusalCodes(t *testing.T) {
 	for status, code := range map[int]string{400: "request_shape", 403: "identity", 407: "authentication", 429: "busy", 503: "broker_unavailable"} {
 		audit := &adapterAudit{}
 		p := &Proxy{adapter: &HeaderAdapter{Audit: audit}}
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "https://api.vendor.example/", nil)
-		p.adapterIdentityDeny(rec, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, "", nil, 0)
+		p.adapterIdentityDeny(rec, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, "refused", "", nil, 0)
 		if rec.Code != status || rec.Header().Get(RefusalHeader) != code || audit.last().Outcome != "refused" {
 			t.Errorf("%d: got %d %q, row %q", status, rec.Code, rec.Header().Get(RefusalHeader), audit.last().Outcome)
 		}
@@ -174,8 +161,7 @@ func TestIdentityRefusalCodes(t *testing.T) {
 	}
 }
 
-// An address over its failed sign-in budget is told the limiter's own wait,
-// minutes into a sliding window, not the fixed few seconds of a busy broker.
+// An address over its failed sign-in budget is told the limiter's own wait, not a fixed few seconds.
 func TestSignInLimitSendsTheLimitersWait(t *testing.T) {
 	audit := &adapterAudit{}
 	p := &Proxy{adapter: &HeaderAdapter{Catalog: httpcatalog.Catalog{}, Keys: &adapterKeys{}, Audit: audit}}
@@ -192,13 +178,7 @@ func TestSignInLimitSendsTheLimitersWait(t *testing.T) {
 	}
 }
 
-// Every next step is one plain line, every passing refusal answers 503 or
-// 429, and every fixed outcome the adapters refuse with has its own entry:
-// the literals this package refuses with, assigns to an outcome or returns
-// from an ...Outcome helper, and every refusal outcome the authorize and
-// entitlement packages return, which the adapters pass on as variables. A new
-// outcome written in any of those shapes without an entry here fails this
-// test instead of reaching the agent only as the generic "refused".
+// Every next step is one plain line, every passing refusal answers 503 or 429, and every fixed outcome the adapters refuse with has its own entry; a new outcome without one fails this test.
 func TestRefusalTableIsComplete(t *testing.T) {
 	for code, kind := range refusals {
 		if kind.next == "" || strings.ContainsAny(kind.next, "\r\n") || strings.ContainsFunc(kind.next, func(r rune) bool { return r > 0x7e }) {
@@ -214,9 +194,7 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			t.Errorf("%s refuses with %q, which has no next step", file, outcome)
 		}
 	}
-	// In this package: every quoted code on a line that refuses, every code
-	// assigned to an outcome, and every code refusal.go's helpers or any
-	// ...Outcome helper returns.
+	// In this package: every quoted code on a line that refuses, every code assigned to an outcome, and every code returned by refusal.go's or any ...Outcome helper.
 	refusing := regexp.MustCompile(`(?m)^.*\b(?:deny|refuse|refuseWith|adapterDeny|adapterDenyAs)\(.*$`)
 	quoted := regexp.MustCompile(`"([a-z_]+)"`)
 	returned := regexp.MustCompile(`return "([a-z_]+)"`)
@@ -258,9 +236,7 @@ func TestRefusalTableIsComplete(t *testing.T) {
 			}
 		}
 	}
-	// The outcomes authorize.Resolve and entitlement.Decide return, other than
-	// the ones that allow the request, and the ones the GraphQL parser and
-	// target checks refuse with, which reach a deny as variables.
+	// The refusing outcomes authorize.Resolve and entitlement.Decide return, plus those the GraphQL parser and target checks refuse with, which reach a deny as variables.
 	allows := map[string]bool{"t0": true, "entitled": true, "workload_entitled": true, "automation_granted": true}
 	for file, pattern := range map[string]*regexp.Regexp{
 		"../authorize/authorize.go":     regexp.MustCompile(`(?:return who, |\.Outcome(?:, [\w.]+)* = )"([a-z_]+)"`),
@@ -289,9 +265,7 @@ func TestRefusalTableIsComplete(t *testing.T) {
 	}
 }
 
-// Through the proxy: an agent sees the reason header and next step on a real
-// refusal, and a stored key no header may carry is named in the row and the
-// header instead of reading as a missing key.
+// Through the proxy: an agent sees the reason header and next step on a real refusal.
 func TestAdapterRefusalReachesTheAgent(t *testing.T) {
 	f := newAdapterFixture(t)
 	get := func(path string) (int, http.Header, string) {
@@ -332,10 +306,7 @@ func TestAdapterRefusalReachesTheAgent(t *testing.T) {
 	}
 }
 
-// The refusal header is the broker's alone. A destination's own 503 that
-// carries one reaches the agent with its status and Retry-After but without
-// the header, so the agent never reads an answer the destination may already
-// have acted on as a refusal the request never left the broker for.
+// The refusal header is the broker's alone: a destination's own 503 carrying one reaches the agent with its status and Retry-After but without the header.
 func TestDestinationCannotForgeARefusal(t *testing.T) {
 	f := newAdapterFixture(t)
 	r, _ := http.NewRequest("POST", f.url("/v1/chat/forged"), strings.NewReader("{}"))
@@ -350,8 +321,7 @@ func TestDestinationCannotForgeARefusal(t *testing.T) {
 	}
 }
 
-// A streamed body cut off at its limit (a git push) is refused with the
-// reason header like any other refusal, not a bare 413.
+// A streamed body cut off at its limit (a git push) is refused with the reason header, not a bare 413.
 func TestOversizedStreamedBodyNamesItsRefusal(t *testing.T) {
 	vendor := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

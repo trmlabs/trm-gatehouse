@@ -14,9 +14,7 @@ import (
 
 var fixedQueryKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
 
-// ValidateFixedQuery restricts literal, non-secret query parameters to an exact
-// service. Only strict HTTPS GET forwarding supports this configuration. It
-// never accepts parameters from an agent or expands credential placeholders.
+// ValidateFixedQuery restricts literal, non-secret query parameters to an exact service; only strict HTTPS GET supports it.
 func (s Service) ValidateFixedQuery() error {
 	if s.FixedQuery == nil {
 		return nil

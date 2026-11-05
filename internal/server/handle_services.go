@@ -12,10 +12,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/proposal"
 )
 
-// rejectDeprecatedDescription returns the index of the first services
-// entry carrying the now-removed `description` field, or -1. Returns
-// -1 on malformed JSON so the typed decoder produces the structured
-// error downstream.
+// rejectDeprecatedDescription returns the index of the first service with the removed `description` field, or -1 (also -1 on malformed JSON).
 func rejectDeprecatedDescription(servicesRaw json.RawMessage) int {
 	var probes []map[string]json.RawMessage
 	if err := json.Unmarshal(servicesRaw, &probes); err != nil {
@@ -31,9 +28,7 @@ func rejectDeprecatedDescription(servicesRaw json.RawMessage) int {
 
 const deprecatedDescriptionMsg = "description is no longer supported; rename via the service name field instead"
 
-// splitInlineHosts copies the input slice and applies SplitInlineHost
-// to each entry so the matcher invariant (Host has no '/') holds before
-// validation. Name is required and validated downstream.
+// splitInlineHosts copies the services and splits inline hosts so Host never contains '/'.
 func splitInlineHosts(in []broker.Service) []broker.Service {
 	out := make([]broker.Service, len(in))
 	for i, svc := range in {
@@ -62,10 +57,7 @@ func (e *hostNotFoundError) Error() string {
 	return fmt.Sprintf("no service matches host %q — delete target must be addressable by host or service name", e.host)
 }
 
-// writeNormalizeError maps a normalizeProposalServices error to an HTTP
-// response. Ambiguity → 409 with candidates. Not-found uses
-// notFoundStatus (caller picks 404 at create, 409 at apply); notFoundMsg
-// optionally overrides the body.
+// writeNormalizeError maps a normalizeProposalServices error to an HTTP response; notFoundStatus is 404 at create, 409 at apply.
 func writeNormalizeError(w http.ResponseWriter, err error, notFoundStatus, defaultStatus int, notFoundMsg func(host string) string) {
 	var ambig *hostAmbiguityError
 	if errors.As(err, &ambig) {
@@ -87,15 +79,7 @@ func writeNormalizeError(w http.ResponseWriter, err error, notFoundStatus, defau
 	jsonError(w, defaultStatus, err.Error())
 }
 
-// adoptByHost fills empty Name on `services` by adopting from an
-// existing service whose (Host, Path) uniquely matches. When
-// `rebindStale` is true, non-empty Names that miss the existing
-// nameset are also rebound by (Host, Path) — used by the proposal
-// path to close the create→rename→apply race where the existing
-// service was renamed after the proposal was persisted. Direct
-// admin upserts pass false so a caller-supplied Name is never
-// silently rewritten. Empty Names without a unique host match are
-// left empty so downstream validation surfaces "name is required".
+// adoptByHost fills empty Names from a unique (Host, Path) match; rebindStale also rebinds stale Names (proposals only, never direct upserts).
 func adoptByHost(services []broker.Service, existing []broker.Service, rebindStale bool) {
 	type hp struct {
 		host string
@@ -132,15 +116,7 @@ func adoptByHost(services []broker.Service, existing []broker.Service, rebindSta
 	}
 }
 
-// normalizeProposalServices splits inline-form host on every entry,
-// resolves ActionDelete-by-host (unique → fill Name; 2+ → ambiguity
-// error; 0 → not-found error), and routes ActionSet entries through
-// adoptByHost so empty Names adopt a unique (Host, Path) match and
-// stale Names rebind across the create→rename→apply race. Empty-Host
-// ActionSet entries are excluded from adoption so an invalid Host
-// surfaces at validation rather than resolving from garbage. Empty
-// Names without a unique host match fall through to proposal.Validate
-// which rejects with "name is required".
+// normalizeProposalServices splits inline hosts, resolves ActionDelete by host, and routes ActionSet entries through adoptByHost.
 func normalizeProposalServices(in []proposal.Service, existing []broker.Service) ([]proposal.Service, error) {
 	out := make([]proposal.Service, len(in))
 
@@ -152,9 +128,7 @@ func normalizeProposalServices(in []proposal.Service, existing []broker.Service)
 				if e.Host != svc.Host {
 					continue
 				}
-				// Narrow by Path when the caller scoped via inline form;
-				// empty Path stays a host-level delete that intentionally
-				// surfaces multi-service ambiguity.
+				// Narrow by Path when scoped inline; an empty Path stays host-level and surfaces ambiguity.
 				if svc.Path != "" && e.Path != svc.Path {
 					continue
 				}
@@ -194,10 +168,7 @@ func normalizeProposalServices(in []proposal.Service, existing []broker.Service)
 	return out, nil
 }
 
-// loadServices reads the vault's broker config, splits inline-form
-// Host so the matcher invariant holds, and backfills missing Name
-// fields via AssignSlugNames (the slug becomes durable on the next
-// write). Returns nil, nil when no config exists.
+// loadServices reads the vault's broker config, splits inline hosts and backfills missing Names; nil, nil if none exists.
 func (s *Server) loadServices(ctx context.Context, vaultID string) ([]broker.Service, error) {
 	bc, err := s.store.GetBrokerConfig(ctx, vaultID)
 	if err != nil {
@@ -217,9 +188,7 @@ func (s *Server) loadServices(ctx context.Context, vaultID string) ([]broker.Ser
 	return services, nil
 }
 
-// resolveServiceRef looks up a service by name first, then by host.
-// Returns ambiguous host matches as candidates (ok=false) for the
-// caller to surface as 409.
+// resolveServiceRef looks up a service by name, then host; ambiguous host matches return as candidates.
 func resolveServiceRef(services []broker.Service, ref string) (idx int, candidates []broker.Service, ok bool) {
 	for i, svc := range services {
 		if svc.Name == ref {
@@ -286,10 +255,7 @@ func (s *Server) handleServicesGet(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"vault": name, "services": services})
 }
 
-// handleServicesCredentialUsage returns {name, host} for every service
-// referencing the given credential key. Gated at proxy+ deliberately:
-// /discover already exposes the same data to the same role, so member+
-// gating here would only create asymmetry.
+// handleServicesCredentialUsage returns services using a credential key; proxy+ because /discover exposes the same data.
 func (s *Server) handleServicesCredentialUsage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
@@ -378,9 +344,7 @@ func (s *Server) handleServicesUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The store serializes statements but not the load → validate → save
-	// sequence; without this lock concurrent upserts can both pass the
-	// duplicate-name check against the same pre-state.
+	// The store does not serialize load, validate, save; without this lock concurrent upserts can both pass the duplicate-name check.
 	unlock, err := s.lockVault(ctx, ns.ID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "lock failed")
@@ -522,9 +486,7 @@ func (s *Server) handleServiceRemove(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleServicePatch updates a single service via name-or-host
-// reference. Only `enabled` is patchable; all other fields change via
-// the POST/PUT upsert/set flow so auth validation has one code path.
+// handleServicePatch toggles `enabled` only; other fields go through upsert so auth validation has one path.
 func (s *Server) handleServicePatch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")

@@ -11,7 +11,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// The private link's source range, and an address inside it.
 var linkIP = netip.MustParseAddr("192.0.2.7")
 
 type proxyFixture struct {
@@ -39,7 +38,6 @@ func setupProxy(t *testing.T) *proxyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The catalog's profiles: one per namespace, from the sandbox cluster.
 	r.SetProfiles(func(pool string) (Profile, bool) {
 		profile := Profile{Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
 			ImageDigests: []string{workerDigest}}
@@ -79,15 +77,13 @@ func TestProxyAttestedAdmitsTheAttestedPod(t *testing.T) {
 	if scope.AttestedRequester != "" {
 		t.Fatalf("a requester the proxy did not attest: %q", scope.AttestedRequester)
 	}
-	// The attested requester reaches the scope as is; authorization decides
-	// whether the pool's profile takes one.
+	// The attested requester reaches the scope as is; authorization decides whether the pool's profile takes one.
 	withRequester := p.a
 	withRequester.Requester = "alice.smith@example.com"
 	if scope, err := p.r.Attest(p.ctx(t, withRequester), p.rc.token(p.rc.claims()), linkIP); err != nil || scope.AttestedRequester != "alice.smith@example.com" {
 		t.Fatalf("requester not carried: %+v %v", scope, err)
 	}
-	// A recheck after the proxy token expired still holds, but only for one
-	// token lifetime (3600 s in this domain) past its expiry.
+	// A recheck after the proxy token expired holds for one token lifetime (3600 s here) past expiry.
 	c := p.rc.claims()
 	c.Issued = time.Now().Unix() - 700
 	c.Expires = c.Issued + 600
@@ -105,8 +101,7 @@ func TestProxyAttestedAdmitsTheAttestedPod(t *testing.T) {
 	}
 }
 
-// A proxy token from a 600-second domain holds a recheck at most 600 s past
-// its expiry, even inside the session cap.
+// A proxy token from a 600-second domain holds a recheck at most 600 s past its expiry, even inside the session cap.
 func TestExpiredProxyTokenRecheckIsBounded(t *testing.T) {
 	p := setupProxy(t)
 	p.r.domains[1].maxLifetime = 600
@@ -123,8 +118,7 @@ func TestExpiredProxyTokenRecheckIsBounded(t *testing.T) {
 	}
 }
 
-// The namespace picks the profile and pool: customer sandboxes land in their
-// external pool, developer sandboxes in theirs, anything else is refused.
+// The namespace picks the profile and pool; anything else is refused.
 func TestNamespacePicksTheProfile(t *testing.T) {
 	p := setupProxy(t)
 	token := p.rc.token(p.rc.claims())
@@ -163,7 +157,6 @@ func TestNamespacePicksTheProfile(t *testing.T) {
 	}
 }
 
-// Every error path denies.
 func TestProxyAttestedRefusals(t *testing.T) {
 	t.Parallel()
 	type input struct {
@@ -252,8 +245,6 @@ func TestProxyAttestedRefusals(t *testing.T) {
 	}
 }
 
-// The declared profile is checked at every admission, for pool Pods and
-// proxies alike.
 func TestAdmissionMatchesTheDeclaredProfile(t *testing.T) {
 	p := setupProxy(t)
 	ownIssuer := p.pool.c.Issuer
@@ -340,7 +331,6 @@ func TestProxyBindingValidation(t *testing.T) {
 	}
 }
 
-// Within one trust domain, a namespace belongs to one proxy binding.
 func TestNamespaceInTwoProxyBindingsIsRefused(t *testing.T) {
 	p := setupProxy(t)
 	c := p.r.config
@@ -359,9 +349,7 @@ func TestNamespaceInTwoProxyBindingsIsRefused(t *testing.T) {
 	}
 }
 
-// Item 8, exactly: a recheck holds until the proxy token's expiry plus the
-// domain's lifetime (at most 1200 s from issue at 600 s), a new session needs
-// an unexpired token, and no session outlives 1800 s from issue.
+// A recheck holds until the proxy token's expiry plus the domain's lifetime, a new session needs an unexpired token, and no session outlives 1800 s from issue.
 func TestProxyRecheckLimits(t *testing.T) {
 	p := setupProxy(t)
 	p.r.domains[1].maxLifetime = 600
@@ -403,8 +391,7 @@ const (
 	developerPrefix = "registry.example.com/example-project/example-developers-profile/"
 )
 
-// With image prefixes, each namespace runs what its tenant path pulled, and
-// the platform's own containers run listed digests.
+// Each namespace runs what its tenant path pulled, and platform containers run listed digests.
 func TestProxyImagePrefixes(t *testing.T) {
 	p := setupProxy(t)
 	c := p.r.config
@@ -482,8 +469,7 @@ func TestProxyImagePrefixes(t *testing.T) {
 	}
 }
 
-// Each refusal names the check that refused it, as a fixed code, and is
-// still ErrInvalidSession to every caller.
+// Each refusal names the check that refused it as a fixed code, and is still ErrInvalidSession to every caller.
 func TestRefusalsNameTheirCheck(t *testing.T) {
 	p := setupProxy(t)
 	token := p.rc.token(p.rc.claims())
@@ -522,7 +508,6 @@ func TestRefusalsNameTheirCheck(t *testing.T) {
 	}
 }
 
-// setupProfiles restores the fixture's catalog profiles.
 func setupProfiles(p *proxyFixture) {
 	p.r.SetProfiles(func(pool string) (Profile, bool) {
 		profile := Profile{Issuer: remoteIssuer, Audience: "example-edge", Remote: true, Kind: IdentityProxyAttested, OwnerKind: "Sandbox",
@@ -539,8 +524,7 @@ func setupProfiles(p *proxyFixture) {
 	})
 }
 
-// A shared proxy may serve 10,000 tenant namespaces, and its operator lists
-// stay roomy; past those bounds the configuration is refused as malformed.
+// A shared proxy may serve 10,000 tenant namespaces and its operator lists stay roomy; past those bounds the configuration is refused.
 func TestProxyBindingListsAreFleetSized(t *testing.T) {
 	load := func(mutate func(b *Binding)) error {
 		p := setupProxy(t)
@@ -579,8 +563,7 @@ func TestProxyBindingListsAreFleetSized(t *testing.T) {
 	}
 }
 
-// A shared proxy asking for its serving certificate is admitted as itself:
-// its own current token, from its link's range. Nothing else qualifies.
+// A shared proxy asking for its serving certificate is admitted as itself, by its own current token from its link's range.
 func TestVerifyProxyAdmitsOnlyTheProxy(t *testing.T) {
 	p := setupProxy(t)
 	if err := p.r.VerifyProxy(context.Background(), p.rc.token(p.rc.claims()), linkIP); err != nil {
@@ -605,8 +588,7 @@ func TestVerifyProxyAdmitsOnlyTheProxy(t *testing.T) {
 	}
 }
 
-// A requester, when present, must be a lower-case login; the broker refuses
-// any other value before it looks at the rest of the attestation.
+// A requester, when present, must be a lower-case login; any other value is refused before the rest of the attestation.
 func TestAttestationRequester(t *testing.T) {
 	a := setupProxy(t).a
 	for _, requester := range []string{"", "alice.smith@example.com", "a+b@sub.example.com"} {
@@ -625,9 +607,7 @@ func TestAttestationRequester(t *testing.T) {
 	}
 }
 
-// The session ceiling is one policy setting, a day by default: a proxy
-// binding without its own cap takes it, and a pool binding's Pod lifetime and
-// a proxy binding's cap may reach it but not pass it.
+// The session ceiling is one policy setting, a day by default: a proxy binding without its own cap takes it, and a pool Pod lifetime or proxy cap may reach it but not pass it.
 func TestSessionCeiling(t *testing.T) {
 	p := setupProxy(t)
 	if got := p.r.config.Bindings[1].Proxy.MaxSessionSeconds; got == 0 {

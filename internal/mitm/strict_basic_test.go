@@ -29,8 +29,7 @@ func (c *basicFreshCredentials) Inject(_ context.Context, _, host string, _ int,
 		}}, nil
 }
 
-// Exercise the real CONNECT/TLS forwarding path with a request-scoped resolver
-// seam. This verifies wire compatibility, not a deployed Vault integration.
+// Exercises the real CONNECT/TLS path with a request-scoped resolver seam; wire compatibility only, not a deployed Vault integration.
 func TestStrictBasicPlaceholder(t *testing.T) {
 	f := newStrictFixture(t)
 	c := &basicFreshCredentials{value: strictCanary}

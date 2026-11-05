@@ -16,18 +16,14 @@ import (
 	"strings"
 )
 
-// BrowserCommonName names the intermediate that signs leaves for web apps a
-// browser uses through Gatehouse, and nothing else.
+// BrowserCommonName names the intermediate that signs leaves for web apps, and nothing else.
 const BrowserCommonName = "Agent Vault Browser CA"
 
-// browserKeyInfo separates the browser CA's key from every other use of the
-// root key. Changing it changes the browser CA's key, and so its pin.
+// browserKeyInfo separates the browser CA's key from every other use of the root key; changing it changes the pin.
 const browserKeyInfo = "agent-vault browser CA key v1"
 
-// deriveBrowserCA makes the browser CA from the root: its key is derived
-// from the root key, so every replica sharing the root holds the same key
-// and a browser can pin it by its public key hash. It may sign leaves only
-// (path length zero), for as long as the root is valid.
+// deriveBrowserCA derives the browser CA's key from the root key so every replica sharing the root holds the same key and a browser can pin it.
+// It may sign leaves only (path length zero).
 func deriveBrowserCA(root *x509.Certificate, rootKey *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey, []byte, error) {
 	secret, err := rootKey.Bytes()
 	if err != nil {
@@ -73,19 +69,15 @@ func deriveBrowserCA(root *x509.Certificate, rootKey *ecdsa.PrivateKey) (*x509.C
 	return cert, key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// BrowserCAPEM returns the browser CA certificate in PEM form. Replicas
-// sharing a root return certificates with the same public key; the
-// signature bytes differ.
+// BrowserCAPEM returns the browser CA certificate in PEM form; replicas sharing a root share its public key.
 func (c *SoftCA) BrowserCAPEM() []byte {
 	out := make([]byte, len(c.browserPEM))
 	copy(out, c.browserPEM)
 	return out
 }
 
-// MintBrowserLeaf returns a leaf for sni signed by the browser CA, chained
-// leaf, browser CA, root. It carries sni alone, without the extra names
-// MintLeaf adds, so a browser pinning the browser CA trusts it for that
-// host only. The caller decides that sni is a web app's host.
+// MintBrowserLeaf returns a leaf for sni chained leaf, browser CA, root. It carries sni alone,
+// so a pin on the browser CA trusts it for that host only.
 func (c *SoftCA) MintBrowserLeaf(sni string) (*tls.Certificate, error) {
 	isIP, err := validateSNI(sni)
 	if err != nil {

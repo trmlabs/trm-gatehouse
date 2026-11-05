@@ -12,9 +12,6 @@ func resetSharedDecoys() {
 	sharedDecoys.Unlock()
 }
 
-// Without AGENT_VAULT_DECOY_VAULT_PREFIX there is no decoy source, and a
-// location that is not mount/prefix, or one without a Vault client, fails
-// startup instead of running with no decoys.
 func TestDecoySourceSettings(t *testing.T) {
 	resetSharedDecoys()
 	t.Cleanup(resetSharedDecoys)

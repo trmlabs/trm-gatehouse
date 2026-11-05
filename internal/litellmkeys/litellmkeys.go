@@ -1,14 +1,5 @@
-// Package litellmkeys mints, rotates and revokes the LiteLLM virtual keys the
-// broker injects for each pool. It runs as a short job with its own Vault
-// login, never inside the broker: the team key that can mint keys never
-// reaches a process that agents talk to.
-//
-// Each pool's key lives in one KV version 2 document. The document holds the
-// key in its "key" field, which is the only field the broker reads, beside
-// the bookkeeping this package needs: the key's alias and expiry, a digest of
-// the settings it was minted with, and the previous alias waiting to be
-// revoked. One versioned write records a new key and its bookkeeping
-// together, so a failed run never strands a key Vault does not describe.
+// Package litellmkeys mints, rotates and revokes the LiteLLM virtual keys the broker injects per pool, as a short job with its own Vault login so the team key that mints keys never reaches a process agents talk to.
+// Each pool's key lives in one KV v2 document ("key" is the only field the broker reads) beside bookkeeping; one versioned write records a new key and its bookkeeping together, so a failed run never strands an undescribed key.
 package litellmkeys
 
 import (
@@ -32,8 +23,7 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// Config is the job's whole input. It names Vault locations and LiteLLM
-// settings only; Vault holds every key.
+// Config is the job's whole input: Vault locations and LiteLLM settings only; Vault holds every key.
 type Config struct {
 	Gateway      string   `json:"gateway"`      // https://<LiteLLM host>
 	TeamID       string   `json:"teamID"`       // the capped LiteLLM team every key belongs to
@@ -61,8 +51,7 @@ type KeyRef struct {
 	Field string `json:"field"`
 }
 
-// Duration is a LiteLLM-style duration: a whole number of days ("30d"),
-// hours ("12h") or minutes ("90m").
+// Duration is a LiteLLM-style duration: a whole number of days ("30d"), hours ("12h") or minutes ("90m").
 type Duration string
 
 var durationShape = regexp.MustCompile(`^([1-9][0-9]{0,3})([dhm])$`)
@@ -157,8 +146,7 @@ func (c Config) validate() error {
 	return nil
 }
 
-// settingsDigest changes whenever a key's minted settings change, so a new
-// budget or model list replaces the key on the next run.
+// settingsDigest changes whenever a key's minted settings change, so a new budget or model list replaces the key.
 func (c Config) settingsDigest(k Key) string {
 	models := slices.Clone(k.Models)
 	slices.Sort(models)
@@ -199,9 +187,7 @@ type Result struct {
 	Minted, Revoked, Current, Failed int
 }
 
-// Run reconciles every key and returns the counts. A failure on one key is
-// logged and counted, and the others still run; the job exits non-zero when
-// any key failed.
+// Run reconciles every key and returns the counts; a failure on one key is logged and counted, the others still run, and the job exits non-zero if any failed.
 func (r *Reconciler) Run(ctx context.Context) (Result, error) {
 	var res Result
 	key, err := r.readField(ctx, r.Config.MinterKey)
@@ -239,8 +225,7 @@ func (r *Reconciler) reconcile(ctx context.Context, k Key) (minted bool, revoked
 	expires, _ := time.Parse(time.RFC3339, doc.Expires)
 	due := doc.Key == "" || doc.Alias == "" || doc.Settings != r.Config.settingsDigest(k) || !now.Before(expires.Add(-rotate))
 
-	// The replaced key is revoked once the broker has had time to read the
-	// new one, or straight away when yet another replacement is due.
+	// The replaced key is revoked once the broker has had time to read the new one, or at once when another replacement is due.
 	if doc.PreviousAlias != "" {
 		revokeAt, _ := time.Parse(time.RFC3339, doc.RevokeAfter)
 		if due || !now.Before(revokeAt) {
@@ -268,8 +253,7 @@ func (r *Reconciler) reconcile(ctx context.Context, k Key) (minted bool, revoked
 	revokeAfter, _ := r.Config.RevokeAfter.Value()
 	next := document{Key: key, Alias: alias, Expires: keyExpires.UTC().Format(time.RFC3339), Settings: r.Config.settingsDigest(k)}
 	if doc.Alias != "" && doc.Key != "" {
-		// A key this job minted is replaced; one written by hand has no alias
-		// and simply runs out.
+		// A key this job minted is replaced; one written by hand has no alias and runs out.
 		next.PreviousAlias, next.RevokeAfter = doc.Alias, now.Add(revokeAfter).UTC().Format(time.RFC3339)
 	}
 	if _, err := r.writeDocument(ctx, k, next, version); err != nil {
@@ -310,8 +294,7 @@ func (r *Reconciler) readDocument(ctx context.Context, k Key) (document, int, er
 	return doc, version, nil
 }
 
-// writeDocument writes a new version only if nobody wrote since the read
-// (check-and-set), so two runs cannot interleave.
+// writeDocument writes a new version only if nobody wrote since the read (check-and-set), so two runs cannot interleave.
 func (r *Reconciler) writeDocument(ctx context.Context, k Key, doc document, version int) (int, error) {
 	data := map[string]interface{}{"key": doc.Key}
 	for field, value := range map[string]string{"alias": doc.Alias, "expires": doc.Expires, "settings": doc.Settings,
@@ -354,8 +337,7 @@ func (r *Reconciler) generate(ctx context.Context, k Key, alias string) (string,
 		"max_budget":      k.MaxBudget,
 		"budget_duration": string(k.BudgetDuration),
 		"models":          k.Models,
-		// Inference routes only: a pool key cannot manage keys, teams or users
-		// even if it leaked.
+		// Inference routes only: a leaked pool key cannot manage keys, teams or users.
 		"key_type": "llm_api",
 		"metadata": map[string]string{"gatehouse_pool": k.Pool, "gatehouse_managed": "true"},
 	}
@@ -378,8 +360,7 @@ func (r *Reconciler) generate(ctx context.Context, k Key, alias string) (string,
 	return reply.Key, expires, nil
 }
 
-// deleteAlias revokes a key by alias. An alias LiteLLM no longer knows is
-// already gone.
+// deleteAlias revokes a key by alias; an alias LiteLLM no longer knows is already gone.
 func (r *Reconciler) deleteAlias(ctx context.Context, alias string) error {
 	err := r.call(ctx, "/key/delete", map[string]any{"key_aliases": []string{alias}}, nil)
 	var status statusError

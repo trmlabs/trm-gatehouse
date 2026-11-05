@@ -96,9 +96,7 @@ var (
 	machineIDValue string
 )
 
-// MachineID returns a stable anonymous identifier for the current
-// machine. Falls back to a hostname-derived hash when /etc/machine-id
-// is unavailable (e.g. minimal Docker containers).
+// MachineID returns a stable anonymous ID, hostname-derived when /etc/machine-id is unavailable.
 func MachineID() string {
 	machineIDOnce.Do(func() {
 		if mid, err := machineid.ProtectedID("agent-vault"); err == nil && mid != "" {

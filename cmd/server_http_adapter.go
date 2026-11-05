@@ -29,20 +29,7 @@ var sharedCatalog struct {
 	started bool
 }
 
-// brokerCatalog loads the destination catalog once per process, for the HTTP
-// adapter and the PostgreSQL broker alike. AGENT_VAULT_CATALOG_VAULT_PATH
-// (mount/path of a KV version 2 secret whose "catalog" field Terraform
-// writes) is reloaded every 30 seconds without a restart; a version that
-// fails validation is logged and the last good catalog stays in force.
-// AGENT_VAULT_CATALOG_VAULT_PREFIX reads the same catalog stored one secret
-// per entry, with the same reload. AGENT_VAULT_HTTP_CATALOG_FILE is a fixed
-// catalog read at start.
-//
-// A Vault catalog never stops the broker: an entry that fails validation is
-// left out and named in the log, and each accepted version is kept in st. A
-// broker that starts while Vault is unreachable starts from that stored copy,
-// or, with none, from an empty catalog that refuses everything and reports
-// not ready until the watch loads a version.
+// brokerCatalog loads the destination catalog once per process for both brokers; invalid entries are dropped and the last accepted version is kept.
 func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready func(string, func() bool), getenv func(string) string, logger *slog.Logger) (*httpcatalog.Source, error) {
 	sharedCatalog.Lock()
 	defer sharedCatalog.Unlock()
@@ -63,9 +50,7 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready 
 		if !ok || client == nil {
 			return nil, fmt.Errorf("the catalog's Vault location needs mount/path and a Vault client")
 		}
-		// One secret per entry (AGENT_VAULT_CATALOG_VAULT_PREFIX) has no size
-		// limit; the single document (AGENT_VAULT_CATALOG_VAULT_PATH) is
-		// bounded by Vault's size limit for one secret and stays for migration.
+		// One secret per entry has no size limit; the single document is bounded by Vault's size limit for one secret.
 		load := httpcatalog.VaultLoader(client.Logical(), mount, path, "catalog")
 		if perEntry != "" {
 			load = httpcatalog.VaultPrefixLoader(client.Logical(), mount, path)
@@ -99,7 +84,6 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready 
 		if ready != nil {
 			ready("catalog", source.Loaded)
 		}
-		// ctx is the server's lifetime context, so the watch runs until exit.
 		go source.Watch(ctx, 30*time.Second, load, func(version int, err error) {
 			logger.Error("broker catalog version rejected; keeping the last good catalog",
 				slog.Int("version", version), slog.Int("in_force", source.Version()), slog.String("error", err.Error()))
@@ -115,14 +99,11 @@ func brokerCatalog(ctx context.Context, client *hashicorp.Client, st any, ready 
 	return source, nil
 }
 
-// catalogStore keeps the last accepted catalog across restarts.
 type catalogStore interface {
 	SaveBrokerCatalog(ctx context.Context, location string, version int, document []byte) error
 	LoadBrokerCatalog(ctx context.Context, location string) ([]byte, int, error)
 }
 
-// logDroppedCatalogParts names, without contents, each part a catalog version
-// left out, so a bad entry is found from the log while the rest serve.
 func logDroppedCatalogParts(logger *slog.Logger, version int, dropped []httpcatalog.Dropped) {
 	for _, d := range dropped {
 		logger.Error("broker catalog part left out; the rest of the catalog is in force",
@@ -130,10 +111,7 @@ func logDroppedCatalogParts(logger *slog.Logger, version int, dropped []httpcata
 	}
 }
 
-// httpHeaderAdapter builds the catalog-driven HTTP adapter when a broker
-// catalog is configured. It requires the strict credential proxy, a Vault
-// client and the signed audit chain, and refuses to start without any of
-// them rather than serve unaudited or unlisted traffic.
+// httpHeaderAdapter needs the strict credential proxy, a Vault client and the signed audit chain, and refuses to start without them rather than serve unaudited traffic.
 func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(string) string) (*mitm.HeaderAdapter, error) {
 	if getenv("AGENT_VAULT_CATALOG_VAULT_PATH") == "" && getenv("AGENT_VAULT_CATALOG_VAULT_PREFIX") == "" && getenv("AGENT_VAULT_HTTP_CATALOG_FILE") == "" {
 		return nil, nil
@@ -223,15 +201,11 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 			return nil, err
 		}
 		minter := &githubapp.Minter{Signer: signer, API: api, Log: srv.Logger(), ScopeMode: scopeMode, Scope: func(installation int64) githubapp.Scope {
-			// A conversion, not a field list: a scope added to one type and not
-			// the other stops the build, instead of going unmapped and making
-			// the installation check report every installation that holds it.
+			// A conversion, not a field list: a scope added to one type and not the other stops the build.
 			return githubapp.Scope(source.Current().GitScope(installation))
 		}}
 		adapter.GitTokens = minter
-		// A catalog change that removes or narrows a repository revokes the
-		// tokens it no longer grants instead of letting them run out, and
-		// checks each installation against the new catalog before its next token.
+		// A catalog change that removes or narrows a repository revokes its tokens at once and rechecks each installation before its next token.
 		source.OnChange(func(c httpcatalog.Catalog) {
 			minter.ForgetScope()
 			minter.Prune(func(installation int64, repo string, p githubapp.Permissions) bool {
@@ -244,11 +218,7 @@ func httpHeaderAdapter(ctx context.Context, srv *server.Server, getenv func(stri
 	return adapter, nil
 }
 
-// auth0Client is how browser-session test users log in from the broker: over
-// the same guarded dialer as every other upstream, to an Auth0 domain the
-// current catalog names on port 443 and nowhere else, never following a
-// redirect, since the login body holds the user's password and the client
-// secret.
+// auth0Client logs users in over the guarded dialer, to a catalog-named Auth0 domain on 443 only, never following a redirect: the login body holds a password and client secret.
 func auth0Client(catalog interface{ Current() httpcatalog.Catalog }, dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	pinned := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -262,9 +232,7 @@ func auth0Client(catalog interface{ Current() httpcatalog.Catalog }, dial func(c
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-// tokenClient is how the broker mints clientCredentials entries' tokens:
-// over the guarded dialer, to port 443 of a token host the current catalog
-// names and nowhere else, never following a redirect.
+// tokenClient mints clientCredentials tokens over the guarded dialer, to port 443 of a catalog token host only, never following a redirect.
 func tokenClient(catalog interface{ Current() httpcatalog.Catalog }, dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	pinned := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -278,10 +246,7 @@ func tokenClient(catalog interface{ Current() httpcatalog.Catalog }, dial func(c
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-// automatedAuthClient is how browser-session test users sign in through an
-// automated-auth service: over the guarded dialer, to a service address the
-// current catalog names and nowhere else, never following a redirect. The
-// service drives a real login page, so a sign-in takes tens of seconds.
+// automatedAuthClient signs users in over the guarded dialer to a catalog-named service address only, never following a redirect; a sign-in takes tens of seconds.
 func automatedAuthClient(catalog interface{ Current() httpcatalog.Catalog }, dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
 	pinned := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if !catalog.Current().HasAutomatedAuth(addr) {
@@ -294,7 +259,6 @@ func automatedAuthClient(catalog interface{ Current() httpcatalog.Catalog }, dia
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-// gitScope names a token's permissions as the catalog grants them.
 func gitScope(p githubapp.Permissions) string {
 	switch {
 	case p.Actions == "read":
@@ -320,8 +284,7 @@ func gitScope(p githubapp.Permissions) string {
 
 var transitKeyName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,126}$`)
 
-// catalogEnvironment applies AGENT_VAULT_CATALOG_ENVIRONMENT, the environment
-// every catalog database role must be named for (such as staging).
+// catalogEnvironment applies AGENT_VAULT_CATALOG_ENVIRONMENT, the environment every catalog database role must be named for.
 func catalogEnvironment(getenv func(string) string) error {
 	env := getenv("AGENT_VAULT_CATALOG_ENVIRONMENT")
 	if env != "" && !regexp.MustCompile(`^[a-z]+$`).MatchString(env) {
@@ -331,10 +294,7 @@ func catalogEnvironment(getenv func(string) string) error {
 	return nil
 }
 
-// githubAppSigner signs App JWTs with the App key imported into Transit, so
-// the key never leaves Vault. AGENT_VAULT_GITHUB_APP_KV_PATH selects the
-// fallback, a PEM on the broker's KV mount (AGENT_VAULT_KV_MOUNT) read into
-// the broker per signature.
+// githubAppSigner signs App JWTs with the key imported into Transit so it never leaves Vault; AGENT_VAULT_GITHUB_APP_KV_PATH selects a PEM on the KV mount as fallback.
 func githubAppSigner(client *hashicorp.Client, getenv func(string) string) (githubapp.JWTSigner, error) {
 	if key := getenv("AGENT_VAULT_GITHUB_APP_TRANSIT_KEY"); key != "" {
 		mount := getenv("AGENT_VAULT_GITHUB_APP_TRANSIT_MOUNT")

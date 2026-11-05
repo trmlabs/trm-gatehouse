@@ -64,11 +64,8 @@ func TestRealVault_FleetReplicaHelper(t *testing.T) {
 	select {}
 }
 
-// Two replicas share a PostgreSQL journal with production timings. Replica 1
-// is SIGKILLed mid-query. Replica 0 waits for the dead owner row to expire by
-// the database clock, then claims and revokes: the Vault-created role and its
-// session are gone within 40 seconds of the kill, and never before the row
-// could have expired.
+// Two replicas share a PostgreSQL journal with production timings.
+// Replica 0 waits for the dead owner row to expire by the database clock.
 func TestRealVault_FleetSurvivorRevokesCrashedReplica(t *testing.T) {
 	client, admin, _ := realDurableInputs(t)
 	journal := fleetJournal(t)

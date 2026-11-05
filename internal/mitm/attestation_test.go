@@ -189,10 +189,7 @@ func (l spoofedListener) Accept() (net.Conn, error) {
 	return spoofedConn{c}, nil
 }
 
-// A client outside the broker Pod sends a forged PROXY header claiming a
-// worker's address. The header is never parsed, the Attestor is never asked,
-// and the connection is refused. The same bytes from a loopback peer are
-// parsed and attested, so the test can tell the two apart.
+// A forged PROXY header from outside the Pod is never parsed or attested; the same bytes from loopback are.
 func TestForgedProxyHeaderFromNonLoopbackPeerIsRefused(t *testing.T) {
 	send := func(t *testing.T, spoof bool) (bool, []netip.Addr, string) {
 		attestor := &fakeAttestor{err: errors.New("stop after attestation")}
@@ -298,9 +295,7 @@ func TestTunnelRechecksUseReattest(t *testing.T) {
 	}
 }
 
-// Reading the PROXY header restores the HTTP server's read deadline instead
-// of clearing it, so a client behind the terminator cannot hold a connection
-// open forever before authenticating.
+// Reading the PROXY header restores the read deadline so an unauthenticated client cannot hold the connection open.
 func TestProxyHeaderKeepsTheServerReadDeadline(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

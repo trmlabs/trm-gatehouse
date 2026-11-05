@@ -286,9 +286,8 @@ func overflowWaits(t *testing.T, b *Broker, addr string) <-chan string {
 	return overflow
 }
 
-// A burst far past the pending bound and the admission concurrency is
-// queued, not refused: with a store that answers one call at a time, every
-// connection of the burst is served.
+// A burst far past the pending bound and the admission concurrency is queued, not refused: with a store that
+// answers one call at a time, every connection of the burst is served.
 func TestBurstQueuesInsteadOfRefusing(t *testing.T) {
 	up := startFakeUpstream(t, authTrust, "")
 	var store sync.Mutex // one connection, like the SQLite store
@@ -335,10 +334,8 @@ func (l slowLedger) Add(ctx context.Context, _, _ string, _ int) error {
 
 func (slowLedger) Remove(context.Context, string) error { return nil }
 
-// A slow session ledger has its own deadline and does not spend the wait for
-// serving capacity: an Add that outlasts AdmissionTimeout but not
-// LedgerTimeout still admits, and one past LedgerTimeout is refused as the
-// ledger, not as the serving cap.
+// A slow session ledger has its own deadline and does not spend the wait for serving capacity: an Add that
+// outlasts AdmissionTimeout but not LedgerTimeout still admits.
 func TestSlowLedgerHasItsOwnDeadline(t *testing.T) {
 	up := startFakeUpstream(t, authTrust, "")
 	start := func(ledger time.Duration) string {
@@ -412,9 +409,8 @@ func TestQueuedRefusalReachesTheClient(t *testing.T) {
 	}
 }
 
-// One workload at its own cap opens more connections. While they wait for its
-// per-workload slot they hold no admission slot, so another workload's
-// admission does not stall behind them.
+// One workload at its own cap opens more connections. While they wait for its per-workload slot they hold no
+// admission slot, so another workload's admission does not stall behind them.
 func TestWorkloadAtItsCapDoesNotStallOthers(t *testing.T) {
 	t.Parallel()
 	up := startFakeUpstream(t, authTrust, "")

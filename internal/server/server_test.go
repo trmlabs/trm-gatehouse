@@ -586,8 +586,7 @@ func (m *mockStore) UpsertDatabaseService(_ context.Context, svc store.DatabaseS
 	if svc.ID == "" {
 		svc.ID = "dbs-" + svc.VaultID + "-" + svc.Name
 	}
-	// Mirror the SQLStore's empty-sslmode normalization so the mock stays
-	// faithful to production (the real store's CHECK rejects an empty sslmode).
+	// Mirror the SQLStore's empty-sslmode normalization (its CHECK rejects empty).
 	if svc.SSLMode == "" {
 		svc.SSLMode = "prefer"
 	}
@@ -1354,7 +1353,6 @@ func (r *readiness) Ready() bool                 { return r.ready }
 func (r *readiness) Close(context.Context) error { return nil }
 func (r *readiness) BeginDrain()                 { r.ready = false }
 
-// The readiness gate follows the cleanup owner row; liveness does not.
 func TestReadyEndpointFollowsCleanupOwnership(t *testing.T) {
 	cleanup := &readiness{}
 	srv := newTestServer()
@@ -1374,11 +1372,40 @@ func TestReadyEndpointFollowsCleanupOwnership(t *testing.T) {
 	if code := get("/ready"); code != http.StatusOK {
 		t.Fatalf("not ready with a fresh owner row: %d", code)
 	}
-	// SIGTERM turns readiness false before any listener drains, and starts
-	// the database cleanup's drain.
 	srv.beginShutdown()
 	if code := get("/ready"); code != http.StatusServiceUnavailable || cleanup.ready {
 		t.Fatalf("ready after shutdown began: %d, cleanup ready %v", code, cleanup.ready)
+	}
+}
+
+func TestAttachedChecksSplitReadinessFromLiveness(t *testing.T) {
+	srv := newTestServer()
+	ready, live := true, true
+	srv.AttachReadiness("audit-trail", func() bool { return ready })
+	srv.AttachLiveness("audit-trail", func() bool { return live })
+	get := func(path string) (int, string) {
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		var body map[string]string
+		_ = json.NewDecoder(rec.Body).Decode(&body)
+		return rec.Code, body["error"]
+	}
+	if code, _ := get("/health"); code != http.StatusOK {
+		t.Fatalf("health with passing checks: %d", code)
+	}
+	if code, _ := get("/readyz"); code != http.StatusOK {
+		t.Fatalf("readyz with passing checks: %d", code)
+	}
+	ready = false
+	if code, reason := get("/readyz"); code != http.StatusServiceUnavailable || reason != "audit-trail not ready" {
+		t.Fatalf("readyz with a failing readiness check: %d %q", code, reason)
+	}
+	if code, _ := get("/health"); code != http.StatusOK {
+		t.Fatalf("a readiness check failed liveness: %d", code)
+	}
+	live = false
+	if code, reason := get("/health"); code != http.StatusServiceUnavailable || reason != "audit-trail failed" {
+		t.Fatalf("health with a failing liveness check: %d %q", code, reason)
 	}
 }
 
@@ -2102,12 +2129,8 @@ func TestScopedSessionSuccess(t *testing.T) {
 	}
 }
 
-// TestScopedSessionRoleAdminRejected covers the new restriction: even an
-// owner with vault-admin can no longer request a non-proxy role through
-// POST /v1/sessions. Tokens are minted with role `proxy` only.
-// TestScopedSessionProxyUserRejected covers the rule that a proxy-role
-// vault user cannot mint scoped tokens. Proxy is a "can only proxy
-// requests" tier and explicitly excludes mint, even at proxy role.
+// TestScopedSessionRoleAdminRejected covers that even an owner cannot request a non-proxy role.
+// TestScopedSessionProxyUserRejected covers that a proxy-role vault user cannot mint scoped tokens.
 func TestScopedSessionProxyUserRejected(t *testing.T) {
 	ms := newMockStore()
 	ms.users["proxy@test.com"] = &store.User{
@@ -2541,9 +2564,7 @@ func TestScopedSessionEnforcesVaultOnDelete(t *testing.T) {
 
 // --- Discovery endpoint tests ---
 
-// setupVaultWithCredential seeds a mock store with a scoped session, broker
-// config, and an encrypted STRIPE_KEY credential. Returns (store, scoped
-// token, encryption key).
+// setupVaultWithCredential seeds a mock store with a scoped session, broker config and an encrypted STRIPE_KEY.
 func setupVaultWithCredential(t *testing.T, servicesJSON string) (*mockStore, string, []byte) {
 	t.Helper()
 	ms := newMockStore()
@@ -2614,11 +2635,7 @@ func TestDiscoverSuccess(t *testing.T) {
 	}
 }
 
-// TestDiscoverHealsLegacyUnnamedServices pins that /discover returns
-// auto-slugged Names for legacy entries persisted without `name`.
-// Agents identify services by Name (per skill_cli.md); a blank Name
-// here makes the service un-addressable until an unrelated write
-// triggers a heal elsewhere.
+// TestDiscoverHealsLegacyUnnamedServices pins that /discover returns auto-slugged Names for legacy entries.
 func TestDiscoverHealsLegacyUnnamedServices(t *testing.T) {
 	servicesJSON := `[
 		{"host":"api.anthropic.com","auth":{"type":"bearer","token":"ANTHROPIC_KEY"}},
@@ -2977,11 +2994,7 @@ func TestProposalCreateRefFromExistingCredential(t *testing.T) {
 
 func TestProposalCreateWithDeleteAction(t *testing.T) {
 	srv, ms, token := setupProposalTest(t)
-	// Seed the vault with the service we're about to propose deleting,
-	// so the host-only delete resolves uniquely to its canonical Name.
-	// (A delete for a host with no matching service is now rejected at
-	// create time with "name is required" rather than fabricating a
-	// slug that could collide with an unrelated service.)
+	// Seed the service so the host-only delete resolves to its canonical Name.
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
 		ID: "bc-1", VaultID: "root-ns-id",
 		ServicesJSON: `[{"name":"slack","host":"api.slack.com","auth":{"type":"bearer","token":"SLACK_TOKEN"}}]`,
@@ -3103,11 +3116,7 @@ func TestAdminProposalApproveSuccess(t *testing.T) {
 	}
 }
 
-// TestAdminProposalApproveRejectsStaleDeleteWithoutName pins that an
-// ActionDelete proposal lacking Name whose target Host no longer
-// matches any service is rejected at approve time. The delete-by-host
-// resolver (kept as a UX feature for proposals) returns 0 matches →
-// hostNotFoundError → 409, rather than silently dropping anything.
+// TestAdminProposalApproveRejectsStaleDeleteWithoutName pins that a nameless delete whose host matches nothing is rejected with 409.
 func TestAdminProposalApproveRejectsStaleDeleteWithoutName(t *testing.T) {
 	ms := newMockStore()
 
@@ -3122,9 +3131,7 @@ func TestAdminProposalApproveRejectsStaleDeleteWithoutName(t *testing.T) {
 	ms.sessions[adminSess.ID] = adminSess
 	srv := newTestServer(withStore(ms), withEncKey(make([]byte, 32)))
 
-	// Vault holds an unrelated service. The stale delete proposal below
-	// targets a host that no longer matches anything; the resolver must
-	// surface 409 (no match) rather than touch the unrelated service.
+	// An unrelated service must be untouched when the stale delete matches no host.
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
 		VaultID: "root-ns-id",
 		ServicesJSON: `[
@@ -3337,11 +3344,7 @@ func TestOwnerCannotAccessVaultWithoutGrant(t *testing.T) {
 	}
 }
 
-// GET /v1/instance/credential-stores advertises only the kinds the caller
-// can actually create. Two contracts are load-bearing: "infisical" requires
-// a non-nil client (UI 503s otherwise), and "infisical" requires owner role
-// (write path is owner-only; non-owners would see an enabled picker that
-// 403s on submit).
+// GET /v1/instance/credential-stores lists only kinds the caller can create: "infisical" needs a client and owner role.
 func TestInstanceCredentialStores(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -3476,9 +3479,7 @@ func TestVaultCredentialStoreSwitchToInfisicalNoClient(t *testing.T) {
 	}
 }
 
-// Connecting to Infisical is owner-only, mirroring vault create. A non-owner
-// vault admin must be rejected. The client is attached so this proves the owner
-// gate fires (403), not the no-client 503.
+// Connecting to Infisical is owner-only; a non-owner admin gets 403 even with a client attached.
 func TestVaultCredentialStoreSwitchToInfisicalRequiresOwner(t *testing.T) {
 	ms, _ := setupMockStoreWithSession(t)
 	adminToken := setupMemberSession(t, ms, "root-ns-id")
@@ -3512,9 +3513,7 @@ func TestVaultCredentialStoreSwitchToBuiltinAllowsAdmin(t *testing.T) {
 	}
 }
 
-// infisical_available drives the Infisical option in the credential-store
-// switcher. Since connecting is owner-only, it must be reported owner-gated:
-// true for an owner, false for a non-owner vault admin, even with a client.
+// infisical_available is owner-gated: true for an owner, false for a non-owner vault admin.
 func TestVaultSettingsInfisicalAvailableOwnerGated(t *testing.T) {
 	settingsAvailable := func(t *testing.T, srv *Server, token string) bool {
 		t.Helper()
@@ -3548,11 +3547,7 @@ func TestVaultSettingsInfisicalAvailableOwnerGated(t *testing.T) {
 	}
 }
 
-// TestVaultContextRedactsConfigForNonAdmin locks in that the upstream
-// topology (project_id, environment, secret_path) is only returned to vault
-// admins and instance owners. Proxy/member roles must see only the kind +
-// sync health, otherwise a proxy-role agent can call this endpoint and read
-// the operator's Infisical layout.
+// TestVaultContextRedactsConfigForNonAdmin pins that upstream topology is returned only to vault admins and owners.
 func TestVaultContextRedactsConfigForNonAdmin(t *testing.T) {
 	ms, ownerToken := setupMockStoreWithSession(t)
 	memberToken := setupMemberSession(t, ms, "root-ns-id")
@@ -3598,9 +3593,7 @@ func TestVaultContextRedactsConfigForNonAdmin(t *testing.T) {
 	}
 }
 
-// TestVaultContextRedactsLastSyncErrorForNonAdmin locks in that
-// last_sync_error (may carry upstream keys via the invalid-key carve-out)
-// is redacted alongside Config for non-admin/non-owner callers.
+// TestVaultContextRedactsLastSyncErrorForNonAdmin pins that last_sync_error is redacted for non-admin callers.
 func TestVaultContextRedactsLastSyncErrorForNonAdmin(t *testing.T) {
 	ms, ownerToken := setupMockStoreWithSession(t)
 	memberToken := setupMemberSession(t, ms, "root-ns-id")
@@ -3791,10 +3784,7 @@ func TestVaultSyncNow_InvalidKeyReturns400(t *testing.T) {
 	}
 }
 
-// TestVaultSyncNow_InvalidKeyRedactedForNonAdmin locks the contract that a
-// non-admin/non-owner caller hitting ErrInvalidKey receives a generic message —
-// the offending key name is upstream topology and is redacted on every other
-// surface (last_sync_error in handleVaultContext, the post-sync summary).
+// TestVaultSyncNow_InvalidKeyRedactedForNonAdmin pins that non-admins get a generic message without the key name.
 func TestVaultSyncNow_InvalidKeyRedactedForNonAdmin(t *testing.T) {
 	ms, _ := setupMockStoreWithSession(t)
 	memberToken := setupMemberSession(t, ms, "root-ns-id")
@@ -4259,9 +4249,7 @@ func TestAgentList(t *testing.T) {
 	}
 }
 
-// Non-owner creators must see their own vault-less agents in /v1/agents.
-// Mutation endpoints (revoke/rotate/rename) accept agent.CreatedBy == actor.ID
-// regardless of vault overlap, so the list endpoint must mirror that ACL.
+// Non-owner creators must see their own vault-less agents in /v1/agents, mirroring the mutation ACL.
 func TestAgentList_NonOwnerSeesOwnVaultlessAgent(t *testing.T) {
 	ms, _ := setupMockStoreWithSession(t)
 	memberToken := setupMemberSession(t, ms)
@@ -4582,9 +4570,7 @@ func TestVaultSettingsUnmatchedHostPolicy(t *testing.T) {
 			t.Fatalf("expected stored policy=deny, got %q",
 				ms.vaultSettings["root-ns-id"][settingUnmatchedHostPolicy])
 		}
-		// Response must echo the validated value, not depend on a second
-		// store read — otherwise a transient read failure post-write
-		// would desync the UI from the persisted policy.
+		// The response must echo the validated value rather than depend on a second store read.
 		var resp map[string]string
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		if resp["unmatched_host_policy"] != "deny" {
@@ -5325,9 +5311,7 @@ func TestOwnerVaultListShowsAllVaultsWithMembership(t *testing.T) {
 	}
 }
 
-// TestVaultListOmitsCredentialStoreForBuiltin locks in that the credential_store
-// field is absent for builtin vaults (json:"omitempty") and present for external
-// ones. Scripts and UI both branch on its presence.
+// TestVaultListOmitsCredentialStoreForBuiltin pins that credential_store is absent for builtin vaults.
 func TestVaultListOmitsCredentialStoreForBuiltin(t *testing.T) {
 	ms, ownerToken := setupMockStoreWithSession(t)
 	if _, err := ms.CreateVault(context.Background(), "ext"); err != nil {
@@ -6034,10 +6018,7 @@ func TestServicesUpsertAddNew(t *testing.T) {
 	}
 }
 
-// TestServicesUpsertRejectsMissingNameForNewService pins the
-// "name is required for new services" contract: an empty-Name upsert
-// against an empty vault has no existing entry to adopt by host, so
-// it falls through to broker.Validate which rejects with 400.
+// TestServicesUpsertRejectsMissingNameForNewService pins that an empty-Name upsert on an empty vault is rejected with 400.
 func TestServicesUpsertRejectsMissingNameForNewService(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	srv := newTestServer(withStore(ms))
@@ -6093,11 +6074,7 @@ func TestServicesUpsertReplaceExisting(t *testing.T) {
 	}
 }
 
-// TestServicesUpsertEmptyNameAdoptsExistingByHostPath pins the
-// same-host rename heal: an empty-Name upsert against a service that
-// was renamed (`stripe-prod` for `api.stripe.com`) adopts the existing
-// Name and in-place replaces, instead of appending an unreachable
-// `api-stripe-com` ghost that loses every MatchService tiebreak.
+// TestServicesUpsertEmptyNameAdoptsExistingByHostPath pins that an empty-Name upsert adopts the renamed service's Name.
 func TestServicesUpsertEmptyNameAdoptsExistingByHostPath(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -6133,13 +6110,7 @@ func TestServicesUpsertEmptyNameAdoptsExistingByHostPath(t *testing.T) {
 	}
 }
 
-// TestServicesUpsertEmptyNameDoesNotReplaceUnrelatedExisting pins
-// that an empty-Name upsert whose Host does not uniquely match the
-// existing wildcard service is rejected as a new-service-needs-name
-// error rather than silently overwriting the wildcard. Before the
-// required-name contract this case relied on a Slugify cross-host
-// disambiguation; with the contract restored, the safer behavior is
-// to refuse the write so the caller picks an explicit name.
+// TestServicesUpsertEmptyNameDoesNotReplaceUnrelatedExisting pins that an empty-Name upsert with a non-matching host is rejected.
 func TestServicesUpsertEmptyNameDoesNotReplaceUnrelatedExisting(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -6395,9 +6366,7 @@ func TestServiceRemoveUnauthenticated(t *testing.T) {
 
 // --- no-access instance role tests ---
 
-// setupNoAccessAgentSession creates a no-access agent (not a user) with an
-// agent-token session and optional vault grants. Exercises the sess.AgentID
-// branch of actorFromSession, which the user-based helper does not cover.
+// setupNoAccessAgentSession creates a no-access agent with an agent-token session, covering the sess.AgentID branch.
 func setupNoAccessAgentSession(t *testing.T, ms *mockStore, grantVaultIDs ...string) string {
 	t.Helper()
 	ms.agents["scoped-bot"] = &store.Agent{
@@ -6626,10 +6595,7 @@ func TestUserInviteWithNoAccessRoleAccepted(t *testing.T) {
 
 // --- Path-scoped service / route disambiguation tests ---
 
-// TestServiceRemoveByHostAmbiguity exercises the 409-with-candidates
-// fallback: when two services share a host, DELETE/PATCH on the host
-// slot must not silently target one of them — the server returns 409
-// with the candidate names so the caller can pick.
+// TestServiceRemoveByHostAmbiguity pins that two services sharing a host yield 409 with candidate names.
 func TestServiceRemoveByHostAmbiguity(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -6753,10 +6719,7 @@ func TestServicePatchByHostAmbiguity(t *testing.T) {
 	}
 }
 
-// TestServicePatchByName resolves unambiguously when the slot value
-// matches a canonical service name. Verifies the right service is
-// patched (not the other one sharing the host) and the response echoes
-// the targeted service.
+// TestServicePatchByName pins that a canonical name patches only that service, not the host sibling.
 func TestServicePatchByName(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -6807,10 +6770,7 @@ func TestServicePatchByName(t *testing.T) {
 	}
 }
 
-// TestServicesUpsertSplitsInlineHost lets a client paste `slack.com/api/*`
-// into the host field and verifies the round-trip: storage holds the
-// joined form (Service.MarshalJSON re-joins Host+Path) and `path` is
-// not exposed on the wire.
+// TestServicesUpsertSplitsInlineHost pins that a pasted `slack.com/api/*` host is stored joined and `path` is not exposed.
 func TestServicesUpsertSplitsInlineHost(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	srv := newTestServer(withStore(ms))
@@ -6836,9 +6796,7 @@ func TestServicesUpsertSplitsInlineHost(t *testing.T) {
 	}
 }
 
-// TestServicesUpsertExplicitNameMatchingExistingReplaces confirms the
-// intended upsert-by-name semantic: if the caller supplies a Name that
-// matches an existing service, the upsert replaces that service.
+// TestServicesUpsertExplicitNameMatchingExistingReplaces pins that an upsert with an existing Name replaces it.
 func TestServicesUpsertExplicitNameMatchingExistingReplaces(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -6869,10 +6827,7 @@ func TestServicesUpsertExplicitNameMatchingExistingReplaces(t *testing.T) {
 	}
 }
 
-// TestProposalCreateActionSetRejectsMissingNameForNewService pins the
-// "name is required for new services" contract on the proposal path:
-// an empty-Name ActionSet whose Host does not uniquely match an
-// existing service falls through to proposal.Validate which rejects.
+// TestProposalCreateActionSetRejectsMissingNameForNewService pins the "name is required" contract on the proposal path.
 func TestProposalCreateActionSetRejectsMissingNameForNewService(t *testing.T) {
 	srv, _, token := setupProposalTest(t)
 
@@ -6894,12 +6849,7 @@ func TestProposalCreateActionSetRejectsMissingNameForNewService(t *testing.T) {
 	}
 }
 
-// TestProposalCreateActionSetEmptyNameAdoptsExistingByHostPath pins
-// the proposal-flow same-host rename heal: an empty-Name ActionSet
-// targeting a host already owned by a renamed service (`stripe-prod`)
-// adopts the existing Name on the proposal record. Without this, the
-// proposal would persist `name:"api-stripe-com"`, MergeServices would
-// fail the Name-lookup, and apply would append an unreachable ghost.
+// TestProposalCreateActionSetEmptyNameAdoptsExistingByHostPath pins that an empty-Name ActionSet adopts a renamed service's Name.
 func TestProposalCreateActionSetEmptyNameAdoptsExistingByHostPath(t *testing.T) {
 	srv, ms, token := setupProposalTest(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -6932,13 +6882,7 @@ func TestProposalCreateActionSetEmptyNameAdoptsExistingByHostPath(t *testing.T) 
 	}
 }
 
-// TestAdminProposalApplyRebindsStaleNameByHost pins the create→
-// rename→apply rebind. A proposal whose Name was correct at create
-// (adopted from the legacy heal of host api.stripe.com → api-stripe-com)
-// becomes stale when the admin renames the existing service to
-// stripe-prod before approving. At apply, normalize must rebind by
-// (Host, Path) so MergeServices upserts stripe-prod with the new
-// auth — instead of appending an unreachable ghost.
+// TestAdminProposalApplyRebindsStaleNameByHost pins that apply rebinds a stale Name by (Host, Path) instead of appending a ghost.
 func TestAdminProposalApplyRebindsStaleNameByHost(t *testing.T) {
 	ms := newMockStore()
 
@@ -6996,11 +6940,7 @@ func TestAdminProposalApplyRebindsStaleNameByHost(t *testing.T) {
 	}
 }
 
-// TestProposalCreateActionSetEmptyNameUnrelatedHostRejects pins that
-// an empty-Name ActionSet whose Host does not uniquely match an
-// existing service (e.g. the wildcard owns `*.github.com`, incoming
-// is bare `github.com`) is rejected as "name is required" instead of
-// silently overwriting the wildcard via cross-host slug collision.
+// TestProposalCreateActionSetEmptyNameUnrelatedHostRejects pins that a non-matching host is rejected, not merged into a wildcard.
 func TestProposalCreateActionSetEmptyNameUnrelatedHostRejects(t *testing.T) {
 	srv, ms, token := setupProposalTest(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -7026,10 +6966,7 @@ func TestProposalCreateActionSetEmptyNameUnrelatedHostRejects(t *testing.T) {
 	}
 }
 
-// TestProposalCreateActionDeleteUnknownHostReturnsNotFound pins that a
-// delete-action with no Name and 0 host matches surfaces a 404 with a
-// clear "no service matches host" message rather than silently
-// touching an unrelated service.
+// TestProposalCreateActionDeleteUnknownHostReturnsNotFound pins a 404 for a nameless delete matching no host.
 func TestProposalCreateActionDeleteUnknownHostReturnsNotFound(t *testing.T) {
 	srv, ms, token := setupProposalTest(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -7062,12 +6999,7 @@ func TestProposalCreateActionDeleteUnknownHostReturnsNotFound(t *testing.T) {
 	}
 }
 
-// TestProposalCreateActionDeleteInlineFormNarrowsByPath pins that an
-// unnamed delete with an inline-form host (`slack.com/api/*`) resolves
-// to the exact (Host, Path) match instead of 409'ing against unrelated
-// path siblings on the same host. Without this narrowing the user would
-// be forced to fall back to the canonical Name even though the inline
-// form already uniquely identifies the target.
+// TestProposalCreateActionDeleteInlineFormNarrowsByPath pins that an inline-form delete resolves by (Host, Path), not 409.
 func TestProposalCreateActionDeleteInlineFormNarrowsByPath(t *testing.T) {
 	srv, ms, token := setupProposalTest(t)
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
@@ -7106,20 +7038,12 @@ func TestProposalCreateActionDeleteInlineFormNarrowsByPath(t *testing.T) {
 	}
 }
 
-// TestServicesGetReturnsJoinedHostNoPathField pins the wire shape on
-// the read surface: GET /v1/vaults/{name}/services emits Host in joined
-// inline form (`slack.com/api/*`) and never includes the legacy `path`
-// field, even when the persisted record uses split form (the legacy
-// shape from before MarshalJSON joined them). Both the joined-form
-// emission AND the defensive split-on-load are exercised.
+// TestServicesGetReturnsJoinedHostNoPathField pins that GET emits the joined host and no `path` field, even for split records.
 func TestServicesGetReturnsJoinedHostNoPathField(t *testing.T) {
 	ms, token := setupMockStoreWithSession(t)
 	srv := newTestServer(withStore(ms))
 
-	// Seed storage with the legacy split form to prove loadServices's
-	// defensive SplitInlineHost handles older records correctly. After
-	// this PR, new writes persist the joined form via MarshalJSON; this
-	// test covers the migration window.
+	// Seed the legacy split form to prove loadServices splits it defensively.
 	ms.brokerConfigs["root-ns-id"] = &store.BrokerConfig{
 		VaultID: "root-ns-id",
 		ServicesJSON: `[
@@ -7148,13 +7072,7 @@ func TestServicesGetReturnsJoinedHostNoPathField(t *testing.T) {
 	}
 }
 
-// TestAdminProposalApproveRejects409OnAmbiguousDelete pins the
-// apply-time counterpart of normalizeProposalServices's host-ambiguity
-// check: a stale ActionDelete proposal with no Name whose host matches
-// 2+ existing services must surface 409 + candidates rather than
-// silently picking one. The create path tests this; this is the
-// apply-path twin so a pre-PR proposal stored with no Name can't slip
-// through and cause arbitrary deletion at approval time.
+// TestAdminProposalApproveRejects409OnAmbiguousDelete pins that a stale nameless delete matching 2+ services returns 409 at apply.
 func TestAdminProposalApproveRejects409OnAmbiguousDelete(t *testing.T) {
 	ms := newMockStore()
 
@@ -7211,9 +7129,7 @@ func TestAdminProposalApproveRejects409OnAmbiguousDelete(t *testing.T) {
 func TestSPACatchAllRoutes(t *testing.T) {
 	srv := newTestServer()
 
-	// /invite/{token} is omitted: Go's ServeMux prefers the API handler's
-	// single-segment pattern over the SPA's {token...}, so a 404 there
-	// wouldn't indicate an SPA fallback bug.
+	// /invite/{token} is omitted: ServeMux prefers the API single-segment pattern, so a 404 there proves nothing.
 	paths := []string{
 		"/",
 		"/login",
@@ -7357,9 +7273,7 @@ func TestDiscoveredHostsFilterConfiguredService(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// api.stripe.com filtered (host-only match against api.stripe.com/v1/*),
-	// api.github.com and raw.github.com filtered (wildcard *.github.com),
-	// only hooks.slack.com remains
+	// Only hooks.slack.com remains; the stripe and github hosts are filtered.
 	if resp.Total != 1 {
 		t.Fatalf("expected total=1, got %d (hosts: %+v)", resp.Total, resp.Hosts)
 	}
@@ -7524,10 +7438,7 @@ func TestDiscoveredHostsNoBrokerConfig(t *testing.T) {
 	}
 }
 
-// TestCredentialProvider_LateBindsDynamicResolver reproduces the MITM-ordering
-// bug: attachMITMIfEnabled captures the provider before Start() builds
-// s.infisicalDynamic. The captured provider must observe the resolver once it
-// is assigned, so dynamic secrets resolve through the proxy like static ones.
+// TestCredentialProvider_LateBindsDynamicResolver pins that a provider captured before Start() sees the later-assigned resolver.
 func TestCredentialProvider_LateBindsDynamicResolver(t *testing.T) {
 	srv := newTestServer()
 
@@ -7553,10 +7464,7 @@ func TestCredentialProvider_LateBindsDynamicResolver(t *testing.T) {
 		t.Fatalf("pre-bind: expected ok=false err=nil, got ok=%v err=%v", ok, err)
 	}
 
-	// Start() later assigns the resolver; the already-captured provider must
-	// reach it. A configured resolver over a non-Infisical vault still returns
-	// ok=false, but it now flows through s.infisicalDynamic rather than the nil
-	// short-circuit, proving the live read.
+	// The captured provider must reach the resolver assigned by Start().
 	srv.infisicalDynamic = infisical.NewDynamicResolver(srv.store, nil, slog.New(slog.DiscardHandler))
 	if _, ok, err := p.Dynamic.Resolve(context.Background(), "v1", "SOME_KEY"); ok || err != nil {
 		t.Fatalf("post-bind: expected ok=false err=nil, got ok=%v err=%v", ok, err)

@@ -9,10 +9,7 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// LoginOnce logs in once with the projected service-account token named by
-// VAULT_JWT_MOUNT, VAULT_JWT_ROLE and VAULT_JWT_TOKEN_FILE, for a short job
-// that needs no refresh loop. done revokes the login; call it when the job
-// ends.
+// LoginOnce logs in once from the projected token named by VAULT_JWT_MOUNT, VAULT_JWT_ROLE and VAULT_JWT_TOKEN_FILE; done revokes the login.
 func LoginOnce(ctx context.Context, getenv func(string) string) (logical *vaultapi.Logical, done func(), err error) {
 	if getenv("VAULT_ADDR") == "" {
 		return nil, nil, ErrNotConfigured

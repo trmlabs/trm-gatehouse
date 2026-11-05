@@ -7,13 +7,7 @@ import (
 	"net/http"
 )
 
-// MaterializeRequestBody buffers body fully into memory and returns a
-// re-readable copy plus its byte length, so the outbound request can carry
-// a real Content-Length instead of falling back to chunked transfer (some
-// upstreams reject chunked uploads). Callers must wrap body in
-// http.MaxBytesReader before calling so a hostile client cannot exhaust
-// memory; size-cap violations surface as *http.MaxBytesError. Returns
-// http.NoBody for empty/nil input.
+// MaterializeRequestBody buffers body so the request has a real Content-Length; callers must cap it with http.MaxBytesReader first.
 func MaterializeRequestBody(body io.ReadCloser) (io.ReadCloser, int64, error) {
 	if body == nil || body == http.NoBody {
 		return http.NoBody, 0, nil
@@ -30,9 +24,7 @@ func MaterializeRequestBody(body io.ReadCloser) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
-// RequestBodyErrorCode maps a MaterializeRequestBody error to the proxy
-// status + error_code pair: *http.MaxBytesError → 413/request_too_large,
-// any other read failure → 400/request_read_error.
+// RequestBodyErrorCode maps a MaterializeRequestBody error to a proxy status and error code.
 func RequestBodyErrorCode(err error) (status int, code string) {
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {

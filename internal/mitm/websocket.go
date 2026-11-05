@@ -149,9 +149,7 @@ func (p *Proxy) forwardWebSocket(
 	pipeWebSocket(clientConn, clientBuf.Reader, upstreamConn, upstreamReader, wsSubs)
 }
 
-// Without an idle deadline, a stalled or abandoned WebSocket would pin a
-// goroutine pair and a TLS connection indefinitely. Real-time APIs and
-// keepalive pings comfortably fit inside this window.
+// Without an idle deadline a stalled WebSocket would pin goroutines and a TLS connection forever.
 const wsIdleTimeout = 10 * time.Minute
 
 func (p *Proxy) dialWebSocketUpstream(
@@ -169,9 +167,7 @@ func (p *Proxy) dialWebSocketUpstream(
 		return nil, nil, nil, err
 	}
 
-	// Plain-HTTP upstream (ws://): skip TLS, deadlines apply directly to
-	// rawConn. pipeWebSocket/copyWithIdleTimeout downstream use only
-	// net.Conn methods, so a *net.TCPConn substitutes for *tls.Conn.
+	// Plain-HTTP upstream: skip TLS; downstream code only needs net.Conn methods.
 	if outReq.URL.Scheme == "http" {
 		headerTimeout := p.responseHeaderTimeout()
 		_ = rawConn.SetDeadline(time.Now().Add(headerTimeout))
@@ -326,11 +322,7 @@ func pipeWebSocket(clientConn net.Conn, clientReader *bufio.Reader, upstreamConn
 	<-done
 }
 
-// copyWithIdleTimeout streams src→dst, refreshing srcConn's read deadline
-// on each iteration so a silent connection trips the deadline rather than
-// blocking forever. srcConn must be the underlying net.Conn that src
-// reads from (directly or via a bufio.Reader); the deadline only applies
-// to actual socket reads, not to bytes already buffered.
+// copyWithIdleTimeout streams src to dst, refreshing srcConn's read deadline; srcConn must be the net.Conn src reads from.
 func copyWithIdleTimeout(dst io.Writer, src io.Reader, srcConn net.Conn, idle time.Duration) {
 	buf := make([]byte, 32*1024)
 	for {
@@ -347,9 +339,7 @@ func copyWithIdleTimeout(dst io.Writer, src io.Reader, srcConn net.Conn, idle ti
 	}
 }
 
-// maxWSSubstitutionPayload caps the frame payload size we'll buffer for
-// substitution. Frames larger than this are streamed through without
-// substitution. Auth payloads are tiny; this prevents memory exhaustion.
+// maxWSSubstitutionPayload caps buffered frame size; larger frames stream through unsubstituted.
 const maxWSSubstitutionPayload = 1 << 20 // 1 MB
 
 // WebSocket frame opcodes (RFC 6455 §11.8).
@@ -374,10 +364,7 @@ func filterWebSocketSubs(subs []brokercore.ResolvedSubstitution) []brokercore.Re
 	return out
 }
 
-// copyWSFramesWithSubstitution reads WebSocket frames from src, applies
-// placeholder substitutions to unfragmented text frames, and writes them
-// to dst. Non-text, compressed (RSV1), fragmented, and oversized frames
-// are forwarded without modification.
+// copyWSFramesWithSubstitution substitutes in unfragmented text frames; all other frames pass through unmodified.
 func copyWSFramesWithSubstitution(dst io.Writer, src io.Reader, srcConn net.Conn, idle time.Duration, subs []brokercore.ResolvedSubstitution) {
 	r := bufio.NewReaderSize(src, 32*1024)
 	for {

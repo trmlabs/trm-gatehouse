@@ -18,7 +18,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// Synthetic test keys, generated per run; never real credentials.
+// Synthetic test keys, generated per run.
 type testKeys struct {
 	mu       sync.Mutex
 	versions map[int][]byte
@@ -258,8 +258,7 @@ func TestVerifierDetectsTampering(t *testing.T) {
 		return join(lines)
 	}
 	key1, _ := f.keys.lookup(1)
-	// A compromised broker holds the HMAC key: it rewrites row 5 and re-links
-	// every later row, but cannot re-sign the checkpoint covering them.
+	// A holder of the HMAC key can rewrite and re-link rows but cannot re-sign the checkpoint.
 	rewritten := func() string {
 		lines := append([]string(nil), clean[:5]...)
 		prev := parsed[4].MAC
@@ -353,8 +352,7 @@ func TestVerifierReadsCloudLoggingEntries(t *testing.T) {
 	}
 }
 
-// Transit down: rows keep flowing and each failure is recorded in the chain,
-// but new sessions are refused once the grace period passes unsigned.
+// With Transit down, failures are recorded and new sessions are refused after the grace period.
 func TestTransitOutageRefusesAdmissionAfterGrace(t *testing.T) {
 	f := newFixture(t)
 	f.signer.setDown(true)
@@ -491,8 +489,7 @@ func TestSortBySeqAcceptsShuffledExportButNotEdits(t *testing.T) {
 	}
 }
 
-// threeBoots writes boots 1 to 3 of one replica, each with a session and a
-// checkpoint, and returns each boot's lines.
+// threeBoots writes boots 1 to 3, each with a session and a checkpoint, and returns each boot's lines.
 func threeBoots(t *testing.T) (*fixture, [][]string) {
 	t.Helper()
 	f := newFixture(t)
@@ -533,8 +530,7 @@ func TestBootsLinkToTheirPredecessor(t *testing.T) {
 	}
 }
 
-// Deleting a whole boot is detected, unless it predates the export window and
-// the verifier is told the history is partial.
+// Deleting a boot is detected unless it predates the export and PartialHistory is set.
 func TestVerifierDetectsMissingBoot(t *testing.T) {
 	f, boots := threeBoots(t)
 	report := verify(t, f.verifier(), joinBoots(boots[0], boots[2]))
@@ -554,8 +550,7 @@ func TestVerifierDetectsMissingBoot(t *testing.T) {
 	}
 }
 
-// Cutting a boot's tail back past the checkpoint its successor recorded is
-// detected even though the remaining rows chain correctly.
+// Cutting a boot's tail past its successor's recorded checkpoint is detected.
 func TestVerifierDetectsTruncatedTailAcrossBoots(t *testing.T) {
 	f, boots := threeBoots(t)
 	truncated := boots[0][:len(boots[0])-1] // drop boot 1's final checkpoint
@@ -567,8 +562,7 @@ func TestVerifierDetectsTruncatedTailAcrossBoots(t *testing.T) {
 	}
 }
 
-// A broker holding the HMAC key cannot re-point a boot at a different
-// predecessor checkpoint.
+// A holder of the HMAC key cannot re-point a boot at a different predecessor checkpoint.
 func TestVerifierDetectsForgedBootLink(t *testing.T) {
 	f, boots := threeBoots(t)
 	start := rows(t, boots[1][0])[0]
@@ -588,8 +582,7 @@ func TestVerifierDetectsForgedBootLink(t *testing.T) {
 	}
 }
 
-// A checkpoint that cannot be persisted does not count: it is recorded, and
-// admission closes once the grace period passes.
+// An unpersisted checkpoint does not count: it is recorded and admission closes after the grace period.
 func TestCheckpointPersistenceFailureCountsAsMissed(t *testing.T) {
 	f := newFixture(t)
 	f.boots.mu.Lock()
@@ -618,8 +611,7 @@ func (f *fixture) heads() []Head {
 	return heads
 }
 
-// The newest boot has no successor to link to it, so only the store's head
-// shows that it was deleted or cut back to an earlier checkpoint.
+// Only the store's head shows that the newest boot was deleted or cut back.
 func TestVerifierChecksEachReplicaAgainstTheStoreHead(t *testing.T) {
 	f, boots := threeBoots(t)
 	checked := f.verifier()
@@ -648,8 +640,7 @@ func TestVerifierChecksEachReplicaAgainstTheStoreHead(t *testing.T) {
 	}
 }
 
-// Every boot signs a checkpoint as it starts, so a chain with none is
-// unsigned however short, and even with the duration check off.
+// A chain with no checkpoint is unsigned however short, even with the duration check off.
 func TestVerifierReportsABootWithNoCheckpoint(t *testing.T) {
 	f := newFixture(t)
 	f.session(t, 1)
@@ -661,8 +652,7 @@ func TestVerifierReportsABootWithNoCheckpoint(t *testing.T) {
 	}
 }
 
-// A boot that starts under an older key than its predecessor ended on is
-// what a holder of a retired key would write.
+// A boot starting under an older key than its predecessor ended on is a retired-key forgery.
 func TestVerifierRejectsAKeyDowngradeAcrossBoots(t *testing.T) {
 	f := newFixture(t)
 	f.session(t, 1)
@@ -686,8 +676,7 @@ type brokenWriter struct{}
 
 func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("sink gone") }
 
-// A failed write stops the chain for good and says so, so open sessions can
-// be ended rather than run unaudited.
+// A failed write stops the chain for good so open sessions end rather than run unaudited.
 func TestChainSignalsFailure(t *testing.T) {
 	f := newFixture(t)
 	select {

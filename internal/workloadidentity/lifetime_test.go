@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// The last good keys stand through failed refetches for at most a day, in
-// every trust domain.
+// The last good keys stand through failed refetches for at most a day, in every trust domain.
 func TestLastGoodKeysExpireAfterADay(t *testing.T) {
 	f := setupPool(t)
 	rc := newRemoteCluster(t)
@@ -47,8 +46,7 @@ func TestLastGoodKeysExpireAfterADay(t *testing.T) {
 	}
 }
 
-// Each trust domain bounds token lifetime by its own limit and requires the
-// Pod claim.
+// Each trust domain bounds token lifetime by its own limit and requires the Pod claim.
 func TestEachTrustDomainBoundsItsTokens(t *testing.T) {
 	f := setupPool(t)
 	rc := newRemoteCluster(t)

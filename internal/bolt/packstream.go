@@ -1,7 +1,4 @@
-// Package bolt reads and writes the Bolt protocol that Neo4j-compatible graph
-// databases such as Memgraph speak: the version handshake, chunked messages
-// and the PackStream values inside them. It holds no policy; the database
-// broker and the worker sidecar decide what to do with each message.
+// Package bolt reads and writes the Bolt protocol: version handshake, chunked messages and PackStream values. It holds no policy.
 package bolt
 
 import (
@@ -11,8 +8,7 @@ import (
 	"math"
 )
 
-// Structure is a PackStream structure: a message (HELLO, RUN, SUCCESS, ...)
-// or a value such as a node, a date or a point.
+// Structure is a PackStream structure: a message or a value such as a node.
 type Structure struct {
 	Tag    byte
 	Fields []any
@@ -21,8 +17,7 @@ type Structure struct {
 // Values decode to nil, bool, int64, float64, string, []byte, []any,
 // map[string]any or *Structure, and only those encode.
 
-// maxDepth bounds nesting so a hostile value cannot exhaust the stack. A
-// message's size is bounded by its reader; this bounds only recursion.
+// maxDepth bounds nesting so a hostile value cannot exhaust the stack.
 const maxDepth = 256
 
 var (
@@ -72,8 +67,7 @@ func (d *decoder) size(n int) (int, error) {
 		return int(binary.BigEndian.Uint16(b)), nil
 	default:
 		v := binary.BigEndian.Uint32(b)
-		// Every item takes at least one byte, so a count past what is left is
-		// a lie, refused before any allocation.
+		// Every item takes at least one byte, so a count past what is left is refused before any allocation.
 		if uint64(v) > uint64(len(d.b)-d.i) {
 			return 0, errTruncated
 		}

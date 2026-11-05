@@ -80,9 +80,7 @@ var authSessionsRevokeCmd = &cobra.Command{
 	},
 }
 
-// shortTime renders an RFC3339 timestamp as "2006-01-02 15:04" for table
-// readability, matching cmd/user_invite.go and cmd/vaults.go. Falls back
-// to the raw string if it doesn't parse.
+// shortTime renders an RFC3339 timestamp as "2006-01-02 15:04", or the raw string if it does not parse.
 func shortTime(rfc3339 string) string {
 	if rfc3339 == "" {
 		return ""

@@ -10,8 +10,6 @@ import (
 
 func TestProxyActivity(t *testing.T) { checkProxyActivity(t, openTestDB(t)) }
 
-// The latest time wins, a scope reads only its own rows, paging walks every
-// row once, and pruning drops only old rows.
 func checkProxyActivity(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -25,7 +23,7 @@ func checkProxyActivity(t *testing.T, s *SQLStore) {
 	if _, _, err := s.RecordProxyActivity(ctx, scope, "r1", rows, 100000, 100, 0); err != nil {
 		t.Fatal(err)
 	}
-	// An older report never moves a time back; a newer one moves it forward.
+	// An older report never moves a time back.
 	if _, _, err := s.RecordProxyActivity(ctx, scope, "r1", []ProxyActivity{{Namespace: "developers", OwnerUID: "sb-00000", LastSeen: now.Add(-time.Hour)},
 		{Namespace: "developers", OwnerUID: "sb-00002", LastSeen: now.Add(time.Second)}}, 100000, 100, 0); err != nil {
 		t.Fatal(err)
@@ -75,9 +73,7 @@ func TestProxyActivityHistoryAndCeiling(t *testing.T) {
 	checkProxyActivityHistoryAndCeiling(t, openTestDB(t))
 }
 
-// A scope's history starts at its first report, even an empty one, and does
-// not move; a report that would take a scope past its row ceiling is refused
-// whole, while updates to rows it holds still land.
+// History starts at the first report, even an empty one; a report past the row ceiling is refused whole, but updates to held rows land.
 func checkProxyActivityHistoryAndCeiling(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -126,12 +122,7 @@ func checkProxyActivityHistoryAndCeiling(t *testing.T, s *SQLStore) {
 
 func TestProxyActivitySequence(t *testing.T) { checkProxyActivitySequence(t, openTestDB(t)) }
 
-// Each accepted report takes its replica stream's next sequence. A report
-// carrying an acknowledged sequence its stream no longer reaches (a
-// restore), or one for a stream the store lost, is a loss and restarts the
-// history; one its stream still reaches, as after a broker restart with
-// nothing lost, changes nothing. Another replica's reports never advance a
-// stream, so a busy replica cannot overtake an idle one's loss.
+// An acknowledged sequence the stream no longer reaches, or a lost stream, restarts the history; a broker restart with nothing lost changes nothing.
 func checkProxyActivitySequence(t *testing.T, s *SQLStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -174,9 +165,7 @@ func checkProxyActivitySequence(t *testing.T, s *SQLStore) {
 	if seq, lost := record("aaaa0001", 2); seq != 3 || lost || !history().Equal(old) {
 		t.Fatalf("after a broker restart: %d %v", seq, lost)
 	}
-	// A restore to when replica A's stream stood at 1 and B's at 0. B is busy
-	// and reports ten times before A reports again: it cannot overtake A's
-	// loss, since it advances only its own stream.
+	// After a restore, a busy replica B cannot overtake A's loss: it advances only its own stream.
 	exec(`UPDATE proxy_activity_stream SET seq = 1 WHERE scope = ? AND replica = 'aaaa0001'`)
 	exec(`DELETE FROM proxy_activity_stream WHERE scope = ? AND replica = 'bbbb0002'`)
 	acked := int64(0)
@@ -198,8 +187,7 @@ func checkProxyActivitySequence(t *testing.T, s *SQLStore) {
 	if restarted := history(); restarted.Before(before) {
 		t.Fatalf("the history did not restart: %v", restarted)
 	}
-	// A stream the store lost entirely while its replica holds an
-	// acknowledgment.
+	// A stream the store lost entirely while its replica holds an acknowledgment.
 	exec(`DELETE FROM proxy_activity_stream WHERE scope = ? AND replica = 'bbbb0002'`)
 	if seq, lost := record("bbbb0002", 10); seq != 1 || !lost {
 		t.Fatalf("stream lost: %d %v, want a loss", seq, lost)
@@ -228,9 +216,7 @@ func checkProxyActivitySequence(t *testing.T, s *SQLStore) {
 
 func TestProxyActivityStreamCeiling(t *testing.T) { checkProxyActivityStreamCeiling(t, openTestDB(t)) }
 
-// A binding starts at most maxStreams replica streams: a report that would
-// start one more is refused whole and writes nothing, while the streams it
-// holds go on reporting, and another binding is not affected.
+// A report starting more than maxStreams streams is refused whole; held streams keep reporting and other bindings are unaffected.
 func checkProxyActivityStreamCeiling(t *testing.T, s *SQLStore) {
 	ctx := context.Background()
 	scope := "td/stream-ceiling/" + time.Now().Format("150405.000000000")

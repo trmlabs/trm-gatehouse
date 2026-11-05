@@ -11,11 +11,8 @@ import (
 
 var errProxyHeader = errors.New("invalid PROXY header")
 
-// ReadProxyV1 reads one PROXY protocol v1 header from a connection made by a
-// trusted loopback TLS terminator (stunnel's protocol = proxy) and returns the
-// original client address. The caller must require a loopback remote address
-// before trusting it. It reads byte by byte so no client protocol bytes are
-// consumed past the header.
+// ReadProxyV1 reads one PROXY v1 header from a loopback TLS terminator and returns the client address.
+// It reads byte by byte so nothing past the header is consumed.
 func ReadProxyV1(r io.Reader, remote net.Addr) (netip.Addr, error) {
 	tcp, ok := remote.(*net.TCPAddr)
 	if !ok || !tcp.IP.IsLoopback() {
@@ -28,8 +25,7 @@ func ReadProxyV1(r io.Reader, remote net.Addr) (netip.Addr, error) {
 			return netip.Addr{}, errProxyHeader
 		}
 		line = append(line, one[0])
-		// Fail fast on anything that is not a PROXY header, such as a client
-		// protocol message sent straight to the listener.
+		// Fail fast on anything that is not a PROXY header.
 		if n := len(line); n <= 6 && line[n-1] != "PROXY "[n-1] {
 			return netip.Addr{}, errProxyHeader
 		}

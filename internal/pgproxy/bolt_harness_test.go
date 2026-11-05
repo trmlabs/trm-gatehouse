@@ -23,9 +23,8 @@ type boltTestClient struct {
 	v    bolt.Version
 }
 
-// dialBoltTest opens a Bolt session as a driver would: handshake proposing
-// versions, HELLO (with auth before 5.1) and LOGON after. It returns the
-// client and the final sign-in answer.
+// dialBoltTest opens a Bolt session as a driver would: handshake proposing versions, HELLO (with auth before
+// 5.1) and LOGON after.
 func dialBoltTest(t *testing.T, addr string, proposals []byte, principal, credential string) (*boltTestClient, *bolt.Structure) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)

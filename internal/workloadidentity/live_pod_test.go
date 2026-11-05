@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // An admitted Pod counts as live only while it is the same Running Pod with its worker container running and its run annotation intact.
@@ -74,6 +75,27 @@ func TestPodRunningReportsATransientReadFailure(t *testing.T) {
 		if live, err := f.r.PodRunning(context.Background(), scope.Pod, "bc-1"); live || err == nil {
 			t.Errorf("status %d: live %v, err %v; want an error", status, live, err)
 		}
+	}
+}
+
+// A pool Pod read or grant the broker could not complete is retryable; a Pod the API says is gone or unreadable stays refused.
+func TestAttestUnfinishedChecksAreRetryable(t *testing.T) {
+	f := setupPool(t)
+	for status, reason := range map[int]string{500: "pod_lookup_unavailable", 503: "pod_lookup_unavailable", 429: "pod_lookup_unavailable", 404: "pod_unreadable", 403: "pod_unreadable"} {
+		f.podStatus = status
+		_, err := f.r.Attest(context.Background(), f.token(f.c), workerIP)
+		if brokercore.DenialReason(err) != reason || brokercore.DenialUnavailable(err) != (reason == "pod_lookup_unavailable") {
+			t.Errorf("Pod read %d: %v", status, err)
+		}
+	}
+	f.podStatus = 200
+	f.r.store = &fakeStore{status: "active", role: "proxy", err: &pgconn.PgError{Code: "08006"}}
+	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); brokercore.DenialReason(err) != "store_unavailable" || !brokercore.DenialUnavailable(err) {
+		t.Errorf("store outage: %v", err)
+	}
+	f.r.store = &fakeStore{status: "revoked", role: "proxy"}
+	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err == nil || brokercore.DenialUnavailable(err) {
+		t.Errorf("revoked agent: %v", err)
 	}
 }
 

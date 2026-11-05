@@ -34,15 +34,12 @@ func pemCertificate(t *testing.T, tmpl *x509.Certificate, parent *x509.Certifica
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), cert, key
 }
 
-// A database entry may pin its CA and name: the CA must be PEM certificates
-// that are CAs or self-signed, and both need verify-full.
 func TestCatalogDatabasePinnedCA(t *testing.T) {
 	hour := time.Now().Add(time.Hour)
 	caPEM, ca, caKey := pemCertificate(t, &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "cluster-ca"},
 		NotAfter: hour, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}, nil, nil)
 	leafPEM, _, _ := pemCertificate(t, &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "db"},
 		NotAfter: hour, DNSNames: []string{"db.example.com"}}, ca, caKey)
-	// Shaped like Citus's own: self-signed, no extensions, zero validity.
 	citusPEM, _, _ := pemCertificate(t, &x509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "citus-auto-ssl"}}, nil, nil)
 
 	host := "p.abc.db.postgresbridge.com"
@@ -89,12 +86,10 @@ func TestCatalogDatabasePinnedCA(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// Neither the PEM text nor its decoded value ("secret") may be echoed.
 	if err := entry(map[string]any{"ca": "-----BEGIN PRIVATE KEY-----\nc2VjcmV0\n-----END PRIVATE KEY-----\n"}); err == nil ||
 		strings.Contains(err.Error(), "c2VjcmV0") || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("a private key must be refused without echoing it: %v", err)
 	}
-	// The test harness's plaintext database may not carry a pin it never checks.
 	plaintextDatabases.Store(true)
 	t.Cleanup(func() { plaintextDatabases.Store(false) })
 	host = "fixture-db.gatehouse.svc.cluster.local"

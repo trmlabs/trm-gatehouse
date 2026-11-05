@@ -13,9 +13,7 @@ const (
 	DefaultPostgresPort = 14323
 )
 
-// defaultPort returns the PORT env var (if set and valid), otherwise DefaultPort.
-// This lets PaaS platforms like Fly.io, Cloud Run, and Heroku inject their
-// preferred port without requiring --port in the CMD.
+// defaultPort returns the PORT env var if valid, else DefaultPort, so PaaS platforms can inject it.
 func defaultPort() int {
 	if v := os.Getenv("PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil && p > 0 && p <= 65535 {

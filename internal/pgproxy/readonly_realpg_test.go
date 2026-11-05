@@ -2,10 +2,8 @@
 
 package pgproxy
 
-// Read-only logins against a real PostgreSQL. Requires AV_TEST_PG_POOL_ADMIN,
-// an admin DSN for a disposable server, as the pooled tests do. The test
-// creates a login that can read but holds the TEMP privilege PUBLIC has by
-// default, and proves the broker, not the database, refuses temporary objects.
+// Read-only logins against a real PostgreSQL. Requires AV_TEST_PG_POOL_ADMIN, an admin DSN for a disposable
+// server, as the pooled tests do.
 
 import (
 	"context"
@@ -179,9 +177,8 @@ func TestRealPostgres_ReadOnlyLoginRefusesTemporaryObjects(t *testing.T) {
 		}
 	})
 
-	// Read-write pooled: an encoding change is refused, and one the classifier
-	// cannot see (set_config with a computed name) ends the session when the
-	// server reports it, before the next statement is read.
+	// Read-write pooled: an encoding change is refused, and one the classifier cannot see (set_config with a
+	// computed name) ends the session when the server reports it, before the next statement is read.
 	t.Run("read-write pooled", func(t *testing.T) {
 		addr := broker(false, &PoolOptions{QueueFactor: 10})
 		conn := connect(addr)
@@ -198,10 +195,8 @@ func TestRealPostgres_ReadOnlyLoginRefusesTemporaryObjects(t *testing.T) {
 		if err := admin.QueryRow(ctx, "SELECT count(*) FROM pg_db_role_setting WHERE setrole = (SELECT oid FROM pg_roles WHERE rolname = $1)", role).Scan(&defaults); err != nil || defaults != 0 {
 			t.Fatalf("role defaults %d %v", defaults, err)
 		}
-		// Pipelined: the change and a statement hidden from the broker's
-		// lexer arrive together. The second is held until the first is
-		// answered, and the answer's ParameterStatus ends the session, so
-		// the hidden ALTER ROLE never runs.
+		// Pipelined: the change and a statement hidden from the broker's lexer arrive together.
+		// The second is held until the first is answered, and the answer's ParameterStatus ends the session.
 		raw := openAgentSession(t, addr, "agent-token", "app")
 		raw.fe.Send(&pgproto3.Query{String: "SELECT set_config('standard_conforming_' || 'strings', 'off', false)"})
 		raw.fe.Send(&pgproto3.Query{String: `SELECT 'x\' , ' ; ALTER ROLE CURRENT_USER SET work_mem = 7777; --'`})

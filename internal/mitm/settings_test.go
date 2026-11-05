@@ -51,6 +51,9 @@ func newSettingsFixture(t *testing.T) *settingsFixture {
 	}
 	f := &settingsFixture{audit: &adapterAudit{}}
 	pods := &fakeSessionResolver{resolve: func(token, _ string) (*brokercore.ProxyScope, error) {
+		if token == "store-down" {
+			return nil, brokercore.Unavailable("store_unavailable")
+		}
 		parts := strings.Split(token, "/")
 		if len(parts) != 3 {
 			return nil, brokercore.ErrInvalidSession
@@ -142,6 +145,27 @@ func TestSettingsRefusalsAreBare(t *testing.T) {
 		if row.Event != auditchain.EventDenied || row.Decision != c.decision || row.Outcome != "refused" || row.Operation != "automation.settings" || row.Settings != "" {
 			t.Errorf("%s: row %+v", c.name, row)
 		}
+	}
+}
+
+// A Pod check the broker could not complete is a 503 with Retry-After, which the sidecar retries, and its row says the broker was unavailable.
+func TestSettingsUnfinishedIdentityCheckIsRetryable(t *testing.T) {
+	f := newSettingsFixture(t)
+	r, err := http.NewRequest(http.MethodGet, "http://"+f.proxy.Host+httpcatalog.SettingsPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Proxy-Authorization", "Bearer store-down")
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") != "20" {
+		t.Fatalf("sidecar saw %d Retry-After %q", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if row := f.audit.last(); row.Event != auditchain.EventDenied || row.Outcome != "broker_unavailable" || row.Decision != "identity_store_unavailable" || row.Status != 503 {
+		t.Fatalf("row %+v", row)
 	}
 }
 

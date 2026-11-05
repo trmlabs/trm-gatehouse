@@ -10,9 +10,7 @@ import (
 	"golang.org/x/term"
 )
 
-// defaultDeviceLabel returns os.Hostname() so a login from a typical
-// workstation is recognizable in `auth sessions list`. Falls back to "cli"
-// if the OS refuses to give us a hostname.
+// defaultDeviceLabel returns the hostname, or "cli" if it is unavailable.
 func defaultDeviceLabel() string {
 	h, err := os.Hostname()
 	if err != nil || strings.TrimSpace(h) == "" {

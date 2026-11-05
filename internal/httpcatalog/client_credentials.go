@@ -13,25 +13,15 @@ import (
 	"time"
 )
 
-// ClientCredentialsBinding, header entries only, makes the broker mint the
-// entry's key instead of reading it: an OAuth 2.0 access token from the
-// client-credentials grant (RFC 6749 section 4.4), for an API that takes only
-// short-lived tokens, such as one behind Auth0 machine-to-machine
-// applications. The client's ID and secret come from Vault and go only to
-// TokenHost. The worker sends the placeholder as its Bearer token and never
-// holds the client or the token.
+// ClientCredentialsBinding, header entries only, makes the broker mint the key as an OAuth 2.0 client-credentials access token; the client ID and secret come from Vault and go only to TokenHost, and the worker never holds the client or the token.
 type ClientCredentialsBinding struct {
-	// TokenHost is the authorization server's exact DNS name. The broker
-	// posts to https://TokenHost/TokenPath on port 443 and nowhere else.
+	// TokenHost is the authorization server's exact DNS name; the broker posts only to https://TokenHost/TokenPath on port 443.
 	TokenHost string `json:"tokenHost"`
-	// TokenPath defaults to /oauth/token.
 	TokenPath string `json:"tokenPath,omitempty"`
-	// Audience, when set, is sent as the audience parameter, which Auth0
-	// uses to name the API a token is for. Scope, when set, is sent as scope.
+	// Audience and Scope, when set, are sent as the audience and scope parameters.
 	Audience string `json:"audience,omitempty"`
 	Scope    string `json:"scope,omitempty"`
-	// Client is a KV version 2 secret with fields client_id and client_secret.
-	Client KVRef `json:"client"`
+	Client   KVRef  `json:"client"`
 }
 
 func (e *Entry) normalizeClientCredentials() error {
@@ -66,8 +56,6 @@ func (e *Entry) normalizeClientCredentials() error {
 	return nil
 }
 
-// HasTokenHost reports whether host is the token host of a
-// clientCredentials entry: where the broker's own token requests may go.
 func (c Catalog) HasTokenHost(host string) bool {
 	host = strings.ToLower(host)
 	for _, e := range c.entries {
@@ -78,12 +66,7 @@ func (c Catalog) HasTokenHost(host string) bool {
 	return false
 }
 
-// ClientTokens mints the access tokens of clientCredentials entries and keeps
-// each until a quarter of its life remains. It reads the client from Vault
-// through Keys on every call, so a deleted client is refused, and a rotated
-// one used, as soon as Keys sees it: a new KV version mints a new token. The
-// client is sent only in the token request, which never follows a redirect;
-// the token is never logged and the client is never cached here.
+// ClientTokens mints tokens and keeps each until a quarter of its life remains. It reads the client through Keys on every call, so a deleted client is refused and a rotated one used; the client is sent only in the token request, which never follows a redirect.
 type ClientTokens struct {
 	Keys interface {
 		Get(context.Context, KeyRef) (Secret, error)
@@ -95,7 +78,6 @@ type ClientTokens struct {
 	states map[string]*clientState
 }
 
-// clientState is one entry's token and its minting.
 type clientState struct {
 	mint    sync.Mutex // one mint at a time
 	token   Secret     // the access token; Version is the client's KV version
@@ -106,10 +88,7 @@ type clientState struct {
 
 var ErrClientToken = errors.New("client-credentials token unavailable")
 
-// remintInterval keeps a token a vendor refused for at least this long: a
-// worker can make the API refuse on purpose, and token issuers count and
-// limit the tokens each client mints. failedMintInterval is how long a failed
-// mint keeps refusing before the next attempt.
+// remintInterval keeps a refused token at least this long, since issuers limit tokens per client; failedMintInterval is how long a failed mint keeps refusing.
 const (
 	remintInterval     = time.Minute
 	failedMintInterval = 10 * time.Second
@@ -147,10 +126,7 @@ func (t *ClientTokens) state(e *Entry) *clientState {
 	return st
 }
 
-// Token returns the entry's current access token, minting one when there is
-// none, it is near its end, or the client has a new KV version. Concurrent
-// callers share one mint. A Vault error is returned as Keys gave it, so it is
-// refused like a header key's.
+// Token returns the current access token, minting when none, near its end, or the client has a new KV version; concurrent callers share one mint.
 func (t *ClientTokens) Token(ctx context.Context, e *Entry) (Secret, error) {
 	if e == nil || e.ClientCredentials == nil || t.Keys == nil || t.Client == nil {
 		return Secret{}, ErrClientToken
@@ -197,8 +173,7 @@ func (t *ClientTokens) mint(ctx context.Context, c *ClientCredentialsBinding, id
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	// A 307 or 308 would re-send the body, the client secret included, to
-	// wherever it points.
+	// A 307 or 308 would re-send the body, client secret included, to wherever it points.
 	client := *t.Client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
@@ -208,7 +183,6 @@ func (t *ClientTokens) mint(ctx context.Context, c *ClientCredentialsBinding, id
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil || resp.StatusCode != http.StatusOK {
-		// The issuer's error text is not passed on.
 		return "", 0, ErrClientToken
 	}
 	var out struct {
@@ -222,8 +196,6 @@ func (t *ClientTokens) mint(ctx context.Context, c *ClientCredentialsBinding, id
 	return out.AccessToken, time.Duration(out.ExpiresIn) * time.Second, nil
 }
 
-// headerSafe reports whether a minted token may go in a header: printable
-// ASCII without spaces, at most maxKeyBytes, as for a stored key.
 func headerSafe(v string) bool {
 	if v == "" || len(v) > maxKeyBytes {
 		return false
@@ -236,8 +208,6 @@ func headerSafe(v string) bool {
 	return true
 }
 
-// Invalidate drops an entry's token after the API refused it, unless the
-// token is younger than remintInterval.
 func (t *ClientTokens) Invalidate(e *Entry) {
 	if e == nil || e.ClientCredentials == nil {
 		return
@@ -251,9 +221,7 @@ func (t *ClientTokens) Invalidate(e *Entry) {
 	st.token = Secret{}
 }
 
-// Prune drops the token of every entry the catalog no longer holds, or holds
-// with different client-credentials settings, so a removed entry's token
-// does not stay in memory until the broker restarts.
+// Prune drops the token of every entry the catalog no longer holds or holds with different settings.
 func (t *ClientTokens) Prune(c Catalog) {
 	keep := map[string]bool{}
 	for i := range c.entries {

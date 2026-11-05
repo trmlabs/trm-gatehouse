@@ -31,8 +31,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// nodeID builds a current-format GitHub node ID: prefix and base64url
-// MessagePack [0, repository, object] with 32-bit integers.
 func nodeID(prefix string, repo, object uint32) string {
 	b := []byte{0x93, 0x00, 0xce, 0, 0, 0, 0, 0xce, 0, 0, 0, 0}
 	binary.BigEndian.PutUint32(b[3:], repo)
@@ -61,11 +59,7 @@ func TestNodeRepositoryID(t *testing.T) {
 	}
 }
 
-// graphqlFixture fronts a fake api.github.com with three repositories:
-// example-repo (ID 1000, listed with every pull request operation),
-// read-repo (2000, listed with pr.read and pr.list only) and secret-repo
-// (3000, not listed). Each token answers only for the repository it was
-// minted for, as GitHub's do, and the fake records what GitHub received.
+// graphqlFixture fronts a fake api.github.com with example-repo (1000, every pull request operation), read-repo (2000, pr.read and pr.list only) and secret-repo (3000, unlisted); each token answers only for its repository.
 type graphqlFixture struct {
 	client       *http.Client
 	port         int
@@ -114,8 +108,6 @@ var (
 	secretR    = repoNodeID(3000)
 )
 
-// repoNodeID builds a current-format GitHub repository node ID: "R_" and
-// base64url MessagePack [0, repository] with a 32-bit integer.
 func repoNodeID(repo uint32) string {
 	b := []byte{0x92, 0x00, 0xce, 0, 0, 0, 0}
 	binary.BigEndian.PutUint32(b[3:], repo)
@@ -137,8 +129,7 @@ var fakeNodes = map[string]fakeNode{
 	preview:    {"Label", "example-repo", "", "", "preview", false},
 	deployProd: {"Label", "example-repo", "", "", "deploy-prod", false},
 	otherLabel: {"Label", "read-repo", "", "", "preview", false},
-	// Its ID names example-repo, but GitHub answers with a public
-	// repository's pull request, which any token can see.
+	// Its ID names example-repo, but GitHub answers with a public repository's pull request.
 	publicPR: {"PullRequest", "public-repo", "public-repo", "cursor/pool-agent/x", "", true},
 	alicePR:  {"PullRequest", "example-repo", "example-repo", "cursor/pool-agent/alice@example.com/fix", "", false},
 	bobPR:    {"PullRequest", "example-repo", "example-repo", "cursor/pool-agent/bob@example.com/fix", "", false},
@@ -153,8 +144,6 @@ const graphqlCatalogTemplate = `{%s"entries":[{"name":"github-api","host":"examp
 	"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]},
 	{"repo":"example-org/read-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`
 
-// exampleRepo is example-repo's catalog entry with these operations; labels
-// and pull request prefixes come with the operations that need them.
 func exampleRepo(ops ...string) string {
 	ops = append([]string{"graphql"}, ops...) // every test repository opts into GraphQL
 	repo := map[string]any{"repo": "example-org/example-repo", "access": "write", "operations": ops}
@@ -189,8 +178,6 @@ func (f *graphqlFixture) use(t *testing.T, ops ...string) {
 	t.Helper()
 	pools := ""
 	if f.person {
-		// pool-agent is a person pool: a Claude runner session names who
-		// stands behind each request.
 		pools = `"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc"}],`
 	}
 	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(graphqlCatalogTemplate, pools, f.port, exampleRepo(ops...))))
@@ -204,8 +191,6 @@ func (f *graphqlFixture) use(t *testing.T, ops ...string) {
 
 func newGraphQLFixture(t *testing.T) *graphqlFixture { return newGraphQLFixtureFor(t, false) }
 
-// newGraphQLFixtureFor serves pool-agent as a person pool when person is set:
-// each request carries the runner session of "alice".
 func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 	t.Helper()
 	f := &graphqlFixture{audit: &adapterAudit{}, catalog: &swapCatalog{}, minted: map[string]string{}, contents: map[string]string{}, perms: map[string]map[string]string{}, person: person}
@@ -353,15 +338,12 @@ func newGraphQLFixtureFor(t *testing.T, person bool) *graphqlFixture {
 	return f
 }
 
-// as sends the fixture's next requests with this runner session.
 func (f *graphqlFixture) as(t *testing.T, session string) {
 	t.Helper()
 	f.client.CloseIdleConnections()
 	f.client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{SessionHeader: {session}}
 }
 
-// send makes one request through the broker, as gh would with the
-// placeholder token and its own headers.
 func (f *graphqlFixture) send(t *testing.T, method, path string, headers map[string]string, body string) (int, string) {
 	t.Helper()
 	r, _ := http.NewRequest(method, "https://example.com:"+strconv.Itoa(f.port)+path, strings.NewReader(body))
@@ -398,8 +380,6 @@ func graphqlMutation(name, input string, variables map[string]any) string {
 	return string(b)
 }
 
-// ghCommands are the recorded gh commands (httpcatalog/testdata/gh) and the
-// operations each needs.
 var ghCommands = []struct {
 	fixture string
 	needs   []string
@@ -428,9 +408,7 @@ var ghCommands = []struct {
 	{"pr-diff", []string{"pr.read"}},
 }
 
-// replay sends a recorded gh command through the broker, with the pool's own
-// pull request and the preview label as the IDs gh read. It returns the first
-// refusal's outcome, or "" when every request was served.
+// replay sends a recorded gh command through the broker and returns the first refusal's outcome, or "" when every request was served.
 func (f *graphqlFixture) replay(t *testing.T, fixture string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "httpcatalog", "testdata", "gh", fixture+".json"))
@@ -470,12 +448,10 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 		if outcome := f.replay(t, c.fixture); outcome != "" {
 			t.Errorf("%s with every operation: refused %q", c.fixture, outcome)
 		}
-		// Exactly the operations it needs are enough.
 		f.use(t, c.needs...)
 		if outcome := f.replay(t, c.fixture); outcome != "" {
 			t.Errorf("%s with %v: refused %q", c.fixture, c.needs, outcome)
 		}
-		// Without any one of them, gh is refused at that step.
 		for _, missing := range c.needs {
 			var rest []string
 			for _, op := range c.needs {
@@ -493,8 +469,6 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 		}
 		f.use(t, allPullRequestOps...)
 	}
-	// Every relayed request was the rebuilt document, for example-repo's own
-	// token, asking GitHub for IDs that name their repository.
 	for i, body := range f.relayed() {
 		if !strings.HasPrefix(body, "example-repo ") {
 			t.Fatalf("relayed with another repository's token: %s", body)
@@ -503,10 +477,7 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 			t.Fatalf("relayed without X-Github-Next-Global-ID: %s", body)
 		}
 	}
-	// Only gh pr ready's mutations (both ways) carried a token with contents
-	// write, and gh pr create's with contents read, as GitHub requires.
-	// Nested fields can reach files and history, which only a git entry
-	// grants, so no other request may.
+	// Only gh pr ready's mutations carried contents write, and gh pr create's contents read; no other request may reach files.
 	f.mu.Lock()
 	withContents := f.withContents
 	f.mu.Unlock()
@@ -532,8 +503,6 @@ func TestGitHubGraphQLServesRecordedGhCommands(t *testing.T) {
 	}
 }
 
-// A mutation acts only on a pull request the pool may write to, in a listed
-// repository that grants the operation, whatever node ID it names.
 func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 	f := newGraphQLFixture(t)
 	comment := func(id string) string {
@@ -578,8 +547,6 @@ func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("GitHub received refused requests: %v", got)
 	}
-	// The pool's own pull request, and one under the repository's prefix, go
-	// ahead; so does reading a pull request in a listed repository.
 	for _, body := range []string{comment(ownPR), comment(prefixPR), label(prefixPR, preview), read(readPR),
 		graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput", map[string]any{"pullRequestId": prefixPR}),
 		graphqlMutation("convertPullRequestToDraft", "ConvertPullRequestToDraftInput", map[string]any{"pullRequestId": prefixPR})} {
@@ -592,10 +559,7 @@ func TestGitHubGraphQLRefusesOtherTargets(t *testing.T) {
 	}
 }
 
-// gh pr create opens a pull request only as REST's pr.open does: in the
-// repository its ID names, which GitHub confirms, from a branch of that
-// repository under the pool's own push prefixes (never its pull request
-// prefixes), onto a plain branch name, with a token holding contents read.
+// gh pr create opens a pull request only as REST's pr.open does: head under the pool's push prefixes (never its pull request prefixes), base a plain branch name, token with contents read.
 func TestGitHubGraphQLOpensPullRequestsAsREST(t *testing.T) {
 	f := newGraphQLFixture(t)
 	create := func(repo, head, base string) string {
@@ -622,7 +586,6 @@ func TestGitHubGraphQLOpensPullRequestsAsREST(t *testing.T) {
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("GitHub received refused requests: %v", got)
 	}
-	// Without pr.open the repository grants no create at all.
 	f.use(t, "pr.read", "pr.list")
 	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, create(exampleR, "cursor/pool-agent/x", "main")); code != 403 || f.audit.last().Outcome != "unlisted" {
 		t.Errorf("without pr.open: %d %q", code, f.audit.last().Outcome)
@@ -639,9 +602,7 @@ func TestGitHubGraphQLOpensPullRequestsAsREST(t *testing.T) {
 	}
 }
 
-// A GraphQL write reaches a pull request under the pool's own pull request
-// prefixes (poolPullRequestPrefixes), as a REST write does, and never one
-// under another pool's list in the same entry.
+// A GraphQL write reaches a pull request under the pool's own pull request prefixes, as a REST write does, never another pool's.
 func TestGitHubGraphQLWritesHonorPoolPullRequestPrefixes(t *testing.T) {
 	f := newGraphQLFixture(t)
 	f.useRaw(t, `{"entries":[{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent","pool-other"],
@@ -655,13 +616,11 @@ func TestGitHubGraphQLWritesHonorPoolPullRequestPrefixes(t *testing.T) {
 	ready := func(id string) string {
 		return graphqlMutation("markPullRequestReadyForReview", "MarkPullRequestReadyForReviewInput", map[string]any{"pullRequestId": id})
 	}
-	// prefixPR's head, factory/fix, is under pool-agent's own list only.
 	for _, body := range []string{comment(prefixPR), ready(prefixPR)} {
 		if code, reply := f.send(t, http.MethodPost, "/graphql", nil, body); code != 200 {
 			t.Errorf("own pull request prefix: %s: %d %s %q", body, code, reply, f.audit.last().Outcome)
 		}
 	}
-	// personPR's head, person/x, is under pool-other's list.
 	for body, outcome := range map[string]string{comment(personPR): "comment_target", ready(personPR): "pull_request_target"} {
 		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, body); code != 403 || f.audit.last().Outcome != outcome {
 			t.Errorf("another pool's pull request prefix: %s: %d %q, want %q", body, code, f.audit.last().Outcome, outcome)
@@ -672,7 +631,6 @@ func TestGitHubGraphQLWritesHonorPoolPullRequestPrefixes(t *testing.T) {
 	}
 }
 
-// A lookup GitHub does not answer refuses; nothing is sent on a guess.
 func TestGitHubGraphQLLookupFailureRefuses(t *testing.T) {
 	f := newGraphQLFixture(t)
 	body := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": ownPR, "body": "x"})
@@ -691,7 +649,6 @@ func TestGitHubGraphQLLookupFailureRefuses(t *testing.T) {
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("GitHub received a request after a failed lookup: %v", got)
 	}
-	// Once GitHub answers, the request goes ahead, and the answer is kept.
 	f.mu.Lock()
 	f.failNode = false
 	f.mu.Unlock()
@@ -708,8 +665,6 @@ func TestGitHubGraphQLLookupFailureRefuses(t *testing.T) {
 	}
 }
 
-// Refusals of the request itself never reach GitHub, and other methods,
-// shapes and pools are refused as for REST.
 func TestGitHubGraphQLRefusesShapes(t *testing.T) {
 	f := newGraphQLFixture(t)
 	for _, tc := range []struct {
@@ -735,8 +690,6 @@ func TestGitHubGraphQLRefusesShapes(t *testing.T) {
 			t.Errorf("%s: %d %q, want %d %q", tc.name, code, f.audit.last().Outcome, tc.code, tc.outcome)
 		}
 	}
-	// A pool granted no github-api repository on the host gets nothing,
-	// feature detection included.
 	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
 		"pools":["another-pool"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write"}]}}]}`, f.port)))
 	if err != nil {
@@ -746,7 +699,6 @@ func TestGitHubGraphQLRefusesShapes(t *testing.T) {
 	f.catalog.c = c
 	f.catalog.mu.Unlock()
 	feature := `{"query":"query PullRequest_fields2{WorkflowRun: __type(name: \"WorkflowRun\"){fields(includeDeprecated: true){name}}}"}`
-	// (The tunnel itself is refused, so the client sees no status.)
 	if code, _ := f.send(t, "POST", "/graphql", nil, feature); code == 200 || f.audit.last().Outcome != "pool" {
 		t.Errorf("another pool's host: %d %q", code, f.audit.last().Outcome)
 	}
@@ -755,8 +707,6 @@ func TestGitHubGraphQLRefusesShapes(t *testing.T) {
 	}
 }
 
-// One listed repository GitHub cannot answer for does not stop requests for
-// the others.
 func TestGitHubGraphQLSkipsAFailedRepository(t *testing.T) {
 	f := newGraphQLFixture(t)
 	f.mu.Lock()
@@ -766,17 +716,13 @@ func TestGitHubGraphQLSkipsAFailedRepository(t *testing.T) {
 	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, string(read)); code != 200 {
 		t.Fatalf("read-repo's pull request with example-repo unreadable: %d %q", code, f.audit.last().Outcome)
 	}
-	// An ID that matches none of the readable repositories still refuses as
-	// unknown, since the unreadable one may hold it.
+	// An ID matching none of the readable repositories still refuses as unknown, since the unreadable one may hold it.
 	ghost, _ := json.Marshal(map[string]any{"query": `query($id: ID!) { node(id: $id) { ... on PullRequest { number } } }`, "variables": map[string]any{"id": ghostPR}})
 	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, string(ghost)); code != 503 || f.audit.last().Outcome != "target_lookup" {
 		t.Fatalf("unmatched ID with a repository unreadable: %d %q", code, f.audit.last().Outcome)
 	}
 }
 
-// A GraphQL row names the person behind the request, with the tier and
-// decision, exactly as a REST row for the same pool does: on a write that
-// reached GitHub, on a refusal, and on the broker's own answer.
 func TestGitHubGraphQLAuditNamesThePerson(t *testing.T) {
 	f := newGraphQLFixtureFor(t, true)
 	sameAuthorization := func(what string, want auditchain.Event) {
@@ -817,9 +763,7 @@ func TestGitHubGraphQLAuditNamesThePerson(t *testing.T) {
 	sameAuthorization("feature detection", rest)
 }
 
-// GraphQL is opt-in per repository: an entry written for REST alone (no
-// graphql operation) keeps its REST routes and gets no GraphQL at all, not
-// even the broker's feature-detection answer.
+// GraphQL is opt-in per repository: an entry with no graphql operation keeps its REST routes and gets no GraphQL, not even feature detection.
 func TestGitHubGraphQLIsOptIn(t *testing.T) {
 	f := newGraphQLFixture(t)
 	f.useRaw(t, `{"entries":[{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],
@@ -847,9 +791,7 @@ func TestGitHubGraphQLIsOptIn(t *testing.T) {
 	}
 }
 
-// A write grant reads nothing: a mutation whose payload reads pull requests
-// needs pr.read, so an entry with only pr.comment may comment but not read
-// through the comment's payload.
+// A write grant reads nothing: a mutation whose payload reads pull requests needs pr.read.
 func TestGitHubGraphQLMutationPayloadNeedsRead(t *testing.T) {
 	f := newGraphQLFixture(t)
 	f.use(t, "pr.comment")
@@ -867,10 +809,7 @@ func TestGitHubGraphQLMutationPayloadNeedsRead(t *testing.T) {
 	}
 }
 
-// The candidate filter runs authorization before any token is minted or
-// GitHub asked: an entry this request cannot use (T1, and the broker has no
-// entitlement source, so alice holds no group) gets no token and no lookup,
-// even when the node ID names its repository.
+// The candidate filter runs authorization before any token or lookup: an entry this request cannot use gets neither, even when the node ID names its repository.
 func TestGitHubGraphQLAuthorizesBeforeLookups(t *testing.T) {
 	f := newGraphQLFixtureFor(t, true)
 	f.useRaw(t, `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}],"entries":[
@@ -896,7 +835,6 @@ func TestGitHubGraphQLAuthorizesBeforeLookups(t *testing.T) {
 	}
 }
 
-// A worker's own token is refused on /graphql, as on REST.
 func TestGitHubGraphQLRefusesAWorkersOwnToken(t *testing.T) {
 	f := newGraphQLFixture(t)
 	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { id } } }"}`
@@ -910,8 +848,7 @@ func TestGitHubGraphQLRefusesAWorkersOwnToken(t *testing.T) {
 	}
 }
 
-// The body is read up to the largest limit among the pool's entries, then
-// held to the chosen entry's own limit.
+// The body is read up to the largest limit among the pool's entries, then held to the chosen entry's.
 func TestGitHubGraphQLHoldsTheChosenEntrysSizeLimit(t *testing.T) {
 	f := newGraphQLFixture(t)
 	f.useRaw(t, `{"entries":[
@@ -930,9 +867,7 @@ func TestGitHubGraphQLHoldsTheChosenEntrysSizeLimit(t *testing.T) {
 	}
 }
 
-// GitHub's answer decides, not the ID: an ID naming example-repo that GitHub
-// resolves to a public repository's pull request (visible to any token) is
-// refused.
+// GitHub's answer decides, not the ID: an ID naming example-repo that resolves to a public repository's pull request is refused.
 func TestGitHubGraphQLChecksGitHubsAnswerNotTheID(t *testing.T) {
 	f := newGraphQLFixture(t)
 	body := graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": publicPR, "body": "x"})
@@ -944,9 +879,7 @@ func TestGitHubGraphQLChecksGitHubsAnswerNotTheID(t *testing.T) {
 	}
 }
 
-// GraphQL rows carry exactly the REST binding, "<entry>/<owner>/<repo>", with
-// nothing appended: an alert that matches the binding against an exact
-// repository list must see a GraphQL write like the same REST write.
+// GraphQL rows carry exactly the REST binding, with nothing appended, so an exact-repository alert sees a GraphQL write like the REST write.
 func TestGitHubGraphQLAuditBindingIsTheRESTBinding(t *testing.T) {
 	f := newGraphQLFixture(t)
 	if code, _ := f.send(t, http.MethodGet, "/repos/example-org/example-repo/pulls/12", nil, ""); code != 200 {
@@ -977,9 +910,7 @@ func TestGitHubGraphQLAuditBindingIsTheRESTBinding(t *testing.T) {
 	}
 }
 
-// A pull request's file list over GraphQL takes the clone grant REST takes:
-// refused for a pool whose git entry may not clone the repository, and for a
-// requester that git entry does not authorize; served with both.
+// A file list over GraphQL takes the same clone grant as REST.
 func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 	files := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { files(first: 10) { nodes { path } } } } }"}`
 	f := newGraphQLFixture(t) // its git entry is on git.example.com: no clone of example.com's repositories
@@ -989,9 +920,7 @@ func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("relayed without the clone grant: %v", got)
 	}
-	// A request naming its pull request only by node ID is refused before
-	// any token is minted or GitHub asked: in a query, and in a mutation's
-	// payload.
+	// A request naming its pull request only by node ID is refused before any token or lookup, in a query and in a mutation's payload.
 	byNode, _ := json.Marshal(map[string]any{"query": `query($id: ID!) { node(id: $id) { ... on PullRequest { files(first: 5) { nodes { path } } } } }`,
 		"variables": map[string]any{"id": ownPR}})
 	payload, _ := json.Marshal(map[string]any{"query": `mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { files(first: 5) { nodes { path } } } } } }`,
@@ -1019,8 +948,6 @@ func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 			t.Fatalf("with the clone grant: %d %q", code, f.audit.last().Outcome)
 		}
 	}
-	// A git entry the requester cannot use (T1, and no entitlement source)
-	// refuses the file list though the API entry allows the query.
 	p := newGraphQLFixtureFor(t, true)
 	p.useRaw(t, fmt.Sprintf(cloneable,
 		`"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc","ceiling":"T1"}],`,
@@ -1037,10 +964,7 @@ func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 	}
 }
 
-// Each GraphQL row names one operation, as a REST row does: the write a
-// mutation makes, even though it also needs pr.read, and "graphql" for a read
-// or a request refused before it was parsed. An alert on writes then matches
-// a GraphQL write exactly as the same REST write, and never a read.
+// Each GraphQL row names one operation: the write a mutation makes, or "graphql" for a read or a request refused before parsing, so a write alert never matches a read.
 func TestGitHubGraphQLAuditNamesOneOperation(t *testing.T) {
 	f := newGraphQLFixture(t)
 	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { title } } }"}`
@@ -1068,21 +992,13 @@ func TestGitHubGraphQLAuditNamesOneOperation(t *testing.T) {
 	}
 }
 
-// checkStatusCatalog lists example-repo (%s: its catalog entry) for GraphQL
-// and a git entry on host %s: example.com pairs with the API host, so the
-// pool may clone the repository; git.example.com does not.
+// checkStatusCatalog lists example-repo for GraphQL plus a git entry on host %s; example.com pairs with the API host, so the pool may clone.
 const checkStatusCatalog = `{%s"entries":[{"name":"github-api","host":"example.com","port":%%[1]d,"kind":"github-api","pools":["pool-agent"],
 	"git":{"appID":7,"installationID":42,"repos":[%s]}},
 	{"name":"github","host":"%s","kind":"git","pools":["pool-agent"]%s,"git":{"appID":7,"installationID":42,
 	"repos":[{"repo":"example-org/example-repo","access":"write","refPrefixes":["refs/heads/cursor/pool-agent/"]}]}}]}`
 
-// Reading check status takes checks and statuses read on the token, and
-// reading a check suite's workflow run (default gh pr view and gh pr checks
-// do) actions read, exactly when the repository grants actions.read, as
-// REST's check run, status and workflow run routes do. GitHub serves the
-// commit that status hangs from only with contents read, so a status read
-// carries it too, but only for a pool that may clone the repository; nothing
-// else does. A request reading none gets the pull request scope alone.
+// Check status takes checks and statuses read, and a check suite's workflow run takes actions read, exactly when the repository grants actions.read; contents read only for a pool that may clone.
 func TestGitHubGraphQLCheckStatusScopes(t *testing.T) {
 	for _, grantsActions := range []bool{true, false} {
 		for _, cloneable := range []bool{true, false} {
@@ -1159,10 +1075,7 @@ func TestGitHubGraphQLCheckStatusContentsNeedsCloneAuthorization(t *testing.T) {
 	}
 }
 
-// A repository reached below the root needs the operations it needs at the
-// root: with pr.read alone, a pull request's repository cannot list pull
-// requests, read the default branch or look up labels, however the request
-// reaches it; nor can a label list its pull requests.
+// A repository reached below the root needs the operations it would need at the root.
 func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
 	f := newGraphQLFixture(t)
 	nested := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { repository { ` +
@@ -1171,12 +1084,8 @@ func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
 		"variables": map[string]any{"id": ownPR}})
 	payload, _ := json.Marshal(map[string]any{"query": `mutation($input: AddCommentInput!) { addComment(input: $input) { subject { ... on PullRequest { repository { defaultBranchRef { name } } } } } }`,
 		"variables": map[string]any{"input": map[string]any{"subjectId": ownPR, "body": "x"}}})
-	// Any list of pull requests needs pr.list, not only a repository's.
 	labelsPRs := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { ` +
 		`labels(first: 10) { nodes { pullRequests(first: 100) { nodes { number body } } } } } } }"}`
-	// Without pr.list on example-repo, a read naming its pull request by node
-	// ID finds only read-repo granting every operation it needs, which does
-	// not hold that pull request; no repository grants the comment's.
 	for _, tc := range []struct {
 		name, body, refused string
 		without             []string // granted: every operation the request needs but one
@@ -1204,9 +1113,7 @@ func TestGitHubGraphQLNestedRepositoryNeedsItsOperations(t *testing.T) {
 	}
 }
 
-// The per-Pod proxy rate limit applies to GraphQL per entry, as to REST: on
-// the entry chosen, and before the broker asks GitHub which repository a node
-// ID is in, so a request over the limit costs no token and no lookup.
+// The per-Pod rate limit applies to GraphQL per entry, before the broker asks GitHub, so a request over the limit costs no token and no lookup.
 func TestGitHubGraphQLRateLimited(t *testing.T) {
 	f := newGraphQLFixture(t)
 	cfg := ratelimit.DefaultsFor(ratelimit.ProfileDefault)
@@ -1224,8 +1131,6 @@ func TestGitHubGraphQLRateLimited(t *testing.T) {
 	if got := f.relayed(); len(got) != 1 {
 		t.Fatalf("relayed over the limit: %v", got)
 	}
-	// A comment by node ID, whose repository the broker has not looked up
-	// yet: refused before the lookup.
 	f.mu.Lock()
 	minted, reads := len(f.mintedFor), f.repoReads
 	f.mu.Unlock()

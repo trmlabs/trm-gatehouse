@@ -1,30 +1,5 @@
-// Package mitm implements an HTTP/1.1 forward-proxy ingress for agent
-// traffic.
-//
-// A Proxy accepts two request shapes on the same listener:
-//
-//   - CONNECT host:port — for HTTPS upstreams. The proxy hijacks the
-//     connection, terminates client-side TLS using a leaf minted on
-//     demand by a ca.Provider, and forwards each tunnelled HTTP/1.1
-//     request to the originally-requested upstream over a fresh TLS
-//     connection with strict verification against the system trust
-//     store.
-//
-//   - Absolute-form forward-proxy requests (e.g. POST http://host/path
-//     HTTP/1.1, RFC 7230 §5.3.2) — for plain-HTTP upstreams. The proxy
-//     authenticates the request inline (no hijack), forwards the body
-//     to the upstream over plain HTTP, and applies the same credential
-//     injection, host policy, and request logging as the CONNECT path.
-//
-// The listener is plain HTTP (standard forward-proxy convention).
-// Clients use HTTPS_PROXY and HTTP_PROXY pointing at http://... and
-// trust the CA that signs the per-host MITM leaves for upstream
-// certificate verification.
-//
-// HTTP/1.1 only (ALPN pinned), except that with the catalog adapter a tunnel
-// to a host whose entries set http2 also offers HTTP/2, for gRPC (grpc.go).
-// HTTPS upstreams must use CONNECT: the forward-proxy path rejects https://
-// URLs to avoid silently TLS-stripping.
+// Package mitm implements an HTTP/1.1 forward-proxy ingress for agent traffic, via CONNECT tunnels and absolute-form requests.
+// HTTPS upstreams must use CONNECT; the forward path rejects https:// URLs to avoid silently TLS-stripping.
 package mitm
 
 import (
@@ -71,12 +46,12 @@ type Proxy struct {
 	peerReader            PeerReader
 	graphql               graphqlLookups // what GitHub said about node IDs (github_graphql.go)
 	http2MaxStreams       int
+	identityRetry         time.Duration                  // Retry-After when an identity check could not complete
 	h2Upstream            atomic.Pointer[http.Transport] // built from upstream on first HTTP/2 request (grpc.go)
 	certificatesMu        sync.Mutex
 	certificateTransports map[certificateTransportKey]certificateTransport // per client certificate (clientcert.go)
 
-	// Tunnel drain (opt-in): Shutdown lets each tunnel finish its current
-	// request instead of leaving tunnels to die with the process.
+	// Tunnel drain (opt-in): Shutdown lets each tunnel finish its current request.
 	drainTunnels bool
 	tunnelsMu    sync.Mutex
 	tunnels      map[*http.Server]bool // true for an HTTP/2 tunnel
@@ -84,38 +59,28 @@ type Proxy struct {
 	draining     bool
 }
 
-// DefaultMaxTunnels bounds pending or active credential-proxy CONNECT tunnels
-// per replica. A tunnel costs goroutines and one TLS session, so the bound is
-// fleet scale; AGENT_VAULT_MITM_MAX_TUNNELS overrides it.
+// DefaultMaxTunnels bounds pending or active CONNECT tunnels per replica; AGENT_VAULT_MITM_MAX_TUNNELS overrides it.
 const DefaultMaxTunnels = 10000
 
 // DefaultMaxIdleUpstreamConns bounds idle upstream connections kept for reuse, in total and per host; it applies only where keep-alives are on.
 const DefaultMaxIdleUpstreamConns = 10000
 
-// Options carries the dependencies a Proxy needs. BaseURL is the
-// externally-reachable control-plane URL used in help-link error
-// responses. Logger must be non-nil; tests can pass
-// slog.New(slog.DiscardHandler). RateLimit is shared with the HTTP
-// server so proxy limits and control-plane limits live in one registry;
-// nil disables rate limiting on the MITM path.
+// Options carries the dependencies a Proxy needs. BaseURL is the externally-reachable control-plane URL for help links; Logger must be non-nil.
+// RateLimit is shared with the HTTP server so proxy and control-plane limits live in one registry; nil disables it on the MITM path.
 type Options struct {
 	MaxIdleUpstreamConns      int                // <=0 defaults to DefaultMaxIdleUpstreamConns idle upstream connections, in total and per host
 	MaxCredentialProxyTunnels int                // <=0 defaults to DefaultMaxTunnels pending or active CONNECT tunnels
 	HTTP2MaxStreams           int                // <=0 defaults to DefaultHTTP2MaxStreams concurrent requests per HTTP/2 tunnel
+	IdentityRetrySeconds      int                // <=0 defaults to DefaultIdentityRetry, at most MaxIdentityRetry: the Retry-After when an identity check could not complete
 	StrictCredentialProxy     bool               // bounded header-placeholder release path
 	DurableAudit              requestlog.Durable // mandatory when strict mode is enabled, unless HeaderAdapter is set
 	HeaderAdapter             *HeaderAdapter     // strict mode only: catalog destinations with signed audit
-	// Attestor, when set, admits workers by projected token and real peer
-	// address instead of Sessions; Sessions remains the token-review fallback.
+	// Attestor, when set, admits workers by projected token and real peer address instead of Sessions, which remains the token-review fallback.
 	Attestor   brokercore.Attestor
 	PeerReader PeerReader // nil: the TCP remote address
-	// AgentTokens verifies a static agent token, on the listener that admits
-	// only that kind (brokercore.KindStaticToken). Nil: such a listener
-	// refuses every caller.
+	// AgentTokens verifies a static agent token on the listener admitting only that kind; nil means such a listener refuses every caller.
 	AgentTokens agenttoken.Verifier
-	// DrainTunnels makes Shutdown stop taking tunnels and wait, within its
-	// context, for each open tunnel's current request to finish. Off, open
-	// tunnels are left to end with the process.
+	// DrainTunnels makes Shutdown stop taking tunnels and wait, within its context, for each open tunnel's current request; off, tunnels end with the process.
 	DrainTunnels     bool
 	CA               ca.Provider
 	Sessions         brokercore.SessionResolver
@@ -166,6 +131,10 @@ func New(addr string, opts Options) *Proxy {
 	if streams <= 0 {
 		streams = DefaultHTTP2MaxStreams
 	}
+	identityRetry := DefaultIdentityRetry
+	if opts.IdentityRetrySeconds > 0 {
+		identityRetry = time.Duration(min(opts.IdentityRetrySeconds, int(MaxIdentityRetry/time.Second))) * time.Second
+	}
 	p := &Proxy{
 		ca:                    opts.CA,
 		strictCredentialProxy: opts.StrictCredentialProxy,
@@ -187,6 +156,7 @@ func New(addr string, opts Options) *Proxy {
 		maxResponseBytes:      opts.MaxResponseBytes, // 0 = unlimited
 		maxRequestBytes:       maxReq,
 		http2MaxStreams:       streams,
+		identityRetry:         identityRetry,
 	}
 
 	p.httpServer = &http.Server{
@@ -201,22 +171,13 @@ func New(addr string, opts Options) *Proxy {
 // Addr returns the listener address the Proxy was configured with.
 func (p *Proxy) Addr() string { return p.httpServer.Addr }
 
-// RootPEM returns the root CA certificate in PEM form. Safe for public
-// distribution — clients install this into trust stores to validate the
-// leaves minted on demand during CONNECT.
+// RootPEM returns the root CA certificate in PEM form, safe to distribute.
 func (p *Proxy) RootPEM() []byte { return p.ca.RootPEM() }
 
-// IsListening reports whether the Proxy has successfully bound its
-// listener and is accepting connections. Callers that gate operator-
-// visible behavior (like advertising the root CA) on proxy reachability
-// should check this rather than nil-checking the Proxy itself — a bind
-// failure leaves the Proxy value alive but unreachable.
+// IsListening reports whether the listener is bound; check it rather than nil-checking the Proxy, since a bind failure leaves it alive.
 func (p *Proxy) IsListening() bool { return p.isListening.Load() }
 
-// ListenAndServe starts accepting connections. It binds the listener
-// eagerly so callers can detect bind failures; on success, IsListening
-// reports true for the lifetime of the accept loop. Blocks until
-// Shutdown, returning http.ErrServerClosed in that case.
+// ListenAndServe binds eagerly so callers see bind failures, then blocks until Shutdown (http.ErrServerClosed).
 func (p *Proxy) ListenAndServe() error {
 	l, err := net.Listen("tcp", p.httpServer.Addr)
 	if err != nil {
@@ -225,16 +186,9 @@ func (p *Proxy) ListenAndServe() error {
 	return p.Serve(l)
 }
 
-// Serve accepts connections on the provided listener. The listener
-// itself is plain HTTP (standard forward-proxy convention); TLS is
-// only used inside CONNECT tunnels where the MITM presents a leaf
-// cert to the client. It blocks until Shutdown is called, returning
-// http.ErrServerClosed in that case.
-// Useful for tests that need to bind :0 and learn the resulting port.
+// Serve accepts connections on the given plain-HTTP listener until Shutdown, useful for tests binding :0.
 func (p *Proxy) Serve(l net.Listener) error {
-	// A PROXY header names the worker, so it is accepted only on a listener
-	// bound to loopback, where the sole peers are the broker Pod's own
-	// containers (the TLS terminator), never a remote client.
+	// A PROXY header names the worker, so it is accepted only on a loopback listener, where the sole peers are the broker Pod's own containers.
 	if p.peerReader != nil {
 		if addr, ok := l.Addr().(*net.TCPAddr); !ok || !addr.IP.IsLoopback() {
 			_ = l.Close()
@@ -246,13 +200,8 @@ func (p *Proxy) Serve(l net.Listener) error {
 	return p.httpServer.Serve(peerListener{Listener: l, reader: p.peerReader})
 }
 
-// Shutdown gracefully stops the listener. Without DrainTunnels, in-flight
-// CONNECT tunnels are not tracked by http.Server's shutdown machinery (they
-// detach from the handler on Hijack), so callers should allow the process to
-// exit after Shutdown returns; the tunnels will die with it. With
-// DrainTunnels, Shutdown refuses new tunnels, closes idle ones, lets each
-// active request finish with Connection: close, and force-closes whatever
-// remains when ctx ends.
+// Shutdown gracefully stops the listener. Hijacked CONNECT tunnels are not tracked by http.Server's shutdown, so without DrainTunnels they die with the process.
+// With DrainTunnels, Shutdown refuses new tunnels, closes idle ones, lets active requests finish with Connection: close, and force-closes the rest when ctx ends.
 func (p *Proxy) Shutdown(ctx context.Context) error {
 	p.upstream.CloseIdleConnections()
 	if h2 := p.h2Upstream.Load(); h2 != nil {
@@ -286,8 +235,7 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	return <-outer
 }
 
-// reserveTunnel counts a tunnel before its CONNECT is answered, so Shutdown
-// waits for it; false once draining, when the CONNECT must be refused.
+// reserveTunnel counts a tunnel before its CONNECT is answered so Shutdown waits for it; false once draining.
 func (p *Proxy) reserveTunnel() (release func(), ok bool) {
 	if !p.drainTunnels {
 		return func() {}, true
@@ -301,8 +249,7 @@ func (p *Proxy) reserveTunnel() (release func(), ok bool) {
 	return p.tunnelWG.Done, true
 }
 
-// trackTunnel registers a tunnel's request server. One registered after
-// Shutdown began serves its current request and then closes.
+// trackTunnel registers a tunnel's request server; one registered after Shutdown began serves its current request and closes.
 func (p *Proxy) trackTunnel(srv *http.Server, h2 bool) (untrack func()) {
 	if !p.drainTunnels {
 		return func() {}
@@ -320,22 +267,15 @@ func (p *Proxy) trackTunnel(srv *http.Server, h2 bool) (untrack func()) {
 	}
 }
 
-// stopTunnel lets a draining tunnel finish what it is serving, then close. An
-// HTTP/1.1 tunnel closes after its current request. An HTTP/2 tunnel also
-// sends GOAWAY, so the client starts new calls on another replica while the
-// calls in flight finish, and closes when the last one does; keep-alives
-// alone would leave an idle HTTP/2 tunnel open until the drain deadline.
+// stopTunnel lets a draining tunnel finish what it is serving, then close; an HTTP/2 tunnel also sends GOAWAY, since keep-alives alone would leave it idle until the drain deadline.
 func stopTunnel(srv *http.Server, h2 bool) {
 	srv.SetKeepAlivesEnabled(false)
 	if h2 {
-		// Shutdown returns once the tunnel's connection closes, by itself
-		// or when the drain deadline closes it.
 		go func() { _ = srv.Shutdown(context.Background()) }()
 	}
 }
 
-// revokeGitTokens revokes every cached GitHub installation token, which GitHub
-// would otherwise honour for up to an hour after the broker stops.
+// revokeGitTokens revokes every cached GitHub installation token, which GitHub would honour for up to an hour after the broker stops.
 func (p *Proxy) revokeGitTokens() {
 	if p.adapter == nil {
 		return
@@ -346,10 +286,7 @@ func (p *Proxy) revokeGitTokens() {
 }
 
 func (p *Proxy) dispatch(w http.ResponseWriter, r *http.Request) {
-	// The static-token listener carries CONNECT only. Its first bytes are
-	// checked before the connection reaches this server, but a refused CONNECT
-	// leaves the connection open for a later request, so any other method is
-	// refused here and ends the connection.
+	// The static-token listener carries CONNECT only: a refused CONNECT leaves the connection open, so any other method is refused and ends it.
 	if r.Method != http.MethodConnect && onlyStaticToken(connKinds(r.Context())) {
 		w.Header().Set("Connection", "close")
 		if p.strictCredentialProxy {
@@ -375,9 +312,6 @@ func (p *Proxy) dispatch(w http.ResponseWriter, r *http.Request) {
 		p.strictUnauthenticatedDeny(w, r, http.StatusBadRequest)
 		return
 	}
-	// Origin-form (no scheme/host), https://, ws://, file://, gopher://,
-	// etc. all land here. The CONNECT-vs-forward split above already
-	// covers every legitimate forward-proxy shape; anything else is a
-	// malformed request, not a method-not-allowed.
+	// Anything other than CONNECT or absolute-form forward is a malformed request, not a method-not-allowed.
 	http.Error(w, "this endpoint is an HTTP forward proxy; non-CONNECT requests must use absolute-form URLs (http://host/path). Use CONNECT for https:// upstreams.", http.StatusBadRequest)
 }

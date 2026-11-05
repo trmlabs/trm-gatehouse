@@ -7,9 +7,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
-// This package's tests use plain role names; tests of the environment rule
-// set Environment or clear this themselves. Image prefixes lie under one
-// example registry.
+// Tests use plain role names; tests of the environment rule set Environment or clear this themselves.
 func TestMain(m *testing.M) {
 	rolesWithoutEnvironment = true
 	if err := imagerule.SetRegistry("registry.example.com/example-project/"); err != nil {

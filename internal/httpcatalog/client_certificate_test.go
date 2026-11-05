@@ -16,7 +16,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog/clientcerttest"
 )
 
-// certVault answers like a KV version 2 mount holding client certificates.
 type certVault struct {
 	mu      sync.Mutex
 	secrets map[string]map[string]interface{} // by "<mount>/data/<path>"
@@ -128,14 +127,12 @@ func TestClientCertificatesReadRotateAndRevoke(t *testing.T) {
 	if leaf := first.TLSCertificate().Leaf; leaf == nil || leaf.Subject.CommonName != "first" {
 		t.Fatal("the leaf is not the stored certificate")
 	}
-	// Printing never shows the key.
 	for _, printed := range []string{fmt.Sprint(first), fmt.Sprintf("%+v", first), fmt.Sprintf("%#v", *first), fmt.Sprintf("%v", []*ClientCertificate{first})} {
 		if strings.Contains(printed, "PRIVATE") || !strings.Contains(printed, "client-certificate(v1") {
 			t.Fatalf("printed as %q", printed)
 		}
 	}
 
-	// A new version is presented within the TTL, without a restart.
 	secondPEM, secondKey := ca.ValidClient(t, "second")
 	vault.put(certPath, secondPEM, secondKey)
 	if again, _ := certs.Get(ctx, certRef); again.ChainFingerprint != first.ChainFingerprint {
@@ -147,7 +144,6 @@ func TestClientCertificatesReadRotateAndRevoke(t *testing.T) {
 		t.Fatalf("after the TTL: %v %v", second, err)
 	}
 
-	// Vault down: the cached certificate serves for MaxStale past its TTL.
 	vault.fail(errors.New("connection refused"))
 	now = now.Add(4 * time.Minute)
 	if stale, err := certs.Get(ctx, certRef); err != nil || stale.ChainFingerprint != second.ChainFingerprint {
@@ -159,7 +155,6 @@ func TestClientCertificatesReadRotateAndRevoke(t *testing.T) {
 	}
 	vault.fail(nil)
 
-	// Removing a field revokes it from the next read; no stale copy.
 	vault.setFields(certPath, map[string]interface{}{ClientCertificateField: secondPEM})
 	now = now.Add(61 * time.Second)
 	if _, err := certs.Get(ctx, certRef); !errors.Is(err, ErrClientCertificateDeleted) || errors.Is(err, ErrClientCertificateInvalid) {
@@ -171,7 +166,6 @@ func TestClientCertificatesReadRotateAndRevoke(t *testing.T) {
 	}
 	vault.fail(nil)
 
-	// Invalidate re-reads at once, at most every 30 seconds.
 	vault.put(certPath, certPEM, keyPEM)
 	certs.Invalidate(certRef)
 	if back, err := certs.Get(ctx, certRef); err != nil || back.ChainFingerprint != first.ChainFingerprint {
@@ -203,13 +197,10 @@ func TestClientCertificateValues(t *testing.T) {
 			t.Errorf("%s: the error quotes the value", name)
 		}
 	}
-	// A chain, leaf first, is presented whole.
 	cert, err := ParseClientCertificate(certPEM+ca.PEM(), keyPEM)
 	if err != nil || len(cert.TLSCertificate().Certificate) != 2 {
 		t.Fatalf("chain: %v", err)
 	}
-	// ChainFingerprint follows the whole chain: one leaf under a renewed
-	// intermediate is a new one, the same chain read again is not.
 	issuing := ca.Intermediate(t, "issuing-ca")
 	leafPEM, leafKey := issuing.ValidClient(t, "chained")
 	first, err := ParseClientCertificate(leafPEM+issuing.PEM(), leafKey)

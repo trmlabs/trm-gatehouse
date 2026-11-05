@@ -16,9 +16,6 @@ import (
 	"time"
 )
 
-// identitySocket is a fake claim socket serving Cursor's mint API. It answers
-// with status and a token ending in the mint count; with gate set, each mint
-// first takes a value from it, and asked receives one per mint request.
 type identitySocket struct {
 	mints  atomic.Int32
 	status atomic.Int32
@@ -53,8 +50,6 @@ func serveIdentitySocket(t *testing.T, dir, name string, s *identitySocket, expi
 	t.Cleanup(func() { _ = srv.Close() })
 }
 
-// fakeIdentitySocket serves Cursor's mint API on dir/<name>.sock, answering
-// with status and a token ending in the mint count.
 func fakeIdentitySocket(t *testing.T, dir, name string, status int, expires func() int64) *atomic.Int32 {
 	t.Helper()
 	s := &identitySocket{}
@@ -65,7 +60,6 @@ func fakeIdentitySocket(t *testing.T, dir, name string, status int, expires func
 
 var quiet = slog.New(slog.NewJSONHandler(io.Discard, nil))
 
-// socketDir is short: a Unix socket path must fit in about 100 bytes.
 func socketDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "cid")
@@ -87,15 +81,12 @@ func TestCursorTokenIsMintedFromTheClaimSocketAndCached(t *testing.T) {
 	if got := m.token(quiet, dir, "gatehouse-broker"); got != "h.p.bc-11" || mints.Load() != 1 {
 		t.Fatalf("cached: %q after %d mints", got, mints.Load())
 	}
-	// Within a minute of expiry the relay mints a fresh one.
 	now = now.Add(4*time.Minute + time.Second)
 	if got := m.token(quiet, dir, "gatehouse-broker"); got != "h.p.bc-12" || mints.Load() != 2 {
 		t.Fatalf("refreshed: %q after %d mints", got, mints.Load())
 	}
 }
 
-// A refresh that fails keeps sending the token in hand until it expires, and
-// the socket is not asked again for a moment.
 func TestCursorFailedRefreshKeepsTheValidToken(t *testing.T) {
 	sink := captureLog(t)
 	log := newRelayLog()
@@ -127,7 +118,6 @@ func TestCursorFailedRefreshKeepsTheValidToken(t *testing.T) {
 	if len(lines) != 1 || lines[0]["status"] != float64(http.StatusServiceUnavailable) || lines[0]["kept"] != true || lines[0]["level"] != "WARN" {
 		t.Fatalf("failure lines %v", lines)
 	}
-	// An expired token is not sent, and neither is any token logged.
 	clock.Add(int64(5 * time.Minute))
 	s.status.Store(http.StatusForbidden)
 	if got := m.token(log, dir, "gatehouse-broker"); got != "" {
@@ -144,7 +134,6 @@ func TestCursorFailedRefreshKeepsTheValidToken(t *testing.T) {
 	}
 }
 
-// Connections that open together share one mint.
 func TestCursorConnectionsShareOneMint(t *testing.T) {
 	dir := socketDir(t)
 	s := &identitySocket{gate: make(chan struct{}, 1), asked: make(chan struct{}, 16)}
@@ -170,8 +159,6 @@ func TestCursorConnectionsShareOneMint(t *testing.T) {
 	}
 }
 
-// While one connection refreshes the token, the others send the one in hand
-// without waiting.
 func TestCursorRefreshUnderWayServesTheHeldToken(t *testing.T) {
 	dir := socketDir(t)
 	var clock atomic.Int64
@@ -203,8 +190,6 @@ func TestCursorRefreshUnderWayServesTheHeldToken(t *testing.T) {
 	}
 }
 
-// No claim socket, or several, is logged once each time the directory turns
-// to it, not once per connection.
 func TestCursorClaimChangesAreLoggedOnce(t *testing.T) {
 	sink := captureLog(t)
 	log := newRelayLog()
@@ -239,7 +224,6 @@ func TestCursorTokenNeedsExactlyOneClaim(t *testing.T) {
 	if got := m.token(quiet, filepath.Join(dir, "missing"), "gatehouse-broker"); got != "" {
 		t.Fatalf("no directory: %q", got)
 	}
-	// A regular file named like a socket is not a claim.
 	if err := os.WriteFile(filepath.Join(dir, "bc-0.sock"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +283,6 @@ func TestSelfModeCursorSessionSource(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// Only a sidecar in the run's own Pod may mint for it.
 	paired := selfConfig()
 	paired.Self = false
 	paired.PostgresBindings = append([]PostgresConfig(nil), paired.PostgresBindings...)
@@ -309,7 +292,6 @@ func TestSelfModeCursorSessionSource(t *testing.T) {
 	}
 }
 
-// Each connection's session comes from the claim socket when one is configured.
 func TestReadSessionMintsFromTheCursorSocket(t *testing.T) {
 	dir := socketDir(t)
 	fakeIdentitySocket(t, dir, "bc-9", http.StatusOK, func() int64 { return time.Now().Add(5 * time.Minute).Unix() })

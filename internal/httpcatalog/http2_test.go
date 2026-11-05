@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// http2 is a property of a header or gcp entry's host: the tunnel offers h2
-// to that host only, every entry on it agrees, and the gRPC deadline header
-// passes on those entries alone.
 func TestHTTP2IsPerHostAndHeaderOrGCPOnly(t *testing.T) {
 	rpc := strings.Replace(validEntry, `"serpapi.com"`, `"rpc.example.com"`, 1)
 	rpc = strings.Replace(rpc, `"pools":["pool-a"]`, `"pools":["pool-a"],"http2":true`, 1)

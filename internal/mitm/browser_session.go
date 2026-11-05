@@ -17,15 +17,11 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// maxSeedLife bounds the placeholder session a seed describes, for a worker
-// without a deadline: the workload identity's default session ceiling. A pool
-// worker's seed ends at its Pod's deadline.
+// maxSeedLife bounds the placeholder session for a worker without a deadline.
 const maxSeedLife = 24 * time.Hour
 
-// forwardBrowser serves a browser-session entry: the app's own host with no
-// credential, the login seed, and the API with the placeholder access token
-// replaced by the test user's real one. Cookies never pass in either
-// direction, and every response is screened for the real token.
+// forwardBrowser serves a browser-session entry: no credential on the app host, a login seed, and the real token swapped in on the API.
+// Cookies never pass and every response is screened for the real token.
 func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, b httpcatalog.BrowserRequest, matchErr error) {
 	a := p.adapter
 	if b.Entry != nil {
@@ -54,14 +50,12 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 	}
 	entry := b.Entry
 	if a.BrowserTokens == nil {
-		// Waiting does not help: only an operator (a restart, for a minter
-		// wired at startup) can give the broker one.
+		// Waiting does not help: only an operator can give the broker a minter.
 		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
 	expected := hostHeaderForScheme("https", target)
-	// Upgrades (WebSocket) are refused until an app needs them; an app that
-	// streams over fetch passes as an ordinary response.
+	// Upgrades (WebSocket) are refused until an app needs them.
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) || r.URL.User != nil || r.URL.Fragment != "" || r.URL.RawPath != "" ||
 		unsafeBrowserPath(r.URL.Path, b.Seed) || containsPlaceholder(r.URL.RawQuery) || r.Header.Get("Upgrade") != "" ||
 		r.Header.Get("Content-Encoding") != "" || len(r.Trailer) > 0 {
@@ -160,10 +154,7 @@ func (p *Proxy) forwardBrowser(w http.ResponseWriter, r *http.Request, target st
 	}, nil)
 }
 
-// invalidToken reports whether the API refused the token itself: a 401 that
-// names no error, or names invalid_token. A 403, or a 401 for another reason
-// such as insufficient_scope, says nothing about the token, and a worker
-// could otherwise force a fresh login per request by calling such a path.
+// invalidToken reports whether the API refused the token itself; treating a 403 or other 401 as invalid would let a worker force a login per request.
 func invalidToken(resp *http.Response) bool {
 	if resp.StatusCode != http.StatusUnauthorized {
 		return false
@@ -178,8 +169,7 @@ func invalidToken(resp *http.Response) bool {
 
 func containsPlaceholder(s string) bool { return bytes.Contains([]byte(s), []byte(placeholderMarker)) }
 
-// unsafeBrowserPath is unsafePath, except that the seed path's own name is
-// allowed.
+// unsafeBrowserPath is unsafePath, except the seed path's own name is allowed.
 func unsafeBrowserPath(path string, seed bool) bool {
 	if seed {
 		return path != httpcatalog.BrowserSeedPath
@@ -187,8 +177,7 @@ func unsafeBrowserPath(path string, seed bool) bool {
 	return unsafePath(path)
 }
 
-// noCookieWriter drops Set-Cookie from every response: a cookie the app or
-// its API sets after a bearer call is a session credential of its own.
+// noCookieWriter drops Set-Cookie: a cookie set after a bearer call is a session credential.
 type noCookieWriter struct{ http.ResponseWriter }
 
 func (w noCookieWriter) WriteHeader(status int) {
@@ -207,16 +196,10 @@ func (w noCookieWriter) Flush() {
 	}
 }
 
-// errSeedDeadline means the worker ends too soon for a browser session. It
-// only gets closer, so the refusal is lasting.
+// errSeedDeadline means the worker ends too soon for a browser session; the refusal is lasting.
 var errSeedDeadline = errors.New("worker deadline too close for a browser session")
 
-// browserSeed is a Playwright storage state for the app's origin. It holds
-// what auth0-spa-js 2.x reads from localStorage, with the placeholder as the
-// access token and an unsigned ID token carrying the test user's non-secret
-// claims, plus the cookie that tells the client a session exists. The app
-// never decodes the access token; it reads sub and org_id from the ID token.
-// Nothing in it authenticates anything: the broker adds the real token.
+// browserSeed is a Playwright storage state for the app's origin with the placeholder as access token; nothing in it authenticates, the broker adds the real token.
 func browserSeed(entry *httpcatalog.Entry, token httpcatalog.BrowserToken, scope *brokercore.ProxyScope, now time.Time) ([]byte, error) {
 	b := entry.BrowserSession
 	expires := now.Add(maxSeedLife)

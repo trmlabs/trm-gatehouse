@@ -3,8 +3,7 @@
 Each file is one gh command's requests, as gh 2.89.0 sent them, used by
 `graphql_test.go` and `internal/mitm/github_graphql_test.go`. `{{PR}}`,
 `{{LABEL}}` and `{{REPO}}` stand for the node IDs gh had just read. They were recorded
-against `recorder/`, a local stand-in for GitHub, with a placeholder token:
-nothing reached GitHub and no real token was used.
+against `recorder/`, a local stand-in for GitHub, with a placeholder token.
 
 To record again (after a gh upgrade), from the repository root:
 

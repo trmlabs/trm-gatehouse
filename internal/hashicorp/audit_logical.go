@@ -2,6 +2,5 @@ package hashicorp
 
 import vaultapi "github.com/hashicorp/vault/api"
 
-// Logical exposes the broker's authenticated Vault client to the signed audit
-// chain, which reads its HMAC key and signs checkpoints with it.
+// Logical exposes the broker's Vault client to the audit chain for its HMAC key and checkpoint signing.
 func (c *Client) Logical() *vaultapi.Logical { return c.api.Logical() }

@@ -22,12 +22,9 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// downloadToken is the installation token the fake GitHub mints.
 const downloadToken = "ghs_syntheticdownloadtoken"
 
-// downloadFixture fronts a fake api.github.com whose job log, size bytes
-// long, is served from a signed download host as GitHub does. When plantAt is
-// not negative, the log carries the installation token at that byte.
+// downloadFixture fronts a fake api.github.com whose job log is served from a signed download host; when plantAt is not negative, the log carries the installation token at that byte.
 type downloadFixture struct {
 	client *http.Client
 	port   int
@@ -101,8 +98,6 @@ func newDownloadFixture(t *testing.T, limits string, size, plantAt int64) *downl
 	return f
 }
 
-// get downloads the job log and returns the status, the bytes received and
-// whether the body ended cleanly.
 func (f *downloadFixture) get(t *testing.T) (int, int64, error) {
 	t.Helper()
 	resp, err := f.client.Get("https://api.example.com:" + strconv.Itoa(f.port) + "/repos/example-org/example-repo/actions/jobs/11/logs")
@@ -114,8 +109,7 @@ func (f *downloadFixture) get(t *testing.T) (int, int64, error) {
 	return resp.StatusCode, n, err
 }
 
-// A log or artifact download of tens of MiB completes under the default
-// limit; one over a limit set in the catalog is cut off and audited.
+// A download of tens of MiB completes under the default limit; one over a catalog limit is cut off and audited.
 func TestGitHubAPIDownloadsStreamUpToTheLimit(t *testing.T) {
 	const size = 24 << 20
 	f := newDownloadFixture(t, ``, size, -1)
@@ -137,9 +131,7 @@ func TestGitHubAPIDownloadsStreamUpToTheLimit(t *testing.T) {
 	}
 }
 
-// The token screen still covers a download past the old 8 MiB limit: an
-// installation token echoed at 12 MiB into a 24 MiB log is cut off before it
-// reaches the worker and audited as secret_echo.
+// The token screen covers a download past 8 MiB: a token echoed at 12 MiB is cut off before the worker and audited as secret_echo.
 func TestGitHubAPIDownloadCutsOffAnEchoedTokenPastTheOldLimit(t *testing.T) {
 	const size, plantAt = 24 << 20, 12<<20 + 100
 	f := newDownloadFixture(t, ``, size, plantAt)

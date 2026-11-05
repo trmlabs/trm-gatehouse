@@ -8,8 +8,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// testPlaintextDatabases honours AGENT_VAULT_CATALOG_PLAINTEXT_DATABASES in
-// the e2e build only, for the Kind fixture database, which serves no TLS.
+// testPlaintextDatabases honours AGENT_VAULT_CATALOG_PLAINTEXT_DATABASES in the e2e build only, for the TLS-less Kind fixture.
 func testPlaintextDatabases(getenv func(string) string, logger *slog.Logger) {
 	if v := getenv("AGENT_VAULT_CATALOG_PLAINTEXT_DATABASES"); v == "1" || v == "true" {
 		httpcatalog.AllowPlaintextDatabases()

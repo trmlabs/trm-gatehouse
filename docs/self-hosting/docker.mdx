@@ -19,6 +19,16 @@ This runs a multi-stage build:
 
 The final image runs as non-root user `agentvault` (UID 65532) and includes a built-in health check at `GET /health`.
 
+## Build the image
+
+Gatehouse has no published image. Build one from a checkout of this repository:
+
+```bash
+make docker
+```
+
+This tags the image `gatehouse:local`.
+
 ## Configuration
 
 Expose both the HTTP API (`14321`) and the transparent HTTP/HTTPS proxy (`14322`) so agents' `HTTPS_PROXY`/`HTTP_PROXY` can reach the broker. Pass the master password via environment variable to wrap the data encryption key (DEK):
@@ -28,7 +38,7 @@ docker run -it -p 14321:14321 -p 14322:14322 \
   -v agent-vault-data:/data \
   -e AGENT_VAULT_MASTER_PASSWORD=your-password \
   -e AGENT_VAULT_ADDR=https://agent-vault.example.com \
-  infisical/agent-vault
+  gatehouse:local
 ```
 
 Omit `AGENT_VAULT_MASTER_PASSWORD` for **passwordless mode** — the DEK is stored unwrapped, relying on volume access controls for security.
@@ -60,7 +70,7 @@ See [transparent proxy setup](/self-hosting/local#transparent-proxy) for install
 ```yaml docker-compose.yml
 services:
   agent-vault:
-    image: infisical/agent-vault
+    image: gatehouse:local
     ports:
       - "14321:14321"
       - "14322:14322"
@@ -105,7 +115,7 @@ For production deployments, or when running multiple instances behind a load bal
 docker run -it -p 14321:14321 -p 14322:14322 \
   -e DATABASE_URL=postgres://user:password@db:5432/agentvault \
   -e AGENT_VAULT_MASTER_PASSWORD=your-password \
-  infisical/agent-vault
+  gatehouse:local
 ```
 
 See the [PostgreSQL guide](/self-hosting/postgres) for a full Docker Compose example with multiple replicas, migration steps, and architecture notes.

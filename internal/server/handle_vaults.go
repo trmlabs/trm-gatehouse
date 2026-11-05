@@ -19,10 +19,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// resolveVaultForAdminOrOwner loads the vault and verifies the caller is
-// either a vault admin or the instance owner — the auth scope shared by
-// vault rename, delete, and settings handlers. On failure it writes the
-// error response and returns nil; callers should `return` immediately.
+// resolveVaultForAdminOrOwner loads the vault and checks the caller is vault admin or instance owner; on failure it responds and returns nil.
 func (s *Server) resolveVaultForAdminOrOwner(w http.ResponseWriter, r *http.Request, name string) *store.Vault {
 	ctx := r.Context()
 	ns, err := s.store.GetVault(ctx, name)
@@ -42,10 +39,7 @@ func (s *Server) resolveVaultForAdminOrOwner(w http.ResponseWriter, r *http.Requ
 	return ns
 }
 
-// readUnmatchedHostPolicy returns the per-vault unmatched_host_policy,
-// defaulting to PolicyPassthrough when the row is absent or holds an
-// unrecognised value. A non-nil error means the underlying store read
-// failed for a reason other than "not present".
+// readUnmatchedHostPolicy returns the vault's unmatched_host_policy, defaulting to PolicyPassthrough when absent or unrecognised.
 func readUnmatchedHostPolicy(ctx context.Context, st interface {
 	GetVaultSetting(ctx context.Context, vaultID, key string) (string, error)
 }, vaultID string) (brokercore.UnmatchedHostPolicy, error) {
@@ -230,10 +224,7 @@ func (s *Server) handleVaultSyncNow(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"credential_store": summary})
 }
 
-// writeInvalidUpstreamKey responds to a sync that failed because an upstream
-// secret key violates the UPPER_SNAKE_CASE pattern. The offending key name is
-// upstream topology, so it's redacted for non-admin/non-owner viewers,
-// mirroring handleVaultContext's last_sync_error gate.
+// writeInvalidUpstreamKey redacts the offending key name (upstream topology) for non-admin viewers.
 func (s *Server) writeInvalidUpstreamKey(w http.ResponseWriter, ctx context.Context, actor *Actor, vaultID string, err error) {
 	if s.callerCanSeeVaultUpstream(ctx, actor, vaultID) {
 		jsonCodedError(w, http.StatusBadRequest, "external_store_invalid_key", err.Error())
@@ -280,9 +271,7 @@ func credentialStoreListSummary(cs *store.VaultCredentialStore) *credentialStore
 	return out
 }
 
-// credentialStoreDetailSummary is the full shape for vault context and
-// post-sync responses. Callers must redact Config and LastSyncError for
-// non-admin/non-owner viewers (upstream topology leak).
+// credentialStoreDetailSummary: callers must redact Config and LastSyncError for non-admin viewers (topology leak).
 func credentialStoreDetailSummary(cs *store.VaultCredentialStore) *credentialStoreSummary {
 	out := credentialStoreListSummary(cs)
 	out.PollIntervalSeconds = cs.PollIntervalSeconds
@@ -293,9 +282,7 @@ func credentialStoreDetailSummary(cs *store.VaultCredentialStore) *credentialSto
 	return out
 }
 
-// handleInstanceCredentialStores lists credential-store kinds the caller
-// may create. Always "builtin"; "infisical" only for owners when the server
-// has an Infisical client (matches the create gate).
+// handleInstanceCredentialStores lists store kinds the caller may create: builtin, plus infisical for owners when configured.
 func (s *Server) handleInstanceCredentialStores(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.requireActor(w, r)
 	if err != nil {
@@ -597,10 +584,7 @@ type infisicalSnapshot struct {
 	Credentials         []store.EncryptedKV
 }
 
-// prepareInfisicalSnapshot validates the requested config, probes Infisical to
-// catch auth/topology errors early, and encrypts the fetched secrets. On any
-// failure it writes the appropriate HTTP error response and returns ok=false;
-// callers should return immediately. logName is used only for log context.
+// prepareInfisicalSnapshot validates config, probes Infisical and encrypts the secrets; on failure it writes the error and returns ok=false.
 func (s *Server) prepareInfisicalSnapshot(w http.ResponseWriter, ctx context.Context, logName string, cs *vaultCreateCredentialStoreRequest) (infisicalSnapshot, bool) {
 	if s.infisicalClient == nil {
 		jsonCodedError(w, http.StatusServiceUnavailable, "infisical_not_configured",
@@ -659,10 +643,7 @@ func (s *Server) prepareInfisicalSnapshot(w http.ResponseWriter, ctx context.Con
 	return infisicalSnapshot{ConfigJSON: configJSON, PollIntervalSeconds: pollInterval, Credentials: items}, true
 }
 
-// createExternalVault dispatches to the per-kind create flow. Each flow
-// validates + probes + commits the vault, credential-store row, initial
-// snapshot, and admin grant in one transaction. Any failure leaves the DB
-// untouched.
+// createExternalVault dispatches to the per-kind create flow; each commits atomically.
 func (s *Server) createExternalVault(w http.ResponseWriter, ctx context.Context, actor *Actor, req vaultCreateRequest) {
 	switch req.CredentialStore.Kind {
 	case store.CredentialStoreInfisical:
@@ -674,9 +655,7 @@ func (s *Server) createExternalVault(w http.ResponseWriter, ctx context.Context,
 	}
 }
 
-// createInfisicalVault validates + probes + commits an Infisical-backed vault,
-// its credential-store row, initial snapshot, and admin grant in one
-// transaction. Any failure leaves the DB untouched.
+// createInfisicalVault commits the vault, credential-store row, snapshot and admin grant in one transaction.
 func (s *Server) createInfisicalVault(w http.ResponseWriter, ctx context.Context, actor *Actor, req vaultCreateRequest) {
 	snap, ok := s.prepareInfisicalSnapshot(w, ctx, req.Name, req.CredentialStore)
 	if !ok {
@@ -716,11 +695,7 @@ func (s *Server) createInfisicalVault(w http.ResponseWriter, ctx context.Context
 	})
 }
 
-// handleVaultCredentialStorePatch switches the credential store backing an
-// existing vault. Switching to "infisical" (owner-only) probes + fetches the
-// upstream snapshot and OVERWRITES the vault's built-in credentials. Switching
-// to "builtin" (vault admin or owner) disconnects the external store; polling
-// stops but the last synced credentials are KEPT as built-in credentials.
+// handleVaultCredentialStorePatch switches a vault's store; infisical is owner-only and OVERWRITES built-in credentials, builtin keeps the last synced ones.
 func (s *Server) handleVaultCredentialStorePatch(w http.ResponseWriter, r *http.Request) {
 	ns := s.resolveVaultForAdminOrOwner(w, r, r.PathValue("name"))
 	if ns == nil {
@@ -748,9 +723,7 @@ func (s *Server) handleVaultCredentialStorePatch(w http.ResponseWriter, r *http.
 			"credential_store": &credentialStoreSummary{Kind: store.CredentialStoreBuiltin},
 		})
 	case store.CredentialStoreInfisical:
-		// Owner-only, mirroring handleVaultCreate: otherwise a vault admin could
-		// use the broker's machine identity to fetch upstream secrets into a
-		// vault they control.
+		// Owner-only, mirroring handleVaultCreate: a vault admin could otherwise use the broker's identity to pull upstream secrets.
 		actor, err := s.requireActor(w, r)
 		if err != nil {
 			return
@@ -1011,9 +984,7 @@ func (s *Server) handleVaultDelete(w http.ResponseWriter, r *http.Request) {
 	if v == nil {
 		return
 	}
-	// Revoke leases before deleting: DeleteVault's FK cascade drops the lease
-	// rows, so the set to revoke (incl. DB-only orphans) must be captured first.
-	// revokeDynamicLeases collects synchronously, then revokes in the background.
+	// Capture leases to revoke before deleting: DeleteVault's FK cascade drops the lease rows.
 	s.revokeDynamicLeases(v.ID)
 	if err := s.store.DeleteVault(r.Context(), name); err != nil {
 		jsonError(w, http.StatusInternalServerError, "Failed to delete vault")
@@ -1070,9 +1041,7 @@ func (s *Server) handleVaultRename(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleVaultSettingsGet is a read-only view, gated at vault-member scope
-// so non-admin users can see the actual policy (the toggle is disabled
-// for them via canManage on the frontend). PATCH stays at admin/owner.
+// handleVaultSettingsGet is gated at vault-member scope so non-admins can see the policy; PATCH stays admin/owner.
 func (s *Server) handleVaultSettingsGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ns, err := s.store.GetVault(ctx, r.PathValue("name"))
@@ -1089,10 +1058,7 @@ func (s *Server) handleVaultSettingsGet(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusInternalServerError, "Failed to read vault settings")
 		return
 	}
-	// infisical_available enables the Infisical option in the credential-store
-	// switcher. Only owners can connect a vault to Infisical (see
-	// handleVaultCredentialStorePatch), so report it owner-gated — otherwise a
-	// non-owner admin would see an option that 403s on submit.
+	// infisical_available is owner-gated since only owners can connect Infisical; admins would otherwise see an option that 403s.
 	jsonOK(w, map[string]interface{}{
 		"unmatched_host_policy": string(policy),
 		"infisical_available":   s.infisicalClient != nil && actor != nil && actor.IsOwner(),
@@ -1114,10 +1080,7 @@ func (s *Server) handleVaultSettingsPatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// On the write path, echo the validated input. The follow-up read
-	// only fires for no-op PATCHes (no field set) — otherwise a transient
-	// read failure after a committed write would desync the UI from the
-	// DB on a security-relevant control.
+	// On write, echo the validated input; a follow-up read could fail after a committed write and desync the UI.
 	if body.UnmatchedHostPolicy != nil {
 		val := strings.TrimSpace(*body.UnmatchedHostPolicy)
 		var effective brokercore.UnmatchedHostPolicy

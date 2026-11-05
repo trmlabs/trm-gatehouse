@@ -1,6 +1,4 @@
-// Package clientcerttest issues throwaway certificates for client certificate
-// tests: a CA made for one test, and end-entity client and server
-// certificates it signs. Nothing here is a real credential.
+// Package clientcerttest issues throwaway CAs and certificates for client certificate tests.
 package clientcerttest
 
 import (
@@ -16,13 +14,11 @@ import (
 	"time"
 )
 
-// CA is a throwaway certificate authority.
 type CA struct {
 	Cert *x509.Certificate
 	key  *ecdsa.PrivateKey
 }
 
-// NewCA makes a CA named name, valid for a day either side of now.
 func NewCA(t testing.TB, name string) *CA {
 	t.Helper()
 	key := newKey(t)
@@ -40,15 +36,13 @@ func NewCA(t testing.TB, name string) *CA {
 	return &CA{Cert: cert, key: key}
 }
 
-// Intermediate issues an intermediate CA named name under ca. A client
-// certificate it issues verifies against ca only when presented with it.
+// Intermediate issues an intermediate CA under ca; its client certificates verify against ca only when presented with it.
 func (ca *CA) Intermediate(t testing.TB, name string) *CA {
 	t.Helper()
 	return ca.issueCA(t, name, newKey(t))
 }
 
-// Reissue signs intermediate again under ca with a new serial, keeping its
-// name and key, as a renewal does: what it issued still verifies under it.
+// Reissue signs intermediate again under ca with a new serial, as a renewal does.
 func (ca *CA) Reissue(t testing.TB, intermediate *CA) *CA {
 	t.Helper()
 	return ca.issueCA(t, intermediate.Cert.Subject.CommonName, intermediate.key)
@@ -70,21 +64,17 @@ func (ca *CA) issueCA(t testing.TB, name string, key *ecdsa.PrivateKey) *CA {
 	return &CA{Cert: cert, key: key}
 }
 
-// Pool trusts this CA only.
 func (ca *CA) Pool() *x509.CertPool {
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.Cert)
 	return pool
 }
 
-// PEM is the CA certificate, and KeyPEM its key: stored together as a client
-// certificate, they are the CA-as-leaf mistake the broker refuses.
+// PEM is the CA certificate; stored with KeyPEM as a client certificate it is the CA-as-leaf mistake the broker refuses.
 func (ca *CA) PEM() string { return encode("CERTIFICATE", ca.Cert.Raw) }
 
 func (ca *CA) KeyPEM(t testing.TB) string { return keyPEMOf(t, ca.key) }
 
-// Client issues an end-entity client certificate valid from notBefore to
-// notAfter, as PEM certificate and key.
 func (ca *CA) Client(t testing.TB, name string, notBefore, notAfter time.Time) (certPEM, keyPEM string) {
 	t.Helper()
 	key := newKey(t)
@@ -93,12 +83,10 @@ func (ca *CA) Client(t testing.TB, name string, notBefore, notAfter time.Time) (
 	return ca.sign(t, template, key), keyPEMOf(t, key)
 }
 
-// ValidClient is Client valid for an hour either side of now.
 func (ca *CA) ValidClient(t testing.TB, name string) (certPEM, keyPEM string) {
 	return ca.Client(t, name, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 }
 
-// Server issues a server certificate for hosts.
 func (ca *CA) Server(t testing.TB, hosts ...string) tls.Certificate {
 	t.Helper()
 	key := newKey(t)

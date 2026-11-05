@@ -54,8 +54,6 @@ func TestParseNormalizesAndRejects(t *testing.T) {
 	}
 }
 
-// A Basic user entry sends the key as the user name with an empty password,
-// as axios auth.username and curl -u key: do; other entries keep their scheme.
 func TestCredentialEncodesBasicUser(t *testing.T) {
 	c, err := Parse([]byte(strings.Replace(entryWith(`,"basicUser":true`), `"x-api-key"`, `"authorization"`, 1)))
 	if err != nil {
@@ -79,9 +77,6 @@ func TestCredentialEncodesBasicUser(t *testing.T) {
 	}
 }
 
-// A Basic pair entry sends a "user:password" key as Basic credentials, and the
-// worker's placeholder stands for both halves, as a client given the
-// placeholder as its public and secret key encodes it.
 func TestCredentialEncodesBasicPair(t *testing.T) {
 	authorization := func(doc string) string { return strings.Replace(doc, `"x-api-key"`, `"authorization"`, 1) }
 	c, err := Parse([]byte(authorization(entryWith(`,"basicPair":true`))))
@@ -126,9 +121,6 @@ func TestCredentialEncodesBasicPair(t *testing.T) {
 	}
 }
 
-// A Basic pair client may hold the pair's user name, which is not secret, and
-// send it with the placeholder as password; only that exact encoding yields
-// the user name for the broker to compare with the stored one.
 func TestCallerPairUserReadsOnlyTheUserBesideThePlaceholder(t *testing.T) {
 	e := Entry{BasicPair: true, Placeholder: "__vault_SERPAPI_KEY__"}
 	encode := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(s)) }
@@ -156,9 +148,6 @@ func TestCallerPairUserReadsOnlyTheUserBesideThePlaceholder(t *testing.T) {
 	}
 }
 
-// pairUserHeader names the header a pair client also sends its user name in.
-// It needs basicPair and a plain header name that is neither reserved nor
-// forwarded, and no other entry kind takes it.
 func TestPairUserHeaderNeedsABasicPairEntry(t *testing.T) {
 	authorization := func(doc string) string { return strings.Replace(doc, `"x-api-key"`, `"authorization"`, 1) }
 	c, err := Parse([]byte(authorization(entryWith(`,"basicPair":true,"pairUserHeader":"x-langfuse-public-key"`))))
@@ -223,7 +212,6 @@ func TestMatchUsesSegmentsAndLongestPrefix(t *testing.T) {
 	if !c.HasHost("serpapi.com", 443) || c.HasHost("serpapi.com", 8443) || c.HasHost("example.com", 443) {
 		t.Fatal("HasHost wrong")
 	}
-	// Per pool: only a pool an entry grants sees its host.
 	if !c.HasHostForPool("SerpAPI.com", 443, "pool-a") || c.HasHostForPool("serpapi.com", 443, "pool-b") ||
 		c.HasHostForPool("serpapi.com", 443, "") || c.HasHostForPool("example.com", 443, "pool-a") {
 		t.Fatal("HasHostForPool wrong")
@@ -316,7 +304,6 @@ func TestSecretNeverPrints(t *testing.T) {
 	}
 }
 
-// A vendor answering 401 to every call cannot turn each call into a Vault read.
 func TestInvalidateIsRateLimitedPerKey(t *testing.T) {
 	ref := KeyRef{Mount: "gatehouse", Path: "vendors/a", Field: "key"}
 	other := KeyRef{Mount: "gatehouse", Path: "vendors/b", Field: "key"}
@@ -360,8 +347,6 @@ func TestTTLIsCappedAtOneMinute(t *testing.T) {
 	}
 }
 
-// basicUser applies only to HTTP header entries; a browser or Google entry
-// that sets it is refused at load instead of silently ignoring it.
 func TestBasicUserRefusedOnBrowserAndGoogleEntries(t *testing.T) {
 	browser := `{"entries":[` + browserEntryJSON(`,"basicUser":true`) + `]}`
 	if _, err := Parse([]byte(browser)); err == nil {

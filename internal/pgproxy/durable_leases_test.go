@@ -281,9 +281,8 @@ func TestDurableLeaseCleanupFailureBlocksBindingAndPreservesOtherSession(t *test
 	}
 }
 
-// A lost response whose child token could not revoke itself survives a stop
-// and a restart as a record; the database keeps issuing meanwhile, and an
-// operator's confirmation still closes the record.
+// A lost response whose child token could not revoke itself survives a stop and a restart as a record; the
+// database keeps issuing meanwhile, and an operator's confirmation still closes the record.
 func TestDurableLeaseLostIssuanceStaysRecordedAcrossRestart(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := newDurableForTest(t, client, st)
@@ -472,9 +471,8 @@ func TestDurableRecoveryNeverRevokesByAccessor(t *testing.T) {
 	}
 }
 
-// A lost credential response: the process still holds the child token, so it
-// revokes it with its own token at once, taking the unknown credential with
-// it. The record stays for the automatic check; the database keeps issuing.
+// A lost credential response: the process still holds the child token, so it revokes it with its own token at
+// once, taking the unknown credential with it.
 func TestDurableLeaseLostIssuanceRevokesTheHeldChild(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := newDurableForTest(t, client, st)
@@ -504,10 +502,8 @@ func TestDurableLeaseLostIssuanceRevokesTheHeldChild(t *testing.T) {
 	}
 }
 
-// Vault refusing a credential read with 403 is its own evidence that nothing
-// was issued, so the record closes at once, even under a shared role the
-// broker cannot list. A 500 proves nothing and stays an unknown issuance. Both
-// failures carry Vault's answer for the broker's log.
+// Vault refusing a credential read with 403 is its own evidence that nothing was issued, so the record closes
+// at once, even under a shared role the broker cannot list.
 func TestDurableLeaseVaultRefusalClosesItsRecord(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := newDurableForTest(t, client, st)

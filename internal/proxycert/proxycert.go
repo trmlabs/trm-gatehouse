@@ -1,9 +1,5 @@
-// Package proxycert issues the serving certificate a shared proxy in another
-// cluster presents to its agent sandboxes, so the hop from a sandbox to its
-// proxy is encrypted and the sandbox can verify it. The proxy keeps its key in
-// memory and sends only a certificate request; the broker checks that the
-// caller is a proxy identity and that the request names only the proxy's own
-// service names, then a Vault PKI role restricted to those names signs it.
+// Package proxycert issues the serving certificate a shared proxy in another cluster presents to its sandboxes. The proxy keeps its key in memory and sends only a CSR;
+// the broker checks the caller is a proxy identity and the request names only its own service names, then a Vault PKI role restricted to those names signs it.
 package proxycert
 
 import (
@@ -34,9 +30,7 @@ type Signer interface {
 	SignCertificate(ctx context.Context, mount, role, csrPEM string, names []string, ttl time.Duration) (string, string, error)
 }
 
-// ProxyVerifier admits only a shared proxy's own identity, from its token and
-// the connection's source address, and names its binding (trust domain,
-// namespace and service account UID).
+// ProxyVerifier admits only a shared proxy's own identity, from its token and source address, and names its binding.
 type ProxyVerifier interface {
 	ProxyBinding(ctx context.Context, token string, peer netip.Addr) (string, error)
 }
@@ -57,10 +51,7 @@ type Issuer struct {
 	Verifier    ProxyVerifier
 	Audit       Audit
 	Logger      *slog.Logger
-	// PerHour and Burst bound issuance per proxy binding (token bucket), so a
-	// looping proxy cannot flood Vault PKI or the audit trail. Defaults: 1,000
-	// an hour, burst 1,000, room for a fleet of replicas all starting at once
-	// and each renewing at two thirds of its lifetime with retries.
+	// PerHour and Burst bound issuance per proxy binding (token bucket) so a looping proxy cannot flood Vault PKI or the audit trail; defaults 1,000 an hour, burst 1,000.
 	PerHour, Burst int
 
 	limitMu sync.Mutex
@@ -101,8 +92,7 @@ func (i *Issuer) allow(binding string, now time.Time) bool {
 }
 
 const (
-	// The request and CSR bounds only stop an oversized body; a CSR naming
-	// every DNS name the broker allows fits well inside them.
+	// The request and CSR bounds only stop an oversized body.
 	maxRequestBytes = 1 << 20
 	maxCSRBytes     = 512 << 10
 	// MaxTTL bounds a proxy certificate. A proxy renews at two thirds of it.
@@ -145,12 +135,8 @@ var (
 	oidServerAuth     = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 1}
 )
 
-// CheckRequest parses a PEM certificate request and refuses anything but an
-// ECDSA P-256 key, a valid self-signature and DNS names that are all in
-// allowed, with no IP, URI or email names. The only extensions it may ask for
-// are subject alternative names, server authentication as its sole extended
-// key usage, and key usage limited to digital signature and key agreement,
-// so it cannot ask to be a CA. It returns the names to sign.
+// CheckRequest parses a PEM certificate request and refuses anything but an ECDSA P-256 key, a valid self-signature and DNS names all in allowed (no IP, URI or email names).
+// Only subject alternative names, server authentication as sole extended key usage, and key usage limited to digital signature and key agreement may be asked for, so it cannot ask to be a CA.
 func CheckRequest(csrPEM string, allowed []string) ([]string, error) {
 	if len(csrPEM) > maxCSRBytes {
 		return nil, errCSR
@@ -212,8 +198,7 @@ func requestedExtensionsAllowed(csr *x509.CertificateRequest) bool {
 				return false
 			}
 			for bit := range bits.BitLength {
-				// 0 is digitalSignature and 4 keyAgreement; 5 keyCertSign
-				// and 6 cRLSign are the ones a proxy must never hold.
+				// 0 is digitalSignature and 4 keyAgreement; 5 keyCertSign and 6 cRLSign are the ones a proxy must never hold.
 				if bits.At(bit) == 1 && bit != 0 && bit != 4 {
 					return false
 				}
@@ -225,9 +210,7 @@ func requestedExtensionsAllowed(csr *x509.CertificateRequest) bool {
 	return true
 }
 
-// checkIssued parses what Vault signed and confirms it is the leaf asked for:
-// for the request's key, exactly names, server authentication only and not a
-// CA. It returns the serial in lower-case hex and notAfter in RFC 3339 UTC.
+// checkIssued confirms what Vault signed is the leaf asked for: the request's key, exactly names, server authentication only, not a CA. It returns the serial in lower-case hex and notAfter in RFC 3339 UTC.
 func checkIssued(certificatePEM string, csrPEM string, names []string) (string, string, error) {
 	block, _ := pem.Decode([]byte(certificatePEM))
 	if block == nil || block.Type != "CERTIFICATE" {
@@ -250,8 +233,7 @@ func checkIssued(certificatePEM string, csrPEM string, names []string) (string, 
 		!slices.Equal(slices.Sorted(slices.Values(leaf.DNSNames)), slices.Sorted(slices.Values(names))) || leaf.SerialNumber == nil || leaf.SerialNumber.Sign() < 0 {
 		return "", "", errIssued
 	}
-	// Text(16) is lower-case hex with no leading zeros ("0" for zero), the
-	// form the audit row takes; hex of the bytes keeps a leading zero nibble.
+	// Text(16) is lower-case hex with no leading zeros, the form the audit row takes; hex of the bytes would keep a leading zero nibble.
 	return leaf.SerialNumber.Text(16), leaf.NotAfter.UTC().Format(time.RFC3339), nil
 }
 
@@ -264,9 +246,7 @@ type response struct {
 	Chain       string `json:"chain"`
 }
 
-// Handler serves POST /v1/proxy/certificate. The proxy authenticates with its
-// own token as a bearer credential; the peer address is the one the TLS front
-// reported. Every refusal is generic to the caller and named in the log.
+// Handler serves POST /v1/proxy/certificate. The proxy authenticates with its own token as a bearer credential; every refusal is generic to the caller and named in the log.
 func (i *Issuer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	i.Register(mux)

@@ -26,9 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// verifyCombinedExecutableRestart exercises the actual CLI against the same
-// persisted store after the component-level recovery. The optional explicit
-// binary is built by the disposable runner, never taken from PATH.
+// verifyCombinedExecutableRestart runs the actual CLI against the persisted store; an explicit binary is built by the runner, never taken from PATH.
 func verifyCombinedExecutableRestart(t *testing.T, s combinedRecovery, token string) {
 	t.Helper()
 	binary := os.Getenv("AV_TEST_EXECUTABLE")

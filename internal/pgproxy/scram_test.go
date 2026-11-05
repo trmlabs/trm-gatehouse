@@ -8,10 +8,8 @@ import (
 	"testing"
 )
 
-// TestSCRAMClient_RFC7677Vector pins the SCRAM-SHA-256 computation to the
-// worked example in RFC 7677 (username "user", password "pencil"). The client
-// nonce and server-first message are fixed, so the client proof and the server
-// signature are deterministic and must match the RFC byte-for-byte.
+// TestSCRAMClient_RFC7677Vector pins the SCRAM-SHA-256 computation to the worked example in RFC 7677
+// (username "user", password "pencil").
 func TestSCRAMClient_RFC7677Vector(t *testing.T) {
 	s := &scramClient{password: "pencil", clientNonce: "rOprNGfwEbeRWgbNEkqO"}
 	// The RFC exchange uses "n=user"; Postgres ignores the field but the proof is

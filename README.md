@@ -63,10 +63,8 @@ docker run --rm --network none credential-proxy-verification
 
 The build takes about a minute and a half and the run about three. The run
 ends with `PASS: local HTTP and PostgreSQL fixtures.`, a list of what it
-proved, and a reminder that a real deployment needs more checks.
-
-A nonzero exit is a failure. Some tests print a skip line asking for extra
-settings; those cover setups the container does not include.
+proved, and a reminder that a real deployment needs more checks. A nonzero exit is a failure. A skip line asking for extra settings
+covers a setup the container does not include.
 
 What the run proves. The HTTP checks use rules that name each key, as the
 strict profile does, not catalog entries, which differ where noted. The reply,
@@ -134,12 +132,11 @@ for an HTTP API:
   pools: [research-agents]
 ```
 
-The broker reloads the catalog every 30 seconds. An entry that fails
-validation is left out and logged while the rest of the new version applies,
-so a bad edit takes that entry offline; it does not leave the old version of
-the entry serving. Only a catalog that cannot be read at all, or whose kept
-parts still fail validation as a whole, keeps the last good one in force. The agent cannot widen an entry; only the next reviewed
-change can. Check a catalog before you propose it (`--environment` names the
+The broker reloads the catalog every 30 seconds. An entry that fails validation
+is left out and logged while the rest applies, so a bad edit takes that entry
+offline. A catalog that cannot be read at all, or whose remaining entries still
+fail validation as a whole, keeps the last good one in force. The agent cannot
+widen an entry; only the next reviewed change can. Check a catalog before you propose it (`--environment` names the
 environment every database role must be for, and is required when the catalog
 has database entries):
 
@@ -162,13 +159,14 @@ has database entries):
 
 The agent holds nothing, so it cannot prove who it is. Something outside the
 sandbox vouches for it instead, using tokens that Kubernetes and Cursor
-already sign:
+already sign, or, where a platform cannot issue one, a per-agent token:
 
 | Agent runtime | How it reaches Gatehouse | Who the audit names |
 |---|---|---|
 | Kubernetes Pods | A sidecar on the Pod's loopback address presents the Pod's own service account token. Gatehouse checks the live Pod, the controller it declares and its exact image. That declaration is only as trustworthy as the admission policy a deployment must add (see [Running it](#running-it)) | The pool, or the person when the runtime signs a session token that names them |
 | Shared sandbox clusters | A relay outside the sandboxes matches each connection to a live sandbox Pod. The sandbox holds no identity token at all | The person who started the sandbox, or the pool |
-| Cursor self-hosted workers | The sidecar adds Cursor's short-lived token for the task, accepted only from the worker running that task | The person who started the task, on a person pool; otherwise the pool |
+| Cursor self-hosted workers | The sidecar adds Cursor's short-lived token for the task, accepted only from the worker running that task | The person who started the task, on a person pool; the Automation and its owning team for an Automation's run; otherwise the pool |
+| Clients with no Kubernetes identity | A per-agent bearer token on a private-link listener only; it always expires within 90 days (see [agent tokens](docs/gatehouse/agent-tokens.md)) | The agent |
 
 Each runtime is declared in the catalog as a harness. A new runtime is a new
 catalog entry, and needs code only if it brings a new kind of identity proof.
@@ -239,7 +237,7 @@ Start with the [developer guide](docs/gatehouse/developer-guide.md), then the
 | [Workload identity](examples/credential-proxy/kubernetes/README.md) | Kubernetes identity setup and fixtures |
 | [Running a fleet](docs/gatehouse/broker-fleet.md) and [database recovery](docs/gatehouse/database-recovery.md) | Several replicas, and recovery of interrupted database logins |
 
-The rest of [docs/](docs/) is Infisical's Agent Vault documentation. It covers
+The rest of [docs/](docs/) is inherited documentation. It covers
 the inherited features: vaults, the web UI, the CLI and the TypeScript SDK.
 
 ## Repository layout
@@ -253,7 +251,7 @@ The binary, Go module path and environment variables keep the upstream
 | `examples/credential-proxy/` | The local demo, the strict profile, and the Kubernetes and task relay fixtures |
 | `docs/gatehouse/` | Gatehouse guides |
 | `docs/`, `web/`, `sdks/` | Inherited from Agent Vault |
-| `install.sh`, `fly.toml`, `.github/workflows/release-node-sdk.yml` | Inherited from Agent Vault. `install.sh` installs upstream Agent Vault, not Gatehouse. The SDK release workflow runs only in the upstream repository |
+| `.github/workflows/release-node-sdk.yml` | Inherited from Agent Vault. The SDK release workflow runs only in the upstream repository |
 
 ## Telemetry
 
@@ -270,9 +268,8 @@ make build            # the web UI and the agent-vault binary
 go test -race ./...   # the full test suite
 ```
 
-The test suite includes a check that refuses a list of known internal
-hostnames, project names and similar identifiers. It catches only what it
-lists. Use `example.com` style placeholders.
+A test refuses known internal hostnames and project names, and only those.
+Use `example.com` style placeholders.
 
 ## Contributing
 

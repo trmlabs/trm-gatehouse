@@ -12,8 +12,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// setupDatabaseAPITest builds a server with an admin session and a member
-// session over the default vault (root-ns-id).
 func setupDatabaseAPITest(t *testing.T) (srv *Server, ms *mockStore, adminToken, memberToken string) {
 	t.Helper()
 	ms = newMockStore()
@@ -55,7 +53,6 @@ const validDatabaseBody = `{"name":"alloy","upstream":"alloy.internal:5432","dat
 func TestDatabaseAPIAddListGetDelete(t *testing.T) {
 	srv, ms, admin, _ := setupDatabaseAPITest(t)
 
-	// Add: 201 Created.
 	rec := doDatabaseRequest(t, srv, http.MethodPost, "/v1/vaults/default/databases", admin, validDatabaseBody)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("add: expected 201, got %d: %s", rec.Code, rec.Body.String())
@@ -74,12 +71,10 @@ func TestDatabaseAPIAddListGetDelete(t *testing.T) {
 		t.Fatalf("unexpected add response: %+v", addResp)
 	}
 
-	// It is persisted in the store under the vault id.
 	if got, _ := ms.ListDatabaseServices(context.Background(), "root-ns-id"); len(got) != 1 || got[0].Name != "alloy" {
 		t.Fatalf("expected one persisted service, got %+v", got)
 	}
 
-	// List includes it.
 	rec = doDatabaseRequest(t, srv, http.MethodGet, "/v1/vaults/default/databases", admin, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -92,13 +87,11 @@ func TestDatabaseAPIAddListGetDelete(t *testing.T) {
 		t.Fatalf("unexpected list: %+v", listResp.Databases)
 	}
 
-	// Get one.
 	rec = doDatabaseRequest(t, srv, http.MethodGet, "/v1/vaults/default/databases/alloy", admin, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Delete.
 	rec = doDatabaseRequest(t, srv, http.MethodDelete, "/v1/vaults/default/databases/alloy", admin, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete: expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -116,7 +109,6 @@ func TestDatabaseAPIUpsertIsIdempotent(t *testing.T) {
 		t.Fatalf("first add: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Re-add the same name with changed coordinates: 200 (not created), overwritten.
 	changed := `{"name":"alloy","upstream":"alloy.internal:6000","mount":"database","role":"rw","sslmode":"verify-full"}`
 	rec = doDatabaseRequest(t, srv, http.MethodPost, "/v1/vaults/default/databases", admin, changed)
 	if rec.Code != http.StatusOK {
@@ -134,7 +126,6 @@ func TestDatabaseAPIUpsertIsIdempotent(t *testing.T) {
 		t.Fatalf("expected overwritten coordinates, got %+v", resp.Database)
 	}
 
-	// Still exactly one row.
 	rec = doDatabaseRequest(t, srv, http.MethodGet, "/v1/vaults/default/databases", admin, "")
 	var listResp struct {
 		Databases []databaseServiceView `json:"databases"`
@@ -145,9 +136,7 @@ func TestDatabaseAPIUpsertIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestDatabaseAPIDefaultsEmptySSLMode pins the documented default: adding a
-// database without sslmode succeeds and stores "prefer" (the store's CHECK
-// rejects an empty value, so an unnormalized empty would 500).
+// The store's CHECK rejects an empty sslmode, so the API must default it to "prefer".
 func TestDatabaseAPIDefaultsEmptySSLMode(t *testing.T) {
 	srv, ms, admin, _ := setupDatabaseAPITest(t)
 
@@ -168,8 +157,7 @@ func TestDatabaseAPIDefaultsEmptySSLMode(t *testing.T) {
 	}
 }
 
-// TestDatabaseAPIRejectsNegativeMaxConns pins that a negative max_conns is a 400
-// (client error), not a 500 from the store's CHECK(max_conns >= 0).
+// A negative max_conns must be a 400, not a 500 from the store's CHECK.
 func TestDatabaseAPIRejectsNegativeMaxConns(t *testing.T) {
 	srv, _, admin, _ := setupDatabaseAPITest(t)
 	body := `{"name":"neg","upstream":"h:5432","mount":"database","role":"ro","max_conns":-1}`
@@ -203,25 +191,20 @@ func TestDatabaseAPIValidation(t *testing.T) {
 func TestDatabaseAPIRequiresAdminForWrites(t *testing.T) {
 	srv, _, _, member := setupDatabaseAPITest(t)
 
-	// A member cannot add.
 	rec := doDatabaseRequest(t, srv, http.MethodPost, "/v1/vaults/default/databases", member, validDatabaseBody)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("member add: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// A member cannot delete.
 	rec = doDatabaseRequest(t, srv, http.MethodDelete, "/v1/vaults/default/databases/alloy", member, "")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("member delete: expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// But a member CAN list (read access).
 	rec = doDatabaseRequest(t, srv, http.MethodGet, "/v1/vaults/default/databases", member, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("member list: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestDiscoverIncludesDatabases pins that /discover surfaces the vault's managed
-// databases (name + upstream host only, never the Vault mount/role).
 func TestDiscoverIncludesDatabases(t *testing.T) {
 	ms, token := setupMockStoreWithScopedSessionRole(t, "default", "root-ns-id", "proxy")
 	srv := newTestServer(withStore(ms))
@@ -253,7 +236,6 @@ func TestDiscoverIncludesDatabases(t *testing.T) {
 	if len(resp.Databases) != 1 || resp.Databases[0].Name != "analytics" || resp.Databases[0].Host != "db.internal:5432" {
 		t.Fatalf("unexpected databases in discover: %+v", resp.Databases)
 	}
-	// The Vault role must never appear in the discovery payload.
 	if strings.Contains(rec.Body.String(), "secret-role") {
 		t.Fatal("discovery leaked the Vault role")
 	}
@@ -262,17 +244,14 @@ func TestDiscoverIncludesDatabases(t *testing.T) {
 func TestDatabaseAPINotFound(t *testing.T) {
 	srv, _, admin, _ := setupDatabaseAPITest(t)
 
-	// Unknown vault.
 	rec := doDatabaseRequest(t, srv, http.MethodGet, "/v1/vaults/nope/databases", admin, "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown vault: expected 404, got %d", rec.Code)
 	}
-	// Unknown database on a real vault.
 	rec = doDatabaseRequest(t, srv, http.MethodGet, "/v1/vaults/default/databases/ghost", admin, "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown db get: expected 404, got %d", rec.Code)
 	}
-	// Delete of an unknown database is 404, not a silent success.
 	rec = doDatabaseRequest(t, srv, http.MethodDelete, "/v1/vaults/default/databases/ghost", admin, "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown db delete: expected 404, got %d", rec.Code)

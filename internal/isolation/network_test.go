@@ -104,9 +104,7 @@ func TestParseNetworkInspect_EmptyContainers(t *testing.T) {
 }
 
 func TestHostBindIP(t *testing.T) {
-	// macOS/Windows: 0.0.0.0 so Docker Desktop can deliver
-	// host.docker.internal traffic regardless of which host interface
-	// its VM backend routes through.
+	// macOS/Windows: 0.0.0.0 so Docker Desktop delivers host.docker.internal traffic via any VM interface.
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		n := &Network{GatewayIP: net.ParseIP("172.20.0.1")}
 		got := HostBindIP(n)

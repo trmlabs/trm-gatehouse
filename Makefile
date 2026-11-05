@@ -65,7 +65,7 @@ docker:
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(DATE) \
-		-t infisical/agent-vault .
+		-t gatehouse:local .
 
 .PHONY: playground playground-shell playground-autoplay playground-down
 playground:

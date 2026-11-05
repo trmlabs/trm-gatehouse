@@ -19,7 +19,6 @@ import (
 
 const remoteIssuer = "https://container.googleapis.com/v1/projects/sandbox/locations/l/clusters/agent-sandbox"
 
-// remoteCluster publishes another cluster's signing keys over HTTPS.
 type remoteCluster struct {
 	key   *rsa.PrivateKey
 	kid   string
@@ -52,7 +51,6 @@ func newRemoteCluster(t *testing.T) *remoteCluster {
 	return rc
 }
 
-// remoteClaims is a token the remote cluster issued to its proxy.
 func (rc *remoteCluster) claims() claims {
 	var c claims
 	c.Issuer, c.Subject, c.Audience = remoteIssuer, "system:serviceaccount:example-edge:example-edge", []string{"example-edge"}
@@ -80,8 +78,6 @@ func withDomains(t *testing.T, f *poolFixture, domains ...TrustDomain) *Resolver
 	return r
 }
 
-// A token is verified against the keys of the domain that issued it, and
-// each domain's keys are fetched and cached on their own.
 func TestTrustDomainsVerifyByIssuer(t *testing.T) {
 	f := setupPool(t)
 	rc := newRemoteCluster(t)

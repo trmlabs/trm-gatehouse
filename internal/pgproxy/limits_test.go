@@ -2,9 +2,8 @@ package pgproxy
 
 import "testing"
 
-// With pooling, client sessions hold no database connection of their own, so
-// their caps default to fleet scale; unpooled, each session is a database
-// connection, and each database's ceiling comes from its catalog maxConns.
+// With pooling, client sessions hold no database connection of their own, so their caps default to fleet
+// scale.
 func TestSessionCapDefaultsFollowPooling(t *testing.T) {
 	pooled := New("127.0.0.1:0", Options{Pool: &PoolOptions{}})
 	if o := pooled.opts; o.MaxConns != 10000 || o.MaxPendingConns != 10000 || o.MaxLeasesPerActor != 1024 || o.MaxLeasesPerAgent != 10000-1024 {

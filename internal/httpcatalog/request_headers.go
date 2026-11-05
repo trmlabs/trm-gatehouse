@@ -6,22 +6,12 @@ import (
 	"net/http"
 )
 
-// RequestHeader limits one request header of a header entry to listed
-// values. The header must appear exactly once on every request to the entry,
-// with a value equal to one of Values, and must be one the entry forwards, so
-// the value the broker checked is the one the vendor reads. A groundcover MCP
-// entry should limit X-Backend-Id, which picks the backend of the key's tenant
-// that a request reads, since the key alone may reach every backend. The
-// broker still serves one without the limit, with only its message rules, so
-// a catalog written before the field existed keeps working; the catalog's own
-// checks are where the limit is required.
+// RequestHeader limits one request header of a header entry to listed values: exactly once on every request, and one the entry forwards. A groundcover MCP entry should limit X-Backend-Id, since the key alone may reach every backend; the broker still serves one without the limit, and the catalog's own checks require it.
 type RequestHeader struct {
 	Name   string   `json:"name"`
 	Values []string `json:"values"`
 }
 
-// ErrRequestHeader is a request whose limited header is missing, repeated or
-// not one of the listed values.
 var ErrRequestHeader = errors.New("request header not allowed")
 
 func (e *Entry) normalizeRequestHeaders() error {
@@ -47,9 +37,6 @@ func (e *Entry) normalizeRequestHeaders() error {
 	return nil
 }
 
-// CheckRequestHeaders holds a request's headers to the entry's
-// RequestHeaders: each limited header present exactly once with a listed
-// value. Every refusal is ErrRequestHeader.
 func (e *Entry) CheckRequestHeaders(h http.Header) error {
 	for _, rh := range e.RequestHeaders {
 		values := h.Values(rh.Name)

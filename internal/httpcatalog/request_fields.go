@@ -13,11 +13,7 @@ import (
 	"unicode"
 )
 
-// RequestField limits one request parameter of a header entry to listed
-// values. The parameter must appear exactly once in the whole request, in the
-// query string or in a JSON object or form body, as a string equal to one of
-// Values. A Slack entry must limit "channel", so a worker can reach only the
-// listed channels and never a person or a group conversation.
+// RequestField limits one request parameter of a header entry to listed values; it must appear exactly once, in the query or a JSON or form body. A Slack entry must limit "channel", so a worker reaches only the listed channels, never a person or group conversation.
 type RequestField struct {
 	Name   string   `json:"name"`
 	Values []string `json:"values"`
@@ -26,21 +22,11 @@ type RequestField struct {
 var (
 	requestFieldName  = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 	requestFieldValue = regexp.MustCompile(`^[A-Za-z0-9_.:@/+-]{1,200}$`)
-	// slackChannel admits only IDs starting with C, which keeps out D (direct
-	// message), G (group conversation or legacy private channel), U and W (a
-	// person, which Slack turns into a direct message). The prefix is Slack's
-	// convention, not a guarantee of the conversation's type.
+	// slackChannel admits only IDs starting with C, keeping out D (direct message), G (group) and U or W (a person); the prefix is Slack's convention, not a guarantee.
 	slackChannel = regexp.MustCompile(`^C[A-Z0-9]{8,20}$`)
 )
 
-// slackMethods are the only Slack Web API paths an entry may list, each with
-// every parameter Slack documents for it except token (the key goes in the
-// header). Each was checked to name its one conversation in channel: it posts
-// or edits a message, adds a reaction, or reads a channel's messages or a
-// thread. Any other method is refused until it is checked and listed here.
-// Some name a person or a second conversation in another parameter
-// (files.completeUploadExternal channel_id, conversations.invite users,
-// chat.postEphemeral user), which the channel rule would not see.
+// slackMethods are the only Slack Web API paths an entry may list, each checked to name its one conversation in channel; any other method is refused until checked. Some name a person or second conversation in another parameter (files.completeUploadExternal channel_id, conversations.invite users, chat.postEphemeral user), which the channel rule would not see.
 var slackMethods = map[string][]string{
 	"/api/chat.postMessage": {"channel", "as_user", "attachments", "blocks", "current_draft_last_updated_ts", "icon_emoji", "icon_url",
 		"link_names", "markdown_text", "metadata", "mrkdwn", "parse", "reply_broadcast", "text", "thread_ts", "unfurl_app_links",
@@ -52,11 +38,7 @@ var slackMethods = map[string][]string{
 	"/api/conversations.replies": {"channel", "ts", "cursor", "include_all_metadata", "inclusive", "latest", "limit", "oldest"},
 }
 
-// Operation names a request to the entry for the audit row, from the
-// broker's fixed vocabulary: for a Slack entry, the Web API method a listed
-// path names, such as "slack.conversations_history" for
-// /api/conversations.history, so a channel read, a post and a reaction can be
-// told apart afterward; "" for any other entry or path. Never the path itself.
+// Operation names a request for the audit row from a fixed vocabulary: the Slack Web API method a listed path names (such as "slack.conversations_history"), else "". Never the path itself.
 func (e *Entry) Operation(path string) string {
 	if e == nil || !slackHost(e.Host) {
 		return ""
@@ -80,12 +62,8 @@ func (e *Entry) Operation(path string) string {
 	return b.String()
 }
 
-// ErrRequestField is a request whose limited parameters are missing,
-// repeated, placed twice or not listed, that uses a key it may not, or whose
-// body cannot be read safely.
 var ErrRequestField = errors.New("request field not allowed")
 
-// slackHost reports whether host is Slack's Web API.
 func slackHost(host string) bool { return host == "slack.com" || strings.HasSuffix(host, ".slack.com") }
 
 func (e *Entry) normalizeRequestFields() error {
@@ -122,10 +100,6 @@ func (e *Entry) normalizeRequestFields() error {
 	return nil
 }
 
-// CheckRequestFields holds a request to the entry's RequestFields. path is the
-// request path, rawQuery the query string, contentTypes every Content-Type
-// header value and body the whole request body. Every refusal is
-// ErrRequestField.
 func (e *Entry) CheckRequestFields(path, rawQuery string, contentTypes []string, body []byte) error {
 	if len(e.RequestFields) == 0 {
 		return nil
@@ -160,11 +134,7 @@ func (e *Entry) CheckRequestFields(path, rawQuery string, contentTypes []string,
 			return ErrRequestField
 		}
 	}
-	// A vendor's parser may read a key as another name: PHP and its ports
-	// drop leading spaces, cut at a NUL byte and fold channel[] or channel[0]
-	// into channel. A key like that beside the limited one could name a
-	// second conversation, so a Slack request may use only the parameters its
-	// method takes, and any request only plain keys.
+	// A vendor's parser may read a key as another name (PHP drops leading spaces, cuts at NUL, folds channel[] into channel), so a Slack request may use only its method's parameters and any request only plain keys.
 	slack := slackHost(e.Host)
 	allowed := slackMethods[path] // none for a path that is not exactly a listed method
 	refused := func(key string) bool {
@@ -200,14 +170,11 @@ func (e *Entry) CheckRequestFields(path, rawQuery string, contentTypes []string,
 	return nil
 }
 
-// foldedRune reports a character some parser drops, cuts at or reads as
-// structure in a parameter name: whitespace, a control byte or a bracket.
 func foldedRune(r rune) bool {
 	return unicode.IsSpace(r) || unicode.IsControl(r) || r == '[' || r == ']'
 }
 
-// uniqueObject decodes a JSON object whose top-level keys are all distinct;
-// a vendor and the broker could read a repeated key differently.
+// uniqueObject decodes a JSON object with distinct top-level keys, since a vendor and the broker could read a repeated key differently.
 func uniqueObject(body []byte) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
@@ -235,8 +202,6 @@ func uniqueObject(body []byte) (map[string]json.RawMessage, error) {
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
 		return nil, errors.New("not an object")
 	}
-	// Only whitespace may follow: a second value and bytes the decoder
-	// rejects (x, ], a comma, NUL) are both trailing data.
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("trailing data")
 	}

@@ -10,9 +10,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// databaseServiceView is the API representation of a managed PostgreSQL-broker
-// database. It carries only references (the Vault mount and role that mint
-// credentials), never a database password — the broker never stores one.
+// databaseServiceView carries only references (Vault mount and role), never a database password.
 type databaseServiceView struct {
 	Name     string `json:"name"`
 	Upstream string `json:"upstream"`
@@ -35,9 +33,7 @@ func toDatabaseServiceView(svc store.DatabaseService) databaseServiceView {
 	}
 }
 
-// handleDatabasesList returns the vault's managed database services. Readable by
-// any vault member so an agent operator can discover which databases are
-// reachable; it exposes names and references only.
+// handleDatabasesList is readable by any vault member; it exposes names and references only.
 func (s *Server) handleDatabasesList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
@@ -63,7 +59,6 @@ func (s *Server) handleDatabasesList(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"vault": name, "databases": views})
 }
 
-// handleDatabaseGet returns a single managed database service by name.
 func (s *Server) handleDatabaseGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
@@ -90,13 +85,7 @@ func (s *Server) handleDatabaseGet(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"vault": name, "database": toDatabaseServiceView(*svc)})
 }
 
-// handleDatabaseUpsert adds or updates a managed database service. Owner-only.
-// External bindings use the instance Vault identity and require an owner.
-// The body is a DatabaseServiceConfig; it is validated with the same rules the
-// bootstrap-config path uses, so the API and config cannot disagree. Upsert is
-// idempotent by name — re-adding a name overwrites its coordinates. The change
-// takes effect immediately because the broker resolves databases live from the
-// store.
+// handleDatabaseUpsert is owner-only and idempotent by name; the body is validated by the bootstrap-config rules.
 func (s *Server) handleDatabaseUpsert(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
@@ -121,8 +110,7 @@ func (s *Server) handleDatabaseUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serialize with the same per-vault lock the HTTP-service path uses so a
-	// concurrent add/remove of the same name cannot interleave.
+	// Same per-vault lock as the HTTP-service path.
 	unlock, err := s.lockVault(ctx, ns.ID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "lock failed")
@@ -164,10 +152,7 @@ func (s *Server) handleDatabaseUpsert(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDatabaseRemove deletes a managed database service by name. Admin-only.
-// Existing agent connections continue on their already-minted credentials until
-// they close or the credential expires; new connections can no longer select
-// the removed database.
+// handleDatabaseRemove is admin-only; open connections keep their minted credentials until they close or expire.
 func (s *Server) handleDatabaseRemove(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")

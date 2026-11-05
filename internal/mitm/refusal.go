@@ -11,25 +11,11 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// RefusalHeader names, on every response the catalog adapter refuses, why it
-// refused: a fixed code an agent can branch on without parsing prose. The
-// body carries the same code and a one-line next step. A code is fixed text
-// from the refusals table, never request data, and says no more about the
-// catalog than the status already does. A request on an entry the caller's
-// pool is not granted answers "unlisted" (403), except that the method check
-// runs first: a method that entry does not list answers "method" (405). The
-// audit row records the refusal and the status sent; its outcome can be more
-// specific than the code ("pool" where the agent sees "unlisted", or an
-// outcome with no table entry where the agent sees "refused") or less
-// ("refused" for a check made before the request reached the catalog). The
-// broker sets this header only on its own refusals and strips it from every
-// upstream response, so its presence means the request was refused here.
+// RefusalHeader names, on every catalog-adapter refusal, a fixed code from the refusals table that an agent can branch on; never request data.
+// The audit row's outcome can be more or less specific than the code. The broker strips this header from upstream responses, so its presence means the request was refused here.
 const RefusalHeader = brokercore.RefusalHeader
 
-// refusalKind is how one refusal code answers. A passing refusal (one the
-// same request may clear by waiting) sets retryAfter and answers 503, or 429
-// when the requester's own rate caused it; a lasting one keeps its 4xx, or
-// answers 503 without Retry-After when only an operator can clear it.
+// refusalKind is how one refusal code answers: a passing refusal sets retryAfter and answers 503 (429 for the requester's own rate); a lasting one keeps its 4xx, or 503 without Retry-After when only an operator can clear it.
 type refusalKind struct {
 	status     int    // the status this code always answers with; 0 keeps the caller's
 	retryAfter int    // seconds; set only when retrying the same request can succeed
@@ -46,9 +32,7 @@ const (
 )
 
 var refusals = map[string]refusalKind{
-	// Passing: the same request can succeed once the condition clears. The
-	// runner session is read once per tunnel, from its CONNECT, so
-	// session_missing closes the connection for the retry to open a new one.
+	// Passing: the same request can succeed once the condition clears; session_missing closes the connection so the retry opens a new one.
 	"audit_unavailable":        {status: http.StatusServiceUnavailable, retryAfter: 5, next: "the audit trail is not recording; " + nextRetry},
 	"broker_unavailable":       {status: http.StatusServiceUnavailable, retryAfter: 1, next: "this broker cannot take the request now; " + nextRetry},
 	"key_unavailable":          {status: http.StatusServiceUnavailable, retryAfter: 5, next: "the destination key could not be read; " + nextRetry},
@@ -142,11 +126,7 @@ var refusals = map[string]refusalKind{
 	"subagent_parent_gone":  {next: "the Automation's run that registered this subagent has ended, so the subagent no longer acts for it; stop, and start the work again from a live run."},
 }
 
-// refusalCode is the code an agent sees for an audit outcome: the outcome
-// itself, except that "pool" is told apart from "unlisted" in the audit row
-// only, and an outcome with no entry in refusals answers "refused". Only the
-// table's fixed codes reach the agent, so an outcome a later change builds
-// from an error or a reason stays in the audit row.
+// refusalCode is the code an agent sees for an audit outcome: the outcome itself, except "pool" shows as "unlisted" and an outcome with no table entry shows as "refused".
 func refusalCode(outcome string) string {
 	if outcome == "pool" {
 		return "unlisted"
@@ -157,9 +137,7 @@ func refusalCode(outcome string) string {
 	return outcome
 }
 
-// identityRefusalCode is the code for a refusal made before the request
-// reached the catalog, whose audit outcome is "refused": its status says
-// which check refused it.
+// identityRefusalCode is the code for a refusal made before the request reached the catalog; its status says which check refused it.
 func identityRefusalCode(status int) string {
 	switch status {
 	case http.StatusBadRequest:
@@ -174,9 +152,7 @@ func identityRefusalCode(status int) string {
 	return "identity"
 }
 
-// refusalFor resolves a code and the status its caller chose into the code,
-// status and kind to answer with. A code with no entry answers as "refused",
-// whatever path it came by.
+// refusalFor resolves a code and the caller's status into the code, status and kind to answer with; a code with no entry answers as "refused".
 func refusalFor(code string, status int) (string, int, refusalKind) {
 	kind, ok := refusals[code]
 	if !ok {
@@ -188,8 +164,6 @@ func refusalFor(code string, status int) (string, int, refusalKind) {
 	return code, status, kind
 }
 
-// after is kind with a limiter's own wait as its Retry-After, rounded up to a
-// whole second, when the limiter gave one.
 func (k refusalKind) after(wait time.Duration) refusalKind {
 	if wait > 0 {
 		k.retryAfter = int(math.Ceil(wait.Seconds()))
@@ -197,10 +171,7 @@ func (k refusalKind) after(wait time.Duration) refusalKind {
 	return k
 }
 
-// writeRefusal answers a refused request: the code in RefusalHeader,
-// Retry-After for a passing refusal, and a one-line body naming the code and
-// the next step. A refusal that only a new connection can clear also closes
-// this one.
+// writeRefusal answers a refused request with the code in RefusalHeader, Retry-After for a passing refusal, and a one-line body; a refusal only a new connection can clear also closes this one.
 func writeRefusal(w http.ResponseWriter, status int, code string, kind refusalKind) {
 	w.Header().Set(RefusalHeader, code)
 	if kind.retryAfter > 0 {
@@ -212,24 +183,17 @@ func writeRefusal(w http.ResponseWriter, status int, code string, kind refusalKi
 	http.Error(w, code+": "+kind.next, status)
 }
 
-// refuseWith answers a refusal that has no row of its own to write, such as
-// one made after the request was admitted, whose response row records it. A
-// code with a fixed status answers with that status; any other keeps status.
+// refuseWith answers a refusal with no row of its own, recorded by the response row; a code with a fixed status uses it, otherwise status.
 func refuseWith(w http.ResponseWriter, status int, code string) {
 	code, status, kind := refusalFor(code, status)
 	writeRefusal(w, status, code, kind)
 }
 
-// refuse is refuseWith for a refusal that is 503 unless its code fixes
-// another status.
 func refuse(w http.ResponseWriter, code string) {
 	refuseWith(w, http.StatusServiceUnavailable, code)
 }
 
-// keyOutcome names a key read failure: a key that is deleted, emptied or
-// revoked in Vault, and one a header cannot carry, apart from one that could
-// not be read, so the operator sees what to fix and the agent does not wait
-// on a refusal that only an operator can clear.
+// keyOutcome names a key read failure (deleted, emptied, revoked, or one a header cannot carry) apart from one that could not be read, so the agent does not wait on a refusal only an operator can clear.
 func keyOutcome(err error) string {
 	switch {
 	case errors.Is(err, httpcatalog.ErrKeyNotHeaderSafe):
@@ -240,9 +204,7 @@ func keyOutcome(err error) string {
 	return "key_unavailable"
 }
 
-// mcpOutcome names an MCP message the broker does not forward: a method or
-// tool it does not list, or a tool argument it refuses, apart from a request
-// it cannot read as one message.
+// mcpOutcome names an MCP message the broker does not forward apart from a request it cannot read as one message.
 func mcpOutcome(err error) string {
 	switch {
 	case errors.Is(err, httpcatalog.ErrMCPTool):
@@ -253,8 +215,7 @@ func mcpOutcome(err error) string {
 	return "mcp_shape"
 }
 
-// seedOutcome names a browser seed failure: a worker whose deadline is too
-// close, which only gets closer, apart from any other.
+// seedOutcome names a browser seed failure for a worker whose deadline is too close, which only gets closer.
 func seedOutcome(err error) string {
 	if errors.Is(err, errSeedDeadline) {
 		return "seed_deadline"

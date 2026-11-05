@@ -2,10 +2,15 @@ package workloadidentity
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +22,7 @@ import (
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type fakeStore struct {
@@ -51,8 +57,7 @@ type fixture struct {
 	reviewer                string
 }
 
-// This TLS HTTP fixture tests the wire contract and fail-closed behavior. It
-// does not mint real Kubernetes tokens or establish deployed runtime evidence.
+// This TLS fixture tests the wire contract and fail-closed behavior; it establishes no deployed runtime evidence.
 func setup(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{s: &fakeStore{status: "active", role: "proxy"}, reviewStatus: 201, podStatus: 200, reviewer: "reviewer-canary"}
@@ -208,6 +213,62 @@ func TestDenyProofAndVerifierFailures(t *testing.T) {
 	}
 }
 
+// A store or Kubernetes API that gave no answer is a retryable refusal; an answer that refuses stays lasting, and neither admits.
+func TestUnfinishedChecksAreRetryableRefusals(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		mutate func(*fixture)
+		reason string // empty for a lasting refusal
+	}{
+		"store-connection": {func(f *fixture) {
+			f.s.err = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+		}, "store_unavailable"},
+		"store-login":       {func(f *fixture) { f.s.err = &pgconn.PgError{Code: "28P01"} }, "store_unavailable"},
+		"store-shutdown":    {func(f *fixture) { f.s.err = &pgconn.PgError{Code: "57P01"} }, "store_unavailable"},
+		"store-deadline":    {func(f *fixture) { f.s.err = context.DeadlineExceeded }, "store_unavailable"},
+		"store-dropped":     {func(f *fixture) { f.s.err = fmt.Errorf("listing grants: %w", io.ErrUnexpectedEOF) }, "store_unavailable"},
+		"store-bad-conn":    {func(f *fixture) { f.s.err = driver.ErrBadConn }, "store_unavailable"},
+		"store-missing-row": {func(f *fixture) { f.s.err = sql.ErrNoRows }, ""},
+		"store-scan":        {func(f *fixture) { f.s.err = errors.New("sql: Scan error on column index 3") }, ""},
+		"store-canceled":    {func(f *fixture) { f.s.err = context.Canceled }, ""},
+		"store-rejected":    {func(f *fixture) { f.s.err = &pgconn.PgError{Code: "42501"} }, ""},
+		"api-unreachable":   {func(f *fixture) { f.r.config.APIServer = "https://127.0.0.1:1" }, "token_review_unavailable"},
+		"review-outage":     {func(f *fixture) { f.reviewStatus = 503 }, "token_review_unavailable"},
+		"review-throttled":  {func(f *fixture) { f.reviewStatus = 429 }, "token_review_unavailable"},
+		"review-denied":     {func(f *fixture) { f.reviewStatus = 403 }, ""},
+		"review-malformed":  {func(f *fixture) { f.malformed = true }, ""},
+		"pod-outage":        {func(f *fixture) { f.podStatus = 500 }, "pod_lookup_unavailable"},
+		"deleted-pod":       {func(f *fixture) { f.podStatus = 404 }, ""},
+		"pod-read-denied":   {func(f *fixture) { f.podStatus = 403 }, ""},
+		"revoked-agent":     {func(f *fixture) { f.s.status = "revoked" }, ""},
+		"removed-grant":     {func(f *fixture) { f.s.role = "" }, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := setup(t)
+			c.mutate(f)
+			scope, err := f.r.ResolveForProxy(context.Background(), token(f.c), "")
+			if err == nil || scope != nil {
+				t.Fatal("refused case admitted")
+			}
+			if brokercore.DenialUnavailable(err) != (c.reason != "") || brokercore.DenialReason(err) != c.reason {
+				t.Fatalf("got reason %q unavailable %v, want %q", brokercore.DenialReason(err), brokercore.DenialUnavailable(err), c.reason)
+			}
+			if c.reason != "" && !errors.Is(err, brokercore.ErrInvalidSession) {
+				t.Fatal("a retryable refusal is not a refusal to other callers")
+			}
+		})
+	}
+	t.Run("check-timeout", func(t *testing.T) {
+		f := setup(t)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		f.s.onRole = func() { <-ctx.Done() }
+		if _, err := f.r.ResolveForProxy(ctx, token(f.c), ""); brokercore.DenialReason(err) != "check_timeout" || !brokercore.DenialUnavailable(err) {
+			t.Fatalf("a check past its deadline: %v", err)
+		}
+	})
+}
+
 func TestTimeoutTLSAndCredentialRotation(t *testing.T) {
 	t.Parallel()
 	t.Run("configured-timeout", func(t *testing.T) {
@@ -319,8 +380,12 @@ func TestExpiryAndCancellationDuringStoreLookup(t *testing.T) {
 					cancel()
 				}
 			}
-			if _, err := f.r.ResolveForProxy(ctx, token(f.c), ""); !errors.Is(err, brokercore.ErrInvalidSession) {
+			_, err := f.r.ResolveForProxy(ctx, token(f.c), "")
+			if !errors.Is(err, brokercore.ErrInvalidSession) {
 				t.Fatal("proof expired or canceled during final store lookup was admitted")
+			}
+			if brokercore.DenialUnavailable(err) {
+				t.Fatal("a proof that expired, or a caller that went away, is retryable")
 			}
 		})
 	}
@@ -328,8 +393,7 @@ func TestExpiryAndCancellationDuringStoreLookup(t *testing.T) {
 
 func TestLoadConfigRejectsOversizeValidPrefix(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	// The valid prefix is followed by enough whitespace to hide trailing content
-	// behind a one-megabyte artificial EOF in a streaming decoder.
+	// The valid prefix is followed by whitespace that hides trailing content behind a one-megabyte EOF in a streaming decoder.
 	data := "{}" + strings.Repeat(" ", 1<<20) + `{"issuer":"ignored"}`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)

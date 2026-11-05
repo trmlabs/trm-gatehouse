@@ -114,9 +114,7 @@ export default function LogsView({
   }
 
   async function pollNew() {
-    // Gate on the initial load completing, not on cursor > 0 — an empty
-    // vault legitimately reports latest_id=0 and still needs polls so
-    // the first row shows up without a reload.
+    // Gate on the initial load, not cursor > 0: an empty vault reports latest_id=0 and still needs polls.
     if (!initializedRef.current) return;
     try {
       const resp = await apiFetch(`${endpoint}?${filterQS}&after=${latestIdRef.current}`);

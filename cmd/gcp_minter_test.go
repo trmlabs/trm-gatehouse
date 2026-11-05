@@ -29,7 +29,6 @@ const (
 	  "gcp":{"serviceAccount":"bq-cases@example-analytics.iam.gserviceaccount.com"}}]}`
 )
 
-// lockedBuffer is a log sink the Watch goroutine writes and the test reads.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -47,10 +46,7 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// gcpMinterLoader serves a catalog document and its version. They change
-// together: Watch takes the version as the document's identity, so a load that
-// pairs a new version with the previous document is applied and never
-// corrected.
+// Watch takes the version as the document's identity, so the loader must change both together.
 type gcpMinterLoader struct {
 	mu      sync.Mutex
 	doc     string
@@ -73,8 +69,6 @@ type tokenSourceFunc func() (*oauth2.Token, error)
 
 func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
 
-// fakeGoogle is a minter whose identity can be switched on, and an IAM
-// Credentials that answers every impersonation with a token.
 type fakeGoogle struct {
 	identity atomic.Bool
 	builds   atomic.Int32
@@ -112,8 +106,6 @@ func (f *fakeGoogle) mint(adapter *mitm.HeaderAdapter) error {
 	return err
 }
 
-// A broker that starts with no gcp entry mints once a later catalog version
-// adds one, and lets the minter go when the last one is removed.
 func TestAttachGoogleMinterFollowsTheCatalog(t *testing.T) {
 	loader := &gcpMinterLoader{}
 	loader.set(gcpMinterHeaderDoc, 1)
@@ -158,9 +150,6 @@ func TestAttachGoogleMinterFollowsTheCatalog(t *testing.T) {
 	}
 }
 
-// A broker that starts with a gcp entry and no Google identity still starts,
-// and only that entry is refused. It mints as soon as the identity appears,
-// with no restart and no catalog change.
 func TestABrokerWithoutItsGoogleIdentityStillStarts(t *testing.T) {
 	loader := &gcpMinterLoader{}
 	loader.set(gcpMinterGCPDoc, 1)
@@ -186,8 +175,6 @@ func TestABrokerWithoutItsGoogleIdentityStillStarts(t *testing.T) {
 	}
 }
 
-// The identity's failures reach the log, without a token, since the minter
-// itself answers only "unavailable".
 func TestAFailedIdentityIsLoggedWithoutATokenValue(t *testing.T) {
 	var logs lockedBuffer
 	src := reportFailures(tokenSourceFunc(func() (*oauth2.Token, error) { return nil, errors.New("no identity") }), slog.New(slog.NewTextHandler(&logs, nil)))
@@ -200,8 +187,6 @@ func TestAFailedIdentityIsLoggedWithoutATokenValue(t *testing.T) {
 	}
 }
 
-// The direct metadata source fails while the metadata server answers nothing
-// usable and works as soon as it does, without a restart.
 func TestMetadataTokensRecover(t *testing.T) {
 	var up atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

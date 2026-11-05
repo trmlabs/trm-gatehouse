@@ -81,9 +81,7 @@ func TestRecheckRefusalPurgesThePerson(t *testing.T) {
 	if d := Decide(ctx, cache, claudePool, t2Entry, carol); !d.Allowed {
 		t.Fatal("T2 admission refused")
 	}
-	// carol leaves both groups. A T2 admission stores the fresh refusal; the
-	// recheck reads it and refuses, purging carol, so her cached T1 answer
-	// (still inside its TTL) is gone too.
+	// carol leaves both groups: the T2 refusal is stored, the recheck refuses and purges her, so her cached T1 answer goes too.
 	src.set("sso|carol")
 	Decide(ctx, cache, claudePool, t2Entry, carol)
 	if d := Decide(WithRecheck(ctx), cache, claudePool, t2Entry, carol); d.Allowed {
@@ -116,9 +114,8 @@ func (s *gatedSource) Lookup(ctx context.Context, subject string, asked []string
 	return s.countingSource.Lookup(ctx, subject, asked)
 }
 
-// A worker looping on a T2 entry asks the directory once per request; past
-// the person's budget it is refused before the directory is asked, after a
-// short window in which the latest answer stands. Other people keep theirs.
+// A worker looping on a T2 entry is refused before the directory is asked once past the person's budget,
+// after a short window where the latest answer stands. Other people keep theirs.
 func TestT2LookupsHaveAPerPersonBudget(t *testing.T) {
 	src := &countingSource{groups: map[string][]string{"sso|carol": {"g2"}, "sso|dave": {"g2"}}}
 	now := time.Now()
@@ -145,8 +142,7 @@ func TestT2LookupsHaveAPerPersonBudget(t *testing.T) {
 	}
 }
 
-// Concurrent fresh lookups of one question share one directory call, and an
-// asker that gives up does not end it for the others.
+// Concurrent fresh lookups share one directory call; an asker that gives up does not end it for the others.
 func TestConcurrentFreshLookupsShareOneCall(t *testing.T) {
 	src := &gatedSource{countingSource: countingSource{groups: map[string][]string{"sso|carol": {"g2"}}},
 		entered: make(chan struct{}, 8), release: make(chan struct{})}
@@ -171,8 +167,7 @@ func TestConcurrentFreshLookupsShareOneCall(t *testing.T) {
 	}
 }
 
-// A purge while a lookup is in flight wins: the older answer does not refill
-// the cache, so the next lookup asks the directory.
+// A purge during an in-flight lookup wins: the older answer does not refill the cache.
 func TestPurgeDuringALookupIsNotUndone(t *testing.T) {
 	src := &gatedSource{countingSource: countingSource{groups: map[string][]string{"sso|carol": {"g1"}}},
 		entered: make(chan struct{}, 2), release: make(chan struct{}, 2)}
@@ -193,8 +188,7 @@ func TestPurgeDuringALookupIsNotUndone(t *testing.T) {
 	<-done
 }
 
-// A fresh answer that refuses forgets the person, like a refused recheck: a
-// cached T1 answer inside its TTL does not survive a T2 refusal.
+// A fresh refusal forgets the person like a refused recheck: a cached T1 answer does not survive it.
 func TestFreshRefusalPurgesThePerson(t *testing.T) {
 	src := &countingSource{groups: map[string][]string{"sso|carol": {"g1"}}}
 	cache := &Cache{Source: src, TTL: time.Minute}
@@ -211,9 +205,7 @@ func TestFreshRefusalPurgesThePerson(t *testing.T) {
 	}
 }
 
-// A fresh answer that the directory has no account for the person forgets
-// them too: a cached T1 answer does not outlive the T2 lookup that found the
-// account gone.
+// A fresh answer that finds no account forgets the person too, so a cached T1 answer does not outlive it.
 func TestFreshNotInDirectoryPurgesThePerson(t *testing.T) {
 	src := &fakeSource{person: Person{ObjectID: "oid", Enabled: true, MemberOf: []string{"g1", "g2"}}}
 	cache := &Cache{Source: src, TTL: time.Minute}

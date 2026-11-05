@@ -9,8 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// readyCmd is the readiness probe for a broker whose listeners are loopback
-// only: the kubelet runs it inside the container.
+// readyCmd is the readiness probe the kubelet runs inside the container of a loopback-only broker.
 var readyCmd = &cobra.Command{
 	Use:   "ready",
 	Short: "Exit 0 when the local server reports ready (for Kubernetes readiness probes)",

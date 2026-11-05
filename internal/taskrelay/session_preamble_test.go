@@ -12,9 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// A sidecar with a session file sends "GHSESS1 <token>" on the broker-side
-// stream ahead of the startup it authors; without one it sends the startup
-// alone. The worker never supplies either.
 func TestSelfModePostgresCarriesTheRunnerSession(t *testing.T) {
 	t.Parallel()
 	const token = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEifQ.c2ln"

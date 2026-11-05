@@ -41,8 +41,7 @@ type adapterAudit struct {
 
 func (a *adapterAudit) Admit() error { a.mu.Lock(); defer a.mu.Unlock(); return a.admitErr }
 
-// Record refuses what the real chain refuses, so a row the chain would reject
-// fails here too.
+// Record refuses what the real chain refuses, so a row the chain would reject fails here too.
 func (a *adapterAudit) Record(e auditchain.Event) error {
 	if err := e.Validate(); err != nil {
 		return err
@@ -83,7 +82,6 @@ func (k *adapterKeys) Get(context.Context, httpcatalog.KeyRef) (httpcatalog.Secr
 }
 func (k *adapterKeys) Invalidate(httpcatalog.KeyRef) { k.mu.Lock(); k.invalidated++; k.mu.Unlock() }
 
-// testSecret builds a Secret through the public catalog cache with a fake Vault.
 func testSecret(value string) httpcatalog.Secret {
 	keys := &httpcatalog.Keys{Vault: staticVault(value)}
 	s, err := keys.Get(context.Background(), httpcatalog.KeyRef{Mount: "gatehouse", Path: "vendor", Field: "key"})
@@ -109,8 +107,6 @@ type adapterFixture struct {
 	roots    *x509.CertPool
 }
 
-// scopeResolver lets a test change the admitted scope without touching the
-// running proxy.
 type scopeResolver struct {
 	mu      sync.Mutex
 	scope   *brokercore.ProxyScope
@@ -137,15 +133,11 @@ func newAdapterFixture(t *testing.T, options ...func(*Options)) *adapterFixture 
 	return newAdapterFixtureWith(t, "", options...)
 }
 
-// basicKey is how a vendor expecting the key as a Basic user name sees it.
 func basicKey(key string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(key+":"))
 }
 
-// newAdapterFixtureWith builds the fixture with a Bearer entry, or with auth
-// "basicUser" or "basicPair", an entry whose vendor takes the key as an HTTP
-// Basic user name or as a "user:password" pair, or "pairUserHeader", a Basic
-// pair whose client also sends the user name in X-Langfuse-Public-Key.
+// newAdapterFixtureWith builds the fixture with a Bearer entry, or auth "basicUser", "basicPair" or "pairUserHeader".
 func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options)) *adapterFixture {
 	t.Helper()
 	f := &adapterFixture{keys: &adapterKeys{value: adapterKeyV1}, audit: &adapterAudit{}, acceptsV: adapterKeyV1, release: make(chan struct{})}
@@ -178,7 +170,6 @@ func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options))
 			<-f.release
 			fmt.Fprint(w, "data: second\n\n")
 		case "/v1/stream-reset":
-			// The vendor drops the connection mid-stream while the worker waits.
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, "data: first\n\n")
 			w.(http.Flusher).Flush()
@@ -196,7 +187,6 @@ func newAdapterFixtureWith(t *testing.T, auth string, options ...func(*Options))
 		case "/v1/echo-basic":
 			fmt.Fprint(w, strings.TrimPrefix(want, "Basic "))
 		case "/v1/chat/forged":
-			// The vendor's own 503, dressed as a broker refusal.
 			w.Header().Set(RefusalHeader, "session_missing")
 			w.Header().Set("Retry-After", "5")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -273,9 +263,6 @@ func (f *adapterFixture) do(t *testing.T, method, path, body string, mutate func
 	return resp.StatusCode, string(data), readErr
 }
 
-// A worker holding only a placeholder, or nothing, gets a POST through with
-// the real key added at the broker, and each call leaves admitted and
-// completed rows naming the pool, Pod and binding.
 func TestAdapterInjectsKeyForPlaceholderOrOmittedHeader(t *testing.T) {
 	f := newAdapterFixture(t)
 	for _, mutate := range []func(*http.Request){nil, func(r *http.Request) { r.Header.Del("Authorization") }} {
@@ -298,8 +285,6 @@ func TestAdapterInjectsKeyForPlaceholderOrOmittedHeader(t *testing.T) {
 	}
 }
 
-// A response row records how long the call took from admission, and the
-// admitted row carries no duration.
 func TestAdapterRecordsResponseDuration(t *testing.T) {
 	f := newAdapterFixture(t)
 	if code, body, err := f.do(t, "GET", "/v1/chat/slow", "", nil); err != nil || code != 200 || body != "ok" {
@@ -314,8 +299,7 @@ func TestAdapterRecordsResponseDuration(t *testing.T) {
 	}
 }
 
-// A refusal inside an open tunnel records the tunnel's CONNECT target, the
-// host the broker checked, not the Host header the client sent.
+// A refusal inside an open tunnel records the tunnel's CONNECT target, not the client's Host header.
 func TestTunnelRefusalRecordsConnectTarget(t *testing.T) {
 	f := newAdapterFixture(t)
 	if code, _, err := f.do(t, "GET", "/v1/chat/x", "", nil); err != nil || code != 200 {
@@ -353,7 +337,6 @@ func TestAdapterRefusesOutsideTheCatalog(t *testing.T) {
 			}
 		})
 	}
-	// An unlisted host is refused before the tunnel opens.
 	r, _ := http.NewRequest("GET", "https://other.example.net:"+strconv.Itoa(f.port)+"/v1/chat", nil)
 	resp, err := f.client.Do(r)
 	if err == nil {
@@ -365,9 +348,7 @@ func TestAdapterRefusesOutsideTheCatalog(t *testing.T) {
 	if got, want := f.audit.last().Target, "other.example.net:"+strconv.Itoa(f.port); got != want {
 		t.Fatalf("unlisted host target %q, want %q", got, want)
 	}
-	// A pool without the grant is still refused per request inside a tunnel
-	// that is already open (this client reuses its earlier tunnel); a new
-	// tunnel for it is refused at CONNECT (TestAdapterRefusesAScopeWithoutAPool).
+	// A pool without the grant is still refused per request inside an already open tunnel; a new tunnel is refused at CONNECT.
 	other := &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-9", Pool: "other-pool", WorkloadID: "pod-9"}
 	f.sessions.set(other)
 	if code, _, _ := f.do(t, "POST", "/v1/chat/completions", "{}", nil); code != 403 || f.audit.last().Outcome != "pool" || f.calls.Load() != 0 {
@@ -410,10 +391,7 @@ func TestAdapterRejectsMisplacedPlaceholdersAndRoutingHeaders(t *testing.T) {
 	}
 }
 
-// A vendor that takes the key as a Basic user name (axios auth.username,
-// curl -u key:) gets it that way. The worker sends the placeholder encoded the
-// same way, or nothing; the bare placeholder or its own key is refused, and an
-// echo of the encoded key is cut off.
+// A vendor taking the key as a Basic user name gets it that way; the bare placeholder or the worker's own key is refused, and an echo of the encoded key is cut off.
 func TestAdapterSendsKeyAsBasicUser(t *testing.T) {
 	f := newAdapterFixtureWith(t, "basicUser")
 	placeholder := func(r *http.Request) { r.Header.Set("Authorization", basicKey("__vault_LLM_KEY__")) }
@@ -441,12 +419,7 @@ func TestAdapterSendsKeyAsBasicUser(t *testing.T) {
 	}
 }
 
-// A vendor that takes a key pair as Basic credentials (a public and a secret
-// key) gets the stored "user:password" key that way. The worker sends the
-// placeholder as both halves, or nothing; any other value is refused, a key
-// that is not a pair is never sent and is refused as lasting, since only
-// rewriting it clears that, and an echo of the encoded pair or of the
-// password alone is cut off.
+// A vendor taking a key pair as Basic credentials gets the stored user:password key; a non-pair key is refused as lasting, and an echo of the encoded pair or the password alone is cut off.
 func TestAdapterSendsKeyPairAsBasic(t *testing.T) {
 	f := newAdapterFixtureWith(t, "basicPair")
 	pair := "pk-synthetic-adapter:" + adapterKeyV1
@@ -499,11 +472,7 @@ func TestAdapterSendsKeyPairAsBasic(t *testing.T) {
 	}
 }
 
-// A Basic pair client given the real public key and the placeholder as its
-// secret key, as Langfuse's SDKs need, is served: the stored user name may
-// stand in Authorization and in the entry's user header, which reaches the
-// vendor only when the client sent it. Any other user name, two values, or
-// the placeholder in the user header is refused before the vendor is called.
+// A Basic pair client with the real public key and the placeholder as secret is served; any other user name, two values, or the placeholder in the user header is refused before the vendor is called.
 func TestAdapterServesAPairClientHoldingItsPublicKey(t *testing.T) {
 	const publicKey = "pk-synthetic-adapter"
 	pair := publicKey + ":" + adapterKeyV1
@@ -570,9 +539,7 @@ func TestAdapterServesAPairClientHoldingItsPublicKey(t *testing.T) {
 		}
 	}
 
-	// Without a user header in the entry, the public key may still stand in
-	// Authorization, and the client's copy of it is dropped like any
-	// unlisted header.
+	// Without a user header in the entry, the client's copy of the public key is dropped like any unlisted header.
 	plain := newAdapterFixtureWith(t, "basicPair")
 	setPair(plain)
 	code, _, err := plain.do(t, "POST", "/v1/chat/completions", `{}`, headers(map[string][]string{"Authorization": {sdk}, "X-Langfuse-Public-Key": {publicKey}}))
@@ -581,8 +548,7 @@ func TestAdapterServesAPairClientHoldingItsPublicKey(t *testing.T) {
 	}
 }
 
-// The key never reaches the worker, even split across two writes of a
-// streamed body: the broker aborts before releasing the first half.
+// The key never reaches the worker, even split across two writes: the broker aborts before releasing the first half.
 func TestAdapterBlocksKeyEchoes(t *testing.T) {
 	f := newAdapterFixture(t)
 	code, body, err := f.do(t, "GET", "/v1/echo-split", "", nil)
@@ -603,7 +569,6 @@ func TestAdapterBlocksKeyEchoes(t *testing.T) {
 	}
 }
 
-// Server-sent events reach the worker as they are produced.
 func TestAdapterStreamsServerSentEvents(t *testing.T) {
 	f := newAdapterFixture(t)
 	r, _ := http.NewRequest("GET", f.url("/v1/stream"), nil)
@@ -625,8 +590,7 @@ func TestAdapterStreamsServerSentEvents(t *testing.T) {
 	}
 }
 
-// A worker that closes its request mid-stream is not a vendor failure: the
-// audit row says client_gone, not upstream_error.
+// A worker closing its request mid-stream is client_gone, not upstream_error.
 func TestAdapterRecordsAClosedStreamAsClientGone(t *testing.T) {
 	f := newAdapterFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -651,8 +615,7 @@ func TestAdapterRecordsAClosedStreamAsClientGone(t *testing.T) {
 	}
 }
 
-// A vendor that drops the connection mid-stream while the worker's request is
-// still live is a real upstream failure: it stays upstream_error.
+// A vendor dropping the connection while the request is live stays upstream_error.
 func TestAdapterKeepsAVendorResetMidStreamAsUpstreamError(t *testing.T) {
 	f := newAdapterFixture(t)
 	r, _ := http.NewRequest("GET", f.url("/v1/stream-reset"), nil)
@@ -672,7 +635,6 @@ func TestAdapterKeepsAVendorResetMidStreamAsUpstreamError(t *testing.T) {
 	}
 }
 
-// After the vendor rejects a rotated-out key, the next request reads the new one.
 func TestAdapterRefreshesKeyAfterVendorRejection(t *testing.T) {
 	f := newAdapterFixture(t)
 	f.acceptsV = adapterKeyV2
@@ -715,8 +677,6 @@ func TestAdapterFailsClosed(t *testing.T) {
 	}
 }
 
-// A verified agent whose scope carries no catalog pool reaches nothing: its
-// CONNECT is refused before a tunnel opens.
 func TestAdapterRefusesAScopeWithoutAPool(t *testing.T) {
 	f := newAdapterFixture(t)
 	f.sessions.set(&brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", WorkloadID: "pod-uid-1"})
@@ -725,8 +685,7 @@ func TestAdapterRefusesAScopeWithoutAPool(t *testing.T) {
 	}
 }
 
-// Paths some backends normalise differently are refused before the prefix
-// match: path parameters and segments that begin with "..".
+// Paths some backends normalise differently are refused before the prefix match.
 func TestUnsafePathRefusesTraversalForms(t *testing.T) {
 	for path, unsafe := range map[string]bool{
 		"/v1/allowed/..;/admin": true,
@@ -743,8 +702,6 @@ func TestUnsafePathRefusesTraversalForms(t *testing.T) {
 	}
 }
 
-// An entry with requestFields forwards a request only when each limited
-// parameter appears once with a listed value, and audits every refusal.
 func TestAdapterHoldsRequestFieldsToListedValues(t *testing.T) {
 	f := newAdapterFixture(t, func(o *Options) {
 		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
@@ -776,9 +733,6 @@ func TestAdapterHoldsRequestFieldsToListedValues(t *testing.T) {
 	}
 }
 
-// A Slack entry forwards a call that uses only its method's parameters and
-// refuses a key Slack could read as a second channel, or one the method does
-// not take, before anything reaches Slack.
 func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 	f := newAdapterFixture(t, func(o *Options) {
 		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
@@ -794,7 +748,6 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 		}
 		o.HeaderAdapter.Catalog = catalog
 	})
-	// The test vendor's certificate names example.com, not slack.com.
 	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
 	call := func(method, path, query string) int {
 		t.Helper()
@@ -810,8 +763,6 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
-	// Each row names the method, so a read is told apart from a post, the
-	// refused rows included.
 	if code := call("GET", "/api/conversations.history", "channel=C0123456789&limit=20"); code != http.StatusOK || f.calls.Load() != 1 ||
 		f.audit.last().Operation != "slack.conversations_history" {
 		t.Fatalf("listed channel: %d, vendor calls %d, operation %q", code, f.calls.Load(), f.audit.last().Operation)
@@ -839,11 +790,6 @@ func TestAdapterHoldsSlackCallsToTheirMethodsParameters(t *testing.T) {
 	}
 }
 
-// A groundcover MCP entry forwards the query client's own requests, with the
-// headers it sends, and names the tool in the row. It refuses another tool,
-// a message it cannot read as one, an unlisted argument and a missing,
-// repeated or other X-Backend-Id before anything reaches groundcover, with
-// the reason in the row and the refusal header.
 func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 	f := newAdapterFixture(t, func(o *Options) {
 		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
@@ -857,10 +803,8 @@ func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 		}
 		o.HeaderAdapter.Catalog = catalog
 	})
-	// The test vendor's certificate names example.com, not groundcover's host.
 	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
-	// call sends what a Python query client sends: every header it sets, the
-	// session after initialize, and its body. backends replaces X-Backend-Id.
+	// call sends what a Python query client sends; backends replaces X-Backend-Id.
 	call := func(method, body string, backends ...string) (int, string) {
 		t.Helper()
 		r, err := http.NewRequest(method, "https://mcp.groundcover.com:"+strconv.Itoa(f.port)+"/api/mcp", strings.NewReader(body))
@@ -895,12 +839,8 @@ func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 	tool := func(name string) string {
 		return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":{"query":"* | limit 1","period":"PT1H"}}}`
 	}
-	// The POSTs of one log query and one metric query (initialize, the
-	// notification and each tool call), byte for byte as the client
-	// serializes them, then the event stream.
-	// settle waits for the response row of a served call, which the broker
-	// records after the client already has its answer, so the next call's
-	// check never reads this one's row.
+	// The POSTs of one log query and one metric query, byte for byte as the client serializes them.
+	// settle waits for a served call's response row, which the broker writes after the client has its answer.
 	settle := func() {
 		for deadline := time.Now().Add(2 * time.Second); f.audit.last().Event != auditchain.EventHTTPResponse && time.Now().Before(deadline); {
 			time.Sleep(5 * time.Millisecond)
@@ -950,9 +890,7 @@ func TestAdapterForwardsOnlyListedGroundcoverTools(t *testing.T) {
 	}
 }
 
-// A groundcover entry with no X-Backend-Id pin, as a catalog written before
-// requestHeaders has, still serves the query client, with any backend header
-// or none, and still refuses another tool, a backend argument and _from.
+// A groundcover entry with no X-Backend-Id pin still serves the query client and refuses another tool, a backend argument and _from.
 func TestAdapterServesAnUnpinnedGroundcoverEntry(t *testing.T) {
 	f := newAdapterFixture(t, func(o *Options) {
 		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
@@ -1005,9 +943,7 @@ func TestAdapterServesAnUnpinnedGroundcoverEntry(t *testing.T) {
 	}
 }
 
-// Authorization refuses a call after its entry matched, which is where the
-// row for an unentitled requester is written. A Slack call refused there
-// names its method too, and the same call from a member goes through.
+// A Slack call refused in authorization names its method too.
 func TestAdapterSlackAuthorizationRefusalNamesTheMethod(t *testing.T) {
 	f := newAdapterFixture(t, func(o *Options) {
 		port := o.HeaderAdapter.Catalog.Current().Entries()[0].Port
@@ -1027,7 +963,6 @@ func TestAdapterSlackAuthorizationRefusalNamesTheMethod(t *testing.T) {
 		o.HeaderAdapter.Sessions = &authorizetest.MemBinder{}
 		o.HeaderAdapter.Entitlements = &entitlement.Cache{Source: directory{"sso|alice": {authzGroup}, "sso|bob": {}}}
 	})
-	// The test vendor's certificate names example.com, not slack.com.
 	f.proxy.upstream.TLSClientConfig.ServerName = "example.com"
 	call := func(session string) int {
 		t.Helper()

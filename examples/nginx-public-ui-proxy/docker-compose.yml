@@ -1,6 +1,6 @@
 services:
   agent-vault:
-    image: infisical/agent-vault:latest
+    image: gatehouse:local
     environment:
       AGENT_VAULT_MASTER_PASSWORD: changeme-for-local-testing
       # Public URL the user hits — drives av_session Secure flag and email links.
@@ -20,13 +20,7 @@ services:
     depends_on:
       - agent-vault
 
-  # Verification harness for trust-header stripping: uncomment, then in the
-  # reverse-proxy service set AGENT_VAULT_UPSTREAM=echo:8080.
-  #
-  # echo:
-  #   image: mendhak/http-https-echo:34
-  #   environment:
-  #     HTTP_PORT: 8080
+# To verify trust-header stripping, add an echo service and set AGENT_VAULT_UPSTREAM=echo:8080.
 
 volumes:
   agent-vault-data:

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/Infisical/agent-vault/internal/auditchain"
 	"github.com/Infisical/agent-vault/internal/authorize"
@@ -72,13 +73,21 @@ func (p *Proxy) handleSettings(w http.ResponseWriter, r *http.Request) {
 	peer, peerErr := peerFromContext(r.Context())
 	scope, err := p.resolveScope(r.Context(), token, hint, peer, peerErr, false)
 	if err != nil {
-		p.recordAuthFailure(r)
+		p.recordIdentityFailure(r, err)
 		if key := brokercore.DenialKey(err); key != nil {
 			event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 		}
 		decision := ""
 		if reason := brokercore.DenialReason(err); reason != "" {
 			decision = "identity_" + reason
+		}
+		if brokercore.DenialUnavailable(err) {
+			// The sidecar asks again on any status but 403; an audit failure answers the same 503.
+			event.Outcome, event.Decision, event.Status = "broker_unavailable", decision, http.StatusServiceUnavailable
+			_ = a.Audit.Record(event)
+			w.Header().Set("Retry-After", strconv.Itoa(int(p.identityRetry/time.Second)))
+			bare(http.StatusServiceUnavailable)
+			return
 		}
 		deny(decision)
 		return

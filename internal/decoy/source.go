@@ -16,10 +16,7 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// Source is the decoy set in force. The broker reads Current per request;
-// Load and Watch swap in each new set. A load that fails keeps the last good
-// set, and a broker that never loaded one recognizes no decoy: decoys are a
-// detection, so they never hold up traffic.
+// Source is the decoy set in force. A failed load keeps the last good set, and a broker that never loaded one recognizes no decoy: decoys never hold up traffic.
 type Source struct {
 	current atomic.Pointer[Set]
 	version atomic.Int64
@@ -43,14 +40,11 @@ func (s *Source) Current() *Set {
 // Version is the version of the set in force, or 0 before the first load.
 func (s *Source) Version() int { return int(s.version.Load()) }
 
-// Loader returns every decoy by label, the fields it skipped (by label, never
-// value), and the version they belong to. Given the version already in force,
-// it may return no values and that version to say nothing changed.
+// Loader returns every decoy by label, the fields it skipped (by label, never value), and their version;
+// given the version in force it may return no values to say nothing changed.
 type Loader func(ctx context.Context, known int) (values map[string]string, skipped []Rejected, version int, err error)
 
-// Load reads the newest decoys and puts them in force. force rereads them
-// even when the version is unchanged. It returns the decoys left out: the
-// fields the loader skipped, then the values the set refused.
+// Load reads the newest decoys and puts them in force; force rereads even at the same version. It returns the decoys left out.
 func (s *Source) Load(ctx context.Context, load Loader, force bool) ([]Rejected, error) {
 	known := s.Version()
 	if force || s.Current() == nil {
@@ -69,8 +63,7 @@ func (s *Source) Load(ctx context.Context, load Loader, force bool) ([]Rejected,
 	return append(skipped, rejected...), nil
 }
 
-// Watch loads every interval, and in full every refresh, until ctx ends.
-// report hears each load's left-out decoys or error.
+// Watch loads every interval, and in full every refresh, until ctx ends; report hears each load's left-out decoys or error.
 func (s *Source) Watch(ctx context.Context, interval, refresh time.Duration, load Loader, report func([]Rejected, error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -99,8 +92,7 @@ type Logical interface {
 	ReadWithDataWithContext(ctx context.Context, path string, data map[string][]string) (*vaultapi.Secret, error)
 }
 
-// readConcurrency is how many owner secrets a load reads at once. It sets
-// load speed, not how many owners a set may hold.
+// readConcurrency is how many owner secrets a load reads at once.
 const readConcurrency = 64
 
 var (
@@ -109,18 +101,8 @@ var (
 	fieldName = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,63}$`)
 )
 
-// VaultLoader reads decoys from a KV version 2 mount, under prefix:
-//
-//   - head: field "names" lists the owners (worker pools), as a JSON array or
-//     a string holding one. Other fields are ignored. Its KV version is the
-//     set's version, so a poll costs one read until the head changes.
-//   - pools/<name>: each string field is one decoy, labelled
-//     "<name>/<field>". A field whose name is not lower-case letters, digits
-//     and _, or whose value is not a string, is skipped and reported by label.
-//
-// Terraform writes the owners' decoys, then the head. An owner whose secret is
-// deleted has no decoys. Any other read failure fails the load, and the last
-// good set stays in force.
+// VaultLoader reads decoys from a KV v2 mount under prefix. The head's "names" field lists owners (a JSON array or a string holding one); its KV version is the set's version.
+// Each pools/<name> string field is a decoy labelled "<name>/<field>"; a bad field name or non-string value is skipped and reported by label. A deleted owner secret has no decoys; any other read failure fails the load.
 func VaultLoader(vault Logical, mount, prefix string) Loader {
 	return func(ctx context.Context, known int) (map[string]string, []Rejected, int, error) {
 		if vault == nil || !validPath(mount) || !validPath(prefix) {
@@ -184,9 +166,7 @@ func headNames(field interface{}) ([]string, error) {
 	return names, nil
 }
 
-// readOwners reads every owner's decoys, concurrently. A field that is not a
-// string or not a plain name is skipped and returned by label, sorted; its
-// value is never reported.
+// readOwners reads every owner's decoys concurrently; a field that is not a string or plain name is skipped and returned by label, sorted, never by value.
 func readOwners(ctx context.Context, vault Logical, base string, names []string) (map[string]string, []Rejected, error) {
 	values := map[string]string{}
 	var skipped []Rejected
@@ -243,8 +223,7 @@ func readOwners(ctx context.Context, vault Logical, base string, names []string)
 
 var errDeleted = errors.New("decoy secret deleted")
 
-// readKV reads a KV version 2 secret's data and version. Errors never carry
-// the secret's contents.
+// readKV reads a KV v2 secret's data and version; errors never carry its contents.
 func readKV(ctx context.Context, vault Logical, path string) (map[string]interface{}, int, error) {
 	resp, err := vault.ReadWithDataWithContext(ctx, path, nil)
 	if err != nil || resp == nil || resp.Data == nil {

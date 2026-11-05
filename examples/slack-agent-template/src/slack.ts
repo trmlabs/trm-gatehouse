@@ -9,17 +9,11 @@ import { runAgent } from "./run-agent.js";
 import { chunkText } from "./slack-format.js";
 import { MAX_THREAD_CONTEXT_MESSAGES, formatThreadTranscript } from "./slack-transcript.js";
 
-// @slack/web-api hard-codes `proxy: false` on its axios client, ignoring
-// HTTPS_PROXY env vars. Pass an explicit agent so the agent-vault MITM proxy
-// can intercept and substitute placeholder tokens. The same agent is reused for
-// the one-off identity probe below.
+// @slack/web-api ignores HTTPS_PROXY; pass an explicit agent so the MITM proxy can substitute tokens.
 const proxyUrl = process.env.HTTPS_PROXY;
 const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
 
-// Behind Agent Vault, the real token lives only in the broker; the env holds a
-// placeholder that the proxy swaps into the Authorization header. A token must
-// never ride in the request body: @slack/web-api copies a per-call `token`
-// argument into the form body, which the proxy cannot rewrite.
+// The env holds a placeholder the proxy swaps into the Authorization header; a token in the body cannot be rewritten.
 const identity = await new WebClient(process.env.SLACK_BOT_TOKEN, { agent }).auth.test();
 const botUserId = identity.user_id;
 
@@ -54,9 +48,7 @@ async function resolveEmail(
   if (emailCache.has(userId)) return emailCache.get(userId);
 
   try {
-    // No per-call `token` arg: behind Agent Vault that would land in the
-    // request body, which the proxy cannot rewrite. The client-level token rides
-    // in the header.
+    // No per-call `token`: it would land in the body, which the proxy cannot rewrite.
     const info = await client.users.info({ user: userId });
     const email = info.user?.profile?.email;
     emailCache.set(userId, email);
@@ -139,9 +131,7 @@ async function handleMessage(
     botUserId,
   });
 
-  // Always append userMessage explicitly: conversations.replies returns the
-  // oldest N messages, so on a long thread the triggering message itself can
-  // fall outside the window. Slight redundancy in the common case is fine.
+  // Append userMessage explicitly: replies returns the oldest N, so the triggering message can fall outside.
   const prompt = transcript
     ? `Conversation in this Slack thread so far:\n\n${transcript}\n\nRespond to this latest message: ${userMessage}`
     : userMessage;

@@ -2,7 +2,7 @@
 
 # Agent Vault TypeScript SDK
 
-The official TypeScript SDK for [Agent Vault](https://github.com/Infisical/agent-vault), an open-source credential brokerage layer for AI agents. Agent Vault sits between development agents and target services, proxying requests and injecting credentials so agents never see raw keys or tokens.
+The TypeScript SDK for the Gatehouse credential brokerage layer for AI agents. Gatehouse sits between development agents and target services, proxying requests and injecting credentials so agents never see raw keys or tokens.
 
 ## Installation
 
@@ -135,10 +135,6 @@ await vault.services!.removeByName("slack-conn");
 ## Error handling
 
 The SDK throws `ApiError` for non-2xx responses from Agent Vault control-plane endpoints. Upstream HTTP errors from agent-issued traffic — which travels through `HTTPS_PROXY`, not the SDK — surface in the agent's normal HTTP client.
-
-## Documentation
-
-For comprehensive SDK reference and advanced usage, see the [documentation](https://agent-vault.infisical.com).
 
 ## Releasing
 

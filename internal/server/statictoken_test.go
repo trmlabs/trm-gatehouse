@@ -10,9 +10,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// The static-token listener carries HTTP CONNECT only, behind its TLS front's
-// PROXY header; every other start is closed, and what it admits is tagged so
-// the HTTP proxy takes it only as a static token.
 func TestStaticTokenListenerAdmitsOnlyConnect(t *testing.T) {
 	for name, c := range map[string]struct {
 		send string
@@ -43,9 +40,6 @@ func TestStaticTokenListenerAdmitsOnlyConnect(t *testing.T) {
 	}
 }
 
-// The cross-cluster listener still admits proxy-attested identities only, and
-// refuses the CONNECT of a static token's client as it always refused any
-// identity but its own: the two listeners share no kind.
 func TestStaticTokenAndCrossClusterShareNoKind(t *testing.T) {
 	routed, _, err := routeCrossCluster(loopbackPair(t, proxyLine+"CONNECT h:443 HTTP/1.1\r\n\r\n"))
 	if err != nil {
@@ -83,8 +77,6 @@ func TestStaticTokenListenerMustBeLoopbackAndApartFromCrossCluster(t *testing.T)
 	}
 }
 
-// serveStaticToken injects each admitted connection into the HTTP listener
-// and closes the rest.
 func TestServeStaticTokenInjectsOnlyConnect(t *testing.T) {
 	front, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -104,8 +96,7 @@ func TestServeStaticTokenInjectsOnlyConnect(t *testing.T) {
 	}
 	_, _ = io.WriteString(bad, proxyLine+"GET / HTTP/1.1\r\n\r\n")
 	_ = bad.SetReadDeadline(time.Now().Add(5 * time.Second))
-	// Closed with the start unread, which the peer sees as a reset or an end;
-	// what it must not see is a connection left open until the deadline.
+	// A reset or end is fine; a connection left open until the deadline is not.
 	if _, err := io.ReadAll(bad); err != nil {
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			t.Fatalf("a refused start was left open: %v", err)

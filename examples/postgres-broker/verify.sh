@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Disposable local verification. Requires go, vault, PostgreSQL tools, openssl.
-# Run as a non-root user; never touches the user's Agent Vault home or services.
+# Requires go, vault, PostgreSQL tools and openssl; run as a non-root user.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 for tool in go vault initdb pg_ctl psql openssl; do command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }; done
@@ -19,8 +18,7 @@ admin_pw=$(openssl rand -hex 16)
 printf '%s' "$admin_pw" > "$review_work/admin-pw"
 chmod 600 "$review_work/admin-pw"
 initdb -D "$review_work/pg" -U review_admin --auth-local=trust --auth-host=scram-sha-256 --pwfile="$review_work/admin-pw" > "$review_work/init.log"
-# Test-only network separation: agents take IPv4, broker takes IPv6. The same
-# principle must be implemented with workload source CIDRs/firewall rules in production.
+# Test-only separation: agents use IPv4, the broker IPv6. Production uses source CIDRs or firewall rules.
 cat > "$review_work/pg/pg_hba.conf" <<'HBA'
 local all all trust
 host all +pg_read_all_data 127.0.0.1/32 reject
@@ -31,7 +29,6 @@ pg_ctl -D "$review_work/pg" -l "$review_work/postgres.log" -o "-h 127.0.0.1,::1 
 pg() { psql -h "$review_work" -p "$pg_port" -U review_admin -v ON_ERROR_STOP=1 "$@"; }
 pg -d postgres -c 'CREATE DATABASE appdb;' -c 'CREATE DATABASE brokerstore;' -c 'CREATE DATABASE appdb2;' >/dev/null
 pg -d appdb -c "CREATE TABLE customers(id serial PRIMARY KEY,name text); INSERT INTO customers(name) VALUES ('Acme'),('Globex'),('Initech');" >/dev/null
-# The fixture's inherited reader grant must not allow persistent object ownership.
 pg -d appdb -c 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;' >/dev/null
 pg -d appdb2 -c 'REVOKE CREATE ON SCHEMA public FROM PUBLIC;' >/dev/null
 export VAULT_ADDR="http://127.0.0.1:$vault_port" VAULT_TOKEN="$(openssl rand -hex 16)"
@@ -49,11 +46,7 @@ vault write database/config/appdb plugin_name=postgresql-database-plugin allowed
 vault write database/roles/readonly db_name=appdb creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE pg_read_all_data;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=8s max_ttl=90s >/dev/null
 vault write database/config/appdb2 plugin_name=postgresql-database-plugin allowed_roles=readonly2 connection_url="postgresql://{{username}}:{{password}}@127.0.0.1:$pg_port/appdb2?sslmode=disable" username=review_admin password="$admin_pw" >/dev/null
 vault write database/roles/readonly2 db_name=appdb2 creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE pg_read_all_data;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=8s max_ttl=90s >/dev/null
-# Each child token can read only its selected role and end itself, which
-# revokes the credential it issued. The parent needs these policies plus token
-# creation and lease renewal; it holds no right to revoke tokens by accessor.
-# gatehouse-test.readonly is the same grant under a Gatehouse role name: the
-# broker lists and revokes orphan leases only under gatehouse-* roles.
+# gatehouse-test.readonly is the same grant under a gatehouse-* name, the only roles the broker revokes orphan leases for.
 vault write database/roles/gatehouse-test.readonly db_name=appdb creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE pg_read_all_data;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=8s max_ttl=90s >/dev/null
 for db_role in readonly readonly2 gatehouse-test.readonly; do
   db_policy_hash=$(printf '%s' "database/creds/$db_role" | openssl dgst -sha256 | awk '{print $NF}')
@@ -72,9 +65,7 @@ path "sys/leases/renew" {
 path "sys/leases/revoke/database/creds/readonly/*" { capabilities = ["update"] }
 path "sys/leases/revoke/database/creds/readonly2/*" { capabilities = ["update"] }
 path "sys/leases/revoke/database/creds/gatehouse-test.readonly/*" { capabilities = ["update"] }
-# Listing its own roles' leases lets the broker clear an unknown issuance once
-# Vault shows no credential from it remains. Vault requires sudo to list leases;
-# on these exact paths it grants nothing else.
+# Vault requires sudo to list leases; granted on these exact paths only, so the broker can clear unknown issuances.
 path "sys/leases/lookup/database/creds/readonly/" { capabilities = ["list", "sudo"] }
 path "sys/leases/lookup/database/creds/readonly2/" { capabilities = ["list", "sudo"] }
 path "sys/leases/lookup/database/creds/gatehouse-test.readonly/" { capabilities = ["list", "sudo"] }
@@ -90,12 +81,10 @@ export AV_TEST_PG_SECOND_DB=appdb2 AV_TEST_VAULT_SECOND_ROLE=readonly2 AV_TEST_V
 export AV_TEST_PG_UPSTREAM="[::1]:$pg_port" AV_TEST_PG_DENIED_UPSTREAM="127.0.0.1:$pg_port" AV_TEST_PG_DB=appdb
 export AV_TEST_PG_ADMIN="postgres://review_admin:$admin_pw@127.0.0.1:$pg_port/appdb?sslmode=disable"
 export AV_TEST_STORE_PG_URL="postgres://review_admin:$admin_pw@127.0.0.1:$pg_port/brokerstore?sslmode=disable"
-# Serial packages: generated-role baseline measurements must not overlap.
-# An optional first argument narrows test names for an affected-boundary rerun.
+# Packages run serially; an optional first argument narrows the test names.
 go test -p 1 -tags 'realpg realvault loadpg' ./internal/pgproxy ./internal/hashicorp ./internal/server ./internal/store ./internal/workloadidentity -run "${1:-RealPostgres|RealVault|TestLoadPG_}" -count=1 -v -timeout 5m
 if [[ ${AV_VERIFY_COMBINED:-false} == true ]]; then
   go test -tags realcombined ./internal/mitm -run '^TestRealCombined(WorkloadProofVaultAndPostgres|ParentExpiryRecovery)$' -count=1 -v -timeout 2m
 fi
 
-# Parent authentication expiry crosses HTTP and PostgreSQL boundaries.
 go test -tags realvault ./internal/mitm -run '^TestRealVault_BrokerParentExpiry$' -count=1 -v -timeout 2m

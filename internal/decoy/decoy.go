@@ -1,13 +1,5 @@
-// Package decoy recognizes decoy credentials: values planted in agent
-// sessions that look like keys and that no service accepts. A request that
-// presents one shows the session was steered into hunting for secrets, so the
-// broker refuses it and records why.
-//
-// A Set holds only SHA-256 digests. The broker hashes each decoy as it loads
-// and keeps no value, so nothing it logs, stores or returns can carry one.
-// Each candidate in a request is hashed and looked up by its digest's first
-// eight bytes, then confirmed with a constant-time compare, so a lookup costs
-// the same at any set size and its timing depends on digests only.
+// Package decoy recognizes decoy credentials: planted values no service accepts, whose presentation means the session was steered into hunting for secrets.
+// A Set holds only SHA-256 digests, looked up by first eight bytes then compared in constant time, so nothing logged can carry a value.
 package decoy
 
 import (
@@ -22,17 +14,13 @@ import (
 	"unicode/utf8"
 )
 
-// A decoy is one run of decoy characters (A-Z, a-z, 0-9, "_" and "-"),
-// MinLength to MaxLength long. Text is split at every other byte, so a decoy
-// sent as a bearer token, a header value, a query value, a JSON string or a
-// Basic credential part is always one whole run.
+// A decoy is one run of decoy characters (A-Z, a-z, 0-9, "_" and "-"), MinLength to MaxLength long; text is split at every other byte.
 const (
 	MinLength = 20
 	MaxLength = 256
 )
 
-// Surfaces name where a request presented a decoy. Each is a fixed code for
-// the audit row.
+// Surfaces are fixed codes naming where a request presented a decoy.
 const (
 	SurfaceHeader   = "header"
 	SurfacePath     = "path"
@@ -42,8 +30,7 @@ const (
 	SurfacePassword = "password"
 )
 
-// placeholderMarker starts every broker placeholder. A decoy holding it could
-// match a placeholder a worker legitimately sends.
+// placeholderMarker starts every broker placeholder; a decoy holding it could match a legitimate one.
 const placeholderMarker = "__vault_"
 
 // Match is a decoy a request presented: the decoy's label, "<owner>/<name>",
@@ -71,10 +58,7 @@ type Set struct {
 	size    int
 }
 
-// NewSet hashes each value under its label. A value outside the decoy
-// alphabet or length, one holding a placeholder marker, or a repeat of another
-// is left out and reported by label. Labels are taken in byte order, so the
-// same values always keep the same labels.
+// NewSet hashes each value under its label. A value outside the decoy alphabet or length, holding a placeholder marker, or repeated is left out and reported by label.
 func NewSet(values map[string]string) (*Set, []Rejected) {
 	s := &Set{index: make(map[uint64][]entry, len(values))}
 	labels := make([]string, 0, len(values))
@@ -121,7 +105,6 @@ func decoyByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
 }
 
-// Len is the number of decoys in the set.
 func (s *Set) Len() int {
 	if s == nil {
 		return 0
@@ -129,8 +112,7 @@ func (s *Set) Len() int {
 	return s.size
 }
 
-// Request reports a decoy in a request's user info, path, query or any header
-// value. A Basic credential is decoded first, and percent-encoding is undone.
+// Request reports a decoy in user info, path, query or any header value; Basic credentials are decoded and percent-encoding undone.
 func (s *Set) Request(r *http.Request) (Match, bool) {
 	if s.Len() == 0 || r == nil {
 		return Match{}, false
@@ -197,8 +179,7 @@ func (s *Set) header(v string) (string, bool) {
 	return "", false
 }
 
-// text checks data as sent and, when it holds percent-encoding or a
-// backslash, decoded: a vendor decodes either before reading a value.
+// text checks data as sent and, if it holds percent-encoding or a backslash, decoded.
 func (s *Set) text(data []byte) (string, bool) {
 	if label, ok := s.find(data); ok {
 		return label, true
@@ -246,8 +227,7 @@ func (s *Set) lookup(digest [sha256.Size]byte) (string, bool) {
 	return "", false
 }
 
-// percentDecode undoes %XX escapes and leaves a malformed one as sent, so a
-// stray "%" never hides the rest of the text.
+// percentDecode undoes %XX escapes and leaves a malformed one as sent, so a stray "%" never hides the rest.
 func percentDecode(data []byte) []byte {
 	out := make([]byte, 0, len(data))
 	for i := 0; i < len(data); i++ {
@@ -265,10 +245,8 @@ func percentDecode(data []byte) []byte {
 	return out
 }
 
-// jsonUnescape undoes \uXXXX escapes and JSON's control escapes (\n \r \t
-// \b \f), whose letter would otherwise run into a decoy that follows, as in
-// "out:\n<decoy>". Any other escape is kept as sent, both bytes together, so
-// an escaped backslash never starts an escape.
+// jsonUnescape undoes \uXXXX and control escapes (\n \r \t \b \f) so their letter cannot run into a following decoy.
+// Any other escape is kept as sent, both bytes together.
 func jsonUnescape(data []byte) []byte {
 	out := make([]byte, 0, len(data))
 	for i := 0; i < len(data); i++ {

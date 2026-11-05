@@ -13,9 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// databaseServiceView mirrors the server's API representation of a managed
-// PostgreSQL-broker database. It carries references only (the Vault mount and
-// role that mint credentials), never a database password.
+// databaseServiceView mirrors the server's view of a database; it holds references, never a password.
 type databaseServiceView struct {
 	Name     string `json:"name"`
 	Upstream string `json:"upstream"`

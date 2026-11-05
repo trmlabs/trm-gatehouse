@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// SeedDatabaseService consumes a bootstrap entry once. The durable marker
-// survives deletion; explicit API additions remain possible through Upsert.
+// SeedDatabaseService consumes a bootstrap entry once; the durable marker survives deletion.
 func (s *SQLStore) SeedDatabaseService(ctx context.Context, svc DatabaseService) (bool, error) {
 	var inserted bool
 	err := s.auditWrite(ctx, func(tx *sql.Tx) error {

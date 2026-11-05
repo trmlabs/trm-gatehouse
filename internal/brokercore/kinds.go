@@ -12,32 +12,22 @@ import (
 	"sync"
 )
 
-// Identity kinds a verified scope carries, so each listener can admit only
-// the kinds it was opened for.
+// Identity kinds a verified scope carries; each listener admits only the kinds it was opened for.
 const (
-	// KindPodToken: a Pod's own projected token, checked against the live Pod
-	// and the connection's source address.
+	// KindPodToken: a Pod's projected token, checked against the live Pod and source address.
 	KindPodToken = "pod-token"
 	// KindTokenReview: a projected token checked by online TokenReview.
 	KindTokenReview = "token-review"
-	// KindProxyAttested: a shared proxy's token and its attestation of the
-	// agent Pod behind the connection.
+	// KindProxyAttested: a shared proxy's token plus its attestation of the agent Pod.
 	KindProxyAttested = "proxy-attested"
-	// KindStaticToken: a per-agent bearer token with no Kubernetes proof,
-	// checked against the hash in that agent's catalog block. Only the
-	// static-token listener admits it, and that listener admits nothing else.
+	// KindStaticToken: a per-agent bearer token checked against its catalog hash; only the static-token listener admits it, and nothing else.
 	KindStaticToken = "static-token"
 )
 
-// defaultKinds are what an untagged listener admits: every kind except a
-// proxy's attestation and a static token, which only a listener opened for
-// each admits. The empty
-// kind is a legacy session token.
+// defaultKinds are what an untagged listener admits; the empty kind is a legacy session token.
 var defaultKinds = []string{"", KindPodToken, KindTokenReview}
 
-// KindedConn is a connection from a listener that admits only Kinds.
-// Prefix, when set, is read before the connection: bytes a dispatcher
-// already consumed to route it.
+// KindedConn is a connection from a listener that admits only Kinds; Prefix holds bytes a dispatcher already consumed.
 type KindedConn struct {
 	net.Conn
 	Kinds  []string
@@ -77,23 +67,16 @@ func ConnKinds(c net.Conn) []string {
 // KindAdmitted reports whether a scope of this kind may use the listener.
 func KindAdmitted(kinds []string, kind string) bool { return slices.Contains(kinds, kind) }
 
-// deniedError is an identity refusal with a fixed reason code. It is
-// ErrInvalidSession to every caller; the reason only reaches the broker's own
-// log, so an operator can tell which check refused a workload. A refusal at
-// the token's signing key also names the key ID the token claimed and the
-// connection's peer, so a forged or stale token can be traced to its sender.
+// deniedError is an identity refusal that is ErrInvalidSession to callers; the reason reaches only the broker's log.
 type deniedError struct {
-	reason string
-	key    *KeyDenial
+	reason      string
+	key         *KeyDenial
+	unavailable bool // the broker could not complete the check, so the same proof may pass on retry
 }
 
-// KeyDenial is what a signing-key refusal records: the token's key ID in a
-// safe form and the connection's peer address. Never any part of the token.
+// KeyDenial records a signing-key refusal: a safe key ID and the peer address, never part of the token.
 type KeyDenial struct {
-	// Kid is the token's key ID, or "invalid" when it is not a plain
-	// identifier; KidSHA256 is then the first 12 hex characters of the
-	// SHA-256 of the raw value. The kid is chosen by whoever made the token,
-	// before any signature check, so it is never recorded raw.
+	// Kid is "invalid" when not a plain identifier, then KidSHA256 is 12 hex characters of its SHA-256; the kid is attacker-chosen so is never recorded raw.
 	Kid       string
 	KidSHA256 string
 	Peer      string
@@ -120,8 +103,16 @@ func (e deniedError) Is(target error) bool { return target == ErrInvalidSession 
 // Denied returns ErrInvalidSession carrying a fixed reason code.
 func Denied(reason string) error { return deniedError{reason: reason} }
 
-// DeniedKey is Denied for a refusal at the token's signing key, naming the
-// key ID the token claimed in its safe form.
+// Unavailable is Denied for a check the broker could not complete, such as a store or Kubernetes API that did not answer.
+func Unavailable(reason string) error { return deniedError{reason: reason, unavailable: true} }
+
+// DenialUnavailable reports whether err is a refusal made because the broker could not complete a check.
+func DenialUnavailable(err error) bool {
+	var d deniedError
+	return errors.As(err, &d) && d.unavailable
+}
+
+// DeniedKey is Denied for a signing-key refusal, naming the claimed key ID in safe form.
 func DeniedKey(reason, kid string) error {
 	k := &KeyDenial{Kid: kid}
 	if !plainKid.MatchString(kid) {
@@ -140,7 +131,8 @@ func WithPeer(err error, peer netip.Addr) error {
 	}
 	k := *d.key
 	k.Peer = peer.Unmap().String()
-	return deniedError{reason: d.reason, key: &k}
+	d.key = &k
+	return d
 }
 
 // DenialKey returns a signing-key refusal's key ID and peer, or nil.

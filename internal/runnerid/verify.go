@@ -1,13 +1,5 @@
-// Package runnerid verifies the Claude runner's session token locally and
-// derives who is behind an agent session. The token proves which runner pool
-// issued the session and who created it (Anthropic, "Verify session identity in
-// self-hosted environments"): act.sub is user:<id> for a person or agent:<id>
-// for the organization's service identity, and act.email is the person's
-// address when the creating surface recorded one. act.attested_by is reserved
-// and not read. A person is named by that email, as an Entra user principal
-// name, only in a configured domain; without one the session has no person.
-// CursorVerifier does the same for a Cursor run's identity token (cursor.go).
-// The token is never stored or logged; callers keep only its SHA-256.
+// Package runnerid verifies the Claude runner's session token locally and derives who is behind an agent session: act.sub is user:<id> or agent:<id>, and act.email names a person (as an Entra UPN) only in a configured domain; act.attested_by is reserved and not read.
+// CursorVerifier does the same for Cursor run tokens (cursor.go). The token is never stored or logged; callers keep only its SHA-256.
 package runnerid
 
 import (
@@ -28,8 +20,7 @@ const (
 	maxLifetime = 12 * time.Hour
 	clockSkew   = 60 * time.Second
 	sessionRole = "session_worker"
-	// tokenPrefix marks a self-hosted runner session token. Hosted sessions carry
-	// another sk-ant- prefix and other keys; those are refused outright.
+	// tokenPrefix marks a self-hosted runner session token; hosted sessions carry another sk-ant- prefix and are refused outright.
 	tokenPrefix = "sk-ant-cc-"
 )
 
@@ -72,8 +63,7 @@ func (s Session) InPool(ccpool string) bool {
 type Verifier struct {
 	JWKSURL string
 	Issuer  string
-	// PersonDomains are the lower-case email domains whose user sessions name a
-	// person. Empty: no session names a person, so entries above T0 are refused.
+	// PersonDomains are the lower-case email domains whose user sessions name a person; empty means none, so entries above T0 are refused.
 	PersonDomains []string
 	Client        *http.Client
 	Now           func() time.Time
@@ -101,14 +91,12 @@ type claims struct {
 	} `json:"act"`
 }
 
-// Verify checks signature, issuer, role, lifetime and audience shape. It does
-// not decide entitlement; that is a live per-request lookup elsewhere.
+// Verify checks signature, issuer, role, lifetime and audience shape; entitlement is a live per-request lookup elsewhere.
 func (v *Verifier) Verify(ctx context.Context, token string) (Session, error) {
 	if len(token) == 0 || len(token) > 16384 || strings.ContainsAny(token, " \t\r\n") {
 		return Session{}, ErrInvalid
 	}
-	// The runner's value carries the prefix; the JWT follows it. Any other
-	// sk-ant- token (a hosted session's) is not one this broker can verify.
+	// The runner's value carries the prefix; any other sk-ant- token (a hosted session's) is not one this broker can verify.
 	raw := token
 	if strings.HasPrefix(token, tokenPrefix) {
 		token = strings.TrimPrefix(token, tokenPrefix)
@@ -163,8 +151,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Session, error) {
 		// No person behind it, whatever else the token says.
 		session.Kind, session.Subject = KindAgent, c.Act.Sub
 	case strings.HasPrefix(c.Act.Sub, "user:") && len(c.Act.Sub) > len("user:"):
-		// A person only with a recorded email in a configured domain; otherwise
-		// the session has no person and gets T0 at most.
+		// A person only with a recorded email in a configured domain; otherwise no person and T0 at most.
 		if email, ok := personEmail(c.Act.Email, v.PersonDomains); ok {
 			session.Kind, session.Subject = KindPerson, email
 		}
@@ -180,8 +167,7 @@ func plainSubject(s string) bool {
 	return len(s) <= 256 && !strings.ContainsAny(s, " \"\\") && !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
-// personEmail is the lower-cased email when it is a single plain address in one
-// of the configured domains.
+// personEmail is the lower-cased email when it is a single plain address in a configured domain.
 func personEmail(email string, domains []string) (string, bool) {
 	email = strings.ToLower(email)
 	at := strings.LastIndexByte(email, '@')

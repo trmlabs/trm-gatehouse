@@ -40,8 +40,6 @@ func TestStartupRetryWindowSetting(t *testing.T) {
 	}
 }
 
-// A Vault blip at startup: Vault refuses the first logins, answers a later
-// one, and the broker attaches its client instead of starting without one.
 func TestVaultLoginIsRetriedAtStartup(t *testing.T) {
 	shortStartupRetry(t, 5*time.Second)
 	var attempts atomic.Int32
@@ -72,7 +70,6 @@ func TestVaultLoginIsRetriedAtStartup(t *testing.T) {
 	}
 }
 
-// A missing or invalid auth setting is not retried: no Vault answer fixes it.
 func TestVaultLoginMisconfigurationIsNotRetried(t *testing.T) {
 	shortStartupRetry(t, 5*time.Second)
 	t.Setenv("VAULT_ADDR", "http://127.0.0.1:1")
@@ -92,7 +89,6 @@ func TestVaultLoginMisconfigurationIsNotRetried(t *testing.T) {
 	}
 }
 
-// The window bounds the retries: past it, the last error is returned.
 func TestRetryAtStartupGivesUpAfterTheWindow(t *testing.T) {
 	shortStartupRetry(t, 60*time.Millisecond)
 	var attempts int
@@ -112,8 +108,6 @@ func TestRetryAtStartupGivesUpAfterTheWindow(t *testing.T) {
 	}
 }
 
-// An attempt that ignores its deadline is abandoned, and what it builds late
-// is handed to late so it can be closed.
 func TestBoundedAttemptClosesLateResults(t *testing.T) {
 	release := make(chan struct{})
 	closed := make(chan string, 1)
@@ -135,8 +129,6 @@ func TestBoundedAttemptClosesLateResults(t *testing.T) {
 	}
 }
 
-// The audit key read is retried for the startup window: a blip no longer
-// exits with "proxy certificates need the signed audit trail".
 func TestAuditTrailStartIsRetried(t *testing.T) {
 	shortStartupRetry(t, 80*time.Millisecond)
 	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,20 +158,16 @@ func TestAuditTrailStartIsRetried(t *testing.T) {
 		return nil, errors.New("audit HMAC key unavailable: vault sealed")
 	}
 	env := map[string]string{"AGENT_VAULT_AUDIT_REPLICA": "broker-0", "AGENT_VAULT_AUDIT_HMAC_PATH": "audit/hmac", "AGENT_VAULT_AUDIT_TRANSIT_KEY": "audit"}
-	_, err = brokerAuditChain(context.Background(), client, st, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler))
+	_, _, _, _, err = startAuditChain(context.Background(), client, st, func(k string) string { return env[k] }, slog.New(slog.DiscardHandler))
 	if err == nil || attempts.Load() < 2 {
 		t.Fatalf("audit start: err %v after %d attempts, want retries then the error", err, attempts.Load())
 	}
-	// Missing settings still fail at once, with no attempt.
 	attempts.Store(0)
-	if _, err = brokerAuditChain(context.Background(), client, st, func(string) string { return "" }, slog.New(slog.DiscardHandler)); err == nil || attempts.Load() != 0 {
+	if _, _, _, _, err = startAuditChain(context.Background(), client, st, func(string) string { return "" }, slog.New(slog.DiscardHandler)); err == nil || attempts.Load() != 0 {
 		t.Fatalf("missing settings: err %v attempts %d", err, attempts.Load())
 	}
 }
 
-// A broker restarting while Vault cannot serve the catalog starts from the
-// copy its store kept, ready; with no copy it starts empty and not ready,
-// instead of exiting.
 func TestBrokerCatalogStartsFromTheStoredCopyWhenVaultIsDown(t *testing.T) {
 	sharedCatalog.Lock()
 	sharedCatalog.source, sharedCatalog.started = nil, false
@@ -228,7 +216,6 @@ func TestBrokerCatalogStartsFromTheStoredCopyWhenVaultIsDown(t *testing.T) {
 	if !source.Current().HasHost("serpapi.com", 443) || checks["catalog"] == nil || !checks["catalog"]() {
 		t.Fatal("the stored catalog is not in force")
 	}
-	// No stored copy: empty, not ready, still running.
 	sharedCatalog.Lock()
 	sharedCatalog.source, sharedCatalog.started = nil, false
 	sharedCatalog.Unlock()

@@ -11,10 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// readStartup reads the agent's startup packet, transparently declining SSL and
-// GSS encryption requests (the agent reaches this listener over loopback, so the
-// broker↔agent hop needs no TLS). A CancelRequest is surfaced as
-// errCancelRequest so the caller can route it without a password handshake.
+// readStartup reads the agent's startup packet, transparently declining SSL and GSS encryption requests (the
+// agent reaches this listener over loopback, so the broker↔agent hop needs no TLS).
 func readStartup(backend *pgproto3.Backend, conn net.Conn) (*pgproto3.StartupMessage, error) {
 	for {
 		msg, err := backend.ReceiveStartupMessage()
@@ -40,13 +38,8 @@ func readStartup(backend *pgproto3.Backend, conn net.Conn) (*pgproto3.StartupMes
 	}
 }
 
-// authenticateAgent requests the agent's Agent Vault token via a cleartext
-// password prompt and validates it. The token identifies the agent and its
-// vault scope; it is never a database credential. Returns the authorized scope
-// or an error (the caller maps errors to a generic client-facing message so no
-// internal detail leaks).
-// admit, when set, runs after the token has arrived and before the store is
-// asked about it, so a client slow to send its token holds no admission slot.
+// authenticateAgent requests the agent's Agent Vault token via a cleartext password prompt and validates it.
+// The token identifies the agent and its vault scope; it is never a database credential.
 func authenticateAgent(ctx context.Context, backend *pgproto3.Backend, auth AgentAuthenticator, decoys *decoy.Set, startup *pgproto3.StartupMessage,
 	admit func() (context.Context, context.CancelFunc, error)) (*AgentScope, string, error) {
 	backend.Send(&pgproto3.AuthenticationCleartextPassword{})
@@ -81,9 +74,8 @@ func authenticateAgent(ctx context.Context, backend *pgproto3.Backend, auth Agen
 		defer cancel()
 		ctx = admitted
 	}
-	// An optional startup parameter lets an instance-scoped token name its vault,
-	// mirroring the HTTP path's vault hint. A vault-scoped session token needs no
-	// hint.
+	// An optional startup parameter lets an instance-scoped token name its vault, mirroring the HTTP path's
+	// vault hint.
 	scope, err := auth.Authenticate(ctx, pw.Password, startup.Parameters["agent_vault_vault"])
 	if err != nil {
 		return nil, "", fmt.Errorf("authenticate agent token: %w", err)
@@ -91,11 +83,8 @@ func authenticateAgent(ctx context.Context, backend *pgproto3.Backend, auth Agen
 	return scope, pw.Password, nil
 }
 
-// sendClientReady completes the agent-facing handshake by replaying the
-// upstream's post-authentication state: AuthenticationOk, every upstream
-// ParameterStatus, the BackendKeyData, and ReadyForQuery. After this the agent
-// believes it is authenticated and issues queries over the already-established
-// upstream session — without ever receiving a database credential.
+// sendClientReady completes the agent-facing handshake by replaying the upstream's post-authentication state:
+// AuthenticationOk, every upstream ParameterStatus, the BackendKeyData, and ReadyForQuery.
 func sendClientReady(backend *pgproto3.Backend, sess *upstreamSession) error {
 	backend.Send(&pgproto3.AuthenticationOk{})
 	for i := range sess.parameters {
@@ -115,9 +104,8 @@ func sendClientReady(backend *pgproto3.Backend, sess *upstreamSession) error {
 	return nil
 }
 
-// writeClientError sends a FATAL ErrorResponse to the agent before any raw
-// relay begins, so a failed handshake surfaces as a clean Postgres error rather
-// than a dropped connection. Messages are deliberately generic.
+// writeClientError sends a FATAL ErrorResponse to the agent before any raw relay begins, so a failed
+// handshake surfaces as a clean Postgres error rather than a dropped connection.
 func writeClientError(backend *pgproto3.Backend, code, reason, message string) {
 	backend.Send(brokerError("FATAL", code, reason, message))
 	_ = backend.Flush()

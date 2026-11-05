@@ -77,8 +77,6 @@ func (f *browserFixture) headers(host string) http.Header {
 // One TLS server plays the app, its API and Auth0, told apart by Host.
 func newBrowserFixture(t *testing.T) *browserFixture { return newBrowserFixtureWith(t, false, nil) }
 
-// newBrowserFixtureWith logs the test user in through automated-auth when
-// automated is set, and sends the proxy's log to logger when one is given.
 func newBrowserFixtureWith(t *testing.T, automated bool, logger *slog.Logger) *browserFixture {
 	t.Helper()
 	f := &browserFixture{audit: &adapterAudit{}, seen: map[string]http.Header{}}
@@ -203,7 +201,6 @@ func newBrowserFixtureWith(t *testing.T, automated bool, logger *slog.Logger) *b
 	return f
 }
 
-// browserResult is what a test reads of a response, after its body is closed.
 type browserResult struct {
 	StatusCode int
 	Header     http.Header
@@ -232,9 +229,6 @@ func (f *browserFixture) do(t *testing.T, method, rawURL string, mutate func(*ht
 
 func bearerPlaceholder(r *http.Request) { r.Header.Set("Authorization", "Bearer "+browserPlaceholder) }
 
-// The seed is a Playwright storage state for the app's origin: the
-// placeholder where auth0-spa-js keeps the access token, an unsigned ID token
-// with the test user's sub and org_id, and an expiry at the Pod's deadline.
 func TestBrowserSeedHoldsOnlyPlaceholders(t *testing.T) {
 	f := newBrowserFixture(t)
 	resp, body := f.do(t, "GET", "https://api.example.com"+httpcatalog.BrowserSeedPath, nil)
@@ -295,8 +289,7 @@ func TestBrowserSeedHoldsOnlyPlaceholders(t *testing.T) {
 	}
 }
 
-// The API gets the real token for the placeholder; the browser never sees it,
-// nor any cookie either side sets. Preflight and streaming pass.
+// The API gets the real token; the browser never sees it or any cookie.
 func TestBrowserAPISwapsPlaceholderAndStripsCookies(t *testing.T) {
 	f := newBrowserFixture(t)
 	resp, body := f.do(t, "GET", "https://api.example.com/v1/cases", func(r *http.Request) {
@@ -320,7 +313,6 @@ func TestBrowserAPISwapsPlaceholderAndStripsCookies(t *testing.T) {
 	if resp, body := f.do(t, "GET", "https://api.example.com/v1/stream", bearerPlaceholder); resp == nil || body != "data: one\n\ndata: two\n\n" {
 		t.Fatalf("stream: %v %q", resp, body)
 	}
-	// An API that echoes the token never gets it to the browser.
 	if resp, body := f.do(t, "GET", "https://api.example.com/v1/echo", bearerPlaceholder); resp != nil && strings.Contains(body, "Bearer synthetic") {
 		t.Fatal("echoed token reached the browser")
 	}
@@ -354,8 +346,7 @@ func TestBrowserRefusals(t *testing.T) {
 	if resp, _ := f.do(t, "GET", "https://api.example.com"+httpcatalog.BrowserSeedPath, nil); resp == nil || resp.StatusCode != 403 || f.audit.last().Outcome != "pool" {
 		t.Fatalf("ungranted pool got a seed: %v", resp)
 	}
-	// A refusal before routing names no path on a browser host either: an
-	// app's path can be a one-time sign-in link.
+	// A refusal before routing names no path on a browser host: an app's path can be a one-time sign-in link.
 	f.audit.mu.Lock()
 	f.audit.admitErr = errors.New("audit down")
 	f.audit.mu.Unlock()
@@ -369,9 +360,7 @@ func TestBrowserRefusals(t *testing.T) {
 	}
 }
 
-// The app loads with no credential and none of its cookies; a token the API
-// refuses as invalid is dropped and the next call logs in again, but no more
-// than once a minute, and a refusal that is not about the token never does.
+// A token the API refuses as invalid is dropped and the next call logs in again, at most once a minute.
 func TestBrowserAppAndTokenRenewal(t *testing.T) {
 	f := newBrowserFixture(t)
 	resp, body := f.do(t, "GET", "https://app.example.com/index.html", func(r *http.Request) { r.Header.Set("Cookie", "leak=1") })
@@ -396,15 +385,12 @@ func TestBrowserAppAndTokenRenewal(t *testing.T) {
 	}
 	call(200, 1)
 	f.clock.Add(int64(2 * time.Minute))
-	// Refusals that say nothing about the token keep it.
 	refuse(http.StatusForbidden, "")
 	refuse(http.StatusUnauthorized, `Bearer realm="api", error="insufficient_scope"`)
 	call(200, 1)
-	// A refusal of a fresh token keeps it too: a worker cannot force logins.
 	f.clock.Store(0)
 	refuse(http.StatusUnauthorized, "")
 	call(200, 1)
-	// Past the interval, an invalid-token refusal drops it.
 	f.clock.Store(int64(2 * time.Minute))
 	refuse(http.StatusUnauthorized, `Bearer realm="api", error="invalid_token", error_description="expired"`)
 	call(200, 2)
@@ -413,8 +399,7 @@ func TestBrowserAppAndTokenRenewal(t *testing.T) {
 	call(200, 3)
 }
 
-// TestBrowserSeedFile writes a seed for the real-browser check in
-// scripts/browser-seed-check.mjs. It runs only when asked.
+// TestBrowserSeedFile writes a seed for scripts/browser-seed-check.mjs; it runs only when asked.
 func TestBrowserSeedFile(t *testing.T) {
 	out := os.Getenv("AV_BROWSER_SEED_OUT")
 	if out == "" {
@@ -430,7 +415,6 @@ func TestBrowserSeedFile(t *testing.T) {
 	}
 }
 
-// lockedBuffer collects the proxy's log across its goroutines.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -448,9 +432,7 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// With an automated-auth login the worker still gets only the placeholder
-// seed, the API gets the real token, and neither the log nor the audit trail
-// carries the service key, the password, or either token.
+// With an automated-auth login, neither the log nor the audit trail carries the service key, password or either token.
 func TestBrowserAutomatedAuthKeepsSecretsBrokerSide(t *testing.T) {
 	logs := &lockedBuffer{}
 	f := newBrowserFixtureWith(t, true, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -467,10 +449,8 @@ func TestBrowserAutomatedAuthKeepsSecretsBrokerSide(t *testing.T) {
 	if f.revokes.Load() != 1 || !f.audited("staging-app/revoke", "refresh_revoked") {
 		t.Fatalf("refresh token not revoked: %d", f.revokes.Load())
 	}
-	// A refused login, whose answer names the user, fails closed.
 	f.loginErr.Store(true)
 	f.clock.Store(int64(time.Hour))
-	// The agent is told to wait out the sign-in interval, not 5 seconds.
 	if resp, _ := f.do(t, "GET", "https://api.example.com/v1/cases", bearerPlaceholder); resp == nil || resp.StatusCode != http.StatusServiceUnavailable ||
 		resp.Header.Get("Retry-After") != "60" || f.audit.last().Outcome != "token_unavailable" {
 		t.Fatalf("refused login: %v %+v", resp, f.audit.last())
@@ -495,8 +475,7 @@ func (f *browserFixture) audited(binding, outcome string) bool {
 	return false
 }
 
-// A failed revocation is retried once, then audited as revoke_failed; the
-// sign-in still succeeds, since the broker keeps the refresh token nowhere.
+// A failed revocation is retried once, then audited as revoke_failed; the sign-in still succeeds.
 func TestBrowserAutomatedAuthRevokeFailureAudited(t *testing.T) {
 	f := newBrowserFixtureWith(t, true, nil)
 	f.revokeErr.Store(true)
@@ -508,7 +487,6 @@ func TestBrowserAutomatedAuthRevokeFailureAudited(t *testing.T) {
 	}
 }
 
-// Vault unreachable: the sign-in fails closed with 503 and calls nothing.
 func TestBrowserAutomatedAuthVaultErrorIs503(t *testing.T) {
 	f := newBrowserFixtureWith(t, true, nil)
 	f.vaultDown.Store(true)
@@ -518,9 +496,7 @@ func TestBrowserAutomatedAuthVaultErrorIs503(t *testing.T) {
 	}
 }
 
-// The path guard refuses credential and account-admin routes anywhere in
-// the path, and writes to read-only routes, before any sign-in or upstream
-// call.
+// The path guard refuses credential and account-admin routes, and writes to read-only routes, before any sign-in or upstream call.
 func TestBrowserPathGuard(t *testing.T) {
 	f := newBrowserFixture(t)
 	for _, tc := range []struct {
@@ -557,8 +533,6 @@ func TestBrowserPathGuard(t *testing.T) {
 	}
 }
 
-// The per-Pod proxy rate limit (default 20 requests a second, a burst of
-// 200 and 64 in flight per Pod and entry) applies to browser sessions.
 func TestBrowserRateLimited(t *testing.T) {
 	f := newBrowserFixture(t)
 	cfg := ratelimit.DefaultsFor(ratelimit.ProfileDefault)
@@ -578,8 +552,7 @@ func TestBrowserRateLimited(t *testing.T) {
 	}
 }
 
-// Through the proxy, 20 concurrent workers against a failing sign-in make
-// one attempt, and the next request inside the minute makes none.
+// 20 concurrent workers against a failing sign-in make one attempt.
 func TestBrowserFailedSignInIsCapped(t *testing.T) {
 	f := newBrowserFixtureWith(t, true, nil)
 	f.loginErr.Store(true)
@@ -611,8 +584,7 @@ func TestBrowserFailedSignInIsCapped(t *testing.T) {
 	}
 }
 
-// A web app's hosts get leaves from the browser CA, so a browser pinning that
-// CA trusts Gatehouse for them alone; the SNI must name the CONNECT host.
+// A web app's hosts get leaves from the browser CA; the SNI must name the CONNECT host.
 func TestBrowserHostsGetBrowserCALeaves(t *testing.T) {
 	f := newBrowserFixture(t)
 	for _, target := range []string{"https://app.example.com/index.html", "https://api.example.com" + httpcatalog.BrowserSeedPath} {

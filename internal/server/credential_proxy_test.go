@@ -40,8 +40,7 @@ func TestCredentialProxyStartupFailureReleasesCleanupOwner(t *testing.T) {
 				}
 				defer occupied.Close()
 				s.AttachMITM(mitm.New(occupied.Addr().String(), mitm.Options{}))
-				// Any attempt to bind the management listener before the strict proxy
-				// would yield a different error and fail this ordering assertion.
+				// Binding the management listener before the strict proxy would fail this ordering assertion.
 				s.httpServer.Addr = "invalid address"
 			}
 			err := s.Start()
@@ -123,8 +122,7 @@ func TestCredentialProxyCreateStoresMetadataWithoutFetching(t *testing.T) {
 	st := &createMetadataStore{mockStore: newMockStore()}
 	s := newTestServer(withStore(st))
 	s.EnableCredentialProxy()
-	// This deliberately unconfigured client would panic if the create path
-	// attempted a secret read. Configuring the mapping must not fetch a value.
+	// An unconfigured client would panic on a secret read; configuring the mapping must not fetch a value.
 	s.AttachHashicorp(&hashicorp.Client{})
 	rec := httptest.NewRecorder()
 	s.createHashicorpVault(rec, context.Background(), &Actor{ID: "owner", Type: "user"}, vaultCreateRequest{Name: "approved", CredentialStore: &vaultCreateCredentialStoreRequest{Kind: store.CredentialStoreHashicorp, Config: []byte(`{"mount":"secret","secret_path":"approved"}`)}})

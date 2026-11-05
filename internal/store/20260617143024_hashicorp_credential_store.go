@@ -6,10 +6,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Widen vault_credential_stores.kind to allow 'hashicorp' alongside 'infisical'.
-// Runs after the table exists (migration 047 on SQLite, the Postgres baseline on
-// Postgres). SQLite cannot ALTER a CHECK constraint, so the table is rebuilt;
-// Postgres alters the named constraint in place. Both branches are idempotent.
+// SQLite cannot ALTER a CHECK, so the table is rebuilt; Postgres alters the named constraint. Both branches are idempotent.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		if db.Name() == "postgres" {
@@ -19,7 +16,6 @@ func init() {
 			return db.Exec(`ALTER TABLE vault_credential_stores ADD CONSTRAINT vault_credential_stores_kind_check CHECK (kind IN ('infisical','hashicorp'))`).Error
 		}
 
-		// SQLite: skip if the CHECK already permits hashicorp.
 		var ddl string
 		if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vault_credential_stores'`).Scan(&ddl).Error; err != nil {
 			return err
@@ -27,9 +23,7 @@ func init() {
 		if strings.Contains(ddl, "hashicorp") {
 			return nil
 		}
-		// Rebuild with the widened CHECK. vault_credential_stores is a leaf table
-		// (only it references vaults; nothing references it), so the drop/rename is
-		// safe without toggling foreign_keys.
+		// Leaf table (nothing references it), so drop/rename is safe without toggling foreign_keys.
 		stmts := []string{
 			`CREATE TABLE vault_credential_stores_new (
     vault_id              TEXT PRIMARY KEY REFERENCES vaults(id) ON DELETE CASCADE,

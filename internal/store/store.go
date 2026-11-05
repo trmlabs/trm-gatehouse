@@ -32,9 +32,7 @@ type VaultGrant struct {
 	CreatedAt time.Time
 }
 
-// Credential represents an encrypted credential within a vault.
-// Ciphertext and Nonce are opaque bytes, encryption is handled
-// by the caller, not the store.
+// Credential is an encrypted credential within a vault; encryption is the caller's job.
 type Credential struct {
 	ID         string
 	VaultID    string
@@ -46,9 +44,7 @@ type Credential struct {
 	UpdatedAt  time.Time
 }
 
-// CredentialOAuth stores the OAuth configuration and refresh state for
-// an OAuth-type credential. The access token lives in credentials.ciphertext;
-// this table stores everything needed to refresh it.
+// CredentialOAuth stores OAuth config and refresh state; the access token lives in credentials.ciphertext.
 type CredentialOAuth struct {
 	VaultID            string
 	CredentialKey      string
@@ -85,9 +81,7 @@ type CredentialOAuthState struct {
 	ExpiresAt     time.Time
 }
 
-// OAuthCredentialConfig bridges the handler layer to the store for
-// ApplyProposal — carries the OAuth provider config for a credential
-// slot being created or updated.
+// OAuthCredentialConfig carries the OAuth provider config for a credential slot in ApplyProposal.
 type OAuthCredentialConfig struct {
 	Key               string
 	AuthorizationURL  string
@@ -101,10 +95,7 @@ type OAuthCredentialConfig struct {
 	TokenAuthMethod   string
 }
 
-// MasterKeyRecord holds the KEK/DEK key-wrapping artifacts.
-// The sentinel is always encrypted with the DEK for verification.
-// In password-protected mode: DEKCiphertext/DEKNonce hold the KEK-wrapped DEK.
-// In passwordless mode: DEKPlaintext holds the unwrapped DEK.
+// MasterKeyRecord holds the KEK/DEK key-wrapping artifacts; DEKPlaintext is set only in passwordless mode.
 type MasterKeyRecord struct {
 	Sentinel      []byte // sentinel ciphertext (encrypted with DEK)
 	SentinelNonce []byte // sentinel GCM nonce
@@ -132,8 +123,7 @@ const (
 )
 
 // Session represents an authenticated session.
-// User sessions: VaultID may be set (scoped) or empty (global login).
-// Agent tokens: VaultID is empty; vault resolved per-request via X-Vault header.
+// User sessions may be scoped to a VaultID or global; agent tokens have none and resolve the vault per request via X-Vault.
 type Session struct {
 	ID        string
 	UserID    string     // non-empty for user login sessions, empty for agent tokens
@@ -152,18 +142,13 @@ type Session struct {
 	LastIP        string
 	LastUserAgent string
 
-	// Scoped-session metadata (populated only for vault-scoped tokens; left
-	// empty on user login sessions and agent tokens). Label is a
-	// user-supplied tag shown in the Tokens UI; CreatedByActorID/Type
-	// record the actor that minted the token.
+	// Scoped-session metadata, set only for vault-scoped tokens.
 	Label              string
 	CreatedByActorID   string
 	CreatedByActorType string
 }
 
-// IsExpired reports whether the session is past its absolute expiry or its
-// idle window. Single source of truth for expiry checks across the server
-// (requireAuth) and proxy ingress (brokercore.SessionResolver).
+// IsExpired reports whether the session is past its absolute expiry or idle window.
 func (s *Session) IsExpired(now time.Time) bool {
 	if s.ExpiresAt != nil && now.After(*s.ExpiresAt) {
 		return true
@@ -174,9 +159,7 @@ func (s *Session) IsExpired(now time.Time) bool {
 	return false
 }
 
-// CreateUserSessionParams carries all the fields persisted on a fresh
-// user-login session. Captured as a struct so login and password-change
-// call sites stay aligned without positional drift.
+// CreateUserSessionParams carries the fields persisted on a user-login session.
 type CreateUserSessionParams struct {
 	UserID        string
 	ExpiresAt     time.Time
@@ -186,9 +169,7 @@ type CreateUserSessionParams struct {
 	LastUserAgent string
 }
 
-// CreateScopedSessionParams carries the fields persisted on a vault-scoped
-// session token. ExpiresAt is optional (nil = never expires); Label and
-// the CreatedBy fields are optional metadata for the Tokens UI.
+// CreateScopedSessionParams carries the fields persisted on a vault-scoped token; nil ExpiresAt never expires.
 type CreateScopedSessionParams struct {
 	VaultID            string
 	VaultRole          string
@@ -223,11 +204,7 @@ type BrokerConfig struct {
 	UpdatedAt    time.Time
 }
 
-// DatabaseService is one managed upstream Postgres-wire database within a vault
-// that the PostgreSQL broker can front. It carries the network address plus the
-// Vault database secrets-engine mount and role that mint short-lived
-// credentials for it; the broker never stores a database password itself. Name
-// is the per-vault slug an agent selects by (unique within the vault).
+// DatabaseService is a managed upstream database; Vault mints its short-lived credentials, the broker never stores a password.
 type DatabaseService struct {
 	ID        string
 	VaultID   string
@@ -301,9 +278,7 @@ type VaultCredentialStore struct {
 	UpdatedAt           time.Time
 }
 
-// DynamicSecretLease tracks an Infisical dynamic-secret lease so it can be
-// revoked on disconnect/shutdown and swept on restart. Holds no secret
-// material, only what revoke needs.
+// DynamicSecretLease tracks an Infisical lease for revoke and restart sweep; holds no secret material.
 type DynamicSecretLease struct {
 	LeaseID           string
 	VaultID           string
@@ -337,9 +312,7 @@ type SetVaultExternalStoreParams struct {
 	Credentials         []EncryptedKV
 }
 
-// RequestLog is a persisted record of a single proxied request. Secret-free
-// by construction: no header values, no bodies, no query strings — only
-// metadata already safe to log (see internal/brokercore/logging.go).
+// RequestLog is a persisted record of one proxied request, secret-free by construction.
 type RequestLog struct {
 	ID             int64
 	VaultID        string
@@ -359,9 +332,7 @@ type RequestLog struct {
 	CreatedAt      time.Time
 }
 
-// ListRequestLogsOpts controls the ListRequestLogs query.
-// Exactly one of Before or After may be set (both zero returns the newest page).
-// VaultID == nil means "all vaults" — reserved for a future owner-only endpoint.
+// ListRequestLogsOpts controls ListRequestLogs; set at most one of Before or After.
 type ListRequestLogsOpts struct {
 	VaultID        *string
 	Ingress        string // "", "explicit", "mitm"
@@ -372,9 +343,7 @@ type ListRequestLogsOpts struct {
 	Limit          int   // capped at 200 by handler; store trusts caller
 }
 
-// UnmatchedHost is a hostname seen in proxy traffic that did not match
-// any configured service and resulted in an auth failure (401/403) or
-// proxy denial (no_match). Returned by ListUnmatchedHosts.
+// UnmatchedHost is a host seen in proxy traffic that matched no service and was denied.
 type UnmatchedHost struct {
 	Host         string
 	RequestCount int
@@ -460,8 +429,7 @@ type CAState struct {
 type Store interface {
 	// Vaults
 	CreateVault(ctx context.Context, name string) (*Vault, error)
-	// CreateVaultWithSetting creates a vault and one of its settings in a
-	// single transaction, so no reader sees the vault without the setting.
+	// CreateVaultWithSetting is one transaction, so no reader sees the vault without the setting.
 	CreateVaultWithSetting(ctx context.Context, name, key, value string) (*Vault, error)
 	GetVault(ctx context.Context, name string) (*Vault, error)
 	GetVaultByID(ctx context.Context, id string) (*Vault, error)
@@ -504,8 +472,7 @@ type Store interface {
 
 	// Vault grants (unified: actor_id + actor_type)
 	GrantVaultRole(ctx context.Context, actorID, actorType, vaultID, role string) error
-	// GrantVaultRoleIfAbsent grants role only when the actor holds none on
-	// the vault, and reports whether it did. An existing role is never changed.
+	// GrantVaultRoleIfAbsent never changes an existing role and reports whether it granted.
 	GrantVaultRoleIfAbsent(ctx context.Context, actorID, actorType, vaultID, role string) (bool, error)
 	RevokeVaultAccess(ctx context.Context, actorID, vaultID string) error
 	ListActorGrants(ctx context.Context, actorID string) ([]VaultGrant, error)
@@ -532,11 +499,7 @@ type Store interface {
 	// RevokeScopedSession deletes one scoped session by (vaultID, publicID).
 	// Vault scoping prevents cross-vault revocation.
 	RevokeScopedSession(ctx context.Context, vaultID, publicID string) error
-	// TouchSession bumps last_used_at for the given raw token and
-	// refreshes last_ip + last_user_agent (empty values leave the
-	// existing column unchanged). Throttled internally so per-request
-	// calls collapse to one write per minute. Returns no error when the
-	// session is missing (best-effort).
+	// TouchSession bumps last_used_at and last_ip/last_user_agent (empty leaves them), throttled to one write per minute; best-effort.
 	TouchSession(ctx context.Context, rawToken, ip, userAgent string) error
 	// ListUserSessions returns every non-expired user session for userID
 	// (ordered most-recent activity first). Used by the auth-sessions UI.
@@ -549,7 +512,7 @@ type Store interface {
 	SetBrokerConfig(ctx context.Context, vaultID string, servicesJSON string) (*BrokerConfig, error)
 	GetBrokerConfig(ctx context.Context, vaultID string) (*BrokerConfig, error)
 
-	// Database services (managed PostgreSQL-broker upstreams, per vault)
+	// Database services
 	UpsertDatabaseService(ctx context.Context, svc DatabaseService) (*DatabaseService, error)
 	SeedDatabaseService(ctx context.Context, svc DatabaseService) (bool, error)
 	GetDatabaseService(ctx context.Context, vaultID, name string) (*DatabaseService, error)
@@ -609,9 +572,7 @@ type Store interface {
 
 	// Agents
 	CreateAgent(ctx context.Context, name, createdBy, role string) (*Agent, error)
-	// CreateAgentWithGrantsAndToken creates an agent, its vault grants, and its
-	// first agent token in a single transaction so partial failures cannot strand
-	// an agent row without a token or with half-applied grants.
+	// CreateAgentWithGrantsAndToken creates an agent, grants and first token in one transaction.
 	CreateAgentWithGrantsAndToken(ctx context.Context, name, createdBy, role string, vaultGrants []AgentVaultGrantSpec, tokenExpiresAt *time.Time) (*Agent, *Session, error)
 	GetAgentByID(ctx context.Context, id string) (*Agent, error)
 	GetAgentNameByID(ctx context.Context, id string) (string, error)
@@ -646,17 +607,11 @@ type Store interface {
 	GetVaultCredentialStore(ctx context.Context, vaultID string) (*VaultCredentialStore, error)
 	ListVaultCredentialStores(ctx context.Context) ([]VaultCredentialStore, error)
 	UpdateVaultCredentialStoreHealth(ctx context.Context, vaultID, status, errMsg string, syncedAt time.Time) error
-	// ReplaceVaultCredentialsForSync rewrites credentials only while the
-	// external-store row still matches configJSON; applied=false means the vault
-	// was disconnected or reconfigured mid-sync and nothing was written.
+	// ReplaceVaultCredentialsForSync rewrites credentials only if the store row still matches configJSON (applied=false otherwise).
 	ReplaceVaultCredentialsForSync(ctx context.Context, vaultID, configJSON string, items []EncryptedKV) (applied bool, err error)
-	// SetVaultExternalStore connects an existing vault to an external store:
-	// it upserts the credential-store row and replaces the vault's credentials
-	// in one transaction (built-in → external switch), returning the new row.
+	// SetVaultExternalStore upserts the credential-store row and replaces the vault's credentials in one transaction.
 	SetVaultExternalStore(ctx context.Context, p SetVaultExternalStoreParams) (*VaultCredentialStore, error)
-	// DeleteVaultCredentialStore removes the external-store row so polling stops;
-	// the vault's already-synced credentials are left in place as built-in
-	// credentials (external → built-in switch).
+	// DeleteVaultCredentialStore removes the store row; synced credentials stay as built-in.
 	DeleteVaultCredentialStore(ctx context.Context, vaultID string) error
 
 	// Dynamic-secret lease tracking (Infisical). Lease metadata only — never
@@ -677,10 +632,7 @@ type Store interface {
 	GetCAState(ctx context.Context) (*CAState, error)
 	SetCAState(ctx context.Context, state *CAState) error
 
-	// LockVault acquires an exclusive advisory lock for the given vault.
-	// The returned function releases the lock. Callers MUST defer the
-	// release. SQLite uses an in-memory per-vault mutex; Postgres uses
-	// pg_advisory_lock on a pinned connection.
+	// LockVault acquires an exclusive advisory lock for the vault; callers MUST defer the returned release.
 	LockVault(ctx context.Context, vaultID string) (unlock func(), err error)
 
 	// Lifecycle

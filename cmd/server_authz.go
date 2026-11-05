@@ -39,7 +39,6 @@ func (a authorization) verifier() authorize.Verifier {
 	return runnerid.Verifiers{Claude: a.runner, Cursor: a.cursor, SandboxDomains: a.sandbox}
 }
 
-// attachAuthorization wires the authorization model into the HTTP adapter.
 func attachAuthorization(adapter *mitm.HeaderAdapter, getenv func(string) string) error {
 	a, err := loadAuthorization(getenv)
 	if err != nil {
@@ -52,47 +51,8 @@ func attachAuthorization(adapter *mitm.HeaderAdapter, getenv func(string) string
 	return nil
 }
 
-// loadAuthorization reads the authorization model's settings, shared by the
-// HTTP adapter and the PostgreSQL broker:
-//   - AGENT_VAULT_RUNNER_JWKS_URL (and AGENT_VAULT_RUNNER_ISSUER, default ccr)
-//     verify Claude runner session tokens;
-//   - AGENT_VAULT_RUNNER_PERSON_DOMAINS lists the email domains (comma
-//     separated, lower case) whose user sessions name a person, by act.email as
-//     the Entra user principal name. Unset: no session names a person;
-//   - AGENT_VAULT_CURSOR_AUDIENCE and AGENT_VAULT_CURSOR_TEAM_IDS (comma
-//     separated) verify Cursor run identity tokens minted for that audience in
-//     those teams; AGENT_VAULT_CURSOR_PERSON_DOMAINS names persons by
-//     owner_email as AGENT_VAULT_RUNNER_PERSON_DOMAINS does for Claude.
-//     AGENT_VAULT_CURSOR_JWKS_URL and AGENT_VAULT_CURSOR_ISSUER default to
-//     Cursor's published ones; AGENT_VAULT_CURSOR_PEOPLE_FILE, when set,
-//     replaces owner_email: a JSON object of Cursor user ID to Entra object ID,
-//     the only way a user run names a person, by that object ID;
-//   - AGENT_VAULT_GUMLOOP_AUDIENCE must be a broker-only audience: Gumloop sets
-//     aud to whatever provider path a credential names, so the audience alone
-//     separates a broker token from a GCP federation token. Never use a real
-//     workload identity provider path;
-//   - AGENT_VAULT_SANDBOX_PERSON_DOMAINS lists the email domains whose logins,
-//     attested by a shared proxy from an agent Pod's requester annotation, name
-//     a person, as the Entra user principal name. Unset: no attested login
-//     names a person, and person-mode agent-sandbox pools are refused;
-//   - AGENT_VAULT_ENTITLEMENTS selects the entitlement source: "file:<path>"
-//     (fixtures and tests), "graph", or unset. "graph" asks Microsoft Graph,
-//     looking the person up by user principal name, with a token from
-//     workload identity federation and no secret: AGENT_VAULT_GRAPH_TENANT_ID
-//     and AGENT_VAULT_GRAPH_CLIENT_ID (the Entra app) and
-//     AGENT_VAULT_GRAPH_TOKEN_FILE (the projected service-account token,
-//     audience api://AzureADTokenExchange) are all required;
-//   - AGENT_VAULT_ENTITLEMENT_CACHE_SECONDS shortens the 5-minute cache;
-//   - AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE sets each person's directory
-//     lookup budget, per cache: the HTTP adapter and the PostgreSQL broker
-//     each load their own (default entitlement.DefaultLookupsPerMinute). It
-//     may not exceed AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX (default
-//     entitlement.DefaultMaxLookupsPerMinute), so a mistyped budget fails at
-//     start instead of removing the guard. Each broker replica keeps its own
-//     budget, so the directory sees up to replicas times two times this.
-//
-// Without a verifier or a source, entries above T0 are refused on the pools
-// that would need them.
+// loadAuthorization reads the HTTP adapter and PostgreSQL broker authorization settings from AGENT_VAULT_* env vars.
+// Without a verifier or entitlement source, entries above T0 are refused on the pools that need them.
 func loadAuthorization(getenv func(string) string) (authorization, error) {
 	var a authorization
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: runnerid.RefuseRedirects,
@@ -166,8 +126,7 @@ func loadAuthorization(getenv func(string) string) (authorization, error) {
 	return a, nil
 }
 
-// graphSource reads the Graph settings. Every one is required: a broker told to
-// ask the directory that cannot fails at start, not at its first lookup.
+// graphSource reads the Graph settings; all are required so a broker fails at start, not at its first lookup.
 func graphSource(getenv func(string) string, client *http.Client) (entitlement.GraphSource, error) {
 	tenant, app, file := getenv("AGENT_VAULT_GRAPH_TENANT_ID"), getenv("AGENT_VAULT_GRAPH_CLIENT_ID"), getenv("AGENT_VAULT_GRAPH_TOKEN_FILE")
 	if !uuidPattern.MatchString(tenant) || !uuidPattern.MatchString(app) {
@@ -180,9 +139,7 @@ func graphSource(getenv func(string) string, client *http.Client) (entitlement.G
 	return entitlement.GraphSource{Endpoint: entitlement.GraphEndpoint, Token: token.Token, Client: client}, nil
 }
 
-// cursorVerifier reads the Cursor settings. A Cursor audience without a team
-// is refused: Cursor does not allowlist audiences, so the team is what keeps
-// another company's runs out.
+// A Cursor audience without a team is refused: Cursor does not allowlist audiences, so the team keeps other companies' runs out.
 func cursorVerifier(audience string, getenv func(string) string, client *http.Client) (*runnerid.CursorVerifier, error) {
 	if !audiencePattern.MatchString(audience) {
 		return nil, fmt.Errorf("AGENT_VAULT_CURSOR_AUDIENCE must be printable with no spaces")
@@ -234,10 +191,8 @@ func personDomains(name string, getenv func(string) string) ([]string, error) {
 	return domains, nil
 }
 
-// cursorPeople reads AGENT_VAULT_CURSOR_PEOPLE_FILE: a JSON object of Cursor
-// user ID to Entra object ID, the shape of the Cursor runner's reviewed map.
-// "" (unset) is nil, which keeps naming persons by owner_email. Any other
-// problem is an error: a bad map must stop startup, never widen who is named.
+// cursorPeople reads AGENT_VAULT_CURSOR_PEOPLE_FILE, a JSON object of Cursor user ID to Entra object ID; unset is nil.
+// Any other problem is an error: a bad map must stop startup, never widen who is named.
 func cursorPeople(path string) (map[string]string, error) {
 	if path == "" {
 		return nil, nil

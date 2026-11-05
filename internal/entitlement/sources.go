@@ -15,10 +15,7 @@ import (
 	"time"
 )
 
-// FileSource reads a JSON directory on every lookup. It stands in for Entra
-// in tests and fixtures: {"subjects": {"<sso subject>": {"objectID": "...",
-// "enabled": true, "groups": ["<group id>", ...], "department": "..."}}};
-// department is optional.
+// FileSource reads a JSON directory on every lookup, standing in for Entra in tests: {"subjects": {"<sso subject>": {"objectID", "enabled", "groups", "department" (optional)}}}.
 type FileSource struct{ Path string }
 
 func (f FileSource) Lookup(_ context.Context, subject string, groups []string) (Person, error) {
@@ -65,25 +62,17 @@ var objectID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // errNotFound is a directory call answered 404.
 var errNotFound = errors.New("directory returned 404")
 
-// GraphSource asks Microsoft Graph with an application token: the user by the
-// SSO subject, then POST /users/{id}/checkMemberGroups for the asked groups
-// (GroupMember.Read.All and User.Read.All, application). It is off unless
-// configured; creating its app registration is a Security decision.
+// GraphSource asks Microsoft Graph with an application token: the user by SSO subject, then POST /users/{id}/checkMemberGroups (GroupMember.Read.All and User.Read.All, application). Off unless configured.
 type GraphSource struct {
 	Endpoint string // https://graph.microsoft.com/v1.0
 	Token    func(context.Context) (string, error)
 	Client   *http.Client
-	// SubjectIsObjectID: the subject must be an Entra object ID. Otherwise a
-	// subject that is one (a Cursor user mapped by AGENT_VAULT_CURSOR_PEOPLE_FILE)
-	// is looked up by it, and any other is looked up as a user principal name: a Claude or Cursor session names its
-	// person by a lower-case email in a configured domain, and the user Graph
-	// returns must carry exactly that UPN (Entra compares UPNs without case),
-	// never a mail alias.
+	// SubjectIsObjectID: the subject is an Entra object ID (a Cursor user mapped by AGENT_VAULT_CURSOR_PEOPLE_FILE).
+	// Otherwise it is looked up as a lower-case user principal name and the returned user must carry exactly that UPN, never a mail alias.
 	SubjectIsObjectID bool
 }
 
-// checkMemberGroupsMax is Graph's limit on groupIds per checkMemberGroups
-// call. An entry may require more groups; they are asked in batches.
+// checkMemberGroupsMax is Graph's limit on groupIds per checkMemberGroups call; larger sets are asked in batches.
 const checkMemberGroupsMax = 20
 
 func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string) (Person, error) {
@@ -98,8 +87,7 @@ func (g GraphSource) Lookup(ctx context.Context, subject string, groups []string
 		Enabled    *bool  `json:"accountEnabled"`
 		Department string `json:"department"`
 	}
-	// department is read for the audit trail only; User.Read.All already
-	// covers it, so no new permission is needed.
+	// department is read for the audit trail only; User.Read.All already covers it.
 	path := "/users/" + url.PathEscape(subject) + "?$select=id,userPrincipalName,accountEnabled,department"
 	if g.SubjectIsObjectID && !objectID.MatchString(subject) {
 		return Person{}, ErrNotInDirectory

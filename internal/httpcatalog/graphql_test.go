@@ -11,9 +11,7 @@ import (
 	"testing"
 )
 
-// ghFixture is one gh command's requests, recorded from gh 2.89.0 against a
-// local mock server with no GitHub token. {{PR}} and {{LABEL}} stand for the
-// node IDs gh had just read.
+// ghFixture is one gh command's recorded requests; {{PR}} and {{LABEL}} stand for the node IDs gh had just read.
 type ghFixture struct {
 	Requests []struct {
 		Method  string            `json:"method"`
@@ -42,8 +40,6 @@ const (
 	fixtureRepo  = "R_kgDNA-g"      // [0, 1000]
 )
 
-// Every GraphQL request gh sends for the supported commands maps to the
-// operations it needs, and GitHub would receive it rebuilt.
 func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 	const repo = "example-org/example-repo"
 	read := []string{"pr.read"}
@@ -62,8 +58,6 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-list-all-json", [][]string{list}, nil},
 		{"pr-list-head", [][]string{list}, nil},
 		{"pr-list-limit-200", [][]string{list}, nil},
-		// gh pr list --search asks which search types exist, answered by
-		// the broker, then searches with the terms in parentheses.
 		{"pr-list-search", [][]string{nil, list}, nil},
 		{"pr-status", [][]string{list}, nil},
 		{"pr-comment", [][]string{read, {"pr.comment", "pr.read"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
@@ -73,8 +67,6 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 		{"pr-ready", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-ready-undo", [][]string{read, {"pr.read", "pr.ready"}}, [][]GraphQLTarget{nil, {{fixturePR, TargetPullRequestWrite}}}},
 		{"pr-create", [][]string{list, list, {"pr.open", "pr.read"}}, [][]GraphQLTarget{nil, nil, {{fixtureRepo, TargetRepository}}}},
-		// gh repo view --json createdAt and gh repo clone read the repository
-		// itself; the clone then goes through the git entry.
 		{"repo-view-json", [][]string{read}, nil},
 		{"repo-clone", [][]string{list}, nil},
 		{"pr-checks", [][]string{read, nil, nil, read}, [][]GraphQLTarget{nil, nil, nil, {{fixturePR, TargetPullRequest}}}},
@@ -108,13 +100,11 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 			if !reflect.DeepEqual(got.Targets, targets) {
 				t.Errorf("%s request %d: targets %v, want %v", tc.fixture, i, got.Targets, targets)
 			}
-			// Only gh pr ready's (both ways) and gh pr create's mutations need contents.
 			wantContents := map[string]string{"pr-ready 1": "write", "pr-ready-undo 1": "write", "pr-create 2": "read"}[fmt.Sprintf("%s %d", tc.fixture, i)]
 			if got.Contents != wantContents {
 				t.Errorf("%s request %d: contents %q, want %q", tc.fixture, i, got.Contents, wantContents)
 			}
 			if want != nil {
-				// The rebuilt request parses to the same result.
 				again, err := ParseGitHubGraphQL(got.Body)
 				if err != nil || !reflect.DeepEqual(again.Operations, got.Operations) || !reflect.DeepEqual(again.Targets, got.Targets) ||
 					string(again.Body) != string(got.Body) {
@@ -129,10 +119,7 @@ func TestGraphQLMapsEveryGhRequest(t *testing.T) {
 	}
 }
 
-// The ready mutation's token carries contents write and create's contents
-// read, so their payload may read back the pull request's id, URL, number and
-// draft state and nothing more; every other request's token has no contents.
-// Create names its head and base for the caller to check.
+// The ready and create mutations carry a contents token, so their payload may read back only the pull request's id, URL, number and draft state.
 func TestGraphQLContentsMutations(t *testing.T) {
 	ready := `mutation($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { __typename clientMutationId pullRequest { __typename id number isDraft } } }`
 	got, err := ParseGitHubGraphQL(graphqlBody(ready, map[string]any{"input": map[string]any{"pullRequestId": fixturePR}}))
@@ -203,8 +190,7 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"fragment cycle", graphqlBody(repoQuery(`pullRequest(number: 1) { ...a }`)+` fragment a on PullRequest { author { ...a } }`, repoVars), ErrGraphQLShape},
 		{"unknown fragment", graphqlBody(repoQuery(`pullRequest(number: 1) { ...missing }`), repoVars), ErrGraphQLShape},
 		{"duplicate fragment", graphqlBody(repoQuery(`pullRequest(number: 1) { ...f }`)+` fragment f on PullRequest { id } fragment f on PullRequest { title }`, repoVars), ErrGraphQLShape},
-		// The printer drops a variable definition's directives, so GitHub would
-		// read something other than what was checked.
+		// The printer drops a variable definition's directives, so GitHub would read something other than what was checked.
 		{"directive on a variable", graphqlBody(`query($owner: String! @deprecated, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequest(number: 1) { id } } }`, repoVars), ErrGraphQLShape},
 		{"too many tokens", graphqlBody(repoQuery(`pullRequest(number: 1) { `+strings.Repeat("id ", maxGraphQLTokens)+`}`), repoVars), ErrGraphQLLimit},
 		{"oversized document", graphqlBody(repoQuery(`pullRequest(number: 1) { id }`)+strings.Repeat(" ", maxGraphQLDocument), repoVars), ErrGraphQLLimit},
@@ -214,8 +200,6 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"organization", graphqlBody(`query { organization(login: "o") { repositories(first: 5) { nodes { name } } } }`, nil), ErrGraphQLUnmapped},
 		{"another repository field", graphqlBody(repoQuery(`collaborators(first: 5) { nodes { login } }`), repoVars), ErrGraphQLUnmapped},
 		{"repository object", graphqlBody(repoQuery(`object(expression: "main:secrets.txt") { id }`), repoVars), ErrGraphQLUnmapped},
-		// History, blame and compare read a branch's commits and code, which
-		// only a git entry grants, at any depth.
 		{"history", graphqlBody(repoQuery(`pullRequest(number: 1) { commits(first: 1) { nodes { commit { history(first: 100) { nodes { message } } } } } }`), repoVars), ErrGraphQLUnmapped},
 		{"blame", graphqlBody(repoQuery(`pullRequest(number: 1) { commits(first: 1) { nodes { commit { blame(path: "main.go") { ranges { startingLine } } } } } }`), repoVars), ErrGraphQLUnmapped},
 		{"compare", graphqlBody(repoQuery(`pullRequest(number: 1) { headRef { compare(headRef: "main") { aheadBy } } }`), repoVars), ErrGraphQLUnmapped},
@@ -238,8 +222,6 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"search excluding a repository", graphqlBody(`query { search(query: "is:pr -repo:o/r", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search two repositories", graphqlBody(`query { search(query: "repo:o/r repo:o/s", type: ISSUE, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"search code", graphqlBody(`query { search(query: "repo:o/r token", type: REPOSITORY, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
-		// Advanced search reads OR and parentheses: only gh's one group of
-		// terms, with no repository in it, is read as the search's.
 		{"advanced search with OR", graphqlBody(`query { search(query: "repo:o/r OR is:pr", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"advanced search with or", graphqlBody(`query { search(query: "repo:o/r or is:pr", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
 		{"advanced search with OR in a group", graphqlBody(`query { search(query: "( a OR is:pr ) repo:o/r", type: ISSUE_ADVANCED, first: 5) { issueCount } }`, nil), ErrGraphQLUnmapped},
@@ -258,12 +240,9 @@ func TestGraphQLRefusals(t *testing.T) {
 			map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}), ErrGraphQLUnmapped},
 		{"aliased mutation", graphqlBody(`mutation($input: AddCommentInput!) { c: addComment(input: $input) { clientMutationId } }`,
 			map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}), ErrGraphQLUnmapped},
-		// Only the first field is mapped, so a second, unaliased one would be
-		// printed and sent unchecked.
+		// Only the first field is mapped, so a second unaliased one would be sent unchecked.
 		{"an allowed mutation, then another", graphqlBody(`mutation($input: AddCommentInput!, $merge: MergePullRequestInput!) { addComment(input: $input) { clientMutationId } mergePullRequest(input: $merge) { clientMutationId } }`,
 			map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}, "merge": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A"}}), ErrGraphQLUnmapped},
-		// pr.ready's token carries contents write: its payload reads back the
-		// pull request's id, number and draft state, and nothing more.
 		{"ready reading the body", ready(`pullRequest { body }`), ErrGraphQLUnmapped},
 		{"ready reading the head's commits", ready(`pullRequest { headRef { target { ... on Commit { message } } } }`), ErrGraphQLUnmapped},
 		{"ready with an aliased field", ready(`pullRequest { n: number }`), ErrGraphQLUnmapped},
@@ -273,8 +252,6 @@ func TestGraphQLRefusals(t *testing.T) {
 		{"ready with an unused fragment", graphqlBody(`mutation($input: MarkPullRequestReadyForReviewInput!) { markPullRequestReadyForReview(input: $input) { clientMutationId } } fragment f on PullRequest { number }`,
 			map[string]any{"input": map[string]any{"pullRequestId": "PR_kwDNA-jNB9A"}}), ErrGraphQLUnmapped},
 		{"ready reading another payload field", ready(`pullRequest { id } clientMutationId __typename actor { login }`), ErrGraphQLUnmapped},
-		// createPullRequest opens from this repository only, with string
-		// names and boolean flags, and its token carries contents read.
 		{"create from a fork", create(map[string]any{"headRepositoryId": "R_kgDNB9A"}, `pullRequest { id }`), ErrGraphQLUnmapped},
 		{"create with draft not a boolean", create(map[string]any{"draft": "true"}, `pullRequest { id }`), ErrGraphQLUnmapped},
 		{"create with an empty head", create(map[string]any{"headRefName": ""}, `pullRequest { id }`), ErrGraphQLUnmapped},
@@ -344,8 +321,6 @@ func TestGraphQLRefusals(t *testing.T) {
 	}
 }
 
-// A variable the document does not declare never reaches GitHub, nor do
-// comments or the operation name; the repository is read case-insensitively.
 func TestGraphQLRebuildsTheRequest(t *testing.T) {
 	body := []byte(`{"query":"query Q($owner: String!, $repo: String!) {\n  repository(owner: $owner, name: $repo) { pullRequest(number: 1) { id } } # comment\n}",` +
 		`"variables":{"owner":"Example-Org","repo":"example-repo","extra":"dropped"},"operationName":"Q"}`)
@@ -363,8 +338,6 @@ func TestGraphQLRebuildsTheRequest(t *testing.T) {
 	}
 }
 
-// Below a mapped field any selection is allowed, so every query needs
-// pr.read, whatever else it needs.
 func TestGraphQLQueriesNeedPullRequestRead(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for _, inner := range []string{
@@ -378,8 +351,6 @@ func TestGraphQLQueriesNeedPullRequestRead(t *testing.T) {
 	}
 }
 
-// Files are a git entry's grant: every field or type that reads them is
-// refused at any depth (and the GraphQL token has no contents permission).
 func TestGraphQLRefusesRepositoryContents(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for _, inner := range []string{
@@ -407,16 +378,13 @@ func TestGraphQLRefusesRepositoryContents(t *testing.T) {
 	}
 }
 
-// A mutation's payload is read like a query: anything beyond __typename and
-// clientMutationId needs pr.read, so a write grant alone reads nothing.
 func TestGraphQLMutationPayloadNeedsPullRequestRead(t *testing.T) {
 	input := map[string]any{"input": map[string]any{"subjectId": "PR_kwDNA-jNB9A", "body": "x"}}
 	for payload, want := range map[string]string{
 		`clientMutationId`:             "pr.comment",
 		`__typename clientMutationId`:  "pr.comment",
 		`commentEdge { node { url } }`: "pr.comment pr.read",
-		`subject { ... on PullRequest { number comments(first: 1) { nodes { body } } } }`: "pr.comment pr.read",
-		// A repository reached from the payload is mapped as at the root.
+		`subject { ... on PullRequest { number comments(first: 1) { nodes { body } } } }`:                                                   "pr.comment pr.read",
 		`subject { ... on PullRequest { repository { pullRequests(first: 1) { nodes { body comments(first: 1) { nodes { body } } } } } } }`: "pr.comment pr.list pr.read",
 	} {
 		got, err := ParseGitHubGraphQL(graphqlBody(`mutation($input: AddCommentInput!) { addComment(input: $input) { `+payload+` } }`, input))
@@ -426,9 +394,6 @@ func TestGraphQLMutationPayloadNeedsPullRequestRead(t *testing.T) {
 	}
 }
 
-// GitHub receives the parsed document printed again, and only when that
-// print reads back as itself: a string the printer cannot write faithfully
-// (a control character) is refused rather than sent changed.
 func TestGraphQLRefusesWhatCannotBePrintedFaithfully(t *testing.T) {
 	body := []byte(`{"query":"query { repository(owner: \"o\", name: \"r\") { pullRequests(headRefName: \"x\\u0007\", first: 1) { totalCount } } }"}`)
 	if _, err := ParseGitHubGraphQL(body); !errors.Is(err, ErrGraphQLShape) {
@@ -436,8 +401,6 @@ func TestGraphQLRefusesWhatCannotBePrintedFaithfully(t *testing.T) {
 	}
 }
 
-// An audit row names one operation: the write a mutation makes, or graphql
-// for a read, never the read a payload adds.
 func TestGraphQLAuditOperation(t *testing.T) {
 	for fixture, want := range map[string][]string{
 		"pr-comment":        {"graphql", "pr.comment"},
@@ -463,9 +426,6 @@ func TestGraphQLAuditOperation(t *testing.T) {
 	}
 }
 
-// A request that reads which files a pull request changes is marked Code,
-// for the clone grant REST asks for the same list; gh's default commands
-// read none.
 func TestGraphQLMarksFileListsAsCode(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for inner, want := range map[string]bool{
@@ -501,10 +461,6 @@ func TestGraphQLMarksFileListsAsCode(t *testing.T) {
 	}
 }
 
-// A request reading check status is marked Checks, for the checks and
-// statuses scopes, and one reading a check suite's workflow run is marked
-// Actions, for the actions scope; gh's default view and checks read both,
-// status reads check status only, list and the mutations read neither.
 func TestGraphQLMarksCheckStatusReads(t *testing.T) {
 	for fixture, want := range map[string][]string{ // per request: Checks/Actions
 		"pr-view-number": {"true/true", "false/false"},
@@ -530,11 +486,6 @@ func TestGraphQLMarksCheckStatusReads(t *testing.T) {
 	}
 }
 
-// A repository reached below the root is checked as the root one is: its
-// pull request list and default branch need pr.list and its labels pr.label
-// however it is reached, any other field with arguments or a selection is
-// refused, and lists of repositories are refused outright. gh's own nested
-// reads (a pull request's headRepository name) need nothing more.
 func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	const pr = `repository(owner: $owner, name: $repo) { pullRequest(number: 12) { `
@@ -553,8 +504,6 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 		{"... on Repository in a union", pr + `author { ... on User { pinnedItems(first: 1) { nodes { ... on Repository { pullRequests(first: 1) { totalCount } } } } } }` + prEnd, listed, ""},
 		{"a fragment on Repository", pr + `author { ... on User { pinnedItems(first: 1) { nodes { ...r } } } }` + prEnd, listed,
 			`fragment r on Repository { pullRequests(first: 1) { totalCount } }`},
-		// defaultBranchRef and labels need their operations only through the
-		// repository check, inline and in a fragment definition alike.
 		{"... on Repository, default branch and labels", pr + `author { ... on User { pinnedItems(first: 5) { nodes { ... on Repository { defaultBranchRef { name } labels(first: 5) { nodes { name } } } } } } }` + prEnd,
 			"pr.label pr.list pr.read", ""},
 		{"a fragment on Repository, default branch and labels", pr + `author { ... on User { pinnedItems(first: 5) { nodes { ...F } } } }` + prEnd,
@@ -567,8 +516,6 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 		{"a nested repository's owner beyond plain values", pr + `baseRepository { owner { ... on User { email } } }` + prEnd, "graphql_unmapped", ""},
 		{"an interface fragment inside a repository", pr + `repository { ... on RepositoryInfo { owner { ... on User { email } } } }` + prEnd, "graphql_unmapped", ""},
 		{"a spread of a fragment on another type inside a repository", pr + `repository { ...r }` + prEnd, "graphql_unmapped", `fragment r on RepositoryInfo { owner { ... on User { email } } }`},
-		// gh pr create's repository read: plain values, the owner's login, a
-		// fork's parent and a fragment on Repository, checked as the root.
 		{"a repository's plain values, owner and parent", pr + `repository { id name viewerPermission owner { login } parent { ...r } }` + prEnd,
 			listed, `fragment r on Repository { id owner { login } defaultBranchRef { name } }`},
 		{"a fork's parent's other fields", pr + `repository { parent { issues(first: 1) { totalCount } } }` + prEnd, "graphql_unmapped", ""},
@@ -579,8 +526,6 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 			"graphql_unmapped", ""},
 		{"a fragment on Repository, another field", pr + `author { ... on User { pinnedItems(first: 5) { nodes { ...F } } } }` + prEnd,
 			"graphql_unmapped", `fragment F on Repository { issues(first: 5) { nodes { title } } }`},
-		// A repository or owner looked up by name below the root could be
-		// any repository; only ones related to the root's are read.
 		{"a user's repository by name", pr + `author { ... on User { repository(name: "other") { pullRequest(number: 3) { body } } } }` + prEnd, "graphql_unmapped", ""},
 		{"an owner's repository by name", pr + `headRepositoryOwner { repository(name: "other") { pullRequest(number: 3) { body } } }` + prEnd, "graphql_unmapped", ""},
 		{"a user's organization by login", pr + `author { ... on User { organization(login: "other") { name } } }` + prEnd, "graphql_unmapped", ""},
@@ -600,7 +545,6 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 			t.Errorf("%s: %v, want %s", tc.name, got.Operations, tc.want)
 		}
 	}
-	// The same holds where the root is a node ID, a search or a mutation.
 	for _, tc := range []struct {
 		name string
 		body []byte
@@ -620,9 +564,6 @@ func TestGraphQLNestedRepositoryNeedsTheSameOperations(t *testing.T) {
 	}
 }
 
-// Every list of pull requests needs pr.list wherever it is read, as a
-// repository's pullRequests does: these are all the fields GitHub's schema
-// has that list pull requests.
 func TestGraphQLPullRequestListsNeedList(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for _, inner := range []string{

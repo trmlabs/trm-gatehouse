@@ -28,8 +28,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Run through examples/postgres-broker/verify.sh against disposable services.
-// Synthetic caller identity isolates broker Vault authentication expiry.
+// Run through examples/postgres-broker/verify.sh against disposable services; the synthetic caller identity isolates broker Vault authentication expiry.
 func TestRealVault_BrokerParentExpiry(t *testing.T) {
 	if os.Getenv("AV_TEST_PG_ADMIN") == "" {
 		t.Fatal("requires disposable PostgreSQL/Vault runner")

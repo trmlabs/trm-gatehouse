@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// ProxyAudit is the strict audit schema. It intentionally has no raw path, URL,
-// headers, body, error string or token fields. Unknown means a final outcome has
-// not been durably recorded, including requests interrupted by a process crash.
+// ProxyAudit has no raw path, URL, headers, body, error string or token fields.
+// Outcome unknown means no final outcome was durably recorded, including after a crash.
 type ProxyAudit struct {
 	RequestID   string
 	VaultID     string
@@ -28,9 +27,8 @@ type ProxyAudit struct {
 	FinishedAt  *time.Time
 }
 
-// auditWrite acknowledges only a committed transaction with synchronous durable
-// writes. Use the exact acquired connection for SQLite's connection-local pragma.
-// PostgreSQL's local setting overrides a session configured for async commits.
+// auditWrite acknowledges only a committed, synchronously durable transaction: SQLite's pragma is
+// connection-local, and PostgreSQL's SET LOCAL overrides a session configured for async commits.
 func (s *SQLStore) auditWrite(ctx context.Context, write func(*sql.Tx) error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -58,8 +56,7 @@ func (s *SQLStore) auditWrite(ctx context.Context, write func(*sql.Tx) error) er
 	return tx.Commit()
 }
 
-// InsertProxyAudit creates the durable attempt. Outcome is always unknown until
-// explicitly completed; restarting never marks pending work successful or replays it.
+// InsertProxyAudit records the attempt as unknown; a restart never marks pending work successful or replays it.
 func (s *SQLStore) InsertProxyAudit(ctx context.Context, r ProxyAudit) error {
 	mappings := r.MappingIDs
 	if mappings == nil {
@@ -79,8 +76,7 @@ func (s *SQLStore) InsertProxyAudit(ctx context.Context, r ProxyAudit) error {
 	})
 }
 
-// CompleteProxyAudit atomically closes exactly one unknown attempt. A failed
-// write leaves that attempt queryable as unknown, and never starts network work.
+// CompleteProxyAudit closes exactly one unknown attempt; a failed write leaves it queryable as unknown.
 func (s *SQLStore) CompleteProxyAudit(ctx context.Context, id, outcome string, status int) error {
 	if outcome != "completed" && outcome != "denied" && outcome != "upstream_error" {
 		return errors.New("invalid audit outcome")
@@ -104,8 +100,7 @@ func (s *SQLStore) CompleteProxyAudit(ctx context.Context, id, outcome string, s
 	})
 }
 
-// GetProxyAudit returns persisted state, including unknown outcomes after restart.
-// It does not infer a result or trigger any outbound action.
+// GetProxyAudit returns persisted state without inferring a result or triggering outbound action.
 func (s *SQLStore) GetProxyAudit(ctx context.Context, id string) (ProxyAudit, error) {
 	var r ProxyAudit
 	var mappings, started string

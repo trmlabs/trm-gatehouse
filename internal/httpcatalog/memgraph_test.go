@@ -39,7 +39,6 @@ func TestMemgraphEntry(t *testing.T) {
 	if _, err := c.Database("app-graph", "pool-a"); !errors.Is(err, ErrUnlisted) {
 		t.Fatalf("a graph entry answered as a PostgreSQL database: %v", err)
 	}
-	// No HTTP tunnel reaches a database host.
 	if c.HasHost(e.Host, e.Port) || c.HasHostForPool(e.Host, e.Port, "pool-a") {
 		t.Fatal("a graph host is reachable as an HTTP tunnel")
 	}
@@ -64,7 +63,6 @@ func TestMemgraphEntryRefusals(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// One host serves one kind: a graph and an HTTP entry cannot share it.
 	mixed := `{"entries":[` + graphEntry + `,{"name":"web","host":"memgraph.graphs.svc.cluster.local","port":7687,"pathPrefixes":["/"],"methods":["GET"],` +
 		`"header":"X-Api-Key","placeholder":"__vault_X__","key":{"mount":"gatehouse","path":"vendors/x","field":"k"},"pools":["pool-a"]}]}`
 	if _, err := Parse([]byte(mixed)); err == nil {
@@ -73,8 +71,6 @@ func TestMemgraphEntryRefusals(t *testing.T) {
 }
 
 func TestMemgraphEntryTiers(t *testing.T) {
-	// A graph above T0 follows the tier rules every entry does: it names
-	// its groups, and only a pool that can carry it may hold it.
 	t1 := strings.Replace(graphEntry, `"pools"`, `"tier":"T1","pools"`, 1)
 	if _, err := Parse([]byte(`{"entries":[` + t1 + `]}`)); err == nil {
 		t.Fatal("a T1 graph without required groups was accepted")

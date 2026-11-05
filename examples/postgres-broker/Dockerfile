@@ -1,9 +1,7 @@
-# Build the reviewed source, not a downloaded or committed application binary.
 FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-# Corporate TLS interception can use the host's explicitly configured CA bundle.
-# The secret mount is build-only; TLS verification is never disabled.
+# Optional extra CA bundle, build-only; TLS verification stays on.
 RUN --mount=type=secret,id=demo_ca \
     if [ -s /run/secrets/demo_ca ]; then cat /run/secrets/demo_ca >> /etc/ssl/certs/ca-certificates.crt; fi \
     && go mod download

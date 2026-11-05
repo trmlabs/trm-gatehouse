@@ -14,18 +14,13 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// gcpMinterFixture is a broker that started with no gcp entry: a live Source
-// watching loader, a minter following it, and a fake IAM Credentials that
-// counts the tokens it mints.
 type gcpMinterFixture struct {
-	loader *scriptedLoader
-	source *Source
-	minter *GCPMinter
-	entry  Entry
-	builds atomic.Int32
-	mints  atomic.Int32
-	// applied counts the catalog versions every hook has seen; published, those
-	// sent to the loader.
+	loader    *scriptedLoader
+	source    *Source
+	minter    *GCPMinter
+	entry     Entry
+	builds    atomic.Int32
+	mints     atomic.Int32
 	applied   atomic.Int32
 	published int32
 }
@@ -63,7 +58,6 @@ func (f *gcpMinterFixture) mint() error {
 	return err
 }
 
-// publish makes doc the catalog version and waits until the minter has seen it.
 func (f *gcpMinterFixture) publish(t *testing.T, doc string, version int) {
 	t.Helper()
 	f.published++
@@ -71,8 +65,6 @@ func (f *gcpMinterFixture) publish(t *testing.T, doc string, version int) {
 	waitFor(t, "the catalog version", func() bool { return f.applied.Load() == f.published })
 }
 
-// A broker started with no gcp entry mints once a catalog version adds one,
-// without a restart, and lets the minter go when the last one is removed.
 func TestGCPMinterFollowsTheCatalog(t *testing.T) {
 	f := newGCPMinterFixture(t)
 	if err := f.mint(); !errors.Is(err, ErrGCPToken) || f.builds.Load() != 0 {
@@ -83,25 +75,20 @@ func TestGCPMinterFollowsTheCatalog(t *testing.T) {
 	if err := f.mint(); err != nil || f.builds.Load() != 1 || f.mints.Load() != 1 {
 		t.Fatalf("first gcp entry: %v, %d builds, %d mints", err, f.builds.Load(), f.mints.Load())
 	}
-	// More versions with gcp entries keep the minter, and its cached token.
 	f.publish(t, `{`+gcpPools+`,"entries":[`+bqEntry+`,`+gcsEntry+`]}`, 3)
 	if err := f.mint(); err != nil || f.builds.Load() != 1 || f.mints.Load() != 1 {
 		t.Fatalf("another gcp version: %v, %d builds, %d mints", err, f.builds.Load(), f.mints.Load())
 	}
-	// The last gcp entry goes: the minter goes with it.
 	f.publish(t, `{"entries":[`+validEntry+`]}`, 4)
 	if err := f.mint(); !errors.Is(err, ErrGCPToken) {
 		t.Fatalf("last gcp entry removed: %v", err)
 	}
-	// And a later gcp entry builds a new one.
 	f.publish(t, gcpDoc, 5)
 	if err := f.mint(); err != nil || f.builds.Load() != 2 {
 		t.Fatalf("gcp entry again: %v, %d builds, want 2", err, f.builds.Load())
 	}
 }
 
-// An invalid gcp entry is left out of its catalog version, so it never builds
-// a minter and its requests are refused; the next valid version mints.
 func TestGCPMinterRefusesAnInvalidEntry(t *testing.T) {
 	f := newGCPMinterFixture(t)
 	invalid := strings.Replace(bqEntry, "bigquery.googleapis.com", "iamcredentials.googleapis.com", 1)
@@ -118,8 +105,6 @@ func TestGCPMinterRefusesAnInvalidEntry(t *testing.T) {
 	}
 }
 
-// A minter whose identity is not there yet refuses each request, and mints as
-// soon as the identity appears, with no catalog change in between.
 func TestGCPMinterRecoversWhenTheIdentityAppears(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"accessToken": "impersonated", "expireTime": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)})

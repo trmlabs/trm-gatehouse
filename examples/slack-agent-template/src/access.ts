@@ -11,10 +11,7 @@ export function allowlistConfigured(): boolean {
   return ALLOWED.size > 0;
 }
 
-/**
- * Whether the given email is on the optional Slack allowlist.
- * When no allowlist is configured, the template allows all Slack users.
- */
+/** Whether the email is on the optional Slack allowlist; with none configured, all users pass. */
 export function isAllowedEmail(email: string | undefined | null): boolean {
   if (!allowlistConfigured()) return true;
   if (!email) return false;

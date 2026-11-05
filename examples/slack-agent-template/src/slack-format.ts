@@ -1,16 +1,10 @@
 // Pure Slack text-formatting helpers. Kept free of side effects so they can be
 // unit-tested without standing up the Bolt app.
 
-// Slack rejects messages over 40,000 chars with msg_too_long, and visually
-// collapses very long ones. Chunk well under that, breaking on line boundaries
-// so a long answer splits between paragraphs rather than mid-line.
+// Slack rejects messages over 40,000 chars (msg_too_long); chunk well under that on line boundaries.
 export const SLACK_MAX_CHARS = 3900;
 
-/**
- * Split text into chunks no longer than `max`, breaking on line boundaries.
- * A single line longer than `max` is hard-split. Always returns at least one
- * chunk, with the empty string for empty input.
- */
+/** Split text into chunks of at most `max`, on line boundaries; an over-long line is hard-split. */
 export function chunkText(text: string, max = SLACK_MAX_CHARS): string[] {
   const chunks: string[] = [];
   let current = "";

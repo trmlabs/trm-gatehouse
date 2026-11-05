@@ -22,13 +22,7 @@ const (
 // sessionID value can't contain path separators or "..".
 var sessionIDRE = regexp.MustCompile(`^[0-9a-f]+$`)
 
-// WriteHostCAFile writes the MITM CA cert to
-// ~/.agent-vault/isolation/ca-<sessionID>.pem with mode 0o644 (the
-// container's unprivileged claude user must read it via the bind
-// mount). The enclosing directory stays 0o700 so only the host user
-// and root can read the file on the host side.
-//
-// Returns the full host path for use as a docker -v source.
+// WriteHostCAFile writes the MITM CA cert to the isolation dir (mode 0o644 so the container user can read it) and returns the host path.
 func WriteHostCAFile(pem []byte, sessionID string) (string, error) {
 	if !sessionIDRE.MatchString(sessionID) {
 		return "", fmt.Errorf("WriteHostCAFile: sessionID must be hex, got %q", sessionID)
@@ -44,19 +38,14 @@ func WriteHostCAFile(pem []byte, sessionID string) (string, error) {
 	if err := os.WriteFile(path, pem, 0o600); err != nil {
 		return "", fmt.Errorf("write CA file: %w", err)
 	}
-	// WriteFile with 0o600 is default-safe; Chmod to 0o644 is the
-	// explicit step that lets the container read its own bind mount.
-	// Parent dir is 0o700 so the host attack surface is unchanged.
+	// Chmod to 0o644 so the container can read its bind mount; the 0o700 parent dir keeps host exposure unchanged.
 	if err := os.Chmod(path, 0o644); err != nil { // #nosec G302 -- container user (UID != host) must read bind-mounted CA; parent dir is 0o700
 		return "", fmt.Errorf("chmod CA file: %w", err)
 	}
 	return path, nil
 }
 
-// PruneHostCAFiles removes ca-*.pem files in ~/.agent-vault/isolation/
-// older than caStaleTTL. Best-effort — errors are ignored because this
-// is background cleanup, not correctness-critical. Called at the top of
-// each container-mode vault run.
+// PruneHostCAFiles removes stale ca-*.pem files; best-effort, errors ignored.
 func PruneHostCAFiles() {
 	dir, err := hostIsolationDir()
 	if err != nil {

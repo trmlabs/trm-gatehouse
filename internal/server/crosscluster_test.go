@@ -15,7 +15,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// loopbackPair is a connection accepted on loopback, as from the TLS front.
 func loopbackPair(t *testing.T, send string) net.Conn {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -65,8 +64,6 @@ func TestCrossClusterRoutesByFirstBytes(t *testing.T) {
 		if !c.ok {
 			continue
 		}
-		// The server that gets it reads every byte, PROXY header first, and
-		// admits only proxy-attested identities.
 		b, _ := io.ReadAll(routed)
 		if string(b) != c.send || !brokercore.KindAdmitted(brokercore.ConnKinds(routed), brokercore.KindProxyAttested) ||
 			brokercore.KindAdmitted(brokercore.ConnKinds(routed), brokercore.KindPodToken) {
@@ -123,8 +120,6 @@ func TestCrossClusterListenerMustBeLoopback(t *testing.T) {
 	}
 }
 
-// remoteConn reports another remote address, as if the TCP peer were not the
-// TLS front in the same Pod.
 type remoteConn struct {
 	net.Conn
 	remote net.Addr
@@ -132,8 +127,6 @@ type remoteConn struct {
 
 func (c remoteConn) RemoteAddr() net.Addr { return c.remote }
 
-// The PROXY header is trusted only from a loopback TCP peer: a valid-looking
-// header from anywhere else is refused.
 func TestCrossClusterTrustsPROXYOnlyFromLoopback(t *testing.T) {
 	c := loopbackPair(t, proxyLine+"CONNECT h:443 HTTP/1.1\r\n\r\n")
 	peer := remoteConn{Conn: c, remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: 51000}}
@@ -142,9 +135,6 @@ func TestCrossClusterTrustsPROXYOnlyFromLoopback(t *testing.T) {
 	}
 }
 
-// A shared proxy's certificate request is HTTP, routed to the certificate
-// server with the PROXY header consumed and the proxy's address as the
-// connection's remote address.
 func TestCrossClusterRoutesCertificateRequests(t *testing.T) {
 	request := "POST /v1/proxy/certificate HTTP/1.1\r\nHost: x\r\n\r\n"
 	routed, route, err := routeCrossCluster(loopbackPair(t, proxyLine+request))
@@ -158,7 +148,6 @@ func TestCrossClusterRoutesCertificateRequests(t *testing.T) {
 	if string(b) != request {
 		t.Errorf("replayed %q", b)
 	}
-	// Any other HTTP method or path start is not routed.
 	for _, start := range []string{"POST /v2/x HTTP/1.1\r\n\r\n", "PUT /v1/x HTTP/1.1\r\n\r\n", "GET /v1/proxy/certificate HTTP/1.1\r\n\r\n"} {
 		if _, _, err := routeCrossCluster(loopbackPair(t, proxyLine+start)); err == nil {
 			t.Errorf("%q routed", start)

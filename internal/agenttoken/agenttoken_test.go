@@ -98,8 +98,7 @@ func TestVerifyAdmitsOnlyTheListedToken(t *testing.T) {
 	}
 }
 
-// A refusal names the agent id the token claimed, for the audit row, in the
-// safe form the broker uses for any attacker-chosen name, and never the token.
+// A refusal names the claimed agent id in the broker's safe form, never the token.
 func TestRefusalNamesTheClaimedAgentNotTheToken(t *testing.T) {
 	token, hash, _ := Mint("agent-1")
 	v := Static{Catalog: catalogWith(t, block("agent-1", hash))}
@@ -133,17 +132,13 @@ func TestExpiry(t *testing.T) {
 			t.Errorf("at %s: %v", now, err)
 		}
 	}
-	// A wrong secret learns nothing about the expiry: it is refused as a
-	// mismatch, before the clock is read.
+	// A wrong secret is refused as a mismatch before the clock is read.
 	if _, err := at(expires.Add(180*24*time.Hour)).Verify(context.Background(), "agent-1."+strings.Repeat("A", 43)); reason(err) != ReasonMismatch {
 		t.Errorf("wrong secret after expiry: %v", err)
 	}
 }
 
-// A missing expiry fails closed. The catalog refuses a token block without a
-// real expiry at load, so no catalog can carry one to Verify; the check is
-// driven directly. The zero time is refused at any clock, never read as
-// never-expires, and a real expiry still turns at its instant.
+// A missing expiry fails closed at any clock, and a real expiry still turns at its instant.
 func TestZeroExpiryIsRefused(t *testing.T) {
 	for _, now := range []time.Time{{}, time.Unix(0, 0), time.Now(), time.Now().Add(100 * 365 * 24 * time.Hour)} {
 		if !expired(time.Time{}, now) {
@@ -159,8 +154,7 @@ func TestZeroExpiryIsRefused(t *testing.T) {
 	}
 }
 
-// Two hashes let a token rotate: both are admitted until the old one is
-// removed from the block, which refuses it at the next catalog reload.
+// Two hashes let a token rotate; deleting the old one refuses it at the next reload.
 func TestRotationOverlapAndRevocation(t *testing.T) {
 	oldToken, oldHash, _ := Mint("agent-1")
 	newToken, newHash, _ := Mint("agent-1")
@@ -184,8 +178,7 @@ func TestRotationOverlapAndRevocation(t *testing.T) {
 	}
 }
 
-// A block with no token hash is a Cursor Automation: no token, whatever it
-// claims, reaches it.
+// A block with no token hash is a Cursor Automation: no token reaches it.
 func TestAnAutomationWithNoTokenIsNotReachable(t *testing.T) {
 	token, hash, _ := Mint("agent-1")
 	cursorOnly := `{"id":"cursor-auto","name":"cursor-auto","owner":"platform-team","entries":["open"]}`

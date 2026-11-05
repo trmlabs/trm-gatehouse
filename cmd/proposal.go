@@ -20,10 +20,6 @@ import (
 	"golang.org/x/term"
 )
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 // displayProposal prints the full details of a proposal (metadata, rules, credentials).
 func displayProposal(w io.Writer, cs *store.Proposal) {
 	fmt.Fprintf(w, "%s\n", boldText(fmt.Sprintf("Proposal #%d", cs.ID)))
@@ -94,9 +90,7 @@ func printCredentialSlots(w io.Writer, credentialsJSON string) {
 	}
 }
 
-// collectCredentialValues prompts for credential values that need human input.
-// It skips agent-provided and delete-action slots, only prompting for
-// slots that have no value and aren't covered by credentialOverrides.
+// collectCredentialValues prompts for values that need human input, skipping agent-provided and delete slots.
 func collectCredentialValues(cmd *cobra.Command, cs *store.Proposal, credentialOverrides map[string]string) (map[string]string, error) {
 	var credentialSlots []proposal.CredentialSlot
 	if err := json.Unmarshal([]byte(cs.CredentialsJSON), &credentialSlots); err != nil {
@@ -237,10 +231,6 @@ func parseProposalJSON(data []byte) (*store.Proposal, error) {
 		CreatedAt:       createdAt,
 	}, nil
 }
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
 
 var proposalCmd = &cobra.Command{
 	Use:   "proposal",

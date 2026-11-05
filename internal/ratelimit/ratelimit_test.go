@@ -275,9 +275,7 @@ func TestReloadUpdatesInPlace(t *testing.T) {
 	if d := r.Allow(TierAuth, "k"); d.Allow {
 		t.Fatalf("over-cap attempt allowed before reload")
 	}
-	// Raise the cap — same key should now get more allowance after
-	// the previous history ages out (we keep history, so this tests
-	// that window matters more than cap raise).
+	// Raising the cap grants more allowance once earlier history ages out.
 	cfg2 := cfg
 	cfg2.Tiers[TierAuth].Max = 10
 	r.Reload(cfg2)
@@ -343,8 +341,7 @@ func pairRelease(rel func(), d Decision) (Decision, func()) {
 	return d, rel
 }
 
-// The defaults hold a large fleet: the server-wide backstop admits 10,000
-// workers' traffic, and keyed tiers track every workload without evicting.
+// The defaults hold a large fleet: the global tier admits 10,000 workers and keyed tiers evict none.
 func TestDefaultsAreFleetScale(t *testing.T) {
 	c := DefaultsFor(ProfileDefault)
 	if g := c.Tiers[TierGlobal]; g.Concurrency < 10000 || g.Rate < 20000 || g.Burst < 40000 {

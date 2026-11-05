@@ -185,9 +185,8 @@ func deniedOutcomes(audit *recordingAudit) []string {
 	return out
 }
 
-// Unpooled, a read-only login's statements are classified before they are
-// relayed: a temporary table never reaches the database, the client reads a
-// FATAL refusal, and the refusal is audited.
+// Unpooled, a read-only login's statements are classified before they are relayed: a temporary table never
+// reaches the database, the client reads a FATAL refusal, and the refusal is audited.
 func TestReadOnlyUnpooledRefusesTemporaryTables(t *testing.T) {
 	upstream, addr, audit := readOnlyBroker(t, true, nil)
 	if got, err := runAgentQuery(t, addr, "agent-vault-token", "appdb", "SELECT current_user"); err != nil || got == "" {
@@ -369,9 +368,8 @@ func TestFrameTrackerFollowsSplitMessages(t *testing.T) {
 	}
 }
 
-// A read-write pooled session refuses a mid-session encoding change, so the
-// broker's lexer and the server always read text the same way, and keeps the
-// session open.
+// A read-write pooled session refuses a mid-session encoding change, so the broker's lexer and the server
+// always read text the same way, and keeps the session open.
 func TestReadWritePooledRefusesEncodingChanges(t *testing.T) {
 	upstream, addr, audit := readOnlyBroker(t, false, &PoolOptions{QueueFactor: 20})
 	s := openAgentSession(t, addr, "agent-vault-token", "appdb")
@@ -417,9 +415,8 @@ func TestUnsafeLexerParameter(t *testing.T) {
 	}
 }
 
-// Inside one unsynced extended-protocol batch, a statement with a backslash
-// cannot follow an Execute: there is no answer to wait for that would show
-// whether the Execute changed how the server reads it.
+// Inside one unsynced extended-protocol batch, a statement with a backslash cannot follow an Execute: there
+// is no answer to wait for that would show whether the Execute changed how the server reads it.
 func TestPooledRefusesBackslashAfterUnsyncedExecute(t *testing.T) {
 	_, addr, _ := readOnlyBroker(t, false, &PoolOptions{QueueFactor: 20})
 	s := openAgentSession(t, addr, "agent-vault-token", "appdb")

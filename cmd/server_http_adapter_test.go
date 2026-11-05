@@ -60,8 +60,6 @@ func TestGitHubAppSignerRequiresAKeyLocation(t *testing.T) {
 	}
 }
 
-// The broker's Auth0 logins reach only an Auth0 domain the catalog names, on
-// 443, and never follow a redirect.
 func TestAuth0ClientDialsOnlyCatalogDomains(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"entries":[{"name":"staging-app","kind":"browser-session","host":"api.example.com",
 		"placeholder":"__vault_STAGING_APP__","pools":["pool-a"],"pathPrefixes":["/v1"],"browserSession":{"appHost":"app.example.com",
@@ -94,8 +92,6 @@ func TestAuth0ClientDialsOnlyCatalogDomains(t *testing.T) {
 	}
 }
 
-// The broker's client-credentials token requests reach only a token host the
-// catalog names, on 443, and never follow a redirect.
 func TestTokenClientDialsOnlyCatalogTokenHosts(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"entries":[{"name":"internal-api","host":"api.example.com","pathPrefixes":["/v1/internal/"],
 		"methods":["GET"],"header":"Authorization","scheme":"Bearer","placeholder":"__vault_INTERNAL_API__","pools":["pool-a"],
@@ -127,8 +123,6 @@ func TestTokenClientDialsOnlyCatalogTokenHosts(t *testing.T) {
 	}
 }
 
-// The broker's automated-auth logins reach only a service address the catalog
-// names, and never follow a redirect.
 func TestAutomatedAuthClientDialsOnlyCatalogServices(t *testing.T) {
 	catalog, err := httpcatalog.Parse([]byte(`{"entries":[{"name":"staging-app","kind":"browser-session","host":"api.example.com",
 		"placeholder":"__vault_STAGING_APP__","pools":["pool-a"],"pathPrefixes":["/v1"],"browserSession":{"appHost":"app.example.com",
@@ -160,8 +154,7 @@ func TestAutomatedAuthClientDialsOnlyCatalogServices(t *testing.T) {
 	}
 }
 
-// A drain longer than 65 s would outlast the Pod's 75 s grace with the
-// database cleanup and the Vault revoke, so the server refuses to start.
+// A drain over 65 s would outlast the Pod's 75 s grace, so the server refuses to start.
 func TestShutdownSecondsMustFitTheGrace(t *testing.T) {
 	for raw, ok := range map[string]bool{"": true, "0": true, "60": true, "65": true, "66": false, "300": false, "-1": false, "1m": false} {
 		err := checkShutdownSeconds(func(string) string { return raw })
@@ -175,8 +168,6 @@ func TestShutdownSecondsMustFitTheGrace(t *testing.T) {
 	}
 }
 
-// gitScope names a token's permissions the way the catalog grants them, so a
-// catalog change that drops a grant prunes the tokens minted for it.
 func TestGitScopeNamesEveryTokenScope(t *testing.T) {
 	for p, want := range map[githubapp.Permissions]string{
 		githubapp.ContentsRead:      "contents-read",

@@ -14,14 +14,8 @@ import (
 	"time"
 )
 
-// Cursor identity tokens (Cursor, "OIDC tokens"): a self-hosted worker started
-// with --identity-socket mints an RS256 JWT for the claimed run over a local
-// socket. Cursor fills the claims from the run, so a process on the worker
-// cannot mint one for another run or another owner. sub is user:<id> for a
-// person or service_account:<id> for a service account; owner_email is the
-// person's lower-cased email when Cursor knows it. source says how the run
-// started (WEBSITE, API, SLACK or AUTOMATIONS), and automation_id names the
-// Automation when it started the run.
+// Cursor identity tokens: a self-hosted worker started with --identity-socket mints an RS256 JWT for the claimed run over a local socket, with claims Cursor fills from the run, so a process on the worker cannot mint one for another run or owner.
+// sub is user:<id> or service_account:<id>; owner_email is the person's lower-cased email when known; source says how the run started (WEBSITE, API, SLACK or AUTOMATIONS); automation_id names the Automation that started it.
 const (
 	CursorIssuer  = "https://api.cursor.com"
 	CursorJWKSURL = "https://api.cursor.com/keys"
@@ -36,16 +30,12 @@ type CursorVerifier struct {
 	JWKSURL  string
 	Issuer   string
 	Audience string
-	// TeamIDs are the Cursor team IDs whose runs may name anyone. Empty:
-	// every token is refused.
+	// TeamIDs are the Cursor team IDs whose runs may name anyone; empty refuses every token.
 	TeamIDs []string
-	// PersonDomains are the lower-case email domains whose user runs name a
-	// person. Empty: no run names a person, so entries above T0 are refused.
+	// PersonDomains are the lower-case email domains whose user runs name a person; empty means none, so entries above T0 are refused.
 	PersonDomains []string
-	// People maps a Cursor user ID to the Entra object ID of the person. Set
-	// (non-nil): a user:<id> run names a person only when <id> is a key, the
-	// session subject is that object ID, and owner_email and PersonDomains
-	// are ignored. Nil: a person is named by owner_email as above.
+	// People maps a Cursor user ID to the Entra object ID of the person; when non-nil, a user:<id> run names a person only if <id> is a key.
+	// The session subject is then that object ID and owner_email and PersonDomains are ignored; nil names a person by owner_email.
 	People map[string]string
 	Client *http.Client
 	Now    func() time.Time
@@ -78,9 +68,7 @@ func (v *CursorVerifier) now() time.Time {
 	return time.Now()
 }
 
-// Verify checks signature, issuer, audience, team, runtime and lifetime, and
-// names the person behind the run. Like Verify for Claude, it does not decide
-// entitlement.
+// Verify checks signature, issuer, audience, team, runtime and lifetime and names the person behind the run; like Claude's Verify, it does not decide entitlement.
 func (v *CursorVerifier) Verify(ctx context.Context, token string) (Session, error) {
 	if len(token) == 0 || len(token) > 16384 || strings.ContainsAny(token, " \t\r\n") || v.Audience == "" || len(v.TeamIDs) == 0 {
 		return Session{}, ErrInvalid
@@ -118,15 +106,12 @@ func (v *CursorVerifier) Verify(ctx context.Context, token string) (Session, err
 		time.Unix(c.NotBefor, 0).After(now.Add(clockSkew)) || expires.Sub(issued) > cursorMaxLifetime {
 		return Session{}, ErrInvalid
 	}
-	// Cursor does not allowlist audiences, so a token for anyone else's
-	// verifier must not work here. A Cursor-hosted run's token is refused too:
-	// this broker serves only workers it can see.
+	// Cursor does not allowlist audiences, so a token for anyone else's verifier must not work here; a Cursor-hosted run's token is refused too.
 	if !audienceIs(c.Audience, v.Audience) || c.Runtime != cursorRuntime || c.RunID == "" || !contains(v.TeamIDs, c.TeamID) {
 		return Session{}, ErrInvalid
 	}
 	sum := sha256.Sum256([]byte(token))
-	// Cursor's documentation spells the source in both cases; one spelling
-	// keeps every comparison exact.
+	// Cursor spells the source in both cases; one spelling keeps every comparison exact.
 	session := Session{Kind: KindNone, Owner: c.Subject, Run: c.RunID, Source: strings.ToUpper(c.Source), Automation: c.AutoID,
 		Team: c.TeamID, Expires: expires, TokenSHA256: hex.EncodeToString(sum[:])}
 	switch {
@@ -142,8 +127,7 @@ func (v *CursorVerifier) Verify(ctx context.Context, token string) (Session, err
 			session.Kind, session.Subject = KindPerson, email
 		}
 	default:
-		// A projected subject (team_id:..., from sub_claim) or anything else
-		// names no owner this broker can pin.
+		// A projected subject (team_id:..., from sub_claim) or anything else names no owner this broker can pin.
 		session.Owner = ""
 	}
 	if !plainSubject(session.Subject) || !plainSubject(session.Owner) || !plainSubject(session.Run) ||
@@ -179,20 +163,15 @@ func contains(list []string, s string) bool {
 var ErrUnverifiable = errors.New("runner session verifier not configured")
 
 // Verifiers holds the broker's session verifiers, either of which may be nil.
-// Verify checks a Claude runner token and VerifyCursor a Cursor run's token,
-// so a pool's profile, not the token's shape, picks the vendor.
+// Verifiers holds the broker's session verifiers, either of which may be nil; a pool's profile, not the token's shape, picks the vendor.
 type Verifiers struct {
 	Claude *Verifier
 	Cursor *CursorVerifier
-	// SandboxDomains are the lower-case email domains whose logins, attested
-	// by a shared proxy from an agent Pod's requester annotation, name a
-	// person. Nil: no attested login names a person.
+	// SandboxDomains are the lower-case email domains whose logins, attested by a shared proxy from an agent Pod's requester annotation, name a person; nil means none.
 	SandboxDomains []string
 }
 
-// AttestedPerson names the person behind an attested login: the lower-cased
-// login as the Entra user principal name when its domain is configured, or ""
-// for no person. Without configured domains it is ErrUnverifiable.
+// AttestedPerson names the person behind an attested login: the lower-cased login as the Entra UPN when its domain is configured, or ""; without configured domains it is ErrUnverifiable.
 func (s Verifiers) AttestedPerson(login string) (string, error) {
 	if len(s.SandboxDomains) == 0 {
 		return "", ErrUnverifiable

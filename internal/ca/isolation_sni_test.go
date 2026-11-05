@@ -4,13 +4,7 @@ import (
 	"testing"
 )
 
-// TestValidateSNI_HostDockerInternal locks in the invariant that the
-// container isolation mode depends on: a TLS ClientHello with
-// SNI=host.docker.internal (what the container's HTTPS client sends
-// when dialing the forwarder) must be accepted by MintLeaf, so the
-// inner MITM listener can mint a matching leaf and the handshake
-// succeeds. Tightening validateSNI without updating this test would
-// silently break `vault run --isolation=container`.
+// TestValidateSNI_HostDockerInternal locks in that MintLeaf accepts SNI=host.docker.internal, which container isolation needs.
 func TestValidateSNI_HostDockerInternal(t *testing.T) {
 	isIP, err := validateSNI("host.docker.internal")
 	if err != nil {

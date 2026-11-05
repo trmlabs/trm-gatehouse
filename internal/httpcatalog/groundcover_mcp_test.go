@@ -24,10 +24,7 @@ func groundcoverCatalog(t *testing.T) *Entry {
 	return &e
 }
 
-// The messages a Python query client sends for one log or metric query,
-// byte for byte as it serializes them (json.dumps with compact separators):
-// initialize, the initialized notification and the tool call, each its own
-// POST with one JSON object. Only the client's name is made up.
+// The messages a Python query client sends for one log or metric query, byte for byte as it serializes them.
 const (
 	mcpInitialize  = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"example-query","version":"0.1.0"}}}`
 	mcpInitialized = `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
@@ -35,16 +32,12 @@ const (
 	mcpQueryMetric = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_metrics","arguments":{"mode":"query_range","envs":["production"],"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","promql":"sum(up)","step":"1m"}}}`
 )
 
-// mcpNested is k objects nested in initialize's capabilities, the one object
-// a forwarded message may fill as it likes. The message, params and
-// capabilities take three levels, so the innermost value sits at depth k+3.
+// mcpNested is k objects nested in initialize's capabilities, the one object a forwarded message may fill freely; the innermost value sits at depth k+3.
 func mcpNested(k int) string {
 	nested := strings.Repeat(`{"a":`, k) + `1` + strings.Repeat(`}`, k)
 	return strings.Replace(mcpInitialize, `"capabilities":{}`, `"capabilities":{"experimental":`+nested+`}`, 1)
 }
 
-// mcpLogs and mcpMetrics are the client's calls with one argument's value
-// replaced.
 func mcpLogs(query string) string {
 	return strings.Replace(mcpQueryLogs, `"level:error | limit 10"`, query, 1)
 }
@@ -53,7 +46,6 @@ func mcpMetrics(promql string) string {
 	return strings.Replace(mcpQueryMetric, `"sum(up)"`, promql, 1)
 }
 
-// mcpArgs is a call with extra arguments added before the client's own.
 func mcpArgs(call, args string) string {
 	return strings.Replace(call, `"arguments":{`, `"arguments":{`+args+`,`, 1)
 }
@@ -96,8 +88,6 @@ func TestMCPForwardsTheQueryClientsMessages(t *testing.T) {
 	}
 }
 
-// Every operation a forwarded message names is in the audit chain's
-// vocabulary, so its row is accepted without a new row version.
 func TestMCPOperationsAreAuditable(t *testing.T) {
 	ops := []string{}
 	for _, op := range groundcoverMCPMethods {
@@ -118,10 +108,6 @@ func TestMCPOperationsAreAuditable(t *testing.T) {
 	}
 }
 
-// Every other method and tool is refused as one the broker does not forward:
-// issues and monitors, which groundcover does not hold to a key's data scope,
-// the agent tools that can read them, the tool list and any name it does not
-// know, spelled however the client likes.
 func TestMCPRefusesOtherMethodsAndTools(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for name, body := range map[string]string{
@@ -147,11 +133,6 @@ func TestMCPRefusesOtherMethodsAndTools(t *testing.T) {
 	}
 }
 
-// A request that could carry a second call, or that another parser could
-// read as a different message, is refused before its method is looked at: a
-// batch, a repeated key at any depth (escaped or not), a key that differs
-// only in case, a key the client does not send, and bytes or nesting a
-// parser could cut, drop or give up on.
 func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for name, tc := range map[string]struct {
@@ -215,9 +196,6 @@ func TestMCPRefusesShapesThatCouldSmuggleACall(t *testing.T) {
 	}
 }
 
-// A tool call may not pick its own backend or tenant, however the argument is
-// spelled: neither tool lists it, and the entry's X-Backend-Id pins the
-// backend.
 func TestMCPRefusesRoutingArguments(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for _, arg := range []string{
@@ -232,10 +210,6 @@ func TestMCPRefusesRoutingArguments(t *testing.T) {
 	}
 }
 
-// A tool call carries only the arguments its tool lists, each with its own
-// type: an unknown name, one only the other tool takes, another case, and an
-// object, list, number, null or boolean where a string belongs are refused,
-// so nothing can hide a backend_id below an argument.
 func TestMCPRefusesUnlistedArguments(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for name, body := range map[string]string{
@@ -266,10 +240,6 @@ func TestMCPRefusesUnlistedArguments(t *testing.T) {
 	}
 }
 
-// A call that names gcQL's _from, which reads another signal (monitor
-// issues among them) inside a subquery, or a wildcard prefix of it, is
-// refused in any argument that carries a string, while a longer name that
-// only contains it passes.
 func TestMCPRefusesCrossSignalArguments(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for name, body := range map[string]string{
@@ -303,12 +273,6 @@ func TestMCPRefusesCrossSignalArguments(t *testing.T) {
 	}
 }
 
-// A log query may not run a subquery, through which it could read another
-// signal: no join or union pipe, no pipe inside the list of in(),
-// contains_any() or contains_all() wherever a quote ends it, and no
-// backslash, which could spell any of these escaped. The client's own
-// queries, an in() list, a regex alternative and a pipe after a list pass,
-// and the log rules do not apply to query_metrics.
 func TestMCPRefusesLogSubqueries(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for name, q := range map[string]string{
@@ -344,9 +308,6 @@ func TestMCPRefusesLogSubqueries(t *testing.T) {
 	}
 }
 
-// A metric call may not reach the ALERTS series, which holds what monitors
-// found, by its name in any case or by the names a selector could use for it
-// instead; a longer name passes, and the rule does not apply to query_logs.
 func TestMCPRefusesMetricAlerts(t *testing.T) {
 	e := groundcoverCatalog(t)
 	for name, body := range map[string]string{
@@ -377,10 +338,6 @@ func TestMCPRefusesMetricAlerts(t *testing.T) {
 	}
 }
 
-// An entry with no X-Backend-Id pin, as a catalog written before
-// requestHeaders has, loads from a file and from Vault and keeps every
-// message rule: the client's calls pass with any backend header, and another
-// tool, a backend argument and _from are refused.
 func TestMCPRulesApplyWithoutAPin(t *testing.T) {
 	doc := []byte(`{"entries":[` + strings.Replace(groundcoverEntry, `"requestHeaders":[{"name":"X-Backend-Id","values":["us-backend"]}],`, ``, 1) + `]}`)
 	c, err := Parse(doc)
@@ -417,8 +374,6 @@ func TestMCPRulesApplyWithoutAPin(t *testing.T) {
 	}
 }
 
-// The rule is keyed on groundcover's MCP host alone: another host's entry,
-// with the same paths and bodies, is not read as MCP.
 func TestMCPAppliesOnlyToGroundcoversHost(t *testing.T) {
 	for _, host := range []string{"groundcover.com", "api.groundcover.com", "example.com"} {
 		c, err := Parse([]byte(`{"entries":[` + strings.Replace(groundcoverEntry, `"mcp.groundcover.com"`, `"`+host+`"`, 1) + `]}`))

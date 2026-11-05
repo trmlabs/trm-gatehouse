@@ -1,18 +1,6 @@
 //go:build realpg
 
-// Package pgproxy real-PostgreSQL integration test. It is guarded by the
-// `realpg` build tag and skips unless pointed at a running PostgreSQL via
-// environment variables, so the default `go test ./...` (and CI without a
-// database) is unaffected. Run with:
-//
-//	AV_TEST_PG_UPSTREAM=127.0.0.1:5433 \
-//	AV_TEST_PG_ADMIN='postgres://vault_admin:vault-bootstrap-pw@127.0.0.1:5433/appdb?sslmode=disable' \
-//	AV_TEST_PG_DB=appdb \
-//	go test -tags realpg ./internal/pgproxy/ -run RealPostgres -v
-//
-// It stands in for Vault with a fakeMinter that returns a real, pre-created
-// database role, proving the wire proxy authenticates to a real PostgreSQL over
-// SCRAM-SHA-256 and relays a real libpq (pgx) client session.
+// Package pgproxy real-PostgreSQL test; needs -tags realpg and AV_TEST_PG_UPSTREAM, AV_TEST_PG_ADMIN, AV_TEST_PG_DB set.
 package pgproxy
 
 import (
@@ -70,9 +58,8 @@ func TestRealPostgres_EndToEnd(t *testing.T) {
 	go func() { _ = broker.Serve(ln) }()
 	defer func() { _ = broker.Shutdown(context.Background()) }()
 
-	// The agent connects through the proxy with its Agent Vault token as the
-	// password and NO database credential. sslmode=prefer exercises the proxy's
-	// SSL-decline path.
+	// The agent connects through the proxy with its Agent Vault token as the password and NO database
+	// credential. sslmode=prefer exercises the proxy's SSL-decline path.
 	agentDSN := fmt.Sprintf("postgres://agent:agent-vault-token@%s/%s?sslmode=prefer", ln.Addr().String(), database)
 	agent, err := pgx.Connect(ctx, agentDSN)
 	if err != nil {

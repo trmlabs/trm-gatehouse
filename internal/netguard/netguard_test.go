@@ -286,8 +286,7 @@ func TestEgressRangesConfineEveryDestination(t *testing.T) {
 	}
 }
 
-// Names are checked by the addresses they resolve to, and the connection goes
-// to the checked address, so a name cannot be rebound past the ranges.
+// Names are checked by the addresses they resolve to and the connection goes to the checked address, so a name cannot be rebound.
 func TestEgressRangesCheckResolvedAddressesOfNames(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -539,7 +538,7 @@ func listenTCP(t *testing.T, network, address string) net.Listener {
 	return listener
 }
 
-// acceptAndClose listens on 127.0.0.1 and closes every connection it accepts.
+// acceptAndClose listens on loopback and closes every connection it accepts.
 func acceptAndClose(t *testing.T) net.Listener {
 	t.Helper()
 	listener := listenTCP(t, "tcp", "127.0.0.1:0")
@@ -555,9 +554,7 @@ func acceptAndClose(t *testing.T) net.Listener {
 	return listener
 }
 
-// fakeResolver returns a resolver backed by an in-process DNS server that
-// answers A and AAAA queries from records (keyed by FQDN) and NXDOMAIN for
-// anything else, so dial tests control exactly what net.Dialer resolves.
+// fakeResolver returns a resolver backed by an in-process DNS server answering A and AAAA from records, NXDOMAIN otherwise.
 func fakeResolver(t *testing.T, records map[string][]netip.Addr) *net.Resolver {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -629,10 +626,7 @@ func fakeDNSAnswer(query []byte, records map[string][]netip.Addr) ([]byte, error
 	return b.Finish()
 }
 
-// A name whose every answer is blocked fails, and no answer is connected to,
-// even one with a live listener behind it. The check runs on each address
-// right before connect, so a hostile DNS answer can only offer addresses that
-// the policy would refuse if dialed directly.
+// A name whose every answer is blocked fails without connecting to any, even one with a live listener.
 func TestSafeDialer_AllAnswersBlockedNeverConnect(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -699,8 +693,7 @@ func TestParseHostAddresses(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		}
 	}
-	// A refusal names the line, never the entry, so a path set to the wrong
-	// file (a token, say) never copies it into the log.
+	// A refusal names the line, never the entry.
 	if _, err := parseHostAddresses("203.0.113.9\nnot-an-address-secret\n"); err == nil || strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "line 2") {
 		t.Errorf("refusal: %v", err)
 	}
@@ -712,9 +705,7 @@ func TestParseHostAddresses(t *testing.T) {
 	}
 }
 
-// The egress ranges file adds single addresses while the process runs: a
-// new address works after the next read, a bad file keeps the last good set
-// and never widens it, and a missing file adds nothing.
+// The egress ranges file adds addresses at run time: a bad file keeps the last good set and never widens it, and a missing file adds nothing.
 func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener := acceptAndClose(t)
@@ -765,8 +756,7 @@ func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 	if err := dial(); err != nil {
 		t.Fatalf("address listed again refused: %v", err)
 	}
-	// Inside the interval the last read is reused: a file that drops the
-	// address takes effect only once the interval has passed.
+	// Inside the interval the last read is reused.
 	if err := os.WriteFile(path, []byte("127.0.0.2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -801,13 +791,10 @@ func TestEgressRangesFileIsReReadAndFailsSafe(t *testing.T) {
 	}
 }
 
-// A file that is not there before its first good read is logged once, with
-// its path, so a mistyped path or a mount that never arrives shows; each
-// refused dial names the file too.
+// A file missing before its first good read is logged once with its path; each refused dial names the file too.
 func TestEgressRangesFileLogsAMissingFile(t *testing.T) {
 	var logs bytes.Buffer
-	// slog.SetDefault also redirects the log package, which restoring the
-	// slog default alone does not undo.
+	// slog.SetDefault also redirects the log package, which restoring the slog default alone does not undo.
 	previous, out, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(out); log.SetFlags(flags) })
@@ -834,9 +821,7 @@ func TestEgressRangesFileLogsAMissingFile(t *testing.T) {
 	}
 }
 
-// A refused file is logged by line number only: no entry text, a range or a
-// name alike, reaches the error or the log, so a path set to the wrong file
-// does not copy that file into the log every few seconds.
+// A refused file is logged by line number only, never entry text.
 func TestEgressRangesFileNeverLogsItsEntries(t *testing.T) {
 	var logs bytes.Buffer
 	previous, out, flags := slog.Default(), log.Writer(), log.Flags()
@@ -868,9 +853,7 @@ func TestEgressRangesFileNeverLogsItsEntries(t *testing.T) {
 	}
 }
 
-// The file adds to AGENT_VAULT_EGRESS_RANGES rather than replacing it: an
-// address in the static ranges still dials when the file is set and does not
-// list it.
+// The file adds to AGENT_VAULT_EGRESS_RANGES rather than replacing it.
 func TestEgressRangesFileAddsToStaticRanges(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener := acceptAndClose(t)
@@ -888,8 +871,7 @@ func TestEgressRangesFileAddsToStaticRanges(t *testing.T) {
 	_ = conn.Close()
 }
 
-// Setting only the file confines egress to it: nothing before the file is
-// written, and only what it lists after.
+// Setting only the file confines egress to it.
 func TestEgressRangesFileAloneConfines(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener := acceptAndClose(t)
@@ -912,8 +894,7 @@ func TestEgressRangesFileAloneConfines(t *testing.T) {
 	_ = conn.Close()
 }
 
-// The private and metadata blocks run before the egress ranges, so listing a
-// blocked address in the file never opens it.
+// The private and metadata blocks run before the egress ranges, so the file never opens a blocked address.
 func TestEgressRangesFileNeverOpensBlockedAddresses(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	listener := acceptAndClose(t)
@@ -983,10 +964,7 @@ func TestParsePrivateHosts(t *testing.T) {
 	}
 }
 
-// A listed private host reaches the private address DNS gives it. An IP
-// literal, an unlisted name that resolves to the same address, and a listed
-// name that resolves to a metadata address are all refused, and none of them
-// is connected to.
+// A listed private host reaches its private address; IP literals, unlisted names and metadata addresses are refused without connecting.
 func TestPrivateHostsAllowOnlyListedNames(t *testing.T) {
 	listener := listenTCP(t, "tcp4", "127.0.0.1:0")
 	accepted := make(chan struct{}, 8)
@@ -1030,15 +1008,13 @@ func TestPrivateHostsAllowOnlyListedNames(t *testing.T) {
 		t.Fatal("a refused dial was connected")
 	case <-time.After(50 * time.Millisecond):
 	}
-	// With no host listed the private block is unchanged.
 	if conn, err := withPrivateHosts(public, internal, PrivateHosts{})(context.Background(), "tcp", net.JoinHostPort("vault.example.internal", port)); err == nil {
 		_ = conn.Close()
 		t.Fatal("private address dialed with no private hosts listed")
 	}
 }
 
-// The egress ranges still confine a listed private host, and a private
-// address in the egress file opens nothing for a name that is not listed.
+// Egress ranges still confine a listed private host, and a private address in the file opens nothing for an unlisted name.
 func TestPrivateHostsStayInsideEgressRanges(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	t.Setenv("AGENT_VAULT_EGRESS_RANGES_FILE", "")
@@ -1068,7 +1044,6 @@ func TestPrivateHostsStayInsideEgressRanges(t *testing.T) {
 	if err := dial("localhost", "127.0.0.0/8,::1/128", "127.0.0.1"); err == nil {
 		t.Fatal("an address literal dialed because a private host is listed")
 	}
-	// Globally allowed private ranges are unchanged by the list.
 	t.Setenv("AGENT_VAULT_PRIVATE_HOSTS", "")
 	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")
 	conn, err := SafeDialContext(true)(context.Background(), "tcp", listener.Addr().String())
@@ -1078,9 +1053,7 @@ func TestPrivateHostsStayInsideEgressRanges(t *testing.T) {
 	_ = conn.Close()
 }
 
-// A private address the egress file lists is reachable only by a listed
-// private host's name: a stolen writer of the file cannot open an internal
-// address to any other name.
+// A private address in the egress file is reachable only by a listed private host's name.
 func TestEgressFilePrivateAddressServesOnlyListedHosts(t *testing.T) {
 	t.Setenv("AGENT_VAULT_NETWORK_ALLOWLIST", "")
 	t.Setenv("AGENT_VAULT_EGRESS_RANGES", "")

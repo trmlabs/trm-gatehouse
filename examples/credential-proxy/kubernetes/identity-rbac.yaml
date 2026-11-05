@@ -1,4 +1,3 @@
-# Identity permissions only. This does not deploy the broker or permit egress.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -2,9 +2,6 @@ package hashicorp
 
 import "testing"
 
-// TestParseConfigJSON_TrimsAndDefaults locks the trim + default contract: a
-// padded mount/path is cleaned, a leading slash on the path is dropped, and an
-// omitted kv_version defaults to 2.
 func TestParseConfigJSON_TrimsAndDefaults(t *testing.T) {
 	raw := `{"mount":"  secret  ","secret_path":" /agent-vault/demo "}`
 	cfg, err := ParseConfigJSON(raw)

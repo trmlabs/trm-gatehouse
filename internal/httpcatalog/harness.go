@@ -9,12 +9,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
-// Harness is one agent runtime's profile: how its agents prove who they are,
-// how they reach the broker, and whether access is decided for the pool or
-// for the person behind each session. A new runtime is a new entry here, and
-// needs code only if it brings a new identity kind. Every field is required
-// unless marked optional, and an incomplete or contradictory entry refuses
-// the whole catalog.
+// Harness is one agent runtime's profile: how its agents prove who they are, how they reach the broker, and whether access is decided per pool or per person. Every field is required unless marked optional; an incomplete or contradictory entry refuses the whole catalog.
 type Harness struct {
 	Name          string               `json:"name"`
 	TrustDomain   HarnessTrustDomain   `json:"trustDomain"`
@@ -24,90 +19,50 @@ type Harness struct {
 	Client        HarnessClient        `json:"client"`
 }
 
-// HarnessClient names the environment variables the worker render sets for
-// the agent's own programs, since some runtimes already use the standard
-// ones (Cursor's HTTPS_PROXY points at its own control gateway). The broker
-// does not read them; the HTTP and browser renders do.
+// HarnessClient names the environment variables the worker render sets for the agent's own programs; the broker does not read them.
 type HarnessClient struct {
-	// ProxyEnv holds Gatehouse's HTTP proxy URL (HTTPS_PROXY where free).
-	ProxyEnv string `json:"proxyEnv"`
-	// CAFileEnv holds the path of Gatehouse's interception CA file.
+	ProxyEnv  string `json:"proxyEnv"`
 	CAFileEnv string `json:"caFileEnv"`
-	// CASpkiEnv, optional, holds the CA's SPKI hash for browsers launched
-	// with a trust flag instead of a CA store (no certutil in the image).
+	// CASpkiEnv, optional, holds the CA's SPKI hash for browsers launched with a trust flag instead of a CA store.
 	CASpkiEnv string `json:"caSpkiEnv,omitempty"`
 }
 
-// HarnessTrustDomain is the cluster whose service-account tokens the broker
-// accepts for this harness. Keys "in-cluster" reads the signing keys from the
-// broker's own cluster API; "remote" fetches the issuer's published keys;
-// "pinned" holds them in the broker's identity configuration, fetched never.
+// HarnessTrustDomain is the cluster whose service-account tokens the broker accepts. Keys "in-cluster" reads signing keys from the broker's cluster API, "remote" fetches the issuer's published keys, "pinned" holds them in configuration.
 type HarnessTrustDomain struct {
 	Issuer   string `json:"issuer"`
 	Keys     string `json:"keys"`
 	Audience string `json:"audience"`
 }
 
-// HarnessIdentity says how an agent proves who it is.
-//
-//   - "pod-token": the agent Pod's own projected token, checked against the
-//     live Pod and the connection's source address (Cursor workers).
-//   - "session-jwt": the same Pod check, plus a runner session token naming
-//     the person, pinned to the first Pod that presents it (Claude sessions,
-//     and Cursor runs whose sidecar mints the run's identity token).
-//   - "proxy-attested": a shared proxy in the agent's cluster runs the Pod
-//     check and presents its own token; the broker trusts that one proxy
-//     account and the Pod it attests (agent-sandbox).
-//   - "static-token": a client with no Kubernetes identity at all presents a
-//     per-agent bearer token, checked against a hash in that agent's
-//     Automation block. Only Kubernetes-free fields are allowed, and the
-//     harness authorizes per Automation (see validateStaticToken).
-//
-// OwnerKind is the Kubernetes kind of the controller that must own the
-// agent's Pod. ImageDigests are the images every container must run.
+// HarnessIdentity says how an agent proves who it is: "pod-token" (the Pod's projected token), "session-jwt" (Pod check plus a runner session token naming the person), "proxy-attested" (a shared proxy attests the Pod), or "static-token" (a per-agent bearer token with no Kubernetes identity; see validateStaticToken).
+// OwnerKind is the Kubernetes kind of the controller that must own the Pod; ImageDigests are the images every container must run.
 type HarnessIdentity struct {
 	Kind         string   `json:"kind"`
 	OwnerKind    string   `json:"ownerKind"`
 	Namespaces   []string `json:"namespaces"`
 	ImageDigests []string `json:"imageDigests,omitempty"`
-	// ImagePrefix, proxy-attested only, admits any image pulled from under
-	// this repository path in the agent image registry; ImageDigests then
-	// holds only the platform's own containers, and may be empty.
+	// ImagePrefix, proxy-attested only, admits any image under this registry path; ImageDigests then holds only the platform's own containers.
 	ImagePrefix string            `json:"imagePrefix,omitempty"`
 	Requester   *HarnessRequester `json:"requester,omitempty"` // optional
 }
 
-// HarnessRequester is where the person behind a session comes from:
-// "session-jwt" (a Claude runner session token), "cursor-oidc" (a Cursor
-// run's identity token, minted by the sidecar from the worker's per-run
-// socket), "pod-annotation" (the login a shared proxy attests from the agent
-// Pod's requester annotation, which admission policy fixes to the creator of
-// its controller) or "signed-assertion" (a statement the launching runtime
-// signs onto the agent's controller object).
+// HarnessRequester is where the person behind a session comes from: "session-jwt", "cursor-oidc", "pod-annotation" (the login a shared proxy attests from the Pod's requester annotation) or "signed-assertion".
 type HarnessRequester struct {
 	Kind string `json:"kind"`
 }
 
-// HarnessPath is how the agent reaches the broker: a "sidecar" in the agent's
-// own Pod, a "shared-proxy" serving many agents, or "direct" for a client
-// that connects to the broker's own listener (static-token). CrossCluster says
-// the agents run in another cluster than the broker.
+// HarnessPath is how the agent reaches the broker: a "sidecar", a "shared-proxy", or "direct" (static-token); CrossCluster means the agents run in another cluster.
 type HarnessPath struct {
 	Kind         string `json:"kind"`
 	CrossCluster bool   `json:"crossCluster"`
 }
 
-// HarnessAuthorization decides access for the "pool" (its ceiling and fixed
-// entitlements), for the "person" behind each session (their groups), or for
-// the "automation" that started each run (the entries the catalog lists for
-// it, and nothing about a person).
-// PoolName is the catalog pool the harness's agents are admitted into.
+// HarnessAuthorization decides access for the "pool", the "person" behind each session, or the "automation" that started each run; PoolName is the pool the agents are admitted into.
 type HarnessAuthorization struct {
 	Mode     string `json:"mode"`
 	PoolName string `json:"poolName"`
 }
 
-// Identity kinds, path kinds and authorization modes.
 const (
 	IdentityPodToken      = "pod-token"
 	IdentitySessionJWT    = "session-jwt"
@@ -139,8 +94,6 @@ var (
 	digestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
-// validate checks one profile on its own; validateHarnesses checks it against
-// the pools.
 func (h Harness) validate() error {
 	if !idPattern.MatchString(h.Name) {
 		return errors.New("name must be a short identifier")
@@ -168,8 +121,7 @@ func (h Harness) validate() error {
 	if !kubernetesKind.MatchString(id.OwnerKind) {
 		return errors.New("identity.ownerKind must be a Kubernetes kind")
 	}
-	// One harness may serve a namespace per tenant, so the list is fleet
-	// sized; the bound only guards against a malformed catalog.
+	// One harness may serve a namespace per tenant; the bound only guards against a malformed catalog.
 	if len(id.Namespaces) == 0 || len(id.Namespaces) > 10000 {
 		return errors.New("identity.namespaces needs 1 to 10,000 namespaces")
 	}
@@ -183,8 +135,6 @@ func (h Harness) validate() error {
 	if id.ImagePrefix != "" && (id.Kind != IdentityProxyAttested || !imagerule.ValidPrefix(id.ImagePrefix)) {
 		return errors.New("identity.imagePrefix is for proxy-attested harnesses: a repository or tenant path under AGENT_VAULT_IMAGE_REGISTRY, ending in /")
 	}
-	// No upper bound on digests: each is short and fixed-size, and the
-	// catalog's own size limit bounds the list.
 	if id.ImagePrefix == "" && len(id.ImageDigests) == 0 {
 		return errors.New("identity.imageDigests needs at least one digest unless an image prefix is set")
 	}
@@ -216,7 +166,6 @@ func (h Harness) validate() error {
 	if err := h.Client.validate(); err != nil {
 		return err
 	}
-	// The combinations that hold together. Each refusal names the reason.
 	switch id.Kind {
 	case IdentityPodToken:
 		if h.Path.Kind != PathSidecar || requester != "" || h.Authorization.Mode != AuthorizePool {
@@ -224,7 +173,6 @@ func (h Harness) validate() error {
 		}
 	case IdentitySessionJWT:
 		if h.Authorization.Mode == AuthorizeAutomation {
-			// Only a Cursor run's token names the Automation that started it.
 			if h.Path.Kind != PathSidecar || requester != RequesterCursorOIDC {
 				return errors.New("an automation harness runs a sidecar and takes its automation from a Cursor run token (cursor-oidc)")
 			}
@@ -238,25 +186,18 @@ func (h Harness) validate() error {
 			return errors.New("proxy-attested identity runs a shared proxy and takes no session token")
 		}
 		if requester == RequesterSignedAssertion {
-			// Fail closed until the broker verifies assertions: a profile that
-			// names one must not silently run at pool level.
+			// Fail closed until the broker verifies assertions: a profile naming one must not silently run at pool level.
 			return errors.New("signed-assertion requesters are not verified by this broker yet")
 		}
-		// A person only from the proxy's attested requester, and the
-		// requester only where the person is authorized: a pool-mode
-		// namespace never borrows one.
+		// A person comes only from the proxy's attested requester, and only where the person is authorized.
 		if (requester == RequesterPodAnnotation) != (h.Authorization.Mode == AuthorizePerson) {
 			return errors.New("a proxy-attested harness authorizes the person exactly when its requester is pod-annotation")
 		}
-		// The broker picks a proxy's profile by namespace, so each names one.
 		if len(id.Namespaces) != 1 {
 			return errors.New("a proxy-attested harness names exactly one namespace")
 		}
 	}
-	// An agent in another cluster is verified by that cluster's keys: a
-	// shared proxy there attests its agents, and a sidecar there is admitted
-	// directly only where the broker's identity configuration reads that
-	// cluster's Pods (a trust domain's pods), which refuses it otherwise.
+	// An agent in another cluster is verified by that cluster's keys: a shared proxy attests it, or a sidecar is admitted only where a trust domain's pods are readable.
 	if h.Path.CrossCluster != (td.Keys != KeysInCluster) {
 		return errors.New("a cross-cluster path uses another cluster's keys (remote or pinned), and only it does")
 	}
@@ -273,11 +214,7 @@ func (c HarnessClient) validate() error {
 	return nil
 }
 
-// validateStaticToken checks a static-token profile. Its agents are not
-// Kubernetes workloads, so every Kubernetes field is refused rather than
-// ignored: a profile that names a trust domain, namespace or image would
-// promise a check the broker never makes. It reaches the broker directly,
-// authorizes per Automation, and names no person.
+// validateStaticToken refuses every Kubernetes field rather than ignoring it, since a trust domain, namespace or image would promise a check the broker never makes.
 func (h Harness) validateStaticToken() error {
 	id := h.Identity
 	if h.TrustDomain != (HarnessTrustDomain{}) {
@@ -298,23 +235,13 @@ func (h Harness) validateStaticToken() error {
 	return h.Client.validate()
 }
 
-// sharePool reports whether two harnesses may name the same pool. A pool says
-// who decides access (here, each listed Automation); the harness says how an
-// agent proves it is one, so a pool that decides per Automation may have its
-// Kubernetes harness and, beside it, one static-token harness. Exactly one of
-// the two is static-token, which is also all Parse keeps apart. Any other pool
-// belongs to one harness.
+// sharePool allows a pool that decides per Automation to have its Kubernetes harness plus one static-token harness; any other pool belongs to one harness.
 func sharePool(a, b Harness) bool {
 	return a.Authorization.Mode == AuthorizeAutomation && b.Authorization.Mode == AuthorizeAutomation &&
 		(a.Identity.Kind == IdentityStaticToken) != (b.Identity.Kind == IdentityStaticToken)
 }
 
-// validateHarnesses checks every profile and binds it to its pool. When a
-// catalog declares harnesses, each pool belongs to exactly one, except that a
-// pool deciding per Automation may add one static-token harness (sharePool), and
-// the pool's identity agrees with the profile's authorization. At most one
-// harness uses a static-token identity, since the broker finds a token's pool
-// through it.
+// validateHarnesses checks every profile and binds it to its pool; at most one harness uses a static-token identity, since the broker finds a token's pool through it.
 func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][]Harness, error) {
 	if len(harnesses) == 0 {
 		return nil, nil
@@ -351,7 +278,6 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][
 		if person != (h.Authorization.Mode == AuthorizePerson) || (pool.Identity == IdentityCursorAutomation) != (h.Authorization.Mode == AuthorizeAutomation) {
 			return nil, fmt.Errorf("harness %q authorizes the %s, but pool %q has identity %q", h.Name, h.Authorization.Mode, pool.Name, pool.Identity)
 		}
-		// Each source of a person is trusted only on its own kind of pool.
 		requester := (Profile{Harness: h}).RequesterKind()
 		if person && requester != personPool {
 			return nil, fmt.Errorf("harness %q takes its person from %q, but pool %q has identity %q", h.Name, requester, pool.Name, pool.Identity)
@@ -384,16 +310,12 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][
 	return byPool, nil
 }
 
-// Profile is the harness a pool's agents are admitted under. Explicit is
-// false for a catalog that declares no harnesses: the profile is then derived
-// from the pool's identity alone, and names no trust domain, namespaces or
-// images to check, which is how the broker behaved before profiles.
+// Profile is the harness a pool's agents are admitted under; Explicit is false when no harnesses are declared and it is derived from the pool's identity alone.
 type Profile struct {
 	Harness
 	Explicit bool
 }
 
-// Profile returns the pool's profile.
 func (p Pool) Profile() Profile {
 	if p.harness != nil {
 		return Profile{Harness: *p.harness, Explicit: true}
@@ -414,9 +336,7 @@ func (p Pool) Profile() Profile {
 	return Profile{Harness: h}
 }
 
-// StaticToken returns the pool's static-token profile, when the pool has one.
-// Profile still names the pool's Kubernetes harness, which is what the
-// admission of a Pod checks; a static-token client is never admitted by it.
+// StaticToken returns the pool's static-token profile; a static-token client is never admitted by Profile's Kubernetes harness.
 func (p Pool) StaticToken() (Profile, bool) {
 	if p.staticHarness == nil {
 		return Profile{}, false
@@ -424,11 +344,7 @@ func (p Pool) StaticToken() (Profile, bool) {
 	return Profile{Harness: *p.staticHarness, Explicit: true}, true
 }
 
-// StaticAgent finds the Automation a static token claims to be, and the pool
-// its harness serves. It lists an Automation only when its block carries a
-// token hash, so a block meant for a Cursor run (which has none) can never be
-// reached with a guessed id, and a block with a token can never be reached by
-// a Cursor run.
+// StaticAgent finds the Automation a static token claims to be and its pool; only a block with a token hash is listed, so it is never reachable by a Cursor run's id and vice versa.
 func (c Catalog) StaticAgent(id string) (Automation, string, bool) {
 	a, ok := c.automations[id]
 	if !ok || !a.HasToken() {
@@ -483,8 +399,6 @@ func (p Profile) RequesterKind() string {
 	return ""
 }
 
-// personIdentities maps each pool identity that names a person to the only
-// requester kind that may name it.
 var personIdentities = map[string]string{
 	"claude-session":  RequesterSessionJWT,
 	"cursor-session":  RequesterCursorOIDC,

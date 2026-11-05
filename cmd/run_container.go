@@ -24,10 +24,7 @@ import (
 // than letting the user think a flag is taking effect when it isn't.
 var containerOnlyFlags = []string{"image", "mount", "keep", "no-firewall", "home-volume-shared", "share-agent-dir"}
 
-// validateContainerFlagCombos enforces mutual-exclusion between container-mode
-// flags that would otherwise both try to own /home/claude/.claude. Split from
-// validateIsolationFlagConflicts because the "which mode wants which flag"
-// axis and the "these two flags can't coexist" axis are independent.
+// validateContainerFlagCombos rejects container-mode flags that would both own /home/claude/.claude.
 func validateContainerFlagCombos(cmd *cobra.Command) error {
 	homeShared, _ := cmd.Flags().GetBool("home-volume-shared")
 	shareAgentDir, _ := cmd.Flags().GetBool("share-agent-dir")
@@ -72,11 +69,7 @@ func runContainer(cmd *cobra.Command, args []string, scopedToken, addr, vault st
 	var hostAgentDir string
 	var hostUID, hostGID int
 	if shareAgentDir {
-		// Running as root on Linux would remap the in-container claude
-		// user to uid 0, combining with --cap-add NET_ADMIN/NET_RAW/
-		// SETUID/SETGID/KILL to give the agent a much larger blast
-		// radius than a normal user. --security-opt=no-new-privileges
-		// doesn't undo ambient caps on uid 0. Reject.
+		// Root on Linux maps the container user to uid 0, which with the added caps widens the blast radius; reject.
 		if runtime.GOOS == "linux" && os.Getuid() == 0 {
 			return errors.New("--share-agent-dir: refusing to map the in-container user to root; re-run agent-vault as a non-root user")
 		}
@@ -88,9 +81,7 @@ func runContainer(cmd *cobra.Command, args []string, scopedToken, addr, vault st
 		if err := os.MkdirAll(hostAgentDir, 0o700); err != nil {
 			return fmt.Errorf("--share-agent-dir: create %s: %w", hostAgentDir, err)
 		}
-		// Touch ~/.claude.json so docker doesn't auto-create a dir
-		// where Claude expects a file (O_CREATE without O_TRUNC is a
-		// no-op when the file already exists).
+		// Pre-create ~/.claude.json so docker does not create a directory in its place.
 		configPath := filepath.Join(userHome, ".claude.json")
 		f, err := os.OpenFile(configPath, os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
@@ -165,10 +156,7 @@ func runContainer(cmd *cobra.Command, args []string, scopedToken, addr, vault st
 
 	if !homeShared && !shareAgentDir {
 		defer func() {
-			// Per-invocation volume: remove after the container exits
-			// so .claude state (auth tokens, session history) doesn't
-			// accumulate one volume per invocation. Shared-mode volume
-			// is opt-in persistent; host-bind mode never creates one.
+			// Remove the per-invocation volume on exit so .claude state does not accumulate.
 			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = isolation.RemoveVolume(cleanup, isolation.ClaudeHomeVolumeName(sessionID))
@@ -237,17 +225,8 @@ func runContainer(cmd *cobra.Command, args []string, scopedToken, addr, vault st
 	fmt.Fprintf(os.Stderr, "%s starting %s with isolation=container (%s)...\n\n",
 		successText("agent-vault:"), boldText(args[0]), network.Name)
 
-	// Fork docker (instead of syscall.Exec) so the forwarder stays
-	// alive for the container's lifetime. Go listeners are FD_CLOEXEC,
-	// so exec'ing would close them before the container could dial
-	// host.docker.internal:<fwd-port>, producing ECONNREFUSED on every
-	// HTTPS call through the MITM path.
-	//
-	// Docker is in our process group (default), so the kernel delivers
-	// TTY signals (SIGINT, SIGWINCH) to both docker and us. Docker's
-	// --init/tini handles them for the container; we ignore them in
-	// the parent so we don't exit before the child and leak the
-	// forwarder mid-call.
+	// Fork docker rather than syscall.Exec: Go listeners are FD_CLOEXEC, so exec would close the forwarder before the container dials it.
+	// Ignore TTY signals in the parent so we do not exit before docker and leak the forwarder.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
@@ -264,14 +243,8 @@ func runContainer(cmd *cobra.Command, args []string, scopedToken, addr, vault st
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			// Return an ExitCodeError so defers (network teardown,
-			// signal.Stop, forwarder close) run before Execute() exits
-			// with the container's actual status. Silence cobra's own
-			// error + usage printing on this path — the container
-			// already wrote whatever it had to say to stderr, and a
-			// usage block after `pytest` exits 1 is pure noise.
-			// SilenceErrors and SilenceUsage are independent gates in
-			// cobra, so both must be set.
+			// Return ExitCodeError so defers run before Execute() exits with the container's status.
+			// Set both SilenceErrors and SilenceUsage; they are independent gates in cobra.
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
 			return &ExitCodeError{Code: exitErr.ExitCode()}

@@ -12,15 +12,12 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// PeerReader returns the worker's address for an accepted connection, for
-// example from a PROXY header written by a loopback TLS terminator. It must
-// read no further than the header itself.
+// PeerReader returns the worker's address for an accepted connection; it must read no further than the PROXY header.
 type PeerReader func(net.Conn) (netip.Addr, error)
 
 var errNoPeer = errors.New("connection peer unavailable")
 
-// peerListener resolves each connection's peer lazily, on the connection's
-// own goroutine at its first read, so a stalled client cannot block Accept.
+// peerListener resolves each peer lazily on the connection's goroutine, so a stalled client cannot block Accept.
 type peerListener struct {
 	net.Listener
 	reader PeerReader
@@ -45,8 +42,7 @@ type peerConn struct {
 	deadline time.Time // the read deadline the HTTP server last set
 }
 
-// SetReadDeadline and SetDeadline record the server's read deadline, so
-// reading the PROXY header can put it back instead of clearing it.
+// SetReadDeadline and SetDeadline record the deadline so it can be restored after the PROXY header is read.
 func (c *peerConn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.deadline = t
@@ -77,9 +73,7 @@ func (c *peerConn) resolve() {
 			c.err = errNoPeer
 			return
 		}
-		// The header gets at most 5 seconds, and never more than the server's
-		// own header timeout; the server's deadline is restored afterwards, so
-		// its header and read timeouts keep applying to the request.
+		// The header gets at most 5s, capped by the server's header timeout; the deadline is restored afterwards.
 		c.mu.Lock()
 		restore := c.deadline
 		c.mu.Unlock()
@@ -104,8 +98,7 @@ func (c *peerConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
-// Peer is valid once the connection has been read, which the HTTP server does
-// before any handler runs.
+// Peer is valid only after the first read, which the HTTP server does before any handler.
 func (c *peerConn) Peer() (netip.Addr, error) {
 	c.resolve()
 	return c.peer, c.err
@@ -128,19 +121,13 @@ func peerFromContext(ctx context.Context) (netip.Addr, error) {
 	return pc.Peer()
 }
 
-// resolveScope admits a worker. With an Attestor it uses the projected token
-// and the connection's real peer; the token-review SessionResolver is used
-// only when no Attestor is configured. A recheck inside an open tunnel uses
-// Reattest when the Attestor has it, because the tunnel outlives its token.
-// A scope past its NotAfter is refused.
+// resolveScope admits a worker via the Attestor when set, else the SessionResolver; a tunnel recheck uses Reattest if available.
 func (p *Proxy) resolveScope(ctx context.Context, token, hint string, peer netip.Addr, peerErr error, recheck bool) (*brokercore.ProxyScope, error) {
 	scope, err := p.resolveAnyScope(ctx, token, hint, peer, peerErr, recheck)
 	if err != nil {
 		return nil, err
 	}
-	// Each listener admits only the identity kinds it was opened for. A static
-	// token is checked by its own verifier on the listener that admits nothing
-	// else, so a scope of that kind from anywhere else is refused.
+	// Each listener admits only the identity kinds it was opened for; a scope of another kind is refused.
 	kinds := connKinds(ctx)
 	if !brokercore.KindAdmitted(kinds, scope.IdentityKind) || (scope.IdentityKind == brokercore.KindStaticToken && !onlyStaticToken(kinds)) {
 		p.logRefusal("listener_kind", nil)
@@ -151,14 +138,11 @@ func (p *Proxy) resolveScope(ctx context.Context, token, hint string, peer netip
 
 type kindsKey struct{}
 
-// withKinds carries the CONNECT listener's identity kinds into the requests
-// of its tunnel, which are served on their own connection.
+// withKinds carries the CONNECT listener's identity kinds into its tunnel's requests.
 func withKinds(ctx context.Context, kinds []string) context.Context {
 	return context.WithValue(ctx, kindsKey{}, kinds)
 }
 
-// connKinds returns the identity kinds the request's listener admits: the
-// tunnel's, for a request inside a CONNECT tunnel.
 func connKinds(ctx context.Context) []string {
 	if kinds, ok := ctx.Value(kindsKey{}).([]string); ok {
 		return kinds
@@ -202,32 +186,22 @@ func (p *Proxy) resolveAnyScope(ctx context.Context, token, hint string, peer ne
 	return scope, nil
 }
 
-// onlyStaticToken reports whether a listener admits static agent tokens and
-// nothing else, which is the only listener that reads one.
 func onlyStaticToken(kinds []string) bool {
 	return len(kinds) == 1 && kinds[0] == brokercore.KindStaticToken
 }
 
-// Reasons only the proxy gives for an agent token refusal.
 const (
 	reasonAgentRemoved = "agent_removed"
 	reasonNoVerifier   = "token_unverifiable"
 )
 
-// resolveAgentToken admits a static agent token. It runs on the static-token
-// listener alone, whose connections carry no Kubernetes proof, so none of
-// the Pod checks apply and the Attestor is never asked. It checks the token
-// on every request of a tunnel too (recheck), so a removed block or a passed
-// expiry ends access at the next request. A vault hint is refused: a token
-// names its agent, and a client that sends more is misconfigured.
+// resolveAgentToken admits a static agent token on the static-token listener, rechecked on every tunnel request; a vault hint is refused.
 func (p *Proxy) resolveAgentToken(ctx context.Context, token, hint string, peer netip.Addr, recheck bool) (*brokercore.ProxyScope, error) {
 	refuse := func(err error) (*brokercore.ProxyScope, error) {
-		// Every refusal carries a code, so every refusal has an audit row.
 		if brokercore.DenialReason(err) == "" {
 			err = brokercore.Denied(reasonNoVerifier)
 		}
 		reason := brokercore.DenialReason(err)
-		// The block was there when the tunnel opened and is gone now.
 		if recheck && reason == agenttoken.ReasonUnknown {
 			if k := brokercore.DenialKey(err); k != nil {
 				err = brokercore.DeniedKey(reasonAgentRemoved, k.Kid)
@@ -262,10 +236,7 @@ func (p *Proxy) resolveAgentToken(ctx context.Context, token, hint string, peer 
 	}, nil
 }
 
-// refusalLogEvery bounds the refusal log: one line per reason per interval,
-// with the count since the last, so a flood of bad callers stays one line.
-// A signing-key refusal's line names the kid and peer of the refusal that
-// opens the interval; every refusal's own are in its audit row.
+// refusalLogEvery bounds the refusal log to one line per reason per interval.
 const refusalLogEvery = 10 * time.Second
 
 type refusalLog struct {
@@ -274,9 +245,7 @@ type refusalLog struct {
 	counts map[string]int
 }
 
-// logRefusal records why an identity was refused: a fixed code, never a
-// token or name. A signing-key refusal adds the token's kid, in its safe
-// form, and the connection's peer address.
+// logRefusal logs a fixed code, never a token or name.
 func (p *Proxy) logRefusal(reason string, key *brokercore.KeyDenial) {
 	if reason == "" {
 		reason = "unspecified"

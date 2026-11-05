@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// Every field of a row except the MAC itself must change the MAC input, so
-// no field added later can be left out of the tamper check.
+// Every field except the MAC must change the MAC input.
 func TestEveryRowFieldIsInTheMAC(t *testing.T) {
 	base := Row{MACVersion: MACVersionCurrent}
 	baseInput := base.macInput()
@@ -114,7 +113,7 @@ func authzFixture(t *testing.T) (*fixture, string) {
 	return f, f.out.String()
 }
 
-// The High finding: a log-sink editor flips a decision and the chain must fail.
+// A log-sink editor who flips a decision must fail the chain.
 func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 	for name, edit := range map[string][2]string{
 		"decision":        {`"decision":"not_entitled"`, `"decision":"entitled"`},
@@ -165,9 +164,7 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 	}
 }
 
-// A forged row with a valid v1 MAC (someone holding the HMAC key, or a row
-// downgraded by removing its version) cannot carry authorization fields, and a
-// chain never steps down from v2 to v1.
+// A forged v1 row cannot carry authorization fields, and a chain never steps down from v2 to v1.
 func TestV1RowsCannotCarryAuthorizationOrDowngrade(t *testing.T) {
 	for name, forge := range map[string]func(*Row){
 		"v1 row with a decision":    func(r *Row) { r.Decision = "entitled" },
@@ -326,8 +323,7 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	}
 }
 
-// A certificate row's serial and notAfter are covered by the MAC, and only a
-// hex serial and an RFC 3339 UTC time are accepted.
+// A certificate row's serial and notAfter are MACed and must be hex and RFC 3339 UTC.
 func TestCertificateFieldsAreCoveredAndBounded(t *testing.T) {
 	f := newFixture(t)
 	if err := f.chain.Record(Event{Event: EventCertificate, Outcome: "issued", Peer: "10.0.0.5", Serial: "7f00aa", NotAfter: "2026-10-07T00:00:00Z", DNSNames: "proxy.ns.svc,proxy.ns.svc.cluster.local"}); err != nil {
@@ -358,8 +354,7 @@ func TestCertificateFieldsAreCoveredAndBounded(t *testing.T) {
 	}
 }
 
-// A decision may check any number of groups: the row records the full list,
-// which only Entra object IDs may form, and its MAC covers it.
+// A decision may check any number of groups; only Entra object IDs are accepted and the MAC covers them.
 func TestManyGroupsAreRecordedInFull(t *testing.T) {
 	var groups []string
 	for i := range 1000 {
@@ -376,8 +371,7 @@ func TestManyGroupsAreRecordedInFull(t *testing.T) {
 	}
 }
 
-// A refusal's target is covered by the MAC, and only the canonical form
-// TargetField returns is accepted, so no path, query or free text can enter.
+// A refusal's target is MACed and only the canonical TargetField form is accepted.
 func TestRefusalTargetIsCoveredAndBounded(t *testing.T) {
 	f := newFixture(t)
 	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "unlisted", Pool: "claude", Target: "api.example.com:443"}); err != nil {
@@ -508,10 +502,7 @@ func TestOperationIsAFixedVocabularyShape(t *testing.T) {
 	}
 }
 
-// A row written under an older MAC version that later gains a field only a
-// newer version covers still verifies its MAC, since the old input leaves the
-// field out; only the version's field check catches it. Each trail here is a
-// genuine one at that version, with nothing newer after it.
+// An older-version row that gains a newer field still verifies its MAC; only the version's field check catches it.
 func TestOlderRowsCannotGainNewerFields(t *testing.T) {
 	t.Cleanup(func() { writeMACVersion = MACVersionCurrent })
 	for version, field := range map[int]string{
@@ -549,8 +540,7 @@ func TestOlderRowsCannotGainNewerFields(t *testing.T) {
 	}
 }
 
-// A row's path is the path as sent, printable and bounded; anything else is
-// "invalid", and only canonical paths validate.
+// Only canonical, printable, bounded paths validate; anything else is "invalid".
 func TestPathFieldIsBoundedAndCanonical(t *testing.T) {
 	for in, want := range map[string]string{
 		"":                                     "",

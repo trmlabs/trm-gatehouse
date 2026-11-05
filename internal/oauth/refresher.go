@@ -21,9 +21,7 @@ func NewRefresher() *Refresher {
 	return &Refresher{}
 }
 
-// Do executes fn at most once for the given key at any point in time.
-// Concurrent callers with the same key block until the first caller's fn
-// returns, then all receive the same RefreshResult.
+// Do executes fn at most once per key at a time; concurrent callers wait and share the RefreshResult.
 func (r *Refresher) Do(key string, fn func() RefreshResult) RefreshResult {
 	v, _, _ := r.group.Do(key, func() (interface{}, error) {
 		res := fn()

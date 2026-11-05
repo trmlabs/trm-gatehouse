@@ -257,9 +257,7 @@ func TestAgentQueryRejectedBeforeReadingState(t *testing.T) {
 	}
 }
 
-// The deployed single-worker manager sends no agent parameter. Its response
-// keeps exactly the fields and codes it had before attribution, and an agent
-// that owns all the work sees the same counts as the totals.
+// The deployed single-worker manager sends no agent parameter; its response keeps the fields and codes it had before attribution.
 func TestSingleWorkerResponseUnchanged(t *testing.T) {
 	for _, tc := range []struct {
 		owned  Counts

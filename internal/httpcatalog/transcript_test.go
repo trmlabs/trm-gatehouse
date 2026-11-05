@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// A header entry may mark itself a model API; another kind may not, since
-// only header entries read bodies the broker can exempt.
 func TestTranscriptIsForHeaderEntriesOnly(t *testing.T) {
 	llm := strings.NewReplacer(`"host":"slack.com"`, `"host":"llm.example.com"`, `,"requestFields":[{"name":"channel","values":["C0123456789","C0987654321"]}]`, `,"transcript":true`).Replace(slackEntry)
 	c, err := Parse([]byte(`{"entries":[` + llm + `]}`))

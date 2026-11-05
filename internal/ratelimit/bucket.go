@@ -6,9 +6,7 @@ import (
 	"time"
 )
 
-// tokenBucketMap is a keyed collection of token buckets with LRU-style
-// eviction when the map exceeds maxKeys. Each bucket refills at rate
-// tokens/sec and can accumulate up to burst tokens. Thread-safe.
+// tokenBucketMap is a thread-safe keyed collection of token buckets with LRU-style eviction above maxKeys.
 type tokenBucketMap struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -45,9 +43,7 @@ func newTokenBucketMap(cfg TierConfig) *tokenBucketMap {
 	}
 }
 
-// reconfigure updates rate/burst/maxKeys in place. Existing buckets
-// carry their current token count forward so hot keys don't get a
-// surprise refill on reload.
+// reconfigure updates limits in place, carrying existing token counts forward so hot keys get no surprise refill.
 func (m *tokenBucketMap) reconfigure(cfg TierConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,11 +97,7 @@ func (m *tokenBucketMap) allow(key string) Decision {
 	return Deny("rate", wait, int(m.burst))
 }
 
-// evictIfNeededLocked is called under m.mu. Prefers to drop buckets
-// whose tokens are near full (idle keys — zero fairness impact). If
-// that isn't enough (every bucket is hot), falls back to evicting the
-// oldest-by-lastRefill entry so the map stays bounded even under
-// adversarial distinct-key traffic.
+// evictIfNeededLocked (under m.mu) drops near-full idle buckets first, then the oldest by lastRefill, so the map stays bounded.
 func (m *tokenBucketMap) evictIfNeededLocked(_ time.Time) {
 	if m.maxKeys <= 0 || len(m.buckets) <= m.maxKeys {
 		return

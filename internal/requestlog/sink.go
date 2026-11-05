@@ -1,10 +1,4 @@
-// Package requestlog persists per-request broker metadata (method, host,
-// path, status, latency) so operators can audit what traffic flowed
-// through a vault. Bodies, headers, and query strings are never
-// captured. A Sink is the pluggable output layer: the shipped
-// implementation writes to SQLite, but future sinks (HTTP webhooks,
-// stdout JSONL) satisfy the same interface without changes to the
-// proxy hot path.
+// Package requestlog persists per-request broker metadata (never bodies, headers or query strings) through a pluggable Sink.
 package requestlog
 
 import (
@@ -14,10 +8,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// Record is the in-memory shape handed to sinks. It is a superset of
-// brokercore.ProxyEvent with the actor/vault context the handler knows
-// but brokercore does not. Adapters convert Record → store.RequestLog
-// at the SQLite boundary.
+// Record is the in-memory shape handed to sinks: brokercore.ProxyEvent plus actor and vault context.
 type Record struct {
 	VaultID        string
 	ActorType      string
@@ -38,10 +29,7 @@ type Record struct {
 	AuthHeader     string
 }
 
-// Sink accepts records on the hot proxy path. Implementations MUST NOT
-// block meaningfully: Record runs inline with every proxied request.
-// Return is void by design — sinks are fire-and-forget; durability
-// guarantees live inside the implementation.
+// Sink accepts records on the hot proxy path; implementations MUST NOT block meaningfully.
 type Sink interface {
 	Record(ctx context.Context, r Record)
 }
@@ -67,10 +55,7 @@ func (m MultiSink) Record(ctx context.Context, r Record) {
 	}
 }
 
-// FromEvent lifts a brokercore.ProxyEvent plus the actor/vault context
-// the ingress handler knows (but brokercore does not) into a Record.
-// Callers pass the terminal event — after ProxyEvent.Emit has filled in
-// Status, Err, and TotalMs.
+// FromEvent builds a Record from a terminal brokercore.ProxyEvent plus actor and vault context.
 func FromEvent(ev brokercore.ProxyEvent, vaultID, actorType, actorID string) Record {
 	return Record{
 		VaultID:        vaultID,
@@ -93,9 +78,7 @@ func FromEvent(ev brokercore.ProxyEvent, vaultID, actorType, actorID string) Rec
 	}
 }
 
-// toStoreRow converts a Record to the persisted shape. Kept in the
-// package (not on store.RequestLog) so the store package stays free of
-// requestlog imports.
+// toStoreRow converts a Record to the persisted shape, keeping store free of requestlog imports.
 func toStoreRow(r Record) store.RequestLog {
 	return store.RequestLog{
 		VaultID:        r.VaultID,

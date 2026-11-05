@@ -22,16 +22,12 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// Repository ids the fake GitHub gives the two repositories of the entry.
 const (
 	appRepoID   = 4001
 	otherRepoID = 4002
 )
 
-// pageFixture fronts a fake GitHub that lists pull requests a page at a time,
-// naming each next page by repository id in its Link header as GitHub does.
-// The entry lists two repositories, so a link can name the matched one or
-// another, and a header entry on the same fake serves the same Link.
+// pageFixture fronts a fake GitHub that lists pull requests a page at a time, naming each next page by repository id in its Link header, as GitHub does.
 type pageFixture struct {
 	client    *http.Client
 	port      int // the github-api entry's port
@@ -46,9 +42,7 @@ type pageFixture struct {
 
 func newPageFixture(t *testing.T) *pageFixture { return newPageFixtureWith(t, true) }
 
-// newPageFixtureWith is newPageFixture where the token answer names the
-// repository's id only when withIDs is set. A minted token is kept for reuse,
-// so the choice is made before the first request.
+// newPageFixtureWith names the repository's id only when withIDs is set; a minted token is reused, so the choice is made before the first request.
 func newPageFixtureWith(t *testing.T, withIDs bool) *pageFixture {
 	t.Helper()
 	f := &pageFixture{audit: &adapterAudit{}, link: map[string]string{}, withIDs: withIDs}
@@ -118,8 +112,6 @@ func newPageFixtureWith(t *testing.T, withIDs bool) *pageFixture {
 	return f
 }
 
-// get sends one GET through the broker and returns the status and the answer's
-// Link header values.
 func (f *pageFixture) get(t *testing.T, rawURL string) (int, []string) {
 	t.Helper()
 	r, _ := http.NewRequest(http.MethodGet, rawURL, nil)
@@ -137,15 +129,11 @@ func (f *pageFixture) pulls(repo string) string {
 	return "https://example.com:" + strconv.Itoa(f.port) + "/repos/example-org/" + repo + "/pulls"
 }
 
-// linkFor is a Link header naming a repository's next and last pages by id.
 func (f *pageFixture) linkFor(next, last int) string {
 	return fmt.Sprintf(`<https://{host}/repositories/%d/pulls?per_page=1&page=2>; rel="next", <https://{host}/repositories/%d/pulls?per_page=1&page=5>; rel="last"`, next, last)
 }
 
-// The next page GitHub names by repository id goes back through the route the
-// first request took: the Link a worker's client follows names the repository
-// as the request did, the follow-up is matched, authorized and audited like
-// any request, and it is the same repository's list.
+// The next page GitHub names by repository id goes back through the route the first request took and is matched, authorized and audited like any request.
 func TestGitHubAPIPaginationFollowsTheMatchedRepository(t *testing.T) {
 	f := newPageFixture(t)
 	f.link["/repos/example-org/example-app/pulls"] = f.linkFor(appRepoID, appRepoID)
@@ -171,10 +159,7 @@ func TestGitHubAPIPaginationFollowsTheMatchedRepository(t *testing.T) {
 	}
 }
 
-// A page is never pointed at a repository the request did not match. A link
-// naming another repository's id, even one the entry lists, is left as GitHub
-// wrote it and is refused when followed; only the link naming the matched
-// repository is rewritten.
+// A link naming another repository's id, even one the entry lists, is left as GitHub wrote it; only the matched repository's link is rewritten.
 func TestGitHubAPIPaginationNeverRepointsToAnotherRepository(t *testing.T) {
 	f := newPageFixture(t)
 	other := fmt.Sprintf(`<https://{host}/repositories/%d/pulls?page=2>; rel="next"`, appRepoID)
@@ -189,7 +174,6 @@ func TestGitHubAPIPaginationNeverRepointsToAnotherRepository(t *testing.T) {
 		t.Errorf("following it: %d, audit %q, want 403 unlisted", code, f.audit.last().Outcome)
 	}
 
-	// One response naming both: only the matched repository's link moves.
 	f.link["/repos/example-org/example-app/pulls"] = f.linkFor(appRepoID, otherRepoID)
 	_, links = f.get(t, f.pulls("example-app"))
 	want := fmt.Sprintf(`<https://%[1]s/repos/example-org/example-app/pulls?per_page=1&page=2>; rel="next", <https://%[1]s/repositories/%d/pulls?per_page=1&page=5>; rel="last"`, host, otherRepoID)
@@ -199,8 +183,7 @@ func TestGitHubAPIPaginationNeverRepointsToAnotherRepository(t *testing.T) {
 
 }
 
-// Without the repository's id from GitHub, nothing is known to rewrite to, so a
-// link is left as GitHub wrote it.
+// Without the repository's id from GitHub, links are left as GitHub wrote them.
 func TestGitHubAPIPaginationNeedsTheRepositoryID(t *testing.T) {
 	f := newPageFixtureWith(t, false)
 	f.link["/repos/example-org/example-app/pulls"] = f.linkFor(appRepoID, appRepoID)
@@ -211,8 +194,7 @@ func TestGitHubAPIPaginationNeedsTheRepositoryID(t *testing.T) {
 	}
 }
 
-// Only a github-api entry's answers are rewritten: another entry's Link header
-// reaches the worker exactly as its server wrote it, repository id and all.
+// Only a github-api entry's answers are rewritten; another entry's Link header reaches the worker unchanged.
 func TestPaginationLinksOfOtherEntriesAreUntouched(t *testing.T) {
 	f := newPageFixture(t)
 	written := f.linkFor(appRepoID, appRepoID)
@@ -230,7 +212,6 @@ func TestPaginationLinksOfOtherEntriesAreUntouched(t *testing.T) {
 	}
 }
 
-// Which links are rewritten, form by form.
 func TestRepointLinks(t *testing.T) {
 	const (
 		host = "api.example.test"
@@ -280,7 +261,6 @@ func TestRepointLinks(t *testing.T) {
 		}
 	}
 
-	// An unknown id (0) rewrites nothing, and several Link headers are each read.
 	h := http.Header{}
 	h.Set("Link", `<https://api.example.test/repositories/4001/pulls?page=2>; rel="next"`)
 	repointLinks(h, host, repo, 0)

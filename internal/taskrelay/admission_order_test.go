@@ -21,10 +21,6 @@ func countAuditOutcome(t *testing.T, path, outcome string) int {
 	return bytes.Count(b, []byte(`"outcome":"`+outcome+`"`))
 }
 
-// TestBareConnectPerformsNoAdmission proves that a connection which has not
-// completed protocol validation costs the relay no Kubernetes request and no
-// durable "admitted" row. Bare connects leave nothing in the journal; a wrong
-// placeholder or a wrong startup leaves a "denied" row and nothing else.
 func TestBareConnectPerformsNoAdmission(t *testing.T) {
 	f := newRelayFixture(t)
 	var upstreamAccepts atomic.Int32
@@ -45,17 +41,13 @@ func TestBareConnectPerformsNoAdmission(t *testing.T) {
 	}()
 	f.c.Postgres = &PostgresConfig{Listen: freeAddress(t), Upstream: f.upstream(t, l.Addr().String()), Database: "canary", User: "workload", Placeholder: "public-placeholder"}
 	f.start(t)
-	// start's readiness probe is itself a bare connect; it must not have been
-	// admitted either.
 	if n := countAuditOutcome(t, f.c.AuditFile, "admitted"); n != 0 {
 		t.Fatalf("readiness probe produced %d admitted rows", n)
 	}
 
-	// Every request the supervisor's one-second pair check could account for
-	// over the window, plus one for a tick straddling either edge.
+	// Pair checks the window allows, plus one for a tick straddling either edge.
 	supervisorBudget := func(elapsed time.Duration) int32 { return int32(elapsed/pairInterval) + 1 }
 
-	// Case 1: 20 bare TCP connects that close without sending a byte.
 	before := f.kubeCalls.Load()
 	started := time.Now()
 	for i := 0; i < 20; i++ {
@@ -65,7 +57,7 @@ func TestBareConnectPerformsNoAdmission(t *testing.T) {
 		}
 		c.Close()
 	}
-	// Let the handlers observe EOF and return before reading the counters.
+	// Let the handlers observe EOF before reading the counters.
 	time.Sleep(200 * time.Millisecond)
 	if grew, budget := f.kubeCalls.Load()-before, supervisorBudget(time.Since(started)); grew > budget {
 		t.Fatalf("bare connects drove %d Kubernetes requests; supervisor alone accounts for at most %d", grew, budget)
@@ -77,7 +69,6 @@ func TestBareConnectPerformsNoAdmission(t *testing.T) {
 		t.Fatalf("bare connects produced %d denied rows; a peer that sent nothing should leave no trace", n)
 	}
 
-	// Case 2: a valid TLS startup with the wrong placeholder password.
 	before = f.kubeCalls.Load()
 	started = time.Now()
 	c := f.dial(t, f.c.Postgres.Listen)
@@ -101,8 +92,6 @@ func TestBareConnectPerformsNoAdmission(t *testing.T) {
 		t.Fatalf("wrong placeholder produced %d admitted rows", n)
 	}
 
-	// Case 3: a startup that asserts the wrong authority is denied with its own
-	// reason, so the journal separates probing from use.
 	c = f.dial(t, f.c.Postgres.Listen)
 	b, _ = (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber, Parameters: map[string]string{"user": "workload", "database": "other"}}).Encode(nil)
 	c.Write(b)
@@ -116,8 +105,6 @@ func TestBareConnectPerformsNoAdmission(t *testing.T) {
 	if n := countAuditOutcome(t, f.c.AuditFile, "admitted"); n != 0 {
 		t.Fatalf("denied startups produced %d admitted rows", n)
 	}
-	// Case 4: a partial startup length prefix then close. Bytes were sent, so
-	// this is a malformed startup, not a bare connect, and leaves one row.
 	c = f.dial(t, f.c.Postgres.Listen)
 	c.Write([]byte{0, 0})
 	c.Close()
@@ -141,10 +128,6 @@ func waitFor(t *testing.T, limit time.Duration, ok func() bool) {
 	t.Fatal("condition not reached")
 }
 
-// TestForeignPeerDeniedBeforeHandshake pairs the relay with 127.0.0.2 so every
-// loopback connection is foreign. Such a peer is refused before the TLS
-// handshake, costs no Kubernetes request, and is journaled once, not per
-// connect.
 func TestForeignPeerDeniedBeforeHandshake(t *testing.T) {
 	f := newRelayFixture(t)
 	f.c.Sandbox.PodIP = "127.0.0.2"
@@ -181,8 +164,6 @@ func TestForeignPeerDeniedBeforeHandshake(t *testing.T) {
 	}
 }
 
-// TestPeerMatchesIsPureAndCheckStillUsesIt keeps the split honest: peerMatches
-// makes no network call, and check still refuses a foreign peer.
 func TestPeerMatchesIsPureAndCheckStillUsesIt(t *testing.T) {
 	f := newRelayFixture(t)
 	p, e := newPairVerifier(f.c)

@@ -137,9 +137,7 @@ var registerCmd = &cobra.Command{
 			return fmt.Errorf("verification failed with status %d", verifyResp.StatusCode)
 		}
 
-		// Persist the verify-time auto-login so the next CLI call doesn't
-		// have to run /v1/auth/login (which would mint a second session
-		// row that lingers for the full 30-day idle TTL).
+		// Persist the auto-login so the next CLI call does not mint a second session row.
 		if verifyResult.Token != "" {
 			sess := &session.ClientSession{
 				Token:       verifyResult.Token,

@@ -1,9 +1,5 @@
-// Package proxyactivity keeps, in the broker's shared store, when each agent
-// Sandbox was last in use through a shared proxy, so the idle janitor's view
-// outlives any one proxy replica. Each replica reports its Sandboxes' last
-// use and reads the whole view back for the janitor; both calls authenticate
-// as the proxy itself, and a proxy reads and writes only its own binding's
-// rows, for its own namespaces.
+// Package proxyactivity keeps, in the broker's shared store, when each agent Sandbox was last in use through a shared proxy, so the idle janitor's view outlives any one replica.
+// Both calls authenticate as the proxy itself, and a proxy reads and writes only its own binding's rows, for its own namespaces.
 package proxyactivity
 
 import (
@@ -39,8 +35,7 @@ type Identity struct {
 	Namespaces []string
 }
 
-// Identifier admits a shared proxy as itself and names its binding
-// (workload identity's IdentifyProxy, adapted where the broker is wired).
+// Identifier admits a shared proxy as itself and names its binding.
 type Identifier interface {
 	IdentifyProxy(ctx context.Context, token string, peer netip.Addr) (Identity, error)
 }
@@ -70,24 +65,18 @@ type Row struct {
 // RecordRequest is a proxy's report.
 type RecordRequest struct {
 	Sandboxes []Row `json:"sandboxes"`
-	// Replica names the reporting replica's stream: an identifier the
-	// replica chooses when it starts.
+	// Replica names the reporting replica's stream, an identifier it chooses at start.
 	Replica string `json:"replica"`
-	// AckedSeq is the sequence last acknowledged on this replica's stream, 0
-	// for none (a replica that has not reported since it started).
+	// AckedSeq is the sequence last acknowledged on this replica's stream, 0 for none.
 	AckedSeq int64 `json:"ackedSeq"`
 }
 
-// RecordResponse acknowledges a report: Seq is the sequence it got on the
-// replica's stream. Lost says the broker's store no longer reaches AckedSeq: writes it
-// acknowledged are gone (a restore to an earlier point), the binding's
-// history has started again, and the replica should report everything it
-// holds.
+// RecordResponse acknowledges a report: Seq is the sequence on the replica's stream. Lost says the store no longer reaches AckedSeq (a restore to an earlier point):
+// the binding's history restarted and the replica should report everything.
 type RecordResponse struct {
 	Seq  int64 `json:"seq"`
 	Lost bool  `json:"lost"`
-	// RetentionSeconds is how long the broker keeps rows. The replica
-	// forgets its acknowledgment once it is that old.
+	// RetentionSeconds is how long the broker keeps rows; the replica forgets its acknowledgment once it is that old.
 	RetentionSeconds int64 `json:"retentionSeconds"`
 }
 
@@ -96,15 +85,11 @@ type ReadRequest struct {
 	After string `json:"after"`
 }
 
-// ReadResponse is one page of a binding's view. HistoryStarted is when the
-// binding's history began (its first report), absent if it has none: the
-// janitor deletes nothing until that is older than its idle window.
+// ReadResponse is one page of a binding's view. HistoryStarted is when the binding's history began (absent if none): the janitor deletes nothing until that is older than its idle window.
 type ReadResponse struct {
 	RetentionSeconds int64      `json:"retentionSeconds"`
 	HistoryStarted   *time.Time `json:"historyStarted,omitempty"`
-	// Streams is each replica stream's current sequence: a replica whose
-	// acknowledged sequence is higher than its own stream's, or whose stream
-	// is missing, saw writes this store has lost.
+	// Streams is each replica stream's current sequence: a replica acknowledging a higher one, or whose stream is missing, saw writes this store lost.
 	Streams   map[string]int64 `json:"streams"`
 	Sandboxes []Row            `json:"sandboxes"`
 	Next      string           `json:"next"`
@@ -116,15 +101,10 @@ type Service struct {
 	Identifier Identifier
 	// Retention is how long a row is kept after its last use.
 	Retention time.Duration
-	// MaxRows is the most rows one binding may hold (default
-	// DefaultMaxRows), so a compromised proxy cannot grow the shared store
-	// without bound. A report that would pass it is refused.
+	// MaxRows is the most rows one binding may hold (default DefaultMaxRows) so a compromised proxy cannot grow the shared store without bound; a report past it is refused.
 	MaxRows int
-	// MaxStreams is the most replica streams one binding may hold (default
-	// DefaultMaxStreams); a stream lives for twice the retention after its
-	// last report, so a compromised proxy minting a replica per report
-	// cannot grow the store or every read's stream map without bound. A
-	// report that would start a stream past it is refused.
+	// MaxStreams is the most replica streams one binding may hold (default DefaultMaxStreams); a stream lives twice the retention after its last report,
+	// so a compromised proxy minting a replica per report cannot grow the store. A report starting a stream past it is refused.
 	MaxStreams int
 	Logger     *slog.Logger
 
@@ -190,8 +170,7 @@ func (s *Service) record(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	rows := make([]store.ProxyActivity, 0, len(body.Sandboxes))
 	for _, row := range body.Sandboxes {
-		// Only the proxy's own namespaces, and never a time ahead of the
-		// broker's clock by more than a minute of skew.
+		// Only the proxy's own namespaces, and never a time more than a minute ahead of the broker's clock.
 		if !slices.Contains(id.Namespaces, row.Namespace) || !ownerUID.MatchString(row.OwnerUID) || row.LastSeen.IsZero() || row.LastSeen.After(now.Add(time.Minute)) {
 			s.refuse(w, http.StatusBadRequest, "row")
 			return
@@ -260,12 +239,10 @@ func (s *Service) read(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// DefaultMaxRows sizes a binding's ceiling for a fleet of 10,000+ sandboxes
-// with churn: ten times that many used within a day's retention.
+// DefaultMaxRows sizes a binding's ceiling for 10,000+ sandboxes with churn: ten times that many used within a day's retention.
 const DefaultMaxRows = 100_000
 
-// DefaultMaxStreams allows a binding 10,000 replica starts in twice the
-// retention (48 hours by default), far past any rollout or autoscaling churn.
+// DefaultMaxStreams allows 10,000 replica starts in twice the retention (48 hours by default), far past any rollout churn.
 const DefaultMaxStreams = 10_000
 
 func (s *Service) maxStreams() int {
@@ -291,9 +268,7 @@ func (s *Service) prune(ctx context.Context, now time.Time) {
 	}
 	s.mu.Unlock()
 	if due {
-		// A replica forgets its acknowledgment once it is a retention old,
-		// so a stream is kept twice that: an idle replica's stream is never
-		// gone while the replica still counts on it.
+		// A replica forgets its acknowledgment after one retention, so a stream is kept twice that.
 		if err := s.Store.PruneProxyActivity(ctx, now.Add(-s.Retention), now.Add(-2*s.Retention)); err != nil {
 			s.log().Warn("proxyactivity: prune failed", "error", err.Error())
 		}

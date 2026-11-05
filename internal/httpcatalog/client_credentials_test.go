@@ -62,7 +62,6 @@ func TestClientCredentialsEntries(t *testing.T) {
 	}
 }
 
-// tokenIssuer is an authorization server for the client-credentials grant.
 type tokenIssuer struct {
 	server  *httptest.Server
 	mints   atomic.Int32
@@ -110,8 +109,6 @@ func (i *tokenIssuer) lastForm() map[string]string {
 	return i.forms[len(i.forms)-1]
 }
 
-// client reaches the issuer for any address, trusting its certificate, which
-// names example.com.
 func (i *tokenIssuer) client() *http.Client {
 	tr := i.server.Client().Transport.(*http.Transport).Clone()
 	addr := i.server.Listener.Addr().String()
@@ -158,11 +155,9 @@ func TestClientTokensMintCacheAndRenew(t *testing.T) {
 		form["audience"] != "https://api.example.com" || len(form) != 4 {
 		t.Fatalf("token request %v", form)
 	}
-	// Printing never shows the token.
 	if printed := fmt.Sprint(first) + fmt.Sprintf("%#v", first); strings.Contains(printed, "minted") {
 		t.Fatalf("printed as %q", printed)
 	}
-	// Served from memory until a quarter of its hour remains.
 	f.advance(44 * time.Minute)
 	if again, err := f.tokens.Token(ctx, f.entry); err != nil || again.Value() != first.Value() || f.issuer.mints.Load() != 1 {
 		t.Fatalf("cached token: %v %v mints=%d", again, err, f.issuer.mints.Load())
@@ -200,8 +195,6 @@ func TestClientTokensShareOneMint(t *testing.T) {
 	}
 }
 
-// A new client version mints a new token once Keys reads it; a client deleted
-// in Vault is refused even while a token is held.
 func TestClientTokensFollowVault(t *testing.T) {
 	f := newClientFixture(t)
 	ctx := context.Background()
@@ -254,7 +247,6 @@ func TestClientTokensRefuseBadAnswers(t *testing.T) {
 	}
 }
 
-// A failed mint refuses without asking again for ten seconds; then it asks.
 func TestClientTokensWaitAfterAFailedMint(t *testing.T) {
 	f := newClientFixture(t)
 	f.issuer.answer = func(w http.ResponseWriter, n int32) {
@@ -279,7 +271,6 @@ func TestClientTokensWaitAfterAFailedMint(t *testing.T) {
 	}
 }
 
-// A refused token is minted again only once it is a minute old.
 func TestClientTokensInvalidateKeepsAYoungToken(t *testing.T) {
 	f := newClientFixture(t)
 	ctx := context.Background()

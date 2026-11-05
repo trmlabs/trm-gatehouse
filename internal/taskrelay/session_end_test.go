@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// tcpPair returns two ends of a loopback TCP connection.
 func tcpPair(t *testing.T) (net.Conn, net.Conn) {
 	t.Helper()
 	l, e := net.Listen("tcp", "127.0.0.1:0")
@@ -31,8 +30,6 @@ func tcpPair(t *testing.T) (net.Conn, net.Conn) {
 	return a, b
 }
 
-// session runs copyPostgres between a worker end and a broker end and
-// returns the far sides: what the worker reads, and what the broker writes.
 func session(t *testing.T, deadline time.Time) (worker, broker net.Conn) {
 	t.Helper()
 	worker, relayClient := tcpPair(t)
@@ -109,7 +106,6 @@ func readFull(c net.Conn, b []byte) (int, error) {
 	return n, nil
 }
 
-// An unreachable broker is named, not a silent close.
 func TestUnreachableBrokerIsNamed(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
@@ -155,8 +151,6 @@ func TestWithdrawnTaskClosesSilently(t *testing.T) {
 	}
 }
 
-// In session, a broker refusal is rewritten in fixed words with its severity
-// kept; a database server error passes through byte for byte.
 func TestInSessionErrors(t *testing.T) {
 	worker, broker := session(t, time.Now().Add(time.Minute))
 	server := errorBody("42601", `syntax error at or near "SELEC"`)
@@ -191,7 +185,6 @@ func TestInSessionErrors(t *testing.T) {
 	}
 }
 
-// The sidecar's own proof is unreadable: the worker hears it, not a silent close.
 func TestUnreadableProofIsNamed(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
@@ -214,8 +207,6 @@ func TestUnreadableProofIsNamed(t *testing.T) {
 	}
 }
 
-// A session the broker ends with its own FATAL (a planned restart, a lost
-// upstream) is told once: the relay adds no second ending after it.
 func TestBrokerFatalIsTheOnlyEnding(t *testing.T) {
 	worker, broker := session(t, time.Now().Add(time.Minute))
 	_, _ = broker.Write(encodePGFrame('E', reasonBody("FATAL", "08006", "upstream")))

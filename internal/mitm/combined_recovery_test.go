@@ -73,7 +73,7 @@ func verifyCombinedParentRecovery(t *testing.T, s combinedRecovery) {
 		v, ok := err.(*vaultapi.ResponseError)
 		return ok && v.StatusCode == http.StatusBadRequest
 	})
-	// This proof still resolves to a live, authorized caller. Only broker authority expired.
+	// This proof still resolves to a live caller; only broker authority expired.
 	identity, err := workloadidentity.New(s.identityConfig, s.store)
 	check(err, "identity setup")
 	if _, err := identity.ResolveForProxy(s.ctx, s.proof, ""); err != nil {
@@ -98,7 +98,7 @@ func verifyCombinedParentRecovery(t *testing.T, s combinedRecovery) {
 	})
 	check(s.pg.Shutdown(s.ctx), "old PG shutdown")
 	check(s.proxy.Shutdown(s.ctx), "old HTTP shutdown")
-	// Expired cleanup authorization must preserve durable evidence for recovery.
+	// Expired cleanup authorization must preserve durable evidence.
 	_ = s.minter.Close(s.ctx)
 	pending, err := s.store.ListDatabaseCleanup(s.ctx)
 	check(err, "read cleanup journal")
@@ -122,8 +122,7 @@ func verifyCombinedParentRecovery(t *testing.T, s combinedRecovery) {
 	t.Setenv("VAULT_TOKEN", parent.Auth.ClientToken)
 	hc, err := hashicorp.NewClient(s.ctx, slog.New(slog.DiscardHandler))
 	check(err, "fresh Vault client")
-	// Keep caller endpoints closed while replacement authority reconciles the
-	// persisted journal. Exercise the real old paths, not a readiness variable.
+	// Keep caller endpoints closed while replacement authority reconciles the journal.
 	s.request(s.proof, false)
 	if conn, err := s.connect(s.proof); err == nil {
 		_ = conn.Close(s.ctx)
@@ -133,8 +132,7 @@ func verifyCombinedParentRecovery(t *testing.T, s combinedRecovery) {
 	check(err, "recovered durable minter")
 	t.Cleanup(func() { _ = minter.Close(context.Background()) })
 	wait("fresh parent did not reconcile retained journal", func() bool { rows, err := reopened.ListDatabaseCleanup(s.ctx); return err == nil && len(rows) == 0 })
-	// Only create recovered listeners after the journal has converged. This
-	// fixture models trusted orchestration; it is not a deployed manager test.
+	// Create recovered listeners only after the journal has converged.
 	identity, err = workloadidentity.New(s.identityConfig, reopened)
 	check(err, "reload caller bindings")
 	provider := brokercore.NewStoreCredentialProvider(credStoreAdapter{reopened}, make([]byte, 32))

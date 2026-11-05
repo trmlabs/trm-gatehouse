@@ -8,9 +8,8 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// runAgentStartup completes agent authentication through the broker with the
-// given startup parameters and returns once the broker reports ReadyForQuery.
-// By then the fake upstream has recorded the startup message it received.
+// runAgentStartup completes agent authentication through the broker with the given startup parameters and
+// returns once the broker reports ReadyForQuery.
 func runAgentStartup(t *testing.T, brokerAddr string, params map[string]string) {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", brokerAddr, 5*time.Second)
@@ -43,11 +42,8 @@ func runAgentStartup(t *testing.T, brokerAddr string, params map[string]string) 
 	}
 }
 
-// TestBroker_BoundsForwardedStartupValues proves the broker bounds the value of
-// a forwardable startup parameter, not only its key. An agent reaching the
-// broker's PostgreSQL listener directly must not be able to clear a role-level
-// statement_timeout (or smuggle options through any allowlisted key) with a
-// value the relay would have refused. Invalid values are dropped, never sent.
+// TestBroker_BoundsForwardedStartupValues proves the broker bounds the value of a forwardable startup
+// parameter, not only its key.
 func TestBroker_BoundsForwardedStartupValues(t *testing.T) {
 	upstream := startFakeUpstream(t, authTrust, "")
 	upstream.forbidParam = "search_path"

@@ -48,7 +48,8 @@ You can use the Agent Vault CLI to scaffold any agent or application environment
     Add the `agent-vault` binary to the image where your workload runs.
 
     ```dockerfile
-    COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+    # Build gatehouse:local first with `make docker` in this repository.
+    COPY --from=gatehouse:local /usr/local/bin/agent-vault /usr/local/bin/agent-vault
     ```
 
     ### 2. Set the entrypoint

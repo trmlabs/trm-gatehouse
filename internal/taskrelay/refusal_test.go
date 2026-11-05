@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// refusedWithError reports whether the relay refused: it either closed at once
-// or sent one ErrorResponse and then closed. Nothing else may follow.
 func refusedWithError(c net.Conn) bool {
 	typ, _, e := readPGFrame(c, 4096)
 	if e != nil {
@@ -28,8 +26,6 @@ func errorBody(code, message string) []byte {
 	return append(b, 0)
 }
 
-// reasonBody is an ErrorResponse body as the broker authors it: with its
-// reason code and its own text, which must never reach the worker.
 func reasonBody(severity, code, reason string) []byte {
 	var b []byte
 	for _, f := range [][2]string{{"S", severity}, {"C", code}, {"M", "Agent Vault: broker detail that must not leak"}, {"G", reason}} {
@@ -38,7 +34,6 @@ func reasonBody(severity, code, reason string) []byte {
 	return append(b, 0)
 }
 
-// Each broker reason reaches the worker as its code and fixed words.
 func TestBrokerReasonsBecomeFixedWords(t *testing.T) {
 	for reason, want := range map[string][2]string{
 		"actor_limit":              {"53300", "this worker reached its session cap"},
@@ -81,10 +76,8 @@ func TestBrokerReasonsBecomeFixedWords(t *testing.T) {
 		"session_unbindable":       {"42501", "could not bind this runner session"},
 		"session_pod_mismatch":     {"42501", "already bound to another Pod"},
 		"requester_unverifiable":   {"42501", "could not verify the person behind this session"},
-		// A reason with no words of its own keeps its code and is named.
-		"some_new_check": {"42501", "not authorized for this database (some_new_check)"},
+		"some_new_check":           {"42501", "not authorized for this database (some_new_check)"},
 	} {
-		// Authorization decisions have many reasons and one code, 42501.
 		frame := refusalFrame(reasonBody("FATAL", want[0], reason))
 		if frame[0] != 'E' || sqlState(frame[5:]) != want[0] || !bytes.Contains(frame, []byte(want[1])) || bytes.Contains(frame, []byte("must not leak")) {
 			t.Errorf("%s: frame %q", reason, frame)
@@ -92,7 +85,6 @@ func TestBrokerReasonsBecomeFixedWords(t *testing.T) {
 	}
 }
 
-// Without a reason (an older broker), the known codes still keep fixed words.
 func TestKnownBrokerRefusalsKeepTheirCodeWithFixedText(t *testing.T) {
 	for code, want := range map[string]string{
 		"57P03": "Gatehouse is starting; retry in a few seconds",
@@ -128,9 +120,6 @@ func TestErrorFrameCarriesCodeAndMessage(t *testing.T) {
 	}
 }
 
-// Every reason the broker sends has words here, so the client and the relay
-// log can tell failures apart; an unknown or malformed reason is never echoed
-// unless it has the shape of a code.
 func TestEveryBrokerReasonHasWords(t *testing.T) {
 	for _, reason := range []string{"actor_limit", "audit_unavailable", "authentication", "capacity", "credential", "database_limit",
 		"ledger_unavailable", "no_database", "not_ready", "read_only", "upstream", "authorization_ended", "credential_expired", "deadline",

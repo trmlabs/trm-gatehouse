@@ -8,9 +8,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// Behind a shared proxy every sandbox has the proxy's address: on the
-// proxy-attested listener the auth-failure budget is per attested sandbox,
-// and on any other listener a header changes nothing.
+// On the proxy-attested listener the auth-failure budget is per attested sandbox; on any other listener a header changes nothing.
 func TestAuthFailureKeyIsPerAttestedSandbox(t *testing.T) {
 	attest := func(owner string) string {
 		return base64.RawURLEncoding.EncodeToString([]byte(`{"ownerUID":"` + owner + `"}`))

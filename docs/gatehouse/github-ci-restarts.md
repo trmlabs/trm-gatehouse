@@ -1,6 +1,6 @@
 # Restarting CI on an agent's own branch
 
-An agent whose pull request fell behind its base branch, or whose CI run failed for a reason outside its change, used to push an empty commit to start CI again. That leaves noise in the history and runs every workflow, not just the one that failed. A `github-api` catalog entry can now let agents do the two things a person would do instead: update the pull request's branch from its base, and run a workflow run again. Both are off unless a repository opts in, and both act only on a branch the agent could already push to. A rerun keeps the original run's actor, so it can repeat a run a person started on that branch (see Limits).
+Pushing an empty commit to restart CI adds noise to the history and runs every workflow, not just the one that failed. A `github-api` catalog entry can instead let agents update a pull request's branch from its base and run a workflow run again. Both are off unless a repository opts in, and both act only on a branch the agent could already push to. A rerun keeps the original run's actor, so it can repeat a run a person started on that branch (see Limits).
 
 ## Turning it on
 

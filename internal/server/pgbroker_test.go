@@ -34,8 +34,6 @@ func TestLoadDatabaseServices_Inline(t *testing.T) {
 	}
 }
 
-// Services outside the catalog are read-only logins when their role is, by
-// the catalog's naming, so the broker refuses temporary objects on them.
 func TestLoadDatabaseServices_ReadOnlyFollowsTheRoleName(t *testing.T) {
 	env := map[string]string{
 		"AGENT_VAULT_DB_SERVICES": `{"default":[{"name":"app","upstream":"127.0.0.1:5433","mount":"database","role":"staging.us.example.app-readonly"},
@@ -95,7 +93,6 @@ func TestLoadDatabaseServices_Errors(t *testing.T) {
 }
 
 func TestLoadDatabaseServices_InlineWinsOverFile(t *testing.T) {
-	// When both are set, the inline var takes precedence over the file.
 	env := map[string]string{
 		"AGENT_VAULT_DB_SERVICES":      `{"v":[{"name":"inline","upstream":"h:1","mount":"database","role":"ro"}]}`,
 		"AGENT_VAULT_DB_SERVICES_FILE": "/nonexistent/should-not-be-read.json",
@@ -137,27 +134,22 @@ func TestStaticDatabaseResolver(t *testing.T) {
 	r := NewStaticDatabaseResolver(byVault)
 	ctx := context.Background()
 
-	// Even a sole service requires an explicit match.
 	svc, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultName: "solo"}, "only")
 	if err != nil || svc.Name != "only" {
 		t.Fatalf("solo resolve = %+v, %v", svc, err)
 	}
 
-	// Multi: match by service name.
 	svc, err = r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultName: "multi"}, "writes")
 	if err != nil || svc.Name != "writes" {
 		t.Fatalf("name resolve = %+v, %v", svc, err)
 	}
-	// Multi: match by upstream database name.
 	svc, err = r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultName: "multi"}, "analytics")
 	if err != nil || svc.Name != "reads" {
 		t.Fatalf("database resolve = %+v, %v", svc, err)
 	}
-	// Multi: no match.
 	if _, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultName: "multi"}, "nope"); err == nil {
 		t.Fatal("expected no-match error")
 	}
-	// Unknown vault.
 	if _, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultName: "ghost"}, "x"); err == nil {
 		t.Fatal("expected error for a vault with no services")
 	}
@@ -166,7 +158,6 @@ func TestStaticDatabaseResolver(t *testing.T) {
 func TestStoreDatabaseResolver(t *testing.T) {
 	ms := newMockStore()
 	ctx := context.Background()
-	// Two services in vault "v-multi" (id "vid-multi"), one in a solo vault.
 	for _, svc := range []store.DatabaseService{
 		{VaultID: "vid-multi", Name: "reads", Upstream: "h:1", Database: "analytics", Mount: "database", Role: "ro", SSLMode: "require", MaxConns: 5},
 		{VaultID: "vid-multi", Name: "writes", Upstream: "h:2", Database: "ledger", Mount: "database", Role: "rw"},
@@ -178,7 +169,6 @@ func TestStoreDatabaseResolver(t *testing.T) {
 	}
 	r := NewStoreDatabaseResolver(ms)
 
-	// Keys by scope.VaultID (not name); maps Upstream->Addr and carries fields.
 	svc, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultID: "vid-multi", VaultName: "v-multi"}, "reads")
 	if err != nil {
 		t.Fatalf("resolve reads: %v", err)
@@ -188,30 +178,25 @@ func TestStoreDatabaseResolver(t *testing.T) {
 		t.Fatalf("mapped service = %+v, want %+v", *svc, want)
 	}
 
-	// Match by upstream database name.
 	if svc, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultID: "vid-multi"}, "ledger"); err != nil || svc.Name != "writes" {
 		t.Fatalf("database-name resolve = %+v, %v", svc, err)
 	}
-	// Sole service still matches its name.
 	if svc, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultID: "vid-solo"}, "only"); err != nil || svc.Name != "only" || !svc.ReadOnly {
 		t.Fatalf("solo resolve = %+v, %v", svc, err)
 	}
-	// No match in a multi-service vault.
 	if _, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultID: "vid-multi"}, "nope"); err == nil {
 		t.Fatal("expected no-match error")
 	}
-	// A vault with no services.
 	if _, err := r.ResolveDatabase(ctx, pgproxy.AgentScope{VaultID: "vid-empty", VaultName: "empty"}, "x"); err == nil {
 		t.Fatal("expected error for a vault with no services")
 	}
 }
 
 func TestSeedDatabaseServices(t *testing.T) {
-	ms := newMockStore() // seeds vault "default" (id root-ns-id)
+	ms := newMockStore()
 	srv := newTestServer(withStore(ms))
 	ctx := context.Background()
 
-	// A service already present (modelling a runtime edit) must not be clobbered.
 	if _, err := ms.UpsertDatabaseService(ctx, store.DatabaseService{
 		VaultID: "root-ns-id", Name: "edited", Upstream: "runtime:5432", Mount: "database", Role: "rw",
 	}); err != nil {
@@ -232,15 +217,12 @@ func TestSeedDatabaseServices(t *testing.T) {
 		t.Fatalf("expected exactly 1 seeded (fresh), got %d", seeded)
 	}
 
-	// The runtime edit survived (insert-if-absent did not clobber it).
 	if got, _ := ms.GetDatabaseService(ctx, "root-ns-id", "edited"); got == nil || got.Upstream != "runtime:5432" || got.Role != "rw" {
 		t.Fatalf("runtime edit was clobbered: %+v", got)
 	}
-	// The fresh service was inserted.
 	if got, _ := ms.GetDatabaseService(ctx, "root-ns-id", "fresh"); got == nil || got.Upstream != "new:5432" {
 		t.Fatalf("fresh service not seeded: %+v", got)
 	}
-	// The unknown vault was skipped, not created.
 	if list, _ := ms.ListDatabaseServices(ctx, "ghost"); len(list) != 0 {
 		t.Fatalf("unknown vault should be skipped, got %+v", list)
 	}

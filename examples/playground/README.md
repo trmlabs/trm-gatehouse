@@ -90,7 +90,8 @@ A CI job builds and exercises the same lab. Local checks do not establish that t
 ## Troubleshooting
 
 - **Corporate TLS inspection:** set `SSL_CERT_FILE` to a readable PEM bundle containing the proxy's CA. The launcher passes it as the `build_ca` build secret. Runtime trust contains only this lab's certificates.
-- **Port busy:** stop the other listener on port 8787, or stop an earlier copy with `make playground-down`.
-- **Compose missing:** Docker Desktop includes it. With a standalone Docker installation, install the Compose plugin. The local development launcher also recognizes the temporary pinned Compose binary used to build this draft.
+- **Port busy:** stop the other listener on port 8787, or stop an earlier copy with `make playground-down`, which also removes a lab started under the old project name.
+- **Docker is not running:** the launcher checks for a reachable Docker daemon first and prints one line if there is none. Start Docker Desktop, OrbStack, colima or your Docker service, then run `make playground` again.
+- **Compose missing:** Docker Desktop includes it. With a standalone Docker installation, install the Compose plugin.
 - **Shell disconnected:** the page tries to reconnect without replaying commands. Use **Reconnect terminal** for a fresh shell. Close other playground tabs if all four terminal slots are occupied. Custom files survive until a complete `make playground` reset.
 - **Keys or identities expired:** restart the lab. It is intended for short local sessions, not persistent hosting.

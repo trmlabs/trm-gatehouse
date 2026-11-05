@@ -26,21 +26,8 @@ const (
 	ActionDelete Action = "delete" // remove existing
 )
 
-// Service is a proposed broker service change. Identity is Name; it is
-// required for ActionSet and validated upstream. ActionDelete may omit
-// Name to fall back to host-based resolution: server resolves against
-// existing services by Host (and Path, when scoped via inline form) —
-// unique match fills Name; 2+ matches return 409 with a candidate list;
-// 0 matches return 404 (or 409 at apply time).
-//
-// Host accepts bare, wildcard, or inline path-scoped (`slack.com/api/*`)
-// forms; ingest splits the inline form before validation and MarshalJSON
-// re-joins on read.
-//
-// For set actions, at least one of Auth or Enabled must be specified.
-// Enabled-only on an existing Name overlays just the flag (enable/disable
-// flow); Substitutions require Auth since merge only carries them on
-// full replacements.
+// Service is a proposed broker service change; Name is required for ActionSet, and ActionDelete may resolve it by Host.
+// A set action needs Auth or Enabled; Enabled-only overlays just the flag.
 type Service struct {
 	Action        Action                `json:"action"`
 	Name          string                `json:"name,omitempty"`
@@ -74,10 +61,7 @@ func (s Service) MarshalJSON() ([]byte, error) {
 	return json.Marshal(a)
 }
 
-// CredentialSlot declares a credential operation in a proposal.
-// For "set": value is optional, if provided, it will be encrypted at creation time.
-// If omitted, the human must supply it during approval.
-// For "delete": only key is required.
+// CredentialSlot declares a credential operation; a set value is encrypted at creation, else the approver supplies it.
 type CredentialSlot struct {
 	Action             Action       `json:"action"`
 	Key                string       `json:"key"`

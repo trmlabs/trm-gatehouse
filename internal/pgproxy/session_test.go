@@ -210,7 +210,6 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// recheckResolver records, per call, whether it was an admission or a recheck.
 type recheckResolver struct {
 	svc  *DatabaseService
 	mu   sync.Mutex

@@ -53,3 +53,4 @@ make docker       # Multi-stage Docker image; data persisted at /data/.agent-vau
 - When a change affects operator-facing behavior, update [README.md](README.md).
 - Whenever a new feature lands, scan [docs/](docs/) for pages that need a matching update — quickstart, guides, self-hosting, learn, and reference all mirror runtime behavior and drift fast.
 - When the *mental model* in this file drifts (new core concept, renamed ingress path, changed permission axes), update this file — but don't re-bloat it with reference material that belongs in the skill files or `--help`.
+- Comments are 2 lines at most. Put reasons in the PR body, not in code. If one truly needs more, start it with `allow-long-comment:`; reviewers will ask why.

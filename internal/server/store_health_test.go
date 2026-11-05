@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// Readiness reads the store's reachability from the background check: it
-// follows the last good ping and tolerates a few missed ones, so one slow
-// probe cannot pull a healthy replica out of the Service.
 func TestStoreReachabilityFollowsTheBackgroundPing(t *testing.T) {
 	srv := newTestServer()
 	now := time.Now()

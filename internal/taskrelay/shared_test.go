@@ -31,8 +31,6 @@ const (
 	otherDigest   = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 )
 
-// sandboxPod is an agent-sandbox Pod: owned by its Sandbox, running one
-// approved image, at ip.
 func sandboxPod(name, uid, ip string) map[string]any {
 	return map[string]any{
 		"metadata": map[string]any{"name": name, "namespace": "agent-sandboxes", "uid": uid, "resourceVersion": "5",
@@ -48,8 +46,6 @@ func sharedConfig() *SharedConfig {
 		ImageDigests: []string{sandboxDigest}, MaxPodSeconds: 3600}
 }
 
-// fakeAPI serves a namespace's Pods: one list, then a watch that streams the
-// events the test sends.
 type fakeAPI struct {
 	srv    *httptest.Server
 	mu     sync.Mutex
@@ -107,21 +103,16 @@ type sharedFixture struct {
 	plaintext bool
 }
 
-// startShared runs the relay in shared mode in front of a broker that
-// records each CONNECT's attestation and echoes the tunnel.
 func startShared(t *testing.T, postgres bool) *sharedFixture {
 	t.Helper()
 	return startSharedWith(t, postgres, false)
 }
 
-// startSharedWith can run the listeners in plaintext, with no certificate.
 func startSharedWith(t *testing.T, postgres, plaintext bool, options ...func(*FixedConfig)) *sharedFixture {
 	t.Helper()
 	return startSharedPods(t, postgres, plaintext, []map[string]any{sandboxPod("sandbox-a", "pod-a", "127.0.0.1")}, options...)
 }
 
-// startSharedPods is startSharedWith with the agent Pods the API lists at
-// start.
 func startSharedPods(t *testing.T, postgres, plaintext bool, pods []map[string]any, options ...func(*FixedConfig)) *sharedFixture {
 	t.Helper()
 	f := newRelayFixture(t)
@@ -169,7 +160,6 @@ func startSharedPods(t *testing.T, postgres, plaintext bool, pods []map[string]a
 	return sf
 }
 
-// dial connects to a listener, in TLS unless the fixture is plaintext.
 func (sf *sharedFixture) dial(t *testing.T, address string) net.Conn {
 	t.Helper()
 	if !sf.plaintext {
@@ -184,8 +174,6 @@ func (sf *sharedFixture) dial(t *testing.T, address string) net.Conn {
 	return c
 }
 
-// connect opens a tunnel through the shared proxy and returns its reader and
-// the status, with extra CONNECT header lines.
 func (sf *sharedFixture) connect(t *testing.T, extra string) (net.Conn, *bufio.Reader, int) {
 	t.Helper()
 	c := sf.dial(t, sf.f.c.Connect.Listen)
@@ -203,13 +191,10 @@ func tunnelCloses(t *testing.T, c net.Conn, b *bufio.Reader) bool {
 	t.Helper()
 	c.SetReadDeadline(time.Now().Add(4 * time.Second))
 	_, e := b.ReadByte()
-	// A read that times out found the tunnel still open.
 	var timeout net.Error
 	return e != nil && (!errors.As(e, &timeout) || !timeout.Timeout())
 }
 
-// The shared proxy attests the agent Pod at the connection's source, and
-// drops the tunnel once that Pod stops qualifying.
 func TestSharedProxyAttestsThenDropsTheAgent(t *testing.T) {
 	t.Parallel()
 	sf := startShared(t, false)
@@ -228,7 +213,6 @@ func TestSharedProxyAttestsThenDropsTheAgent(t *testing.T) {
 	if _, e := io.ReadFull(b, echo); e != nil || string(echo) != "hello" {
 		t.Fatal("tunnel did not relay")
 	}
-	// The Sandbox is deleted: its Pod starts terminating.
 	gone := sandboxPod("sandbox-a", "pod-a", "127.0.0.1")
 	gone["metadata"].(map[string]any)["deletionTimestamp"] = time.Now().UTC().Format(time.RFC3339)
 	sf.api.send(t, "MODIFIED", gone)
@@ -240,8 +224,6 @@ func TestSharedProxyAttestsThenDropsTheAgent(t *testing.T) {
 	}
 }
 
-// The recheck compares the controller too: the same Pod under a replaced
-// Sandbox is a different agent.
 func TestSharedProxyDropsTheAgentWhenItsSandboxChanges(t *testing.T) {
 	t.Parallel()
 	sf := startShared(t, false)
@@ -258,8 +240,6 @@ func TestSharedProxyDropsTheAgentWhenItsSandboxChanges(t *testing.T) {
 	}
 }
 
-// A client cannot speak for the proxy: an attestation or PROXY header it
-// sends is refused before anything reaches the broker.
 func TestSharedProxyRefusesClientAttestations(t *testing.T) {
 	t.Parallel()
 	sf := startShared(t, true)
@@ -277,7 +257,6 @@ func TestSharedProxyRefusesClientAttestations(t *testing.T) {
 			t.Errorf("PostgreSQL stream opening %q got a password request", start)
 		}
 	}
-	// Positive control: a valid startup does get the password request.
 	c := sf.f.dial(t, sf.f.c.PostgresBindings[0].Listen)
 	startup, _ := (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber,
 		Parameters: map[string]string{"user": "workload", "database": "appdb"}}).Encode(nil)
@@ -294,7 +273,6 @@ func TestSharedProxyRefusesClientAttestations(t *testing.T) {
 	}
 }
 
-// Every Pod that is not exactly one admissible agent is refused.
 func TestSharedLookupRefusals(t *testing.T) {
 	ip := netip.MustParseAddr("10.8.0.4")
 	cases := map[string]func(p map[string]any) []map[string]any{
@@ -353,13 +331,11 @@ func TestSharedLookupRefusals(t *testing.T) {
 			t.Errorf("%s: admitted %+v", name, a)
 		}
 	}
-	// The positive control, and a stale watch.
 	cache := &podCache{config: sharedConfig(), now: time.Now, pods: map[string]*agentPod{}, byIP: map[netip.Addr]map[string]struct{}{}, inSync: map[string]bool{}, lostAt: map[string]time.Time{}}
 	cache.replace("agent-sandboxes", decodePods(t, []map[string]any{sandboxPod("sandbox-a", "pod-a", ip.String())}))
 	if _, ok := cache.lookup(ip); !ok {
 		t.Fatal("admissible agent refused")
 	}
-	// The watch goes down: Pods stay admissible for outOfSync, then not.
 	cache.lost("agent-sandboxes")
 	if _, ok := cache.lookup(ip); !ok {
 		t.Fatal("refused at once when the watch went down")
@@ -433,9 +409,6 @@ func TestSharedConfigValidation(t *testing.T) {
 	}
 }
 
-// A shared proxy may serve plaintext on the Pod network: CONNECT works, any
-// other request is refused, a PostgreSQL client asking for TLS is told no and
-// goes on, and admissions are audited with the agent Pod and its images.
 func TestSharedProxyPlaintext(t *testing.T) {
 	t.Parallel()
 	sf := startSharedWith(t, true, true)
@@ -458,7 +431,6 @@ func TestSharedProxyPlaintext(t *testing.T) {
 			t.Errorf("non-CONNECT request admitted: %q", request)
 		}
 	}
-	// sslmode=prefer: SSLRequest, 'N', then the startup gets the password request.
 	c := sf.dial(t, sf.f.c.PostgresBindings[0].Listen)
 	c.Write([]byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f})
 	answer := make([]byte, 1)
@@ -479,8 +451,6 @@ func TestSharedProxyPlaintext(t *testing.T) {
 	}
 }
 
-// Upstreams to the broker are TLS in every mode; a shared config cannot
-// leave out the broker's name or CA, nor give a certificate without its key.
 func TestSharedUpstreamsStayTLS(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
@@ -508,7 +478,6 @@ func TestSharedUpstreamsStayTLS(t *testing.T) {
 		c.Connect = &connect
 		mutate(&c)
 		if name == "audit to stdout, paired" {
-			// Paired relays keep a durable, synced audit file.
 			if _, err := openAudit(c, func(string) error { return nil }); err == nil {
 				t.Errorf("%s: accepted", name)
 			}
@@ -525,8 +494,6 @@ func TestSharedUpstreamsStayTLS(t *testing.T) {
 	}
 }
 
-// Image prefixes: each namespace runs what its tenant path pulled; the proxy
-// image in the same repository never counts; platform digests run anywhere.
 func TestSharedImagePrefixes(t *testing.T) {
 	const teamA = "registry.example.com/example-project/example-images/team-a/"
 	ip := netip.MustParseAddr("10.8.0.4")
@@ -573,8 +540,6 @@ func TestSharedImagePrefixes(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// With no image registry set, no prefix is valid, so the relay refuses
-	// a namespace that names one.
 	registry := imagerule.Registry()
 	t.Cleanup(func() { _ = imagerule.SetRegistry(registry) })
 	_ = imagerule.SetRegistry("")
@@ -584,15 +549,11 @@ func TestSharedImagePrefixes(t *testing.T) {
 	s.ImagePrefixes = map[string]string{"agent-sandboxes": teamA}
 	c.Shared = &s
 	c.Connect = &ConnectConfig{Listen: "0.0.0.0:8443", Upstream: f.upstream(t, "broker.internal:16443"), AllowedTargets: []string{"api.example.com:443"}}
-	// The refusal names the setting, so a deployment that missed it can tell.
 	if err := c.Validate(time.Now()); !errors.Is(err, errConfig) || !strings.Contains(fmt.Sprint(err), imagerule.RegistryEnv) {
 		t.Errorf("a prefix with no image registry set: %v", err)
 	}
 }
 
-// A standing shared proxy's configuration: no deadline, no
-// certificate, audit to stdout, image prefixes covering every namespace and
-// no digests. With no listeners it is refused; with one it loads.
 func TestStandingSharedConfig(t *testing.T) {
 	dir := t.TempDir()
 	write := func(withListener bool) string {
@@ -631,8 +592,6 @@ func withRequester(pod map[string]any, requester string) map[string]any {
 	return pod
 }
 
-// connectUntil retries a CONNECT until it gets want, for cache updates that
-// land a moment after the watch event.
 func (sf *sharedFixture) connectUntil(t *testing.T, want int) (net.Conn, *bufio.Reader, int) {
 	t.Helper()
 	for end := time.Now().Add(3 * time.Second); ; {
@@ -648,9 +607,6 @@ func (sf *sharedFixture) connectUntil(t *testing.T, want int) (net.Conn, *bufio.
 	}
 }
 
-// In a namespace configured to carry it, the attestation and the admission
-// row name the requester from the Pod's annotation. A Pod there without a
-// valid one is not admitted, and an open connection ends if it changes.
 func TestSharedProxyAttestsTheRequester(t *testing.T) {
 	t.Parallel()
 	sf := startSharedWith(t, false, false, func(c *FixedConfig) { c.Shared.RequesterNamespaces = []string{"agent-sandboxes"} })
@@ -688,8 +644,6 @@ func TestSharedProxyAttestsTheRequester(t *testing.T) {
 	}
 }
 
-// Elsewhere the attestation never carries a requester, even when the Pod has
-// the annotation, and the namespace list must name configured namespaces.
 func TestSharedProxyRequesterIsOptIn(t *testing.T) {
 	s := sharedConfig()
 	pod := decodePods(t, []map[string]any{withRequester(sandboxPod("sandbox-a", "pod-a", "127.0.0.1"), "alice.smith@example.com")})[0]

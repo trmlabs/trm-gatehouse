@@ -60,20 +60,12 @@ type Verifier struct {
 	// MaxUnsigned bounds the time between the last checkpoint and the last
 	// row of each chain. Zero disables the check.
 	MaxUnsigned time.Duration
-	// SortBySeq checks each chain in sequence order instead of input order,
-	// for exports that do not preserve order. Reorder findings are then
-	// impossible, but a moved row still cannot hide an edit: sequence numbers
-	// and links are inside the MAC.
+	// SortBySeq checks each chain in sequence order for exports that do not preserve order; sequence numbers and links are inside the MAC, so a moved row still cannot hide an edit.
 	SortBySeq bool
-	// PartialHistory accepts that each replica's earliest exported boot links
-	// to a boot outside the export. Without it, every link must resolve.
+	// PartialHistory accepts that each replica's earliest exported boot links to a boot outside the export.
 	PartialHistory bool
-	// Heads, when set, is the store's head for every replica (agent-vault
-	// audit heads). Each replica's newest boot must be present and reach its
-	// head's checkpoint, so deleting a whole boot or cutting a tail back to an
-	// earlier checkpoint is a finding even for a boot with no successor. Rows
-	// after the newest persisted checkpoint (at most one checkpoint interval)
-	// are bounded only by MaxUnsigned.
+	// Heads, when set, is the store's head for every replica. Each replica's newest boot must be present and reach
+	// its checkpoint, so deleting a boot or cutting a tail is a finding; later rows are bounded only by MaxUnsigned.
 	Heads []Head
 }
 
@@ -98,9 +90,7 @@ type chainState struct {
 	lastKey int // key version of the highest-sequence row
 }
 
-// Verify reads newline-delimited rows, either bare or wrapped as Cloud
-// Logging entries ({"jsonPayload": row}). Other lines are ignored. Rows are
-// checked in input order per chain, so moving a line is a reorder.
+// Verify reads newline-delimited rows, bare or wrapped as Cloud Logging entries ({"jsonPayload": row}), ignoring other lines.
 func (v Verifier) Verify(r io.Reader) (Report, error) {
 	var report Report
 	chains := map[chainKey][]Row{}
@@ -160,9 +150,7 @@ func (v Verifier) Verify(r io.Reader) (Report, error) {
 	return report, nil
 }
 
-// verifyHeads checks the export against the store: every replica's newest
-// boot is present and reaches its persisted checkpoint, and no exported boot
-// is newer than the store's (or belongs to a replica the store never saw).
+// verifyHeads checks that each replica's newest boot reaches its persisted checkpoint and that no exported boot is newer than the store's.
 func (v Verifier) verifyHeads(order []chainKey, states map[chainKey]chainState) []Finding {
 	var findings []Finding
 	heads := map[string]Head{}
@@ -189,8 +177,7 @@ func (v Verifier) verifyHeads(order []chainKey, states map[chainKey]chainState) 
 	return findings
 }
 
-// verifyBootLink checks that boot N's first row names boot N-1 and that boot
-// N-1 is present and reaches the checkpoint row boot N recorded for it.
+// verifyBootLink checks that boot N names boot N-1 and that N-1 reaches the checkpoint N recorded.
 func (v Verifier) verifyBootLink(k chainKey, states map[chainKey]chainState, earliest bool) []Finding {
 	start := states[k].start
 	if start == nil {
@@ -212,8 +199,7 @@ func (v Verifier) verifyBootLink(k chainKey, states map[chainKey]chainState, ear
 		}
 		return finding(FindingMissingBoot, start.PrevBoot, 0)
 	}
-	// A boot never starts under an older key than its predecessor ended on, so
-	// a retired key cannot fabricate a later boot.
+	// A retired key must not fabricate a later boot.
 	if start.KeyVersion < previous.lastKey {
 		return finding(FindingKeyDowngrade, k.boot, 0)
 	}
@@ -287,10 +273,8 @@ func (v Verifier) verifyChain(k chainKey, rows []Row, keys map[int][]byte) ([]Fi
 		case !hmac.Equal([]byte(row.computeMAC(key)), []byte(row.MAC)):
 			add(FindingEdit, row.Seq)
 		case row.MACVersion != 0 && (row.MACVersion < 2 || row.MACVersion > MACVersionCurrent):
-			// An unknown version is never trusted.
 			add(FindingEdit, row.Seq)
 		case row.MACVersion < 2 && row.v2Only():
-			// Fields a v1 MAC does not cover cannot be trusted on a v1 row.
 			add(FindingEdit, row.Seq)
 		case row.MACVersion < 3 && row.v3Only():
 			add(FindingEdit, row.Seq)
@@ -336,8 +320,7 @@ func (v Verifier) verifyChain(k chainKey, rows []Row, keys map[int][]byte) ([]Fi
 			if row.Seq == prev.Seq+1 && row.Prev != prev.MAC {
 				add(FindingBrokenLink, row.Seq)
 			}
-			// Only a rotation row may move to a newer key, so a leaked old key
-			// cannot be used to append rows after a rotation.
+			// Only a rotation row may move to a newer key, so a leaked old key cannot append after a rotation.
 			rotated := row.Event == EventKeyRotated && row.PrevKey == prev.KeyVersion && row.KeyVersion > row.PrevKey
 			if row.KeyVersion != prev.KeyVersion && !rotated || row.Event == EventKeyRotated && !rotated {
 				add(FindingKeyChange, row.Seq)
@@ -364,8 +347,7 @@ func (v Verifier) verifyChain(k chainKey, rows []Row, keys map[int][]byte) ([]Fi
 			prev = &rows[i]
 		}
 	}
-	// A boot signs a checkpoint as it starts, so one with none at all is
-	// unsigned however short: anyone holding a key could have written it.
+	// A boot signs a checkpoint as it starts, so one with none is unsigned however short.
 	switch {
 	case prev == nil:
 	case !signedAny:

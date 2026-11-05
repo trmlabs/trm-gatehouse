@@ -1,6 +1,5 @@
-// Package entitlement decides whether an agent's request may use a catalog
-// entry: the lesser of the pool's tier ceiling and, for human sessions, the
-// verified person's live group membership. Every lookup error refuses.
+// Package entitlement decides whether an agent's request may use a catalog entry: the lesser of the pool's tier ceiling and, for humans,
+// the verified person's live group membership. Every lookup error refuses.
 package entitlement
 
 import (
@@ -13,13 +12,10 @@ import (
 	"time"
 )
 
-// maxTrackedPeople bounds the answer cache and lookup budgets, which start
-// over when exceeded. It is sized for every person in a large organization
-// times a few group sets; an entry is a few hundred bytes.
+// maxTrackedPeople bounds the answer cache and lookup budgets, which start over when exceeded; sized for a large organization times a few group sets.
 const maxTrackedPeople = 200000
 
-// MaxCacheTTL bounds how long a person's groups are trusted. Offboarding takes
-// effect within it, because the runner's session tokens cannot be revoked.
+// MaxCacheTTL bounds how long a person's groups are trusted; offboarding takes effect within it because session tokens cannot be revoked.
 const MaxCacheTTL = 5 * time.Minute
 
 // Person is one directory user and the subset of asked groups it belongs to.
@@ -43,31 +39,17 @@ type cached struct {
 // ErrLookupLimited refuses a directory lookup over the per-person budget.
 var ErrLookupLimited = errors.New("entitlement lookups over budget")
 
-// ErrNotInDirectory is a lookup the directory answered: it has no account for
-// the subject. Waiting does not make one appear, so it refuses as lasting,
-// apart from a directory that did not answer.
+// ErrNotInDirectory is a lookup the directory answered with no account for the subject; it refuses as lasting, unlike a directory that did not answer.
 var ErrNotInDirectory = errors.New("subject not in directory")
 
 const (
-	// DefaultLookupsPerMinute is each person's directory budget unless the
-	// operator sets Cache.LookupsPerMinute (the broker's
-	// AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE). A worker looping on a T2
-	// entry asks once per request; past the budget it is refused before the
-	// directory is asked, so it cannot get the tenant throttled and fail every
-	// decision in the fleet.
+	// DefaultLookupsPerMinute is each person's directory budget unless Cache.LookupsPerMinute sets it (AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE).
+	// Past it a lookup is refused before the directory is asked, so a looping worker cannot get the tenant throttled.
 	DefaultLookupsPerMinute = 60
-	// DefaultMaxLookupsPerMinute is the highest per-person budget the broker
-	// accepts unless the operator raises it
-	// (AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX). Lookups of one person
-	// and group set in flight together share one directory call, so a
-	// person's lookups grow with the group sets they use and the directory's
-	// round trip, not with how many agents they run: 100 a second leaves room
-	// for a fleet of 10,000 to 100,000 concurrent agents. Each cache keeps
-	// its own budget, and a broker process has one for HTTP checks and one
-	// for PostgreSQL.
+	// DefaultMaxLookupsPerMinute is the highest per-person budget accepted unless raised (AGENT_VAULT_ENTITLEMENT_LOOKUPS_PER_MINUTE_MAX).
+	// Concurrent lookups of one person and group set share a directory call, so 100 a second covers 10,000 to 100,000 agents; each cache keeps its own budget.
 	DefaultMaxLookupsPerMinute = 6000
-	// DefaultRecentAnswer is how old an answer a fresh lookup over budget
-	// still accepts instead of refusing.
+	// DefaultRecentAnswer is how old an answer a fresh lookup over budget still accepts.
 	DefaultRecentAnswer = 5 * time.Second
 	lookupTimeout       = 10 * time.Second
 )
@@ -79,9 +61,7 @@ type flight struct {
 	err    error
 }
 
-// Cache wraps a Source with a short per-person, per-group-set cache. Lookups
-// of one person and group set in flight together share one directory call,
-// and each person has a directory budget.
+// Cache wraps a Source with a short per-person, per-group-set cache; concurrent lookups of one question share one directory call, and each person has a directory budget.
 type Cache struct {
 	Source           Source
 	TTL              time.Duration
@@ -108,16 +88,12 @@ func (c *Cache) Lookup(ctx context.Context, subject string, groups []string) (Pe
 	return c.lookup(ctx, subject, groups, false)
 }
 
-// Fresh asks the source now, ignoring any cached answer, and caches the result.
-// It joins a lookup of the same question already in flight, and over the
-// person's budget it accepts an answer at most RecentAnswer old or refuses.
+// Fresh asks the source now, ignoring any cached answer, and caches the result. Over the person's budget it accepts an answer at most RecentAnswer old or refuses.
 func (c *Cache) Fresh(ctx context.Context, subject string, groups []string) (Person, time.Duration, error) {
 	return c.lookup(ctx, subject, groups, true)
 }
 
-// Purge forgets every cached answer about subject, so its next lookup of any
-// group set asks the source. A lookup already in flight neither refills the
-// cache nor serves anyone who asks after the purge.
+// Purge forgets every cached answer about subject; a lookup already in flight neither refills the cache nor serves anyone who asks after.
 func (c *Cache) Purge(subject string) {
 	if c == nil {
 		return
@@ -138,8 +114,7 @@ func (c *Cache) Purge(subject string) {
 	}
 }
 
-// spend records one directory call for subject if its budget allows. The
-// caller holds c.mu.
+// spend records one directory call for subject if its budget allows; the caller holds c.mu.
 func (c *Cache) spend(subject string, now time.Time) bool {
 	limit := c.LookupsPerMinute
 	if limit <= 0 {
@@ -259,8 +234,7 @@ type Entry struct {
 type Requester struct {
 	Kind    string // "person", "agent", "workload", "automation" or "none"
 	Subject string // the person's email; for an automation, its id
-	// Granted is set for an Automation the catalog lists the entry for. It
-	// is the only grant on a cursor-automation pool; false refuses there.
+	// Granted is set for an Automation the catalog lists the entry for; it is the only grant on a cursor-automation pool.
 	Granted bool
 }
 
@@ -284,16 +258,8 @@ func WithRecheck(ctx context.Context) context.Context {
 
 func isRecheck(ctx context.Context) bool { v, _ := ctx.Value(recheckKey{}).(bool); return v }
 
-// Decide applies the lesser of the pool ceiling and the requester's entitlements.
-// A T2 admission always asks the directory now, within the person's lookup
-// budget; T1 admissions and rechecks may use the cache. A refusal on a recheck
-// or a fresh answer forgets everything cached about the person, so none of
-// their other sessions or entries rides a stale answer.
-//
-// On a cursor-automation pool, at every tier, T0 included, the requester must
-// be an Automation the catalog lists the entry for (Granted), and nothing else
-// about it is checked: that listing is the approval, so no group is checked
-// and the directory is never asked. The pool's ceiling still caps the tier.
+// Decide applies the lesser of the pool ceiling and the requester's entitlements. A T2 admission always asks the directory now; T1 admissions and rechecks may use the cache.
+// On a cursor-automation pool, at every tier, the requester must be an Automation the catalog lists the entry for (Granted); no group is checked and the directory is never asked.
 func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Requester) Decision {
 	tier := entry.Tier
 	if tier == "" {
@@ -346,8 +312,7 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.Outcome = "no_identity"
 		return d
 	}
-	// No directory configured is an operator's to fix, never a passing
-	// outage: waiting does not make one appear.
+	// No directory configured is the operator's to fix, never a passing outage.
 	if len(entry.Requires) == 0 || cache == nil || cache.Source == nil {
 		d.Outcome = "entitlement_config"
 		return d
@@ -371,8 +336,7 @@ func Decide(ctx context.Context, cache *Cache, pool Pool, entry Entry, who Reque
 		d.ObjectID, d.Department, d.Allowed, d.Outcome = person.ObjectID, person.Department, true, "entitled"
 		return d
 	}
-	// A recheck that refuses, or a fresh answer that refuses, forgets the
-	// person: none of their other sessions or entries rides an older answer.
+	// A refusing recheck or fresh answer forgets the person, so none of their other sessions rides an older answer.
 	if isRecheck(ctx) || (fresh && (err == nil || errors.Is(err, ErrNotInDirectory))) {
 		cache.Purge(who.Subject)
 	}

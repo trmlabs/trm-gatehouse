@@ -8,9 +8,7 @@ import (
 	"strings"
 )
 
-// Config describes everything BuildRunArgs needs to produce a fully
-// resolved `docker run` argv. All values are already decided (mode,
-// session ID, network, TTY) — this type does no I/O.
+// Config holds the already-decided values BuildRunArgs turns into a `docker run` argv; it does no I/O.
 type Config struct {
 	ImageRef         string // "agent-vault/isolation:<hash>" or user --image
 	SessionID        string // 16 hex chars; names the network and per-invocation volume
@@ -34,11 +32,7 @@ type parsedMount struct {
 	ReadOnly bool
 }
 
-// reservedContainerDsts are bind-mount destinations agent-vault owns.
-// A user --mount landing on one of these would silently replace our
-// own mount and undo the isolation guarantees. The entrypoint + firewall
-// scripts are the image's trust path — overwriting either pre-entrypoint
-// would be a direct break-out.
+// reservedContainerDsts are mount destinations agent-vault owns; overlaying one would undo isolation.
 var reservedContainerDsts = []string{
 	"/",
 	"/etc",
@@ -74,11 +68,7 @@ func BuildRunArgs(cfg Config) ([]string, error) {
 
 	home, _ := os.UserHomeDir()
 
-	// The CWD is bind-mounted read-write at /workspace. Subject it to
-	// the same host-src validation as user --mount flags so running
-	// `vault run --isolation=container` from inside ~/.agent-vault (which
-	// holds the encrypted CA key + vault database) does not expose
-	// that dir to the container.
+	// Validate the CWD mount like a user --mount so running from ~/.agent-vault does not expose it.
 	resolvedWorkDir, err := filepath.EvalSymlinks(cfg.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving workdir: %w", err)
@@ -108,16 +98,8 @@ func BuildRunArgs(cfg Config) ([]string, error) {
 	args = append(args,
 		"--init",
 		"--network", cfg.NetworkName,
-		// NET_ADMIN/NET_RAW: init-firewall.sh installs iptables rules.
-		// SETUID/SETGID: gosu(8) drops root to the claude user in entrypoint.sh.
-		// KILL: tini (PID 1, UID 0) forwards TTY signals (SIGWINCH on
-		// resize, SIGINT on ^C) to the child running as a different UID.
-		// With --cap-drop ALL root loses the "bypass capability checks"
-		// shortcut, so kill() across UIDs returns EPERM without CAP_KILL
-		// and tini fatals on the first terminal resize.
-		// Docker does not grant these as *ambient* caps to non-root processes,
-		// so claude post-gosu has an empty effective cap set — it cannot
-		// exercise any of them.
+		// NET_ADMIN/NET_RAW for the firewall, SETUID/SETGID for gosu, KILL so tini can forward TTY signals
+		// across UIDs; none are ambient for the non-root claude user.
 		"--cap-drop", "ALL",
 		"--cap-add", "NET_ADMIN",
 		"--cap-add", "NET_RAW",
@@ -134,9 +116,7 @@ func BuildRunArgs(cfg Config) ([]string, error) {
 	if cfg.NoFirewall {
 		args = append(args, "-e", "AGENT_VAULT_NO_FIREWALL=1")
 	}
-	// HOST_UID/HOST_GID let entrypoint.sh remap the baked-in claude user
-	// to the invoking user so bind-mounted state (see HostAgentDir) is
-	// readable/writable on the host without a chown dance.
+	// HOST_UID/HOST_GID remap the claude user so bind-mounted state is writable on the host.
 	if cfg.HostUID > 0 {
 		args = append(args, "-e", fmt.Sprintf("HOST_UID=%d", cfg.HostUID))
 		args = append(args, "-e", fmt.Sprintf("HOST_GID=%d", cfg.HostGID))
@@ -150,17 +130,13 @@ func BuildRunArgs(cfg Config) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolving HostAgentDir: %w", err)
 		}
-		// Same host-src validation as user --mount (reject ~/.agent-vault
-		// and the docker socket), so a symlinked agent dir can't launder
-		// access to encrypted vault data.
+		// Same host-src validation as user --mount, so a symlinked agent dir cannot launder access.
 		if err := validateHostSrc(resolvedAgentDir, home); err != nil {
 			return nil, fmt.Errorf("HostAgentDir: %w", err)
 		}
 		args = append(args, "-v", resolvedAgentDir+":"+ContainerClaudeHome)
 
-		// Claude reads ~/.claude.json as a sibling file to the dir.
-		// Bind it if present; bail-if-absent keeps docker from
-		// auto-creating a directory where Claude expects a file.
+		// Bind only if present so docker does not create a directory where Claude expects a file.
 		configPath := filepath.Join(filepath.Dir(resolvedAgentDir), ".claude.json")
 		if resolvedConfig, err := filepath.EvalSymlinks(configPath); err == nil {
 			if err := validateHostSrc(resolvedConfig, home); err != nil {
@@ -189,10 +165,7 @@ func BuildRunArgs(cfg Config) ([]string, error) {
 	return args, nil
 }
 
-// parseAndValidateMount parses a --mount "src:dst[:ro|rw]" value, resolves
-// symlinks on the host src, and rejects reserved paths. homeDir may be
-// empty (e.g. in tests without $HOME); the $HOME-based check is skipped
-// in that case.
+// parseAndValidateMount parses a --mount "src:dst[:ro|rw]" value, resolves host symlinks, and rejects reserved paths.
 func parseAndValidateMount(raw, homeDir string) (parsedMount, error) {
 	parts := strings.Split(raw, ":")
 	if len(parts) < 2 || len(parts) > 3 {
@@ -240,10 +213,7 @@ func validateHostSrc(resolved, homeDir string) error {
 		return errors.New("--mount: refusing to bind the docker socket (would undo every isolation guarantee)")
 	}
 	if homeDir != "" {
-		// Canonicalize homeDir so the prefix comparison is apples-to-apples
-		// with the already-EvalSymlinks'd resolved src. On macOS `/var` is a
-		// symlink to `/private/var`, and `$TMPDIR` lives under `/var/folders`,
-		// so without this the comparison silently misses.
+		// Canonicalize homeDir (macOS /var is a symlink to /private/var) or the prefix check misses.
 		canonicalHome := homeDir
 		if c, err := filepath.EvalSymlinks(homeDir); err == nil {
 			canonicalHome = c
@@ -257,10 +227,7 @@ func validateHostSrc(resolved, homeDir string) error {
 	return nil
 }
 
-// isDockerSocket returns true for anything that points at a docker
-// control socket, canonicalizing for the macOS /var→/private/var
-// indirection and double-checking via file mode for unusual mount
-// setups.
+// isDockerSocket reports whether path is a docker control socket, canonicalizing macOS symlinks.
 func isDockerSocket(resolved string) bool {
 	for _, p := range []string{"/var/run/docker.sock", "/private/var/run/docker.sock"} {
 		if resolved == p || strings.HasPrefix(p, resolved+string(os.PathSeparator)) {
@@ -279,13 +246,7 @@ func isDockerSocket(resolved string) bool {
 
 func validateContainerDst(dst string) error {
 	for _, reserved := range reservedContainerDsts {
-		// dst == reserved: direct overlay.
-		// dst inside reserved: e.g. dst=/etc/passwd vs reserved=/etc.
-		// reserved inside dst: e.g. dst=/usr/local/sbin vs
-		//   reserved=/usr/local/sbin/entrypoint.sh — mounting the parent
-		//   shadows every baked-in file underneath, so the entrypoint
-		//   script resolves to attacker content and runs as PID 1 before
-		//   init-firewall.sh ever gets a chance to lock egress down.
+		// Overlap either way is rejected: mounting a parent of a reserved path shadows it (e.g. the entrypoint).
 		if dst == reserved ||
 			strings.HasPrefix(dst, reserved+"/") ||
 			strings.HasPrefix(reserved, dst+"/") {

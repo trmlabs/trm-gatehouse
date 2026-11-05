@@ -54,8 +54,7 @@ func TestBrokerCatalogValidate(t *testing.T) {
 	}
 }
 
-// broker-catalog validate runs the broker's own parser: an unknown kind and a
-// role outside --environment are refused there, as the broker would at load.
+// validate runs the broker's own parser, so an unknown kind or a role outside --environment is refused.
 func TestBrokerCatalogValidateUsesTheBrokerParser(t *testing.T) {
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })
 	var out bytes.Buffer
@@ -91,9 +90,7 @@ entries:
       audience: https://svc.example.com
 `
 
-// An identity entry validates as the broker loads it: one service account
-// and one audience, no scopes, bucket, prefix or role beside them, and a
-// host that is not Google's.
+// An identity entry needs one service account and one audience, and a non-Google host.
 func TestBrokerCatalogValidateGCPIdentity(t *testing.T) {
 	var out bytes.Buffer
 	if err := validateBrokerCatalog([]byte(identityCatalogYAML), []string{".example.com"}, true, &out); err != nil {

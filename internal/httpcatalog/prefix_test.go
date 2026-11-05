@@ -14,7 +14,6 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// prefixVault serves a per-entry catalog from memory.
 type prefixVault struct {
 	mu          sync.Mutex
 	head        map[string]interface{}
@@ -124,7 +123,6 @@ func TestPrefixLoaderReadsTwentyThousandEntries(t *testing.T) {
 
 func TestPrefixLoaderRefusesEntriesThatDoNotMatchTheHead(t *testing.T) {
 	v := newPrefixVault(3)
-	// An apply under way: one entry changed, the head not yet written.
 	v.entries["e00001"] = strings.Replace(v.entries["e00001"], `"/search"`, `"/other"`, 1)
 	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil || !strings.Contains(err.Error(), "do not match") {
 		t.Fatalf("mismatch accepted: %v", err)
@@ -199,8 +197,6 @@ func TestPrefixLoaderSkipsDeletedEntries(t *testing.T) {
 	}
 }
 
-// A stray document fails the digest; the error names it, and what changed,
-// against the last good catalog, so it can be found from the log.
 func TestPrefixLoaderNamesWhatChangedOnAMismatch(t *testing.T) {
 	v := newPrefixVault(3)
 	load := VaultPrefixLoader(v, "gatehouse", "catalog")
@@ -227,10 +223,6 @@ func TestPrefixLoaderNamesWhatChangedOnAMismatch(t *testing.T) {
 	}
 }
 
-// Vault answers LIST on an empty folder with 404, which the client returns as
-// no secret. That reads as no entries, not as a failed listing: a head naming
-// none reaches Parse, which refuses an empty catalog in either mode, and a
-// head naming entries fails its digest.
 func TestPrefixLoaderReadsVaultsEmptyListing(t *testing.T) {
 	v := newPrefixVault(0)
 	raw, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background())
@@ -247,9 +239,6 @@ func TestPrefixLoaderReadsVaultsEmptyListing(t *testing.T) {
 	}
 }
 
-// A stray document under entries/ (one a cancelled apply left behind) breaks
-// the digest of a head that lists nothing, so that catalog cannot reload.
-// A head that names its entries ignores the stray and loads.
 func TestPrefixLoaderIgnoresStrayDocumentsTheHeadDoesNotName(t *testing.T) {
 	v := newPrefixVault(3)
 	digest := v.head["entries_sha256"]
@@ -270,7 +259,6 @@ func TestPrefixLoaderIgnoresStrayDocumentsTheHeadDoesNotName(t *testing.T) {
 			t.Fatalf("%s: loaded %s", name, raw)
 		}
 	}
-	// A named entry that is missing still fails, as a half-written apply should.
 	v.head["entries_names"] = []interface{}{"e00000", "e00001", "e00002", "e00003"}
 	if _, _, err := VaultPrefixLoader(v, "gatehouse", "catalog")(context.Background()); err == nil {
 		t.Fatal("a head naming a missing entry loaded")

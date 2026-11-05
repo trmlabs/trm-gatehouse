@@ -25,9 +25,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// These isolated action handlers share a real proxy and disposable Vault. The
-// authority is the actual local session/grant store, not a hosted identity
-// provider. This does not prove deployed runner isolation or actionref wiring.
+// Isolated action handlers share a real proxy and disposable Vault; this does not prove deployed runner isolation.
 func testRealVaultActorCancellation(t *testing.T, hc *hashicorp.Client, secret string, secure bool) {
 	for _, withdrawal := range []string{"identity", "permission"} {
 		t.Run(withdrawal, func(t *testing.T) {

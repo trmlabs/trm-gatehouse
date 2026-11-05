@@ -233,8 +233,7 @@ func (s *Server) handleAgentGet(w http.ResponseWriter, r *http.Request) {
 		"created_at": agent.CreatedAt.Format(time.RFC3339),
 		"updated_at": agent.UpdatedAt.Format(time.RFC3339),
 	}
-	// Workload bindings use immutable IDs. Export only to the instance owner;
-	// names can change and credential/token values are never part of this read.
+	// Owner-only; bindings use immutable IDs and no credential or token values are read.
 	if actor.IsOwner() {
 		resp["id"] = agent.ID
 	}

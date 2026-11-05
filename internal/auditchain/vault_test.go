@@ -69,8 +69,7 @@ func newFakeVault(t *testing.T) (*fakeVault, *vaultapi.Client) {
 	return f, client
 }
 
-// The production adapters drive a chain end to end, and the verifier checks
-// it using only historical key reads and the exported public key.
+// The production adapters drive a chain that the verifier checks with historical key reads and the public key.
 func TestVaultBackedChainVerifies(t *testing.T) {
 	fake, client := newFakeVault(t)
 	keys := KVKeys{Vault: client.Logical(), Mount: "secret", Path: "gatehouse/example-audit-hmac", Field: "key"}

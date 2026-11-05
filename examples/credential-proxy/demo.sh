@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Disposable fixture runner. The container supplies real Vault and PostgreSQL.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 printf '\nHTTP: request-time rotation, deletion, authorization and strict forwarding\n'

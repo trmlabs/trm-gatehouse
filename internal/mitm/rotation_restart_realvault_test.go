@@ -32,15 +32,12 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// This fixture starts its own disposable Vault. It never uses VAULT_ADDR or
-// credentials from the caller's environment. Upstreams and SQLite are local.
+// Starts its own disposable Vault; never uses VAULT_ADDR or credentials from the caller's environment.
 func TestRealVault_RotationRestart(t *testing.T) {
 	runVaultFreshnessFixture(t, false)
 }
 
-// TestRealVault_StrictHTTPProfile integrates real Vault, SQLite audit and the
-// strict HTTP path. Its stored agent token isolates HTTP behavior; actual
-// Kubernetes-issued proof is tested separately by workloadidentity.
+// TestRealVault_StrictHTTPProfile integrates real Vault, SQLite audit and the strict HTTP path; its stored agent token isolates HTTP behavior.
 func TestRealVault_StrictHTTPProfile(t *testing.T) { runVaultFreshnessFixture(t, true, true) }
 
 func runVaultFreshnessFixture(t *testing.T, strict bool, profile ...bool) {
@@ -234,8 +231,7 @@ func runVaultFreshnessFixture(t *testing.T, strict bool, profile ...bool) {
 				}
 				resp, err := client.Do(req)
 				if err != nil {
-					// On a fresh HTTPS connection, a rejected CONNECT is surfaced
-					// as a transport error rather than an HTTP response.
+					// On a fresh HTTPS connection, a rejected CONNECT surfaces as a transport error, not an HTTP response.
 					if secure && !requireReused && ((want == 407 && strings.Contains(err.Error(), "Proxy Authentication Required")) || (release && want == 403 && strings.Contains(err.Error(), "Forbidden"))) {
 						return
 					}
@@ -280,8 +276,7 @@ func runVaultFreshnessFixture(t *testing.T, strict bool, profile ...bool) {
 				refresh(true)
 			}
 			request(t, 200, !strict)
-			// A failed secret refresh retains the last good cached credential. This
-			// is not a fail-closed freshness guarantee or a production outage test.
+			// A failed secret refresh retains the last good cached credential; this is not a fail-closed freshness guarantee.
 			if _, err := admin.Logical().DeleteWithContext(ctx, "secret/metadata/http-reference"); err != nil {
 				t.Fatal("fixture KV deletion failed")
 			}

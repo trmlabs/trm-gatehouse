@@ -1,6 +1,6 @@
 # PostgreSQL pooling (transaction mode)
 
-With pooling on, the broker multiplexes many client sessions onto a few server connections per worker pool and database, the way a transaction-mode pooler does. Each set of server connections uses one Vault credential, which rotates in the background, so the database sees a small, steady number of logins however many workers connect. Enable it with `AGENT_VAULT_DB_POOLING=true`. Without it, each client session keeps its own server connection and credential, as before.
+With pooling on, the broker multiplexes many client sessions onto a few server connections per worker pool and database, the way a transaction-mode pooler does. Each set of server connections uses one Vault credential, which rotates in the background, so the database sees a small, steady number of logins however many workers connect. Enable it with `AGENT_VAULT_DB_POOLING=true`. Without it, each client session keeps its own server connection and credential.
 
 ## How a session runs
 

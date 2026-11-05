@@ -1,6 +1,5 @@
-// Package workloadidentity admits projected Kubernetes service-account tokens.
-// It never exchanges them for a standing broker token or caches authentication.
-// These are bearer proofs: possession permits replay until expiry or revocation.
+// Package workloadidentity admits projected Kubernetes service-account tokens, never exchanging them for a standing broker token or caching authentication.
+// They are bearer proofs: possession permits replay until expiry or revocation.
 package workloadidentity
 
 import (
@@ -8,27 +7,30 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/store"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Binding maps one account to existing broker authorization records. PodUID
-// optionally restricts admission to one pod; all pods are checked live by UID.
-// A pool binding may omit AgentID and VaultID; see ProvisionPools.
+// Binding maps one account to broker authorization records; PodUID optionally restricts admission to one pod. A pool binding may omit AgentID and VaultID (see ProvisionPools).
 type Binding struct {
 	Namespace         string `json:"namespace"`
 	ServiceAccount    string `json:"serviceAccount"`
@@ -36,29 +38,22 @@ type Binding struct {
 	PodUID            string `json:"podUID"`
 	AgentID           string `json:"agentID"`
 	VaultID           string `json:"vaultID"`
-	// Pool bindings (OwnerUIDs set) admit any live Pod of this account owned by
-	// one of these controllers, by local token verification plus its address.
+	// Pool bindings (OwnerUIDs set) admit any live Pod of this account owned by these controllers, by local token verification plus its address.
 	OwnerUIDs     []string `json:"ownerUIDs,omitempty"`
 	ContainerName string   `json:"containerName,omitempty"`
 	MaxPodSeconds int64    `json:"maxPodSeconds,omitempty"`
 	Pool          string   `json:"pool,omitempty"` // catalog pool name reported as ProxyScope.Pool
-	// ImageDigests lists the image digests (sha256:<64 hex>) every container of
-	// a pool Pod must run, so a Pod whose image is swapped keeps its UID, owner
-	// and token but is no longer admitted.
+	// ImageDigests lists the digests (sha256:<64 hex>) every container of a pool Pod must run, so a swapped image is no longer admitted.
 	ImageDigests []string `json:"imageDigests,omitempty"`
-	// ListAgents is valid only in observer policy. It lets the admission
-	// controller read every agent's outstanding cleanup by agent and Pod UID.
+	// ListAgents is valid only in observer policy, to read each agent's outstanding cleanup by agent and Pod UID.
 	ListAgents bool `json:"listAgents,omitempty"`
-	// TrustDomain names the listed trust domain whose tokens this binding
-	// admits; empty is the broker's own cluster.
+	// TrustDomain names the listed trust domain whose tokens this binding admits; empty is the broker's own cluster.
 	TrustDomain string `json:"trustDomain,omitempty"`
 	// Proxy makes this a shared proxy's binding; see ProxyBinding.
 	Proxy *ProxyBinding `json:"proxy,omitempty"`
 }
 
-// Config selects the broker's own Kubernetes trust domain, any remote ones,
-// and explicit workload grants. Empty API/CA/reviewer paths select the
-// standard in-cluster endpoints.
+// Config selects the broker's own trust domain, remote ones and workload grants; empty API/CA/reviewer paths select the in-cluster defaults.
 type Config struct {
 	APIServer               string    `json:"apiServer"`
 	CAFile                  string    `json:"caFile"`
@@ -70,9 +65,7 @@ type Config struct {
 	Bindings                []Binding `json:"bindings"`
 	// TrustDomains are other clusters, each verified by its published keys.
 	TrustDomains []TrustDomain `json:"trustDomains,omitempty"`
-	// MaxSessionSeconds is the ceiling on every pool binding's Pod lifetime
-	// and every proxy binding's session (default a day, at most 30 days).
-	// Lifetimes follow the platform's own ceilings, so it is set here once.
+	// MaxSessionSeconds is the ceiling on every pool binding's Pod lifetime and proxy session (default a day, at most 30 days).
 	MaxSessionSeconds int64 `json:"maxSessionSeconds,omitempty"`
 }
 
@@ -111,8 +104,7 @@ type Resolver struct {
 	logger     *slog.Logger
 }
 
-// SetLogger sets where refusal reasons are logged; the default is slog's.
-// Workers still see only a generic refusal.
+// SetLogger sets where refusal reasons are logged; workers still see only a generic refusal.
 func (r *Resolver) SetLogger(l *slog.Logger) {
 	if l != nil {
 		r.logger = l
@@ -124,11 +116,9 @@ var _ brokercore.SessionResolver = (*Resolver)(nil)
 var imageDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 const (
-	// maxConfigBytes bounds the configuration file read at startup: room
-	// for a proxy serving 10,000 tenant namespaces.
+	// maxConfigBytes bounds the configuration file: room for a proxy serving 10,000 tenant namespaces.
 	maxConfigBytes = 16 << 20
-	// maxListItems bounds short lists an operator writes (owner UIDs,
-	// source ranges): only a guard against a malformed file.
+	// maxListItems guards against a malformed file's short lists (owner UIDs, source ranges).
 	maxListItems = 1024
 	// maxProxyProfiles is how many namespaces one shared proxy may serve.
 	maxProxyProfiles = 10000
@@ -157,8 +147,7 @@ func LoadConfig(path string) (Config, error) {
 	return c, nil
 }
 
-// New validates policy and builds a TLS-verifying client with no redirect or
-// environment-proxy fallback. It never retains a positive authentication cache.
+// New validates policy and builds a TLS-verifying client with no redirect or environment-proxy fallback; it keeps no positive authentication cache.
 func New(c Config, s Store) (*Resolver, error) {
 	return newResolver(c, s, false)
 }
@@ -221,9 +210,7 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 					return nil, errors.New("pool binding owner UID must be non-empty")
 				}
 			}
-			// No upper bound: a fleet may run many approved images, each digest
-			// is a short fixed-size string, and the configuration file's size
-			// limit bounds the list.
+			// No upper bound: digests are short fixed-size strings and the configuration file's size limit bounds the list.
 			if len(b.ImageDigests) == 0 {
 				return nil, errors.New("pool binding requires at least one image digest")
 			}
@@ -263,8 +250,7 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 			}
 		}
 		if b.TrustDomain != "" && b.Proxy == nil && (len(b.OwnerUIDs) == 0 || !readsPods(c.TrustDomains, b.TrustDomain)) {
-			// TokenReview runs only in the broker's own cluster, and the pool
-			// Pod check only where the broker can read the domain's Pods.
+			// TokenReview runs only in the broker's own cluster; the pool Pod check only where the broker can read the domain's Pods.
 			return nil, errors.New("a remote trust domain admits proxy bindings, and pool bindings only where the broker reads its Pods")
 		}
 		key := b.TrustDomain + "/" + b.Namespace + ":" + b.ServiceAccount
@@ -295,8 +281,7 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 	return r, nil
 }
 
-// readsPods reports whether the named trust domain gives the broker its
-// cluster's Pods.
+// readsPods reports whether the trust domain gives the broker its cluster's Pods.
 func readsPods(domains []TrustDomain, name string) bool {
 	for _, d := range domains {
 		if d.Name == name {
@@ -383,8 +368,7 @@ func (r *Resolver) verifyProof(ctx context.Context, token string) (*Binding, cla
 	if json.Unmarshal(payload, &c) != nil {
 		return nil, claims{}, deny
 	}
-	// This release intentionally accepts only single-audience broker proofs,
-	// a narrower policy than standard JWT audience membership.
+	// Only single-audience broker proofs are accepted, narrower than standard JWT audience membership.
 	now := r.now().Unix()
 	if c.Issuer != r.config.Issuer || !exactly(c.Audience, r.config.Audience) || c.Expires <= now || c.Issued <= 0 || c.Issued > now || c.NotBefore > now || c.Expires <= c.Issued || c.Expires-c.Issued > r.config.MaxTokenLifetimeSeconds {
 		return nil, claims{}, deny
@@ -404,22 +388,23 @@ func (r *Resolver) verifyProof(ctx context.Context, token string) (*Binding, cla
 	if binding == nil {
 		return nil, claims{}, deny
 	}
-	// Claims above only narrow policy. They become authenticated exclusively by
-	// a successful online TokenReview of the exact original token below.
+	// Claims above only narrow policy; they become authenticated by a successful online TokenReview of the exact original token.
 	var req review
 	req.APIVersion, req.Kind = "authentication.k8s.io/v1", "TokenReview"
 	req.Spec.Token, req.Spec.Audiences = token, []string{r.config.Audience}
 	body, _ := json.Marshal(req)
 	var verified review
-	if r.api(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/tokenreviews", body, &verified) != nil {
+	if err := r.api(ctx, http.MethodPost, "/apis/authentication.k8s.io/v1/tokenreviews", body, &verified); err != nil {
+		if kubeUnavailable(err) {
+			return nil, claims{}, errTokenReviewUnavailable
+		}
 		return nil, claims{}, deny
 	}
 	s := verified.Status
 	if verified.APIVersion != req.APIVersion || verified.Kind != req.Kind || !s.Authenticated || s.Error != "" || !exactly(s.Audiences, r.config.Audience) || s.User.Username != c.Subject || s.User.UID != k.ServiceAccount.UID || !exactly(s.User.Extra["authentication.kubernetes.io/pod-uid"], k.Pod.UID) || !exactly(s.User.Extra["authentication.kubernetes.io/pod-name"], k.Pod.Name) {
 		return nil, claims{}, deny
 	}
-	// TokenReview permits a deletion grace period. An explicit Pod read denies
-	// terminating/deleted pods immediately and pins the current object's UID.
+	// TokenReview permits a deletion grace period; an explicit Pod read denies terminating or deleted pods at once and pins the object's UID.
 	var pod struct {
 		Metadata struct {
 			UID               string  `json:"uid"`
@@ -431,7 +416,13 @@ func (r *Resolver) verifyProof(ctx context.Context, token string) (*Binding, cla
 			ServiceAccountName string `json:"serviceAccountName"`
 		} `json:"spec"`
 	}
-	if r.api(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(k.Namespace)+"/pods/"+url.PathEscape(k.Pod.Name), nil, &pod) != nil || pod.Metadata.UID != k.Pod.UID || pod.Metadata.Name != k.Pod.Name || pod.Metadata.Namespace != k.Namespace || pod.Metadata.DeletionTimestamp != nil || pod.Spec.ServiceAccountName != k.ServiceAccount.Name {
+	if err := r.api(ctx, http.MethodGet, "/api/v1/namespaces/"+url.PathEscape(k.Namespace)+"/pods/"+url.PathEscape(k.Pod.Name), nil, &pod); err != nil {
+		if kubeUnavailable(err) {
+			return nil, claims{}, errPodLookupUnavailable
+		}
+		return nil, claims{}, deny
+	}
+	if pod.Metadata.UID != k.Pod.UID || pod.Metadata.Name != k.Pod.Name || pod.Metadata.Namespace != k.Namespace || pod.Metadata.DeletionTimestamp != nil || pod.Spec.ServiceAccountName != k.ServiceAccount.Name {
 		return nil, claims{}, deny
 	}
 	if c.Expires <= r.now().Unix() {
@@ -440,10 +431,7 @@ func (r *Resolver) verifyProof(ctx context.Context, token string) (*Binding, cla
 	return binding, c, nil
 }
 
-// BindingsAuthorized reports whether every configured binding still resolves to
-// an active agent with a proxy, member or admin role on its vault: the same
-// store checks ResolveForProxy applies, without a proof. A revoked grant or a
-// store restored without it reports false. Store errors are returned.
+// BindingsAuthorized reports whether every binding still resolves to an active agent with a proxy, member or admin role on its vault, without a proof; store errors are returned.
 func (r *Resolver) BindingsAuthorized(ctx context.Context) (bool, error) {
 	if len(r.config.Bindings) == 0 {
 		return false, nil
@@ -474,8 +462,7 @@ func (r *Resolver) BindingsAuthorized(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ResolveForProxy verifies proof for every admission and reauthorization. No
-// local/session-token fallback is allowed when this resolver is configured.
+// ResolveForProxy verifies proof for every admission and reauthorization, with no local or session-token fallback.
 func (r *Resolver) ResolveForProxy(ctx context.Context, token, vaultHint string) (*brokercore.ProxyScope, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(r.config.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -485,30 +472,36 @@ func (r *Resolver) ResolveForProxy(ctx context.Context, token, vaultHint string)
 	}
 	deny := brokercore.ErrInvalidSession
 	if len(binding.OwnerUIDs) != 0 || binding.Proxy != nil || binding.TrustDomain != "" || brokercore.AttestationFrom(ctx) != "" {
-		// Pool and proxy bindings are admitted only with the connection's peer
-		// address, and only a proxy binding may present an attestation.
+		// Pool and proxy bindings are admitted only with the connection's peer address; only a proxy binding may present an attestation.
 		return nil, deny
 	}
 	scope, err := r.grant(ctx, binding, vaultHint)
 	if err != nil {
 		return nil, err
 	}
-	// Store calls may consume the remainder of the proof lifetime or timeout.
-	// Never return an authorized scope after either deadline elapsed.
-	if ctx.Err() != nil || c.Expires <= r.now().Unix() {
+	// Store calls may consume the rest of the proof lifetime or timeout; never return a scope after either deadline.
+	if c.Expires <= r.now().Unix() {
 		return nil, deny
+	}
+	if ctx.Err() != nil {
+		return nil, unfinished(ctx, deny)
 	}
 	scope.WorkloadID, scope.IdentityKind = c.Kubernetes.Pod.UID, brokercore.KindTokenReview
 	return scope, nil
 }
 
-// grant reads the binding's current agent, vault and role from the store.
 func (r *Resolver) grant(ctx context.Context, binding *Binding, vaultHint string) (*brokercore.ProxyScope, error) {
 	a, err := r.store.GetAgentByID(ctx, binding.AgentID)
+	if storeUnavailable(err) {
+		return nil, errStoreUnavailable
+	}
 	if err != nil || a == nil || a.ID != binding.AgentID || a.Status != "active" || a.RevokedAt != nil {
 		return nil, brokercore.ErrInvalidSession
 	}
 	v, err := r.store.GetVaultByID(ctx, binding.VaultID)
+	if storeUnavailable(err) {
+		return nil, errStoreUnavailable
+	}
 	if err != nil || v == nil || v.ID != binding.VaultID {
 		return nil, brokercore.ErrVaultAccessDenied
 	}
@@ -516,6 +509,9 @@ func (r *Resolver) grant(ctx context.Context, binding *Binding, vaultHint string
 		return nil, brokercore.ErrVaultHintMismatch
 	}
 	role, err := r.store.GetVaultRole(ctx, a.ID, v.ID)
+	if storeUnavailable(err) {
+		return nil, errStoreUnavailable
+	}
 	if err != nil || (role != "proxy" && role != "member" && role != "admin") {
 		return nil, brokercore.ErrVaultAccessDenied
 	}
@@ -523,6 +519,52 @@ func (r *Resolver) grant(ctx context.Context, binding *Binding, vaultHint string
 }
 
 func exactly(values []string, value string) bool { return len(values) == 1 && values[0] == value }
+
+// Refusals for a check the broker could not complete; each is ErrInvalidSession to callers, so no caller admits on one.
+var (
+	errStoreUnavailable       = brokercore.Unavailable("store_unavailable")
+	errTokenReviewUnavailable = brokercore.Unavailable("token_review_unavailable")
+	errPodLookupUnavailable   = brokercore.Unavailable("pod_lookup_unavailable")
+	errCheckTimeout           = brokercore.Unavailable("check_timeout")
+)
+
+// unfinished is the refusal for a check whose context ended: retryable at its deadline, deny when the caller went away.
+func unfinished(ctx context.Context, deny error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errCheckTimeout
+	}
+	return deny
+}
+
+// transientSQLClasses are the SQLSTATE classes of a store that did not answer: connection, login, resources and operator intervention.
+var transientSQLClasses = []string{"08", "28", "53", "57"}
+
+// storeUnavailable reports whether a store read failed without an answer: no connection, a refused login, exhausted resources or its deadline; any other error is an answer.
+func storeUnavailable(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return len(pgErr.Code) == 5 && slices.Contains(transientSQLClasses, pgErr.Code[:2])
+	}
+	var netErr net.Error
+	var connectErr *pgconn.ConnectError
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &netErr) || errors.As(err, &connectErr) || pgconn.Timeout(err) || pgconn.SafeToRetry(err)
+}
+
+// errVerifierUnreachable is a Kubernetes API call that got no answer: a transport failure or the check's deadline.
+var errVerifierUnreachable = errors.New("workload verifier did not answer")
+
+// kubeUnavailable reports whether a Kubernetes API call failed without an answer about the workload: unreachable, throttled or a server error.
+func kubeUnavailable(err error) bool {
+	var refused *kubeStatusError
+	if errors.As(err, &refused) {
+		return refused.code == http.StatusTooManyRequests || refused.code >= 500
+	}
+	return errors.Is(err, errVerifierUnreachable)
+}
 
 func (r *Resolver) api(ctx context.Context, method, path string, body []byte, out any) error {
 	// Re-read the broker's projected reviewer token so kubelet rotation works.
@@ -564,14 +606,20 @@ func kubeCall(ctx context.Context, client *http.Client, server, bearer, method, 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return errors.New("workload verifier unavailable")
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return errors.New("workload verifier call canceled")
+		}
+		return errVerifierUnreachable
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return &kubeStatusError{resp.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil || len(b) > 1<<20 || json.Unmarshal(b, out) != nil {
+	if err != nil {
+		return errVerifierUnreachable
+	}
+	if len(b) > 1<<20 || json.Unmarshal(b, out) != nil {
 		return errors.New("invalid workload verifier response")
 	}
 	return nil

@@ -122,9 +122,7 @@ export default function InstanceSettingsTab() {
       .catch(() => setLoading(false));
   }, []);
 
-  // Live preview: whenever profile or overrides change, ask the server
-  // what the effective config would be and reflect it in the table.
-  // Debounced so typing into a numeric field doesn't spam.
+  // Live preview: ask the server for the effective config on change, debounced.
   useEffect(() => {
     if (!rateLimit || rateLimit.locked) return;
     if (skipNextPreview.current) {

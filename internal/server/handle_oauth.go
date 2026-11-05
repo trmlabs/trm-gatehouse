@@ -90,9 +90,7 @@ func (s *Server) handleOAuthConnect(w http.ResponseWriter, r *http.Request) {
 	// Lazily expire old states.
 	_, _ = s.store.ExpireCredentialOAuthStates(ctx, time.Now())
 
-	// Handle client_secret: sentinel = keep current, empty = clear, other = set new.
-	// Only reuse stored secret when the provider config hasn't changed
-	// to prevent exfiltration via a new token_url.
+	// client_secret: sentinel keeps current, empty clears; reuse the stored secret only if the provider config is unchanged (prevents exfiltration via a new token_url).
 	var clientSecretCT, clientSecretNonce []byte
 	if req.ClientSecret == oauthSecretSentinel {
 		existing, _ := s.store.GetCredentialOAuth(ctx, ns.ID, req.Key)
@@ -376,9 +374,7 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 		if clientID == "" {
 			clientID = existing.ClientID
 		}
-		// Only reuse stored secrets when the provider config hasn't changed.
-		// If the caller sends a different token_url, don't send stored secrets
-		// to the new endpoint (prevents client secret exfiltration).
+		// Reuse stored secrets only when the provider config is unchanged, so a new token_url cannot exfiltrate them.
 		providerUnchanged := tokenURL == existing.TokenURL
 		if clientSecret == "" && len(existing.ClientSecretCT) > 0 && providerUnchanged {
 			cs, err := crypto.Decrypt(existing.ClientSecretCT, existing.ClientSecretNonce, s.encKey)
@@ -396,9 +392,7 @@ func (s *Server) handleOAuthTokenUpload(w http.ResponseWriter, r *http.Request) 
 	isRefreshSentinel := req.RefreshToken == oauthSecretSentinel
 	hasNewRefreshToken := req.RefreshToken != "" && !isRefreshSentinel
 
-	// If a new (non-sentinel) refresh token is provided, validate it by
-	// refreshing immediately. This gives confidence the setup works and
-	// provides the real expires_at.
+	// Validate a new refresh token by refreshing immediately, which also yields the real expires_at.
 	if hasNewRefreshToken && tokenURL != "" && tokenURL != "manual" {
 		tok, refreshErr := oauth.Refresh(ctx, oauth.RefreshConfig{
 			TokenURL:        tokenURL,

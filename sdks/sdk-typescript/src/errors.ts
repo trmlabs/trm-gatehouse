@@ -1,7 +1,4 @@
-/**
- * Base error class for all Agent Vault SDK errors.
- * Thrown for client-side issues (missing config, network failures, timeouts).
- */
+/** Base error class for client-side SDK failures (missing config, network, timeouts). */
 export class AgentVaultError extends Error {
   constructor(message: string) {
     super(message);
@@ -9,10 +6,7 @@ export class AgentVaultError extends Error {
   }
 }
 
-/**
- * Error returned by the Agent Vault API.
- * Wraps HTTP error responses with status code, error code, and message.
- */
+/** Error returned by the Agent Vault API, carrying status code, error code, and message. */
 export class ApiError extends AgentVaultError {
   readonly status: number;
   readonly code: string;

@@ -21,65 +21,33 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// TrustDomain is another cluster whose service-account tokens the broker
-// accepts, verified locally against the signing keys the cluster publishes.
-// The broker's own cluster is the Config's top-level issuer and audience; a
-// listed domain is always remote, because the broker cannot read its Pods.
-// Only a proxy binding may name a remote domain: a proxy in that cluster
-// runs the Pod check there and presents its own token.
+// TrustDomain is another cluster whose service-account tokens the broker verifies locally against its published signing keys.
+// A listed domain is always remote (the broker cannot read its Pods) and only a proxy binding may name it: the proxy in that cluster runs the Pod check and presents its own token.
 type TrustDomain struct {
 	Name     string `json:"name"`
 	Issuer   string `json:"issuer"`
 	Audience string `json:"audience"`
-	// Keys is "remote" or "pinned". Remote: JWKSURL is the HTTPS address of
-	// the issuer's published keys (for GKE, the issuer URL followed by
-	// /jwks), and CAFile, when set, replaces the system roots for it. The
-	// live set is cached and refetched, so a rotation on the cluster needs no
-	// configuration change. JWKSDialAddress, when set, is the IP and port
-	// the fetch connects to instead of resolving the URL's host (a private
-	// Google APIs address, so egress policy can name a fixed address); TLS
-	// still verifies the URL's host. JWKS beside remote keys is an optional
-	// fallback, used only while no live set is usable: never fetched, or
-	// every refetch failing for longer than jwksMaxStale. A usable live set
-	// always wins, so a key the cluster removed stops verifying even if the
-	// fallback still holds it.
-	// Pinned: JWKS holds the issuer's public key set itself, and the broker
-	// never fetches; a key the set lacks refuses until the set is updated.
+	// Keys is "remote" or "pinned". Remote: JWKSURL is the issuer's HTTPS key address (GKE: issuer URL plus /jwks), cached and refetched so rotations need no configuration change; CAFile replaces the system roots.
+	// JWKSDialAddress (IP:port) replaces resolving the URL host, with TLS still verifying it; JWKS beside remote is a fallback used only while no live set is usable. Pinned: JWKS is the whole key set and nothing is fetched.
 	Keys            string          `json:"keys"`
 	JWKSURL         string          `json:"jwksURL,omitempty"`
 	JWKSDialAddress string          `json:"jwksDialAddress,omitempty"`
 	CAFile          string          `json:"caFile,omitempty"`
 	JWKS            json.RawMessage `json:"jwks,omitempty"`
-	// MaxTokenLifetimeSeconds bounds accepted tokens (default 3600). A remote
-	// token is never checked against a live Pod in the broker's cluster, so
-	// its lifetime is the revocation window.
+	// MaxTokenLifetimeSeconds bounds accepted tokens (default 3600); a remote token is never checked against a live Pod in the broker's cluster, so its lifetime is the revocation window.
 	MaxTokenLifetimeSeconds int64 `json:"maxTokenLifetimeSeconds,omitempty"`
-	// Pods, when set, lets the broker read Pods in this cluster, so its pool
-	// bindings may admit sidecars there directly; see RemotePods. Without
-	// it the domain admits only proxy bindings.
+	// Pods, when set, lets pool bindings admit sidecars in this cluster directly (see RemotePods); without it only proxy bindings are admitted.
 	Pods *RemotePods `json:"pods,omitempty"`
 }
 
-// RemotePods is how the broker reads a remote cluster's Pods, so a sidecar
-// in that cluster is admitted as a pool worker in the broker's own is: its
-// token verified by the domain's keys, then its live Pod (UID, controller,
-// images, container, deadline and claimed run) read on every admission and
-// recheck. One check is not made: the connection's source address, which
-// across clusters is a load balancer's, not the Pod's. The Pod must still be
-// running for its token to admit, and the token's lifetime bounds a replay
-// from anywhere else.
+// RemotePods is how the broker reads a remote cluster's Pods so a sidecar there is admitted as a pool worker: token verified by the domain's keys, then its live Pod read on every admission and recheck.
+// The source address is not checked (across clusters it is a load balancer's); the Pod must still be running, and the token's lifetime bounds replay from elsewhere.
 type RemotePods struct {
-	// APIServer is the cluster's HTTPS control-plane origin, named by host
-	// (for GKE, the cluster's DNS-based endpoint), never by address, so the
-	// address is looked up when the broker connects.
+	// APIServer is the cluster's HTTPS control-plane origin, named by host (GKE: its DNS-based endpoint), never by address.
 	APIServer string `json:"apiServer"`
 	// CAFile, when set, replaces the system roots for the API server.
 	CAFile string `json:"caFile,omitempty"`
-	// Credential is "google": the broker's own Google identity (Workload
-	// Identity), whose access token the cluster accepts through IAM; it needs
-	// only container.pods.get on that cluster. Or "token-file": TokenFile
-	// holds a bearer token, re-read on every call so its writer can rotate
-	// it.
+	// Credential is "google" (the broker's Workload Identity access token, needing only container.pods.get) or "token-file" (TokenFile holds a bearer token re-read on every call so it can rotate).
 	Credential string `json:"credential"`
 	TokenFile  string `json:"tokenFile,omitempty"`
 }
@@ -89,13 +57,10 @@ var googleTokenSource = func(ctx context.Context) (oauth2.TokenSource, error) {
 	return google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
 }
 
-// remotePodsDial, when set, replaces the dialer for remote API servers, so a
-// test can serve a named host locally. Nil dials as net.Dialer does.
+// remotePodsDial, when set, replaces the dialer for remote API servers so tests can serve a named host locally.
 var remotePodsDial func(ctx context.Context, network, address string) (net.Conn, error)
 
-// remotePodReader returns a call to the remote cluster's API server: HTTPS
-// to a named host only, no redirects, no proxy from the environment, a
-// bounded response.
+// remotePodReader returns a call to the remote API server: HTTPS to a named host only, no redirects, no environment proxy, bounded response.
 func remotePodReader(p RemotePods, timeout time.Duration) (func(context.Context, string, string, []byte, any) error, error) {
 	u, err := url.Parse(p.APIServer)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
@@ -128,7 +93,10 @@ func remotePodReader(p RemotePods, timeout time.Duration) (func(context.Context,
 		}
 		bearer = func() (string, error) {
 			token, err := source.Token()
-			if err != nil || token.AccessToken == "" {
+			if err != nil {
+				return "", errVerifierUnreachable
+			}
+			if token.AccessToken == "" {
 				return "", errors.New("google identity unavailable")
 			}
 			return token.AccessToken, nil
@@ -150,14 +118,13 @@ func remotePodReader(p RemotePods, timeout time.Duration) (func(context.Context,
 	return func(ctx context.Context, method, path string, body []byte, out any) error {
 		token, err := bearer()
 		if err != nil {
-			return errors.New("workload verifier unavailable")
+			return err
 		}
 		return kubeCall(ctx, client, server, token, method, path, body, out)
 	}, nil
 }
 
-// domain is one trust domain at run time: its issuer and audience, its key
-// cache and how keys are fetched.
+// domain is one trust domain at run time: issuer, audience, key cache and key fetching.
 type domain struct {
 	name        string // "" for the broker's own cluster
 	issuer      string
@@ -174,8 +141,7 @@ type domain struct {
 	pods func(ctx context.Context, method, path string, body []byte, out any) error
 }
 
-// remoteKeys returns a fetch for a published key set: HTTPS only, no
-// redirects, no proxy from the environment, a bounded response.
+// remoteKeys returns a fetch for a published key set: HTTPS only, no redirects, no environment proxy, bounded response.
 func remoteKeys(td TrustDomain, timeout time.Duration) (func(context.Context, any) error, error) {
 	u, err := url.Parse(td.JWKSURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
@@ -199,8 +165,7 @@ func remoteKeys(td TrustDomain, timeout time.Duration) (func(context.Context, an
 		if err != nil || !dial.IsValid() || dial.Port() == 0 || dial.Addr().IsUnspecified() {
 			return nil, errors.New("trust domain jwksDialAddress must be an IP address and port")
 		}
-		// Only the connection's address changes: the request, its Host and
-		// the certificate check stay on the URL's host.
+		// Only the connection's address changes; the request, Host and certificate check stay on the URL's host.
 		dialer := &net.Dialer{Timeout: timeout}
 		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, dial.String())

@@ -141,9 +141,7 @@ func TestBuildRunArgs_HostAgentDirBindMount(t *testing.T) {
 	cfg := baseConfig(t)
 	agentDir := t.TempDir()
 	cfg.HostAgentDir = agentDir
-	// BuildRunArgs derives the sibling config path from HostAgentDir's
-	// parent and binds it only if present — create it so we exercise
-	// the happy path.
+	// BuildRunArgs binds the sibling config only if present, so create it for the happy path.
 	agentConfig := filepath.Join(filepath.Dir(agentDir), ".claude.json")
 	f, err := os.Create(agentConfig)
 	if err != nil {
@@ -180,9 +178,7 @@ func TestBuildRunArgs_HostAgentDirBindMount(t *testing.T) {
 }
 
 func TestBuildRunArgs_HostAgentDirSkipsAbsentConfig(t *testing.T) {
-	// If the sibling .claude.json doesn't exist, BuildRunArgs must
-	// omit the config bind entirely — otherwise docker would
-	// auto-create a directory where Claude expects a file.
+	// Without the sibling .claude.json the config bind must be omitted, or docker creates a directory.
 	cfg := baseConfig(t)
 	cfg.HostAgentDir = t.TempDir()
 
@@ -198,10 +194,7 @@ func TestBuildRunArgs_HostAgentDirSkipsAbsentConfig(t *testing.T) {
 }
 
 func TestBuildRunArgs_HostAgentDirRejectsVaultDir(t *testing.T) {
-	// A HostAgentDir that resolves into $HOME/.agent-vault must be
-	// rejected the same way a user --mount source would be. Pins the
-	// guarantee that the new bind mount can't be used to smuggle in
-	// the encrypted vault data dir via a symlink.
+	// A HostAgentDir inside $HOME/.agent-vault must be rejected, as a user --mount source would be.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	vaultDir := filepath.Join(home, ".agent-vault")
@@ -287,10 +280,7 @@ func TestBuildRunArgs_UserMountAccepted(t *testing.T) {
 	}
 }
 
-// TestBuildRunArgs_RejectsCWDInsideAgentVaultDir pins the fix for the
-// case where `vault run --isolation=container` is invoked with the CWD
-// inside ~/.agent-vault — the vault's encrypted CA key and database
-// must not be bind-mounted into the container.
+// TestBuildRunArgs_RejectsCWDInsideAgentVaultDir: the vault's CA key and database must not be mounted.
 func TestBuildRunArgs_RejectsCWDInsideAgentVaultDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -322,25 +312,19 @@ func TestParseAndValidateMount_RejectReservedContainerDst(t *testing.T) {
 		ContainerCAPath,
 		"/home/claude/.claude",
 		"/home/claude/.claude/x",
-		// ContainerClaudeConfig: --share-agent-dir bind-mounts ~/.claude.json
-		// here; a user --mount overriding it would replace real config
-		// with attacker-controlled content.
+		// ContainerClaudeConfig: a user --mount must not replace the shared config.
 		ContainerClaudeConfig,
 		// Entrypoint + firewall scripts: overwriting either pre-entrypoint
 		// replaces the trusted setup with attacker code run as root.
 		"/usr/local/sbin/init-firewall.sh",
 		"/usr/local/sbin/entrypoint.sh",
-		// Ancestor bypass: mounting the parent dir silently shadows the
-		// baked-in script underneath. These must reject even though the
-		// reserved list only names the leaves.
+		// Ancestor mounts would shadow the baked-in script and must be rejected.
 		"/usr/local/sbin",
 		"/usr/local",
 		"/usr",
 		"/home/claude",
 		"/home",
-		// /etc subtree is reserved wholesale; ContainerCAPath sits under it
-		// and we also don't want a user overwriting /etc/passwd, /etc/shadow,
-		// etc. pre-privilege-drop.
+		// /etc is reserved wholesale, covering ContainerCAPath and /etc/passwd.
 		"/etc",
 		"/etc/passwd",
 	} {
@@ -368,9 +352,7 @@ func TestParseAndValidateMount_RejectDockerSocket(t *testing.T) {
 	}
 }
 
-// TestParseAndValidateMount_SymlinkLaunderingRejected is the substantive
-// security test: a symlink under a normal-looking src must not launder
-// a forbidden target ($HOME/.agent-vault) past the prefix check.
+// TestParseAndValidateMount_SymlinkLaunderingRejected: a symlink must not launder a forbidden target past the prefix check.
 func TestParseAndValidateMount_SymlinkLaunderingRejected(t *testing.T) {
 	home := t.TempDir()
 	vaultDir := filepath.Join(home, ".agent-vault")

@@ -13,9 +13,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 )
 
-// handleEmailTest sends a test email to verify SMTP configuration.
-// Owner-only. Accepts optional JSON body {"to": "recipient@example.com"}.
-// If "to" is omitted, sends to the owner's own email address.
+// handleEmailTest sends a test email to verify SMTP configuration; owner-only, optional JSON {"to": ...} defaults to the owner.
 func (s *Server) handleEmailTest(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.requireOwnerActor(w, r)
 	if err != nil {
@@ -177,9 +175,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	s.writeSettingsResponse(w, r.Context())
 }
 
-// getAllowedDomains reads the allowed_email_domains setting from the store.
-// Returns (nil, nil) if the setting is not set or is an empty array (unrestricted).
-// Returns a non-nil error on database or parse failures so callers can fail closed.
+// getAllowedDomains returns (nil, nil) when unrestricted and a non-nil error on store or parse failure so callers fail closed.
 func (s *Server) getAllowedDomains(ctx context.Context) ([]string, error) {
 	raw, err := s.store.GetSetting(ctx, settingAllowedDomains)
 	if err != nil {
@@ -198,9 +194,7 @@ func (s *Server) getAllowedDomains(ctx context.Context) ([]string, error) {
 	return domains, nil
 }
 
-// checkEmailDomain returns an error message if the email's domain is not in the allowed list.
-// Returns "" if the domain is allowed or no restrictions are set.
-// Returns a non-empty string on domain mismatch or on internal errors (fail-closed).
+// checkEmailDomain returns "" if the domain is allowed, else a non-empty message (also on internal errors, fail-closed).
 func (s *Server) checkEmailDomain(ctx context.Context, email string) string {
 	domains, err := s.getAllowedDomains(ctx)
 	if err != nil {

@@ -26,19 +26,13 @@ variables). In agent mode (AGENT_VAULT_TOKEN set), AGENT_VAULT_VAULT (or
 
 		jsonOut, _ := cmd.Flags().GetBool("json")
 
-		// Resolve the target vault. In agent mode we require an explicit
-		// --vault or AGENT_VAULT_VAULT — falling through to "default"
-		// would silently route the request at the wrong vault (or produce
-		// a confusing 404 referencing a vault the user never named).
-		// Mirrors the agent-mode contract `vault run` already enforces.
+		// Agent mode requires an explicit vault; falling back to "default" would silently hit the wrong vault.
 		vault, err := resolveVaultForCommand(cmd, tokenSource)
 		if err != nil {
 			return err
 		}
 
-		// Pass the resolved vault as X-Vault so instance-level agent tokens
-		// (which carry no baked-in vault) can be used here too — the broker
-		// rejects agent-token /discover calls without this header.
+		// X-Vault lets instance-level agent tokens work here; the broker rejects them without it.
 		url := fmt.Sprintf("%s/discover", sess.Address)
 		respBody, err := doVaultScopedRequestWithBody("GET", url, sess.Token, vault, nil)
 		if err != nil {

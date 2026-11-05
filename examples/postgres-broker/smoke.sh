@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs only inside the disposable demo image; never point this at production.
+# Runs only inside the disposable demo image.
 set -euo pipefail
 umask 077
 work=$(mktemp -d /tmp/av-demo.XXXXXX)
@@ -46,7 +46,6 @@ wait_ready "$vault_pid" Vault
 vault secrets enable database >/dev/null
 for binding in 'analytics_db analytics_ro' 'transactions_db transactions_ro' 'reporting_db reporting_ro'; do
   read -r db role <<< "$binding"
-  # Explicit per-database grants rather than cluster-wide pg_read_all_data.
   pg -d "$db" -c "REVOKE CREATE ON SCHEMA public FROM PUBLIC; CREATE ROLE ${role}_grants NOLOGIN; GRANT CONNECT ON DATABASE $db TO ${role}_grants; GRANT USAGE ON SCHEMA public TO ${role}_grants; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}_grants;" >/dev/null
   vault write "database/config/$db" plugin_name=postgresql-database-plugin allowed_roles="$role" connection_url="postgresql://{{username}}:{{password}}@127.0.0.1:55439/$db?sslmode=disable" username=demo_admin password="$admin_pw" >/dev/null
   vault write "database/roles/$role" db_name="$db" creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}' IN ROLE ${role}_grants;" revocation_statements="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{{name}}'; DROP ROLE IF EXISTS \"{{name}}\";" default_ttl=30s max_ttl=5m >/dev/null

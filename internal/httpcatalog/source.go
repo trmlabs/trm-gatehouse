@@ -13,9 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Source is the live catalog. The broker reads Current per request; Watch
-// swaps in each new valid version. A version that fails validation never
-// replaces the last good catalog.
+// Source is the live catalog: Current is read per request and Watch swaps in each valid version; an invalid version never replaces the last good one.
 type Source struct {
 	current atomic.Pointer[Catalog]
 	version atomic.Int64
@@ -24,20 +22,16 @@ type Source struct {
 
 	mu       sync.Mutex
 	onChange []func(Catalog)
-	// accepted, when set, runs after each version is swapped in, with the
-	// document it was loaded from and the parts left out of it.
 	accepted func(version int, data []byte, dropped []Dropped)
 }
 
-// OnChange runs f after each new catalog version is swapped in, so state
-// derived from an older version (cached tokens) can follow it.
+// OnChange runs f after each new catalog version is swapped in, so derived state such as cached tokens can follow it.
 func (s *Source) OnChange(f func(Catalog)) {
 	s.mu.Lock()
 	s.onChange = append(s.onChange, f)
 	s.mu.Unlock()
 }
 
-// NewSource starts from a validated catalog at a version (0 for a file).
 func NewSource(c Catalog, version int) *Source {
 	s := &Source{}
 	s.current.Store(&c)
@@ -50,11 +44,9 @@ func (s *Source) Current() Catalog { return *s.current.Load() }
 
 func (s *Source) Version() int { return int(s.version.Load()) }
 
-// Loaded reports that a catalog is in force. A Source started with no
-// catalog anywhere is empty, and refuses everything, until Watch loads one.
+// Loaded reports that a catalog is in force; a Source with none refuses everything until Watch loads one.
 func (s *Source) Loaded() bool { return s.loaded.Load() }
 
-// Dropped lists the parts the version in force left out (see ParseTolerant).
 func (s *Source) Dropped() []Dropped {
 	if d := s.dropped.Load(); d != nil {
 		return *d
@@ -69,11 +61,8 @@ func (s *Source) swap(c Catalog, version int, dropped []Dropped) {
 	s.loaded.Store(true)
 }
 
-// Loader returns the newest catalog document and its version.
 type Loader func(context.Context) (data []byte, version int, err error)
 
-// Open reads and validates a catalog once: no catalog, no Source. Parts that
-// fail validation are left out (see ParseTolerant and Dropped).
 func Open(ctx context.Context, load Loader) (*Source, error) {
 	data, version, err := load(ctx)
 	if err != nil {
@@ -88,13 +77,8 @@ func Open(ctx context.Context, load Loader) (*Source, error) {
 	return s, nil
 }
 
-// Start is Open for a broker that must keep running through a catalog
-// outage. It loads from load; if that fails, it starts from stored, the last
-// catalog this broker accepted; with neither, it starts empty and not Loaded,
-// refusing everything until Watch loads a version. The Source is never nil.
-// The error reports why load did not answer, for the caller's log.
-// accepted, if set, runs for the version Start puts in force and for each
-// version Watch swaps in later, so the caller can keep the newest copy.
+// Start is Open for a broker that must survive a catalog outage: it loads from load, else from stored (the last accepted catalog), else starts empty and not Loaded. The Source is never nil; the error says why load failed.
+// accepted, if set, runs for the version Start puts in force and each version Watch swaps in later.
 func Start(ctx context.Context, load, stored Loader, accepted func(version int, data []byte, dropped []Dropped)) (*Source, error) {
 	s := &Source{accepted: accepted}
 	empty := Catalog{}
@@ -113,8 +97,7 @@ func Start(ctx context.Context, load, stored Loader, accepted func(version int, 
 	}
 	if stored != nil {
 		if data, version, err := stored(ctx); err == nil {
-			// Not re-saved, and Watch still loads this version from the
-			// primary: the stored copy only bridges an outage.
+			// Not re-saved: the stored copy only bridges an outage, and Watch still loads this version from the primary.
 			if c, dropped, err := ParseTolerant(data); err == nil {
 				s.swap(c, version, dropped)
 				s.version.Store(0)
@@ -124,11 +107,7 @@ func Start(ctx context.Context, load, stored Loader, accepted func(version int, 
 	return s, loadErr
 }
 
-// Watch polls every interval until ctx ends. A new version is parsed and
-// swapped in atomically, with any invalid or conflicting parts left out (see
-// ParseTolerant), so access removals always take effect. A version that
-// cannot be decoded at all is reported to rejected (with no catalog content)
-// and the previous catalog stays in force.
+// Watch polls every interval; a new version is swapped in atomically with invalid or conflicting parts left out (see ParseTolerant), so removals always take effect. An undecodable version is reported to rejected and the previous catalog stays.
 func (s *Source) Watch(ctx context.Context, interval time.Duration, load Loader, rejected func(version int, err error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -168,8 +147,7 @@ func (s *Source) Watch(ctx context.Context, interval time.Duration, load Loader,
 	}
 }
 
-// VaultLoader reads the catalog document from field of a KV version 2
-// secret, where Terraform writes it; the KV version is the catalog version.
+// VaultLoader reads the catalog document from field of a KV version 2 secret; the KV version is the catalog version.
 func VaultLoader(vault Logical, mount, path, field string) Loader {
 	return func(ctx context.Context) ([]byte, int, error) {
 		if vault == nil || !kvPattern.MatchString(mount) || !kvPattern.MatchString(path) || field == "" {
@@ -196,8 +174,6 @@ func VaultLoader(vault Logical, mount, path, field string) Loader {
 	}
 }
 
-// FromYAML converts a YAML catalog (the reviewed source form) to the JSON the
-// broker reads, so both pass through the same Parse.
 func FromYAML(data []byte) ([]byte, error) {
 	var doc any
 	if err := yaml.Unmarshal(data, &doc); err != nil {

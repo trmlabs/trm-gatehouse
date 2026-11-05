@@ -22,9 +22,7 @@ import (
 
 const testJWT = "header.payload.signature"
 
-// fakeVault models the parts of Vault's token tree the broker relies on:
-// parent logins with a fixed maximum, child sessions that die with their
-// parent, and an outage switch that fails every request.
+// fakeVault models Vault's token tree: parent logins with a fixed maximum, children dying with their parent, and an outage switch.
 type fakeVault struct {
 	t           *testing.T
 	mu          sync.Mutex
@@ -200,8 +198,7 @@ func newJWTHarness(t *testing.T, maxTTL int, opts reauthOptions) *jwtHarness {
 	return &jwtHarness{t: t, vault: vault, clock: clock, c: c, jwt: jwtFile}
 }
 
-// advance moves time in one-minute steps with a refresh tick after each, as
-// the real loop does every few seconds.
+// advance moves time in one-minute steps with a refresh tick after each.
 func (h *jwtHarness) advance(d time.Duration) {
 	for step := time.Duration(0); step < d; step += time.Minute {
 		h.clock.add(time.Minute)
@@ -279,8 +276,6 @@ func TestJWTOlderLoginRevokeIsRetried(t *testing.T) {
 	}
 }
 
-// A login whose revoke keeps failing is one warning naming the failure's
-// class and status, not one every tick; the retries log at debug.
 func TestJWTOlderLoginRevokeFailureWarnsOncePerLogin(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	var logs bytes.Buffer
@@ -320,9 +315,7 @@ func TestJWTOlderLoginRevokeFailureWarnsOncePerLogin(t *testing.T) {
 	}
 }
 
-// Revokes run from the tick and from every session end, so several may retry
-// the same failing login at once: still one warning, and no data race. A
-// canceled context fails each revoke at once, so the retries overlap.
+// Concurrent revokes of the same failing login still log one warning, without a data race.
 func TestJWTOlderLoginRevokeFailureWarnsOnceUnderConcurrentRetries(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	var logs bytes.Buffer // the JSON handler serializes its writes
@@ -362,9 +355,7 @@ func TestJWTCloseRevokesLoginsWithoutSessions(t *testing.T) {
 	}
 }
 
-// There is no ceiling on older logins: long sessions keep their logins in
-// custody, refresh carries on, and minting never stops on that account. Each
-// older login leaves custody at its fixed maximum lifetime.
+// No ceiling on older logins: long sessions keep their logins in custody until each login's fixed maximum.
 func TestJWTOlderLoginsHaveNoCeiling(t *testing.T) {
 	h := newJWTHarness(t, 4*3600, defaultReauthOptions())
 	// One long session per login keeps every older login in custody.
@@ -381,8 +372,7 @@ func TestJWTOlderLoginsHaveNoCeiling(t *testing.T) {
 	if s := h.mustSession(); h.vault.parent(s.Accessor) != "parent-9" {
 		t.Fatal("minting stopped with older logins in custody")
 	}
-	// Past the first login's four-hour maximum it is dropped, not revoked.
-	// Every login still held is inside its lifetime and holds a session.
+	// Past the first login's four-hour maximum it is dropped, not revoked; every login still held is inside its lifetime.
 	h.advance(80 * time.Minute)
 	h.c.reauthTick(context.Background()) // a login retired on the last tick is released on the next
 	now := h.clock.Now()
@@ -395,8 +385,7 @@ func TestJWTOlderLoginsHaveNoCeiling(t *testing.T) {
 	h.c.logins.mu.Unlock()
 }
 
-// Production's broker login has no revoke-self. An idle older login is then
-// released at once instead of retried every tick, and new logins still mint.
+// Production's broker login has no revoke-self: an idle older login is released at once and new logins still mint.
 func TestJWTOlderLoginWithoutRevokeSelfIsReleased(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	h.vault.mu.Lock()
@@ -557,9 +546,7 @@ func (f *fakeVault) setPolicyFrom(n int) {
 	f.mu.Unlock()
 }
 
-// A database the catalog added after the current login was issued: Vault
-// refuses its child policy to that login. The broker logs in again once and
-// the retry succeeds, with no wait for the scheduled refresh.
+// A database added after the current login was issued: Vault refuses its child policy, the broker logs in again once and the retry succeeds.
 func TestJWTDeniedMintLogsInAgainAndRetries(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	h.vault.setPolicyFrom(2) // the apply landed after parent-1
@@ -581,8 +568,7 @@ func TestJWTDeniedMintLogsInAgainAndRetries(t *testing.T) {
 	}
 }
 
-// A policy that no login holds costs at most one new login a minute, however
-// many sessions ask, and each refusal says why.
+// A policy no login holds costs at most one new login a minute, however many sessions ask.
 func TestJWTDeniedMintLoginsAreBounded(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	h.vault.setPolicyFrom(1 << 30) // no login ever holds it
@@ -614,8 +600,7 @@ func TestJWTDeniedMintLoginsAreBounded(t *testing.T) {
 	if logins, _, _ := h.vault.snapshot(); logins != 2 {
 		t.Fatalf("logins=%d", logins)
 	}
-	// A new login also lacked the policy, so it is missing, not new: no more
-	// logins for it until the next scheduled one.
+	// A new login also lacked the policy, so it is missing, not new: no more logins until the next scheduled one.
 	h.advance(2 * time.Minute)
 	_, _ = h.session()
 	if logins, _, _ := h.vault.snapshot(); logins != 2 {
@@ -623,8 +608,7 @@ func TestJWTDeniedMintLoginsAreBounded(t *testing.T) {
 	}
 }
 
-// A policy missing for an hour of minute-by-minute attempts costs at most one
-// extra login per scheduled login, not one a minute.
+// A policy missing for an hour costs at most one extra login per scheduled login, not one a minute.
 func TestJWTMissingPolicyForAnHourStaysBounded(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	h.vault.setPolicyFrom(1 << 30)
@@ -634,16 +618,13 @@ func TestJWTMissingPolicyForAnHourStaysBounded(t *testing.T) {
 			t.Fatal("minted without the policy")
 		}
 	}
-	// Scheduled logins every 20 minutes from the newest login, each followed
-	// by at most one login after a denial: well under the 60 a per-minute
-	// re-login would make.
+	// Scheduled logins every 20 minutes, each followed by at most one denial login: well under the 60 a per-minute re-login would make.
 	if logins, _, _ := h.vault.snapshot(); logins > 7 {
 		t.Fatalf("logins=%d in an hour with a missing policy", logins)
 	}
 }
 
-// Each distinct missing policy can add one login per scheduled login, never
-// one a minute: three missing for an hour stays within 1 + 3 + 3 x 3.
+// Each distinct missing policy adds at most one login per scheduled login: three for an hour stays within 1 + 3 + 3 x 3.
 func TestJWTSeveralMissingPoliciesStayBounded(t *testing.T) {
 	h := newJWTHarness(t, 3600, defaultReauthOptions())
 	roles := []string{"orders", "ledger", "audit"}

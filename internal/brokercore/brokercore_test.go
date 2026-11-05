@@ -25,8 +25,7 @@ func TestIsHopByHop(t *testing.T) {
 	}
 }
 
-// The refusal header is the broker's own: no relay passes a destination's
-// copy on, however it is spelled.
+// The refusal header is the broker's own, however it is spelled.
 func TestShouldStripResponseHeader(t *testing.T) {
 	for name, want := range map[string]bool{
 		"X-Gatehouse-Refusal": true,
@@ -128,9 +127,7 @@ func TestApplyInjection_StripsBrokerScoped(t *testing.T) {
 }
 
 func TestApplyInjection_StripsExtraStrip(t *testing.T) {
-	// extraStrip lets a caller drop additional headers (beyond the
-	// injection set and broker-scoped names) so they never reach the
-	// upstream.
+	// extraStrip drops additional headers so they never reach the upstream.
 	src := http.Header{}
 	src.Set("Authorization", "Bearer session-token")
 	src.Set("X-Trace-Id", "trace-123")
@@ -150,9 +147,7 @@ func TestApplyInjection_StripsExtraStrip(t *testing.T) {
 }
 
 func TestApplyInjection_PassthroughForwardsArbitraryHeaders(t *testing.T) {
-	// Passthrough auth: inject.Headers is nil, no extraStrip — client
-	// headers (including Authorization, Cookie) flow through unchanged
-	// modulo hop-by-hop and broker-scoped.
+	// Passthrough auth: client headers flow through unchanged except hop-by-hop and broker-scoped ones.
 	src := http.Header{}
 	src.Set("Authorization", "Bearer client-token")
 	src.Set("Cookie", "session=abc")

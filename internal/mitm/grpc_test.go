@@ -42,7 +42,6 @@ import (
 // Synthetic vendor key; never a real credential.
 const grpcKey = "sk-synthetic-grpc-key-9d21e4"
 
-// rawCodec carries messages as bytes, so tests need no generated code.
 type rawCodec struct{}
 
 func (rawCodec) Marshal(v any) ([]byte, error) { return *(v.(*[]byte)), nil }
@@ -52,12 +51,7 @@ func (rawCodec) Unmarshal(data []byte, v any) error {
 }
 func (rawCodec) Name() string { return "raw" }
 
-// grpcVendor is a gRPC server (grpc-go, the reference implementation) for
-// the service example.v1.Reads. It checks the key, and answers by request:
-// "echo-key" returns the key, "trailer-key" puts it in a trailer, "missing"
-// is NOT_FOUND, "stale" is UNAUTHENTICATED; a stream's "sync" sends two
-// messages and waits for the test to read the first before sending the
-// second, and "leak" sends one clean message, then the key.
+// grpcVendor is a grpc-go server for example.v1.Reads that checks the key and answers by request: "echo-key", "trailer-key", "missing", "stale", and the streaming "sync" and "leak".
 type grpcVendor struct {
 	mu        sync.Mutex
 	auth      []string
@@ -113,8 +107,7 @@ func (v *grpcVendor) desc() *grpc.ServiceDesc {
 			if err := v.check(stream.Context()); err != nil {
 				return err
 			}
-			// The first message ends with the start of the key, which a
-			// byte stream must hold back until it knows what follows.
+			// The first message ends with the start of the key, which a byte stream must hold back until it knows what follows.
 			first := []byte("row 1 ends sk-synth")
 			if string(in) == "leak" {
 				first = []byte("row 1")
@@ -149,7 +142,6 @@ type grpcFixture struct {
 	session  string // the runner session a sidecar sends on CONNECT, if any
 }
 
-// grpcTestCert is a self-signed certificate for hosts, playing a vendor's.
 func grpcTestCert(t *testing.T, hosts ...string) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -206,7 +198,6 @@ func newGRPCFixture(t *testing.T, options ...func(*Options)) *grpcFixture {
 	return f
 }
 
-// connect opens a tunnel through the broker as a worker's proxy client does.
 func (f *grpcFixture) connect(ctx context.Context, addr string) (net.Conn, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", f.proxyURL.Host)
 	if err != nil {
@@ -234,8 +225,6 @@ func (f *grpcFixture) connect(ctx context.Context, addr string) (net.Conn, error
 	return conn, nil
 }
 
-// client is a stock grpc-go client that reaches host through the broker,
-// trusting only the broker's interception CA.
 func (f *grpcFixture) client(t *testing.T, host string) *grpc.ClientConn {
 	t.Helper()
 	cc, err := grpc.NewClient("passthrough:///"+host+":443", grpc.WithNoProxy(),
@@ -273,8 +262,6 @@ func (f *grpcFixture) unary(t *testing.T, cc *grpc.ClientConn, method, in string
 	return string(out), header, err
 }
 
-// A unary call carries only the placeholder; the vendor sees the key, the
-// worker never does, and the audit rows name the call's path.
 func TestGRPCUnaryCallGetsTheKeyInjected(t *testing.T) {
 	f := newGRPCFixture(t)
 	cc := f.client(t, "rpc.example.com")
@@ -304,9 +291,7 @@ func TestGRPCUnaryCallGetsTheKeyInjected(t *testing.T) {
 	}
 }
 
-// A streamed message reaches the worker as soon as it is whole, even when
-// it ends with the start of the key: the next byte would be a message header,
-// which no key contains.
+// A streamed message reaches the worker as soon as it is whole, even when it ends with the start of the key, since the next byte would be a message header.
 func TestGRPCServerStreamDeliversEachMessageAtOnce(t *testing.T) {
 	f := newGRPCFixture(t)
 	cc := f.client(t, "rpc.example.com")
@@ -333,8 +318,7 @@ func TestGRPCServerStreamDeliversEachMessageAtOnce(t *testing.T) {
 	}
 }
 
-// The key in a streamed message or in a trailer ends the call with INTERNAL
-// before that message or trailer reaches the worker.
+// The key in a streamed message or trailer ends the call with INTERNAL before it reaches the worker.
 func TestGRPCKeyInStreamOrTrailerEndsTheCall(t *testing.T) {
 	f := newGRPCFixture(t)
 	cc := f.client(t, "rpc.example.com")
@@ -345,8 +329,6 @@ func TestGRPCKeyInStreamOrTrailerEndsTheCall(t *testing.T) {
 	req := []byte("leak")
 	_ = stream.SendMsg(&req)
 	_ = stream.CloseSend()
-	// The clean message may arrive first, or share a read with the leak and
-	// be withheld with it; the leak never arrives.
 	for {
 		var msg []byte
 		err = stream.RecvMsg(&msg)
@@ -373,9 +355,6 @@ func TestGRPCKeyInStreamOrTrailerEndsTheCall(t *testing.T) {
 	}
 }
 
-// Broker refusals reach a gRPC client as gRPC statuses with the refusal
-// code; upstream statuses pass through; an UNAUTHENTICATED answer drops the
-// cached key, as a 401 does.
 func TestGRPCRefusalsAndUpstreamStatuses(t *testing.T) {
 	f := newGRPCFixture(t)
 	cc := f.client(t, "rpc.example.com")
@@ -387,8 +366,7 @@ func TestGRPCRefusalsAndUpstreamStatuses(t *testing.T) {
 	if last := f.audit.last(); last.Outcome != "unlisted" || last.Path != "/example.v1.Writes/Append" || last.Method != "POST" {
 		t.Fatalf("unlisted row: %+v", last)
 	}
-	// A request compressed with anything but gzip could not be checked for
-	// decoys or placeholders (gzip: grpc_gzip_test.go).
+	// A request compressed with anything but gzip could not be checked for decoys or placeholders.
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "x", grpc.UseCompressor(testDeflate{}.Name())); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("compressed: %v", err)
 	}
@@ -405,15 +383,13 @@ func TestGRPCRefusalsAndUpstreamStatuses(t *testing.T) {
 	if invalidated != 1 {
 		t.Fatalf("UNAUTHENTICATED dropped the key %d times", invalidated)
 	}
-	// A passing refusal is UNAVAILABLE, which gRPC clients retry.
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "x"); status.Code(err) != codes.Unavailable ||
 		!strings.Contains(status.Convert(err).Message(), "key_unavailable") {
 		t.Fatalf("key unavailable: %v", err)
 	}
 }
 
-// The tunnel offers HTTP/2 only to a host whose entries take it; every other
-// host keeps HTTP/1.1, so a gRPC client cannot reach it at all.
+// The tunnel offers HTTP/2 only to a host whose entries take it.
 func TestHTTP2OnlyForHTTP2Hosts(t *testing.T) {
 	f := newGRPCFixture(t)
 	for host, want := range map[string]string{"rpc.example.com": "h2", "rest.example.com": "http/1.1"} {
@@ -439,8 +415,7 @@ func TestHTTP2OnlyForHTTP2Hosts(t *testing.T) {
 	}
 }
 
-// An http2 entry whose vendor does not offer HTTP/2 fails the call: the
-// broker never falls back to HTTP/1.1 on connections it would reuse.
+// An http2 entry whose vendor does not offer HTTP/2 fails the call: the broker never falls back to HTTP/1.1.
 func TestHTTP2EntryNeverFallsBackToHTTP1(t *testing.T) {
 	cert, vendorRoots := grpcTestCert(t, "old.example.com")
 	var reached atomic.Int32
@@ -481,9 +456,6 @@ func TestHTTP2EntryNeverFallsBackToHTTP1(t *testing.T) {
 	}
 }
 
-// A gcp entry with http2 serves a BigQuery Storage read: the broker mints the
-// entry's own token, passes the routing header and the deadline, asks for an
-// uncompressed response, and streams the messages and trailers back.
 func TestGRPCGoogleEntryStreamsAReadSession(t *testing.T) {
 	cert, googleRoots := grpcTestCert(t, "sts.googleapis.com", "iamcredentials.googleapis.com", "bigquerystorage.googleapis.com")
 	fake := &gcpFake{boundary: map[string]string{}, accounts: map[string]string{}}
@@ -594,9 +566,7 @@ func TestGRPCGoogleEntryStreamsAReadSession(t *testing.T) {
 	}
 }
 
-// A draining broker sends GOAWAY on its HTTP/2 tunnels: an idle one closes at
-// once, a call in flight finishes, and Shutdown returns when it has, well
-// before its deadline.
+// A draining broker sends GOAWAY: idle tunnels close at once, calls in flight finish, and Shutdown returns before its deadline.
 func TestHTTP2TunnelsDrainWithGOAWAY(t *testing.T) {
 	f := newGRPCFixture(t, func(o *Options) { o.DrainTunnels = true })
 	idle := f.client(t, "rpc.example.com")

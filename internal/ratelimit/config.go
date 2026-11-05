@@ -30,9 +30,7 @@ type TierConfig struct {
 	MaxKeys     int           // per-limiter map cap (LRU evict)
 }
 
-// Config is the fully-resolved per-tier configuration for a Registry.
-// Off means "allow everything" — used when profile=off or for operators
-// fronting with their own edge rate limiter.
+// Config is the resolved per-tier configuration for a Registry; Off allows everything.
 type Config struct {
 	Profile Profile
 	Off     bool
@@ -50,20 +48,11 @@ func DefaultsFor(profile Profile) Config {
 		return c
 	}
 	mul := profileMultiplier(profile)
-	// Unauthenticated surface: login/register/forgot/reset/verify,
-	// invite/approval-token redemption, and proxy auth failures. Proxy
-	// failures are keyed per address, or per attested sandbox behind a
-	// shared proxy. AGENT_VAULT_RATELIMIT_AUTH_MAX and _WINDOW override.
+	// Unauthenticated surface, including proxy auth failures keyed per address or attested sandbox.
 	c.Tiers[TierAuth] = TierConfig{
 		Algorithm: AlgSliding, Window: 5 * time.Minute, Max: scaleMax(50, mul), MaxKeys: defaultMaxKeys,
 	}
-	// MITM proxy: token bucket smooths traffic; Concurrency caps in-flight
-	// upstream calls per (actor and workload, vault), so it bounds one agent
-	// Pod, not a pool. Sized for an agent fanning out in parallel (many tool
-	// and model calls at once, each possibly streaming for minutes); vendors'
-	// own limits bound the real rate, and the global tier is the server's
-	// backstop. AGENT_VAULT_RATELIMIT_PROXY_RATE, _BURST and _CONCURRENCY
-	// override each.
+	// MITM proxy: Concurrency caps in-flight upstream calls per (actor and workload, vault); sized for parallel fan-out.
 	c.Tiers[TierProxy] = TierConfig{
 		Algorithm: AlgTokenBucket, Rate: scaleRate(200.0, mul), Burst: scaleMax(2000, mul),
 		Concurrency: scaleMax(1024, mul), MaxKeys: defaultMaxKeys,
@@ -73,10 +62,7 @@ func DefaultsFor(profile Profile) Config {
 	c.Tiers[TierAuthed] = TierConfig{
 		Algorithm: AlgTokenBucket, Rate: scaleRate(10.0, mul), Burst: scaleMax(240, mul), MaxKeys: defaultMaxKeys,
 	}
-	// Server-wide backstop. Rate/Burst drive the RPS bucket; Concurrency
-	// drives the in-flight semaphore. Sized so 10,000 workers on one replica
-	// each making about two requests a second fit; per-key tiers above are
-	// what stop one noisy workload.
+	// Server-wide backstop sized for 10,000 workers on one replica at about two requests a second each.
 	c.Tiers[TierGlobal] = TierConfig{
 		Rate: float64(scaleMax(20000, mul)), Burst: scaleMax(40000, mul),
 		Concurrency: scaleMax(10000, mul),
@@ -88,10 +74,7 @@ func DefaultsFor(profile Profile) Config {
 	return c
 }
 
-// defaultMaxKeys is how many distinct keys (an IP, or a workload and entry)
-// each keyed tier tracks before evicting the coldest. An evicted key starts
-// over with a full bucket, so this is sized for every workload of a large
-// fleet times its entries; a key costs a few hundred bytes.
+// defaultMaxKeys is how many keys each keyed tier tracks before evicting the coldest; an evicted key restarts with a full bucket.
 const defaultMaxKeys = 200000
 
 func profileMultiplier(p Profile) float64 {
@@ -122,8 +105,6 @@ func scaleRate(base, mul float64) float64 {
 }
 
 // EnvSetMask records which per-tier env knobs were explicitly set.
-// Callers that need to preserve env precedence when merging a setting
-// payload use this to avoid rescanning os.Getenv.
 type EnvSetMask struct {
 	Rate, Burst, Window, Max, Concurrency bool
 }
@@ -132,13 +113,7 @@ type EnvSetMask struct {
 // so callers can hold it in a variable without referencing tierCount.
 type EnvMasks [tierCount]EnvSetMask
 
-// LoadFromEnv returns a Config initialized from the environment and a
-// per-tier mask marking which knobs came from env (as opposed to
-// profile defaults). Precedence: AGENT_VAULT_RATELIMIT_PROFILE sets
-// the baseline; per-tier AGENT_VAULT_RATELIMIT_<TIER>_<KNOB> vars
-// override individual fields. AGENT_VAULT_RATELIMIT_LOCK=true marks
-// the config as operator-pinned; UI overrides are ignored by callers
-// that honor the Locked flag.
+// LoadFromEnv returns a Config from the environment plus a mask of env-set knobs; AGENT_VAULT_RATELIMIT_LOCK=true pins it against UI overrides.
 func LoadFromEnv() (Config, EnvMasks) {
 	profile := Profile(strings.ToLower(os.Getenv("AGENT_VAULT_RATELIMIT_PROFILE")))
 	if profile == "" {
@@ -191,9 +166,7 @@ func (m EnvSetMask) Any() bool {
 	return m.Rate || m.Burst || m.Window || m.Max || m.Concurrency
 }
 
-// ApplyOverrides merges a partial set of overrides (e.g. from the
-// instance settings pane) into c. Env-pinned values (when c.Locked) are
-// not touched; callers should gate on Locked before calling this.
+// ApplyOverrides merges partial overrides into c; callers must gate on Locked first.
 func (c *Config) ApplyOverrides(overrides map[Tier]TierConfig) {
 	for t, ov := range overrides {
 		if t < 0 || t >= tierCount {

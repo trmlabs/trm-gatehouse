@@ -16,11 +16,7 @@ import (
 	"time"
 )
 
-// AllowPrivateFromEnv reads AGENT_VAULT_ALLOW_PRIVATE_RANGES and returns whether
-// the proxy should allow connections to private/reserved IP ranges (RFC-1918,
-// loopback, link-local, IPv6 ULA, CGN). Defaults to false (block) when unset
-// or unparseable — the safe default for network-exposed deployments. Cloud
-// metadata endpoints are blocked regardless of this setting.
+// AllowPrivateFromEnv reports whether AGENT_VAULT_ALLOW_PRIVATE_RANGES permits private ranges; default false. Metadata endpoints stay blocked.
 func AllowPrivateFromEnv() bool {
 	v := os.Getenv("AGENT_VAULT_ALLOW_PRIVATE_RANGES")
 	if v == "" {
@@ -39,12 +35,7 @@ func AllowlistFromEnv() []net.IPNet {
 	return ParseCIDRList(os.Getenv("AGENT_VAULT_NETWORK_ALLOWLIST"), "AGENT_VAULT_NETWORK_ALLOWLIST")
 }
 
-// ParseCIDRList parses a comma-separated list of CIDRs or bare IPs. Bare IPv4
-// addresses are expanded to /32, bare IPv6 to /128. Invalid entries are logged
-// via slog.Warn and skipped. Entries that cover an entire address family
-// (mask 0, i.e. 0.0.0.0/0 or ::/0) are accepted but logged as warnings —
-// they're rarely intended and effectively disable any per-range policy.
-// envName labels the source in log messages.
+// ParseCIDRList parses comma-separated CIDRs or bare IPs, skipping invalid entries; envName labels log messages.
 func ParseCIDRList(raw, envName string) []net.IPNet {
 	if raw == "" {
 		return nil
@@ -104,9 +95,7 @@ var alwaysBlocked = []net.IPNet{
 	parseCIDR("fd00:ec2::254/128"),
 }
 
-// privateRanges contains RFC-1918 and other private/reserved ranges.
-// Blocked unless AGENT_VAULT_ALLOW_PRIVATE_RANGES=true or the IP is in the
-// AGENT_VAULT_NETWORK_ALLOWLIST.
+// privateRanges lists RFC-1918 and other reserved ranges, blocked unless allowed by env or allowlist.
 var privateRanges = []net.IPNet{
 	// IPv4 private
 	parseCIDR("10.0.0.0/8"),
@@ -137,9 +126,7 @@ func parseCIDR(s string) net.IPNet {
 	return *ipNet
 }
 
-// isBlockedIP checks if an IP is blocked. When allowPrivate is false,
-// private/reserved ranges are blocked unless the IP is in the allowlist.
-// IMDS endpoints are always blocked, even when allowlisted.
+// isBlockedIP blocks private ranges unless allowlisted; IMDS endpoints are always blocked.
 func isBlockedIP(ip net.IP, allowPrivate bool, allowed []net.IPNet) bool {
 	for _, n := range alwaysBlocked {
 		if n.Contains(ip) {
@@ -166,18 +153,8 @@ func isBlockedIP(ip net.IP, allowPrivate bool, allowed []net.IPNet) bool {
 	return false
 }
 
-// SafeDialContext returns a DialContext function that blocks connections to
-// forbidden IP ranges. When allowPrivate is true, only IMDS endpoints are
-// blocked. When false, private/reserved ranges are also blocked unless
-// allowlisted via AGENT_VAULT_NETWORK_ALLOWLIST, or the dial names a host
-// listed in AGENT_VAULT_PRIVATE_HOSTS (see PrivateHosts).
-//
-// Resolution and address selection are left to net.Dialer, which tries every
-// resolved address and races IPv6 against IPv4 (RFC 6555 Fast Fallback), so
-// one broken address family does not fail or stall the dial. The policy check
-// runs in the dialer's ControlContext hook on each address right before
-// connect, so blocked addresses are skipped and DNS rebinding cannot swap in
-// an unchecked IP between validation and connection.
+// SafeDialContext returns a DialContext that blocks forbidden IP ranges per the allow settings.
+// The policy runs in ControlContext right before connect, so DNS rebinding cannot swap in an unchecked IP.
 func SafeDialContext(allowPrivate bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	var allowed []net.IPNet
 	if !allowPrivate {
@@ -192,21 +169,8 @@ func SafeDialContext(allowPrivate bool) func(ctx context.Context, network, addr 
 	return withPrivateHosts(public, internal, PrivateHostsFromEnv())
 }
 
-// PrivateHosts names the internal hosts whose private addresses the broker
-// may dial, so an internal target (Vault, a database, an internal API) is
-// named in configuration by host name and its addresses are looked up at
-// run time, never written down. Each entry is a host name matched exactly,
-// or "*." and a suffix of at least two labels, matching every name under
-// that suffix (not the suffix itself). Matching ignores case and a trailing
-// dot.
-//
-// A dial whose target is a listed name may reach the private addresses DNS
-// returns for it. Everything else keeps the private-range block: an IP
-// literal, and any other name, even one that resolves to the same private
-// address, so a vendor's name rebound to an internal address is still
-// refused. Metadata endpoints stay blocked for every name, and the egress
-// ranges (AGENT_VAULT_EGRESS_RANGES and its file) still confine a listed
-// name's dials when they are set.
+// PrivateHosts names internal hosts allowed to reach private addresses; IP literals and other names stay blocked.
+// Metadata endpoints stay blocked for every name and the egress ranges still apply.
 type PrivateHosts struct {
 	exact    map[string]bool
 	suffixes []string // each with its leading dot
@@ -217,11 +181,7 @@ func PrivateHostsFromEnv() PrivateHosts {
 	return ParsePrivateHosts(os.Getenv("AGENT_VAULT_PRIVATE_HOSTS"), "AGENT_VAULT_PRIVATE_HOSTS")
 }
 
-// ParsePrivateHosts parses a comma-separated host list. Entries that are not
-// host names (an address, a range, a URL, a wildcard anywhere but the whole
-// leftmost label, or one over a suffix shorter than two labels) are logged
-// and skipped, so a bad entry never widens what is allowed. envName labels
-// the source in log messages.
+// ParsePrivateHosts parses a comma-separated host list; entries that are not host names or allowed wildcards are logged and skipped, so a bad entry never widens access.
 func ParsePrivateHosts(raw, envName string) PrivateHosts {
 	h := PrivateHosts{exact: map[string]bool{}}
 	for _, entry := range strings.Split(raw, ",") {
@@ -244,8 +204,7 @@ func ParsePrivateHosts(raw, envName string) PrivateHosts {
 	return h
 }
 
-// Match reports whether host, a dial target's host part, is a listed name.
-// An address never matches.
+// Match reports whether host is a listed name; an address never matches.
 func (h PrivateHosts) Match(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	if _, err := netip.ParseAddr(host); err == nil || !hostName(host) {
@@ -264,11 +223,8 @@ func (h PrivateHosts) Match(host string) bool {
 
 func (h PrivateHosts) empty() bool { return len(h.exact) == 0 && len(h.suffixes) == 0 }
 
-// hostName reports whether s is a DNS host name: dot-separated labels of
-// letters, digits and inner hyphens, each 1 to 63 bytes, 253 bytes in all,
-// the last starting with a letter as every top-level domain does. That last
-// rule keeps out every form a C resolver reads as an IPv4 address
-// ("127.1", "0x7f.1", "1.0x7f").
+// hostName reports whether s is a DNS host name. The last label must start with a letter,
+// which keeps out every form a C resolver reads as IPv4 ("127.1", "0x7f.1").
 func hostName(s string) bool {
 	if s == "" || len(s) > 253 {
 		return false
@@ -292,9 +248,7 @@ func hostName(s string) bool {
 
 func asciiLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
-// withPrivateHosts sends a dial whose target is a listed private host
-// through internal, which allows private ranges, and every other dial through
-// public. With no host listed it is public alone.
+// withPrivateHosts sends dials to a listed private host through internal and all others through public.
 func withPrivateHosts(public, internal *net.Dialer, hosts PrivateHosts) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if hosts.empty() {
 		return public.DialContext
@@ -324,9 +278,7 @@ func newSafeDialer(allowPrivate bool, allowed []net.IPNet) *net.Dialer {
 	}
 }
 
-// checkDialAddress applies the network policy to the ip:port net.Dialer is
-// about to connect to. Anything that does not parse as an IP address is
-// rejected, so an unexpected address form cannot slip past the policy.
+// checkDialAddress rejects anything that does not parse as an IP, so odd address forms cannot slip past.
 func checkDialAddress(address string, allowPrivate bool, allowed []net.IPNet) error {
 	addrPort, err := netip.ParseAddrPort(address)
 	if err != nil {
@@ -339,19 +291,7 @@ func checkDialAddress(address string, allowPrivate bool, allowed []net.IPNet) er
 	return nil
 }
 
-// withEgressRanges confines d to the AGENT_VAULT_EGRESS_RANGES data-plane
-// ranges, every destination public or private: the broker's own
-// least-privilege layer beneath the catalog's host allowlist. The ranges are
-// checked in the same ControlContext hook as the network policy, on each
-// address right before connect. With neither setting nor file set, d is
-// unchanged; a set but unparseable setting allows nothing beyond the file's
-// addresses, rather than everything.
-//
-// file, when set (AGENT_VAULT_EGRESS_RANGES_FILE), names a file of single
-// addresses that also count as egress ranges, re-read while the process runs:
-// a job resolves the catalog's host names and writes it, so a host's addresses
-// live outside the deployment's configuration and can change without a
-// restart. Setting it confines d even when setting is empty. See fileRanges.
+// withEgressRanges confines d to the egress ranges right before connect; the file is re-read at run time.
 func withEgressRanges(d *net.Dialer, setting, file string) *net.Dialer {
 	if strings.TrimSpace(setting) == "" && strings.TrimSpace(file) == "" {
 		return d
@@ -385,22 +325,8 @@ func withEgressRanges(d *net.Dialer, setting, file string) *net.Dialer {
 // fileRangesInterval is how long a read of the egress ranges file is reused.
 const fileRangesInterval = 5 * time.Second
 
-// fileRanges holds the addresses read from an egress ranges file. The file
-// lists single addresses (an IPv4 or IPv6 address, or one with /32 or /128),
-// separated by commas, spaces or new lines, with # comments. A missing file
-// adds nothing until a good read, since the job that writes it may not have
-// run yet. A file with no address, or with any other entry (a wider range, a
-// name, garbage), is refused whole and the last good set stays, so a failed
-// or bad write never widens egress and never cuts working connections. After a
-// good read, a missing, unreadable or empty file keeps that set: removing
-// the file revokes nothing, so revoke by writing a shorter list. The broker
-// cannot tell a file cut off mid-write from a whole one, so the writer must
-// replace it atomically (write a temporary file and rename it; a Kubernetes
-// ConfigMap mounted as a directory does, but a subPath mount never updates).
-// The private and metadata blocks apply to these addresses as to every other:
-// a private address in the file serves only a dial to a listed private host
-// (PrivateHosts), so a bad write cannot open an internal address to any other
-// name.
+// fileRanges holds addresses read from an egress ranges file; an invalid file is refused whole and the last good set stays.
+// The writer must replace the file atomically (a subPath mount never updates); private and metadata blocks still apply.
 type fileRanges struct {
 	path    string
 	mu      sync.Mutex
@@ -432,8 +358,7 @@ func (f *fileRanges) current() []net.IPNet {
 		case f.content != "":
 			slog.Warn("netguard: egress ranges file is gone; keeping the last addresses read", slog.String("path", f.path)) //nolint:gosec // G706: structured slog attrs
 		case !f.absent:
-			// Once, so a mistyped path or a mount that never arrives is told
-			// apart from a writer that has not run yet.
+			// Logged once, to tell a bad path or missing mount from a writer that has not run yet.
 			f.absent = true
 			slog.Warn("netguard: egress ranges file not there yet; adding no addresses until it is written", slog.String("path", f.path)) //nolint:gosec // G706: structured slog attrs
 		}
@@ -464,8 +389,7 @@ func parseHostAddresses(raw string) ([]net.IPNet, error) {
 			line = line[:i]
 		}
 		for _, field := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
-			// Errors name the line, never the entry: a path set to the wrong
-			// file must not copy that file's contents into the log.
+			// Errors name the line, never the entry, so a wrong path cannot copy file contents into the log.
 			prefix, err := netip.ParsePrefix(field)
 			if err != nil {
 				addr, aerr := netip.ParseAddr(field)
@@ -482,14 +406,13 @@ func parseHostAddresses(raw string) ([]net.IPNet, error) {
 		}
 	}
 	if len(out) == 0 {
-		// A writer that resolved nothing must not cut every address it gave before.
+		// A writer that resolved nothing must not cut every earlier address.
 		return nil, errors.New("no address listed")
 	}
 	return out, nil
 }
 
-// checkEgressAddress reports an error unless the ip:port the dialer is about
-// to connect to lies inside one of the egress ranges.
+// checkEgressAddress errors unless the dialed ip:port lies inside an egress range.
 func checkEgressAddress(address string, egress []net.IPNet) error {
 	addrPort, err := netip.ParseAddrPort(address)
 	if err != nil {

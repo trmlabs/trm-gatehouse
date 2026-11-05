@@ -118,7 +118,6 @@ func TestGitHubAPIEntries(t *testing.T) {
 		{"POST", "/repos/example-org/example-app/git/refs", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/example-org/other/pulls", "", "pool-a", ErrUnlisted},
 		{"POST", "/repos/example-org/example-app/pulls", "per_page=1", "pool-a", ErrUnlisted},
-		// The default operations (pr.open, pr.read, pr.comment) open no other route.
 		{"GET", "/repos/example-org/example-app/pulls", "", "pool-a", ErrMethod},
 		{"DELETE", "/repos/example-org/example-app/pulls", "", "pool-a", ErrMethod},
 		{"GET", "/repos/example-org/example-app/pulls/12", "", "pool-a", nil},
@@ -126,17 +125,13 @@ func TestGitHubAPIEntries(t *testing.T) {
 		{"POST", "/repos/example-org/example-app/pulls/12/ready", "", "pool-a", ErrUnlisted},
 		{"GET", "/repos/example-org/example-app/issues/12/comments", "", "pool-a", ErrMethod},
 		{"PATCH", "/repos/example-org/example-app/issues/comments/5", "", "pool-a", ErrMethod},
-		// pr.read reads a comment by id; editing one needs pr.edit.
 		{"GET", "/repos/example-org/example-app/issues/comments/5", "", "pool-a", nil},
-		// pr.read reads a pull request's labels; adding one needs pr.label.
 		{"GET", "/repos/example-org/example-app/issues/12/labels", "", "pool-a", nil},
 		{"POST", "/repos/example-org/example-app/issues/12/labels", "", "pool-a", ErrMethod},
 		{"POST", "/repos/example-org/example-app/dispatches", "", "pool-a", ErrUnlisted},
 		{"GET", "/repos/example-org/example-app/actions/runs", "", "pool-a", ErrUnlisted},
 		{"GET", "/repos/example-org/example-app/deployments", "", "pool-a", ErrUnlisted},
 		{"PATCH", "/repos/example-org/example-app/issues/12", "", "pool-a", ErrUnlisted},
-		// pr.read also lists a pull request's files and compares two refs: code
-		// the pool can already clone.
 		{"GET", "/repos/example-org/example-app/pulls/12/files", "", "pool-a", nil},
 		{"GET", "/repos/example-org/example-app/compare/main...feature", "", "pool-a", nil},
 		{"GET", "/repos/example-org/example-app/commits/abc1234/status", "", "pool-a", ErrUnlisted},
@@ -151,7 +146,6 @@ func TestGitHubAPIEntries(t *testing.T) {
 	if _, ok, _ := c.GitHubAPIMatch("github.com", 443, "POST", "/repos/example-org/example-app/pulls", "", "pool-a"); ok {
 		t.Fatal("git host routed to the API")
 	}
-	// Opening a pull request carries the pool's own push prefixes; other routes do not.
 	if m, _, _ := c.GitHubAPIMatch("api.github.com", 443, "POST", "/repos/example-org/example-app/pulls", "", "pool-a"); !m.OpensPullRequest || fmt.Sprint(m.HeadPrefixes) != "[cursor/]" {
 		t.Fatalf("create: %+v", m)
 	}
@@ -167,7 +161,6 @@ func TestGitHubAPIEntries(t *testing.T) {
 	if m, _, _ := c.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/example-org/example-app/pulls/1", "", "pool-a"); m.Write {
 		t.Fatalf("read marked as a write: %+v", m)
 	}
-	// Without a git entry for the pool, there is no branch to open one from.
 	alone, err := Parse([]byte(`{"entries":[` + apiEntry + `]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -177,9 +170,6 @@ func TestGitHubAPIEntries(t *testing.T) {
 	}
 }
 
-// Labels, repository dispatch, Actions and deployments exist only where a
-// repository grants them, and pull request prefixes widen which existing pull
-// requests a write may act on, never which branch one may be opened from.
 func TestGitHubAPIRepositoryGrants(t *testing.T) {
 	granted := strings.Replace(apiEntry, `"access":"write"`, `"access":"write","operations":["pr.open","pr.read","pr.list","pr.comment","pr.edit","pr.label","pr.ready","dispatch","actions.read","deployments.read"],"pullRequestPrefixes":["factory/"],"labels":["preview"],"dispatchEvents":["preview-build"]`, 1)
 	c, err := Parse([]byte(`{"entries":[` + gitEntry + `,` + granted + `]}`))
@@ -286,8 +276,6 @@ func TestGitHubAPIRepositoryGrants(t *testing.T) {
 	}
 }
 
-// A scope with no catalog pool (a non-pool agent, or an Attestor that set
-// none) matches no grant of any kind, even on a listed route.
 func TestEmptyPoolMatchesNoGrant(t *testing.T) {
 	doc := `{"pools":[{"name":"pool-a","namespace":"agents","serviceAccount":"worker"}],"entries":[` + validEntry + `,` + gitEntry + `,` + apiEntry + `,
 		{"name":"core","kind":"postgres","host":"p.abc.db.postgresbridge.com","pools":["pool-a"],"postgres":{"database":"core","mount":"database","role":"r-readonly"}}]}`
@@ -309,8 +297,6 @@ func TestEmptyPoolMatchesNoGrant(t *testing.T) {
 	}
 }
 
-// Each operation opens exactly its routes, with its token scope, and nothing
-// else; every route belongs to an operation in the vocabulary.
 func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 	samples := []string{
 		"POST pulls", "GET pulls", "GET pulls/1", "PATCH pulls/1", "POST pulls/1/ready",
@@ -341,8 +327,7 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 			"GET actions/workflows/ci.yml/runs", "GET actions/jobs/1", "GET actions/jobs/1/logs", "GET actions/artifacts/1", "GET actions/artifacts/1/zip",
 			"GET actions/workflows/ci.yml", "GET commits/abc1234/status", "GET commits/abc1234/statuses", "GET commits/abc1234/check-runs",
 			"GET check-runs/1", "GET check-runs/1/annotations"},
-		"deployments.read": {"GET deployments", "GET deployments/1", "GET deployments/1/statuses"},
-		// CI restarts also need a git entry with push prefixes (TestGitHubCIRestartsNeedPushPrefixes).
+		"deployments.read":     {"GET deployments", "GET deployments/1", "GET deployments/1/statuses"},
 		"pr.update_branch":     nil,
 		"actions.rerun":        nil,
 		"actions.rerun_failed": nil,
@@ -394,8 +379,6 @@ func TestGitHubOperationsMapRoutesAndScopes(t *testing.T) {
 	}
 }
 
-// A pull request's files and a compare return code, so they open only for a
-// pool whose git entry can already clone the repository.
 func TestGitHubAPICodeReadsNeedClone(t *testing.T) {
 	withGit, err := Parse([]byte(`{"entries":[` + gitEntry + `,` + apiEntry + `]}`))
 	if err != nil {
@@ -418,10 +401,6 @@ func TestGitHubAPICodeReadsNeedClone(t *testing.T) {
 	}
 }
 
-// A code read picks its git entry the way a clone does: the git entry on the
-// git host (github.com for api.github.com) that lists the repository, which the
-// catalog allows only once per host, and nothing when that entry does not grant
-// the pool. An entry on another host is never used.
 func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
 	entry := func(name, host, pool string) string {
 		return `{"name":"` + name + `","host":"` + host + `","kind":"git","pools":["` + pool + `"],
@@ -436,21 +415,15 @@ func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
 		m, _, err := c.GitHubAPIMatch("api.github.com", 443, "GET", "/repos/example-org/example-app/compare/main...feature", "", "pool-a")
 		return m, err
 	}
-	// An entry on another host comes first in the catalog; the github.com one is used.
 	if m, err := match(entry("elsewhere", "git.example.com", "pool-a"), entry("github", "github.com", "pool-a")); err != nil || m.CloneEntry == nil || m.CloneEntry.Name != "github" {
 		t.Errorf("git host entry: %v %+v", err, m.CloneEntry)
 	}
-	// The github.com entry does not grant the pool: a clone gets ErrPool, so no
-	// code read, even though another host's entry grants it.
 	if _, err := match(entry("elsewhere", "git.example.com", "pool-a"), entry("github", "github.com", "pool-b")); !errors.Is(err, ErrUnlisted) {
 		t.Errorf("git host entry without the pool: %v", err)
 	}
-	// Only another host lists the repository.
 	if _, err := match(entry("elsewhere", "git.example.com", "pool-a")); !errors.Is(err, ErrUnlisted) {
 		t.Errorf("git entry on another host only: %v", err)
 	}
-	// Another port on the git host is a different endpoint: an entry there,
-	// listed first, never stands in for the clone entry on 443.
 	altPort := strings.Replace(entry("alt-port", "github.com", "pool-a"), `"host":"github.com"`, `"host":"github.com","port":8443`, 1)
 	if m, err := match(altPort, entry("github", "github.com", "pool-a")); err != nil || m.CloneEntry == nil || m.CloneEntry.Name != "github" {
 		t.Errorf("alternate port listed first: %v %+v", err, m.CloneEntry)
@@ -460,10 +433,6 @@ func TestGitHubAPICodeReadsUseTheCloneSelection(t *testing.T) {
 	}
 }
 
-// One git entry and one github-api entry serve several pools, each on its own
-// branches: per-pool prefixes apply to their pool only, beside the shared
-// ones, and a pool is refused on another pool's prefix for a push, opening a
-// pull request and acting on one.
 const poolsGitEntry = `{"name":"github","host":"github.com","kind":"git","pools":["pool-a","pool-b","pool-c"],
 	"git":{"appID":7,"installationID":42,"repos":[
 		{"repo":"example-org/example-repo","access":"write","poolRefPrefixes":{
@@ -488,8 +457,6 @@ func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
 		{"pool-a", "POST", "/example-org/example-repo.git/git-receive-pack", "", "[refs/heads/cursor/pool-a/]", nil},
 		{"pool-b", "POST", "/example-org/example-repo.git/git-receive-pack", "", "[refs/heads/cursor/pool-b/ refs/heads/factory/]", nil},
 		{"pool-b", "GET", "/example-org/example-repo.git/info/refs", "service=git-receive-pack", "[refs/heads/cursor/pool-b/ refs/heads/factory/]", nil},
-		// pool-c is granted the repository but lists no prefix there: it
-		// clones and fetches, and never pushes.
 		{"pool-c", "POST", "/example-org/example-repo.git/git-upload-pack", "", "[]", nil},
 		{"pool-c", "POST", "/example-org/example-repo.git/git-receive-pack", "", "[]", ErrReadOnly},
 		{"pool-c", "GET", "/example-org/example-repo.git/info/refs", "service=git-receive-pack", "[]", ErrReadOnly},
@@ -500,9 +467,6 @@ func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
 			t.Errorf("%s %s %s: ok=%v err=%v prefixes=%v", tc.pool, tc.method, tc.path, ok, err, m.RefPrefixes)
 		}
 	}
-	// A pull request opens only from the pool's own push prefixes, and a write
-	// acts only on pull requests under them or the pool's own pull request
-	// prefixes: pool-b never reaches review/, and nobody else reaches factory/.
 	for _, tc := range []struct{ pool, open, target string }{
 		{"pool-a", "[cursor/pool-a/]", "[cursor/pool-a/ review/]"},
 		{"pool-b", "[cursor/pool-b/ factory/]", "[cursor/pool-b/ factory/]"},
@@ -525,7 +489,6 @@ func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
 			}
 		}
 	}
-	// The shared lists still apply to every pool of the entry, before its own.
 	mixed := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
 	if c, err := Parse([]byte(`{"entries":[` + mixed + `]}`)); err != nil {
 		t.Fatal(err)
@@ -536,8 +499,6 @@ func TestPoolPrefixesKeepEachPoolOnItsOwnBranches(t *testing.T) {
 			}
 		}
 	}
-	// A write repository that lists no prefix at all still leaves every pool
-	// to GitHub's branch protection, as before.
 	open := strings.Replace(gitEntry, `,"refPrefixes":["refs/heads/cursor/"]`, ``, 1)
 	if c, err := Parse([]byte(`{"entries":[` + open + `]}`)); err != nil {
 		t.Fatal(err)
@@ -572,21 +533,18 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 			`{"repo":"example-org/docs","access":"read","poolRefPrefixes":{"pool-a":["refs/heads/x/"]}}`, 1),
 		"pull request prefixes on a git entry": strings.Replace(poolsGitEntry, `{"repo":"example-org/docs","access":"read"}`,
 			`{"repo":"example-org/docs","access":"read","poolPullRequestPrefixes":{"pool-a":["x/"]}}`, 1),
-		"ref prefixes on a github-api entry":     strings.Replace(poolsAPIEntry, `"access":"write",`, `"access":"write","poolRefPrefixes":{"pool-a":["refs/heads/x/"]},`, 1),
-		"pull request prefix for another pool":   heads(`{"pool-x":["review/"]}`),
-		"pull request prefix with refs/heads":    heads(`{"pool-a":["refs/heads/review/"]}`),
-		"pull request prefix without a slash":    heads(`{"pool-a":["review"]}`),
-		"same pull request prefix for two pools": heads(`{"pool-a":["review/"],"pool-b":["review/"]}`),
-		"nested pull request prefixes":           heads(`{"pool-a":["review/"],"pool-b":["review/b/"]}`),
-		"pull request prefixes with reads only":  strings.Replace(heads(`{"pool-a":["review/"]}`), `"operations":["pr.open","pr.read","pr.comment","pr.edit","pr.label","pr.ready"],"labels":["preview"]`, `"operations":["pr.open","pr.read"]`, 1),
-		// A present but empty map would read as no limit at all, and so would
-		// null, which decodes to no map.
-		"empty per-pool ref prefixes":          refs(`{}`),
-		"empty per-pool pull request prefixes": heads(`{}`),
-		"null per-pool ref prefixes":           refs(`null`),
-		"null per-pool pull request prefixes":  heads(`null`),
-		"null prefixes for a pool":             refs(`{"pool-a":null}`),
-		// The shared lists apply to every pool, so they may not reach a pool's own.
+		"ref prefixes on a github-api entry":               strings.Replace(poolsAPIEntry, `"access":"write",`, `"access":"write","poolRefPrefixes":{"pool-a":["refs/heads/x/"]},`, 1),
+		"pull request prefix for another pool":             heads(`{"pool-x":["review/"]}`),
+		"pull request prefix with refs/heads":              heads(`{"pool-a":["refs/heads/review/"]}`),
+		"pull request prefix without a slash":              heads(`{"pool-a":["review"]}`),
+		"same pull request prefix for two pools":           heads(`{"pool-a":["review/"],"pool-b":["review/"]}`),
+		"nested pull request prefixes":                     heads(`{"pool-a":["review/"],"pool-b":["review/b/"]}`),
+		"pull request prefixes with reads only":            strings.Replace(heads(`{"pool-a":["review/"]}`), `"operations":["pr.open","pr.read","pr.comment","pr.edit","pr.label","pr.ready"],"labels":["preview"]`, `"operations":["pr.open","pr.read"]`, 1),
+		"empty per-pool ref prefixes":                      refs(`{}`),
+		"empty per-pool pull request prefixes":             heads(`{}`),
+		"null per-pool ref prefixes":                       refs(`null`),
+		"null per-pool pull request prefixes":              heads(`null`),
+		"null prefixes for a pool":                         refs(`{"pool-a":null}`),
 		"a shared prefix starts a pool's own":              strings.Replace(refs(`{"pool-a":["refs/heads/cursor/pool-a/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/cursor/"],`, 1),
 		"a pool's own starts a shared prefix":              strings.Replace(refs(`{"pool-a":["refs/heads/"]}`), `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1),
 		"a shared pull request prefix starts a pool's own": strings.Replace(heads(`{"pool-a":["review/a/"]}`), `"access":"write",`, `"access":"write","pullRequestPrefixes":["review/"],`, 1),
@@ -596,7 +554,6 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// Prefixes that only share text, not a starting run, are disjoint.
 	for name, doc := range map[string]string{
 		"sibling pools":         refs(`{"pool-a":["refs/heads/cursor/pool-a/"],"pool-ab":["refs/heads/cursor/pool-ab/"]}`),
 		"same pool nests":       refs(`{"pool-a":["refs/heads/a/","refs/heads/a/b/"]}`),
@@ -609,8 +566,6 @@ func TestPoolPrefixesAreValidatedAndDisjoint(t *testing.T) {
 	}
 }
 
-// An explicit null for either per-pool field is refused by name at load, in
-// the strict and the tolerant load alike, rather than read as an absent field.
 func TestPoolPrefixesNullIsRefused(t *testing.T) {
 	git := strings.Replace(poolsGitEntry, `"poolRefPrefixes":{
 			"pool-a":["refs/heads/cursor/pool-a/"],
@@ -630,8 +585,6 @@ func TestPoolPrefixesNullIsRefused(t *testing.T) {
 	}
 }
 
-// The tolerant load drops only the entry whose per-pool prefixes fail, and
-// keeps the rest of the catalog in force.
 func TestPoolPrefixesFailingEntryIsDroppedAlone(t *testing.T) {
 	bad := strings.Replace(poolsGitEntry, `"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]`, `"pool-b":["refs/heads/cursor/pool-a/x/"]`, 1)
 	if bad == poolsGitEntry {
@@ -652,8 +605,6 @@ func TestPoolPrefixesFailingEntryIsDroppedAlone(t *testing.T) {
 	}
 }
 
-// An overlap names both prefixes as the catalog spells them, so an author can
-// find them.
 func TestPoolPrefixOverlapKeepsTheAuthorsSpelling(t *testing.T) {
 	doc := strings.Replace(poolsGitEntry, `"pool-b":["refs/heads/cursor/pool-b/","refs/heads/factory/"]`, `"pool-b":["refs/heads/Cursor/Pool-A/x/"]`, 1)
 	_, err := Parse([]byte(`{"entries":[` + doc + `]}`))
@@ -662,11 +613,6 @@ func TestPoolPrefixOverlapKeepsTheAuthorsSpelling(t *testing.T) {
 	}
 }
 
-// A github-api repository's pull request prefixes may not reach another
-// pool's own push prefixes in the git entry a clone of the repository uses:
-// that pool's pull requests would be in reach of the other's comment, edit,
-// label and ready routes. The load refuses it whichever entry comes first, and
-// the tolerant load drops both entries.
 func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 	heads := func(field, value string) string {
 		return strings.Replace(poolsAPIEntry, `"poolPullRequestPrefixes":{"pool-a":["review/"]}`, `"`+field+`":`+value, 1)
@@ -687,14 +633,10 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 			}
 		}
 	}
-	// A git entry on another host crosses too: a pool's pull request reach
-	// draws on every git entry listing the repository.
 	otherHost := strings.NewReplacer(`"name":"github"`, `"name":"elsewhere"`, `"host":"github.com"`, `"host":"git.example.com"`).Replace(poolsGitEntry)
 	if _, err := Parse([]byte(`{"entries":[` + otherHost + `,` + heads("poolPullRequestPrefixes", `{"pool-b":["cursor/pool-a/"]}`) + `]}`)); err == nil || !strings.Contains(err.Error(), "overlaps push prefix") {
 		t.Errorf("a git entry on other host: %v", err)
 	}
-	// A pool's own pull request prefixes under its own push prefixes and the
-	// git entry's shared push prefixes cross nothing.
 	sharedPush := strings.Replace(poolsGitEntry, `"access":"write",`, `"access":"write","refPrefixes":["refs/heads/shared/"],`, 1)
 	for name, doc := range map[string]string{
 		"its own push prefix":  poolsGitEntry + `,` + heads("poolPullRequestPrefixes", `{"pool-a":["cursor/pool-a/sub/"]}`),
@@ -704,8 +646,6 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 			t.Errorf("%s refused: %v", name, err)
 		}
 	}
-	// A shared pull request prefix on a pool's own push prefix crosses nothing
-	// when the github-api entry grants only that pool.
 	onlyA := strings.Replace(heads("pullRequestPrefixes", `["cursor/pool-a/"]`), `"pools":["pool-a","pool-b","pool-c"]`, `"pools":["pool-a"]`, 1)
 	if _, err := Parse([]byte(`{"entries":[` + poolsGitEntry + `,` + onlyA + `]}`)); err != nil {
 		t.Errorf("shared prefix with one pool refused: %v", err)
@@ -720,9 +660,6 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 			t.Errorf("%s reason: %s", d.Name, d.Reason)
 		}
 	}
-	// The git entry's shared push prefixes are held by each pool of that entry,
-	// so a github-api pool outside it may not reach them either, by its own
-	// pull request prefixes or the shared ones.
 	withD := strings.Replace(poolsAPIEntry, `"pools":["pool-a","pool-b","pool-c"]`, `"pools":["pool-a","pool-b","pool-c","pool-d"]`, 1)
 	outside := func(field, value string) string {
 		return strings.Replace(withD, `"poolPullRequestPrefixes":{"pool-a":["review/"]}`, `"`+field+`":`+value, 1)
@@ -748,10 +685,6 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 	if _, err := Parse([]byte(`{"entries":[` + sharedPush + `,` + outside("poolPullRequestPrefixes", `{"pool-d":["renovate/"]}`) + `]}`)); err != nil {
 		t.Errorf("a pool outside the git entry, off every push prefix, refused: %v", err)
 	}
-	// A write repository that lists no push prefixes lets each pool of its git
-	// entry push any branch, as a shared push prefix of refs/heads/ would, so
-	// no pull request prefix of a pool outside that entry may reach it. A
-	// read-only repository pushes nothing and crosses nothing.
 	unlimited := func(pools, access string) string {
 		return `{"name":"github","host":"github.com","kind":"git","pools":` + pools + `,"git":{"appID":7,"installationID":42,
 		"repos":[{"repo":"example-org/example-repo","access":"` + access + `"}]}}`
@@ -784,11 +717,6 @@ func TestPullRequestPrefixesStayOffOtherPoolsBranches(t *testing.T) {
 	}
 }
 
-// A CI restart (a branch update, a rerun) exists only where the repository
-// opts in and the git entry a push would use lets the pool push to branch
-// prefixes. Its head must then be under those prefixes alone, never the
-// repository's pullRequestPrefixes, and the requester must pass that git
-// entry too.
 func TestGitHubCIRestartsNeedPushPrefixes(t *testing.T) {
 	api := `{"name":"github-api","host":"api.github.com","kind":"github-api","pools":["pool-a"],
 		"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
@@ -823,7 +751,6 @@ func TestGitHubCIRestartsNeedPushPrefixes(t *testing.T) {
 	if s := c.GitScope(42); !s.PullRequests || !s.ActionsWrite || s.Actions {
 		t.Errorf("GitScope = %+v", s)
 	}
-	// Each restart operation alone sets the installation scope its token needs.
 	for op, want := range map[string][2]bool{ // pull requests write, actions write
 		"pr.update_branch":     {true, false},
 		"actions.rerun":        {false, true},
@@ -858,10 +785,6 @@ func TestGitHubCIRestartsNeedPushPrefixes(t *testing.T) {
 	}
 }
 
-// One git entry serves several pools on their own branches: a CI restart
-// reads the pool's own push prefixes beside the shared ones, never another
-// pool's and never its pull request prefixes, and a pool with none has no
-// restart routes.
 func TestGitHubCIRestartsUseThePoolsOwnPrefixes(t *testing.T) {
 	api := strings.Replace(poolsAPIEntry, `"pr.ready"]`, `"pr.ready","pr.update_branch","actions.rerun"]`, 1)
 	if api == poolsAPIEntry {
@@ -898,8 +821,6 @@ func TestGitHubCIRestartsUseThePoolsOwnPrefixes(t *testing.T) {
 	}
 }
 
-// A git entry bounds each push's command list: 16 MiB by default, never more
-// than the entry's request limit, and only git entries take the setting.
 func TestMaxPushCommandBytes(t *testing.T) {
 	entry := func(kind, host, extra string) string {
 		return `{"entries":[{"name":"e","host":"` + host + `","kind":"` + kind + `","pools":["p"],` + extra +

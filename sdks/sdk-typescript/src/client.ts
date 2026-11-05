@@ -2,17 +2,13 @@ import { HttpClient } from "./http.js";
 import type { AgentVaultConfig, VaultCreated, VaultDeleted } from "./types.js";
 import { VaultClient } from "./vault.js";
 
-/**
- * Options for creating a vault.
- */
+/** Options for creating a vault. */
 export interface CreateVaultOptions {
   /** Vault name (3-64 chars, lowercase alphanumeric and hyphens only). */
   name: string;
 }
 
-/**
- * A newly created vault.
- */
+/** A newly created vault. */
 export interface Vault {
   /** Vault UUID. */
   id: string;
@@ -22,9 +18,7 @@ export interface Vault {
   createdAt: string;
 }
 
-/**
- * Result of deleting a vault.
- */
+/** Result of deleting a vault. */
 export interface DeleteVaultResult {
   /** Name of the deleted vault. */
   name: string;
@@ -32,23 +26,7 @@ export interface DeleteVaultResult {
   deleted: boolean;
 }
 
-/**
- * Instance-level client for Agent Vault.
- *
- * Use this when you have an instance-level agent token (`av_agt_...`) that
- * can access multiple vaults and perform instance-level operations.
- *
- * ```typescript
- * // Auto-detect from environment variables
- * const av = new AgentVault();
- *
- * // Explicit config
- * const av = new AgentVault({ token: "av_agt_...", address: "..." });
- *
- * // Get a vault-scoped client
- * const vault = av.vault("my-project");
- * ```
- */
+/** Instance-level client for Agent Vault, for an instance-level agent token (`av_agt_...`) that can access multiple vaults. */
 export class AgentVault {
   /** @internal */
   readonly _httpClient: HttpClient;
@@ -57,12 +35,7 @@ export class AgentVault {
     this._httpClient = HttpClient.fromConfig(config);
   }
 
-  /**
-   * Returns a {@link VaultClient} scoped to the named vault.
-   *
-   * For instance-level agent tokens, this injects the `X-Vault` header
-   * so all requests are directed to the correct vault.
-   */
+  /** Returns a {@link VaultClient} scoped to the named vault via the `X-Vault` header. */
   vault(name: string): VaultClient {
     return VaultClient._create(
       this._httpClient.withHeaders({ "X-Vault": name }),
@@ -70,16 +43,7 @@ export class AgentVault {
     );
   }
 
-  /**
-   * Create a new vault.
-   *
-   * The calling actor becomes the vault admin. Any authenticated actor
-   * (user or agent) can create vaults. Requires an instance-level session
-   * (vault-scoped tokens cannot create vaults).
-   *
-   * @throws {ApiError} 400 if the name is invalid or reserved.
-   * @throws {ApiError} 409 if a vault with this name already exists.
-   */
+  /** Create a new vault, throwing ApiError 400 (invalid or reserved name) or 409 (already exists). */
   async createVault(options: CreateVaultOptions): Promise<Vault> {
     const res = await this._httpClient.post<VaultCreated>("/v1/vaults", {
       name: options.name,
@@ -92,17 +56,7 @@ export class AgentVault {
     };
   }
 
-  /**
-   * Delete a vault by name.
-   *
-   * Requires vault admin role or instance owner. The default vault cannot
-   * be deleted. Requires an instance-level session (vault-scoped tokens
-   * cannot delete vaults).
-   *
-   * @throws {ApiError} 400 if attempting to delete the default vault.
-   * @throws {ApiError} 403 if not a vault admin or instance owner.
-   * @throws {ApiError} 404 if the vault does not exist.
-   */
+  /** Delete a vault by name, throwing ApiError 400 (default vault), 403 (not admin or owner) or 404. */
   async deleteVault(name: string): Promise<DeleteVaultResult> {
     const res = await this._httpClient.del<VaultDeleted>(
       `/v1/vaults/${encodeURIComponent(name)}`,

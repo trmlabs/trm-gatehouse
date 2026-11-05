@@ -2,8 +2,7 @@ package store
 
 import "gorm.io/gorm"
 
-// Independent of request_logs retention and identity/service lifetimes: deleting
-// configuration must not erase an already acknowledged audit attempt.
+// Independent of request_logs retention: deleting configuration must not erase an acknowledged audit attempt.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		return db.Exec(`CREATE TABLE IF NOT EXISTS credential_proxy_audit (

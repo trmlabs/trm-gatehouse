@@ -149,11 +149,7 @@ func TestFetchUserVaults_401PreservesServerMessage(t *testing.T) {
 	}
 }
 
-// TestMintScopedSession_VaultResolutionMemoized asserts that when the admin
-// session expires between the vault lookup and the scoped-session mint, the
-// retry does not re-run vault resolution — otherwise a multi-vault user
-// would be re-prompted by the picker, and a single-vault user would pay an
-// extra `/v1/vaults` round-trip.
+// TestMintScopedSession_VaultResolutionMemoized asserts an expiry retry does not repeat vault resolution (no re-prompt or extra /v1/vaults call).
 func TestMintScopedSession_VaultResolutionMemoized(t *testing.T) {
 	// Isolate $HOME so a developer-set ~/.agent-vault/context doesn't
 	// short-circuit resolveVaultForRun before fetchUserVaults runs.

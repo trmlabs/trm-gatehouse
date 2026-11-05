@@ -12,10 +12,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/ratelimit"
 )
 
-// rateLimitSettingPayload is the JSON blob stored under
-// settings[settingRateLimitConfig]. profile is a named bundle;
-// overrides (optional) tune individual tier fields on top of it.
-// Zero/empty fields in an override mean "inherit from profile".
+// rateLimitSettingPayload is the stored rate-limit setting: a profile plus optional per-tier overrides (empty inherits).
 type rateLimitSettingPayload struct {
 	Profile   string                           `json:"profile"`
 	Overrides map[string]rateLimitTierOverride `json:"overrides,omitempty"`
@@ -51,11 +48,7 @@ func loadRateLimitSetting(ctx context.Context, s Store) (rateLimitSettingPayload
 	return p, true, nil
 }
 
-// resolveRateLimitConfig computes the effective Config applied to the
-// registry. Precedence: env > instance setting > built-in default.
-// When AGENT_VAULT_RATELIMIT_LOCK=true, the instance setting is
-// ignored entirely (operator pin). Returns the env-set mask so
-// callers can render per-tier "source" without re-scanning os.Getenv.
+// resolveRateLimitConfig computes the effective Config: env > instance setting > default; AGENT_VAULT_RATELIMIT_LOCK ignores the setting.
 func resolveRateLimitConfig(ctx context.Context, s Store) (ratelimit.Config, rateLimitSettingPayload, bool, ratelimit.EnvMasks, error) {
 	envCfg, envMask := ratelimit.LoadFromEnv()
 	if envCfg.Locked {
@@ -71,10 +64,7 @@ func resolveRateLimitConfig(ctx context.Context, s Store) (ratelimit.Config, rat
 	return applyPayload(envCfg, envMask, payload), payload, true, envMask, nil
 }
 
-// applyPayload layers a setting payload on top of an env-derived base.
-// envMask tells us which env knobs were explicitly set so we can
-// re-assert them after switching to the payload's profile. Pure — no
-// DB reads.
+// applyPayload layers a payload on an env-derived base, re-asserting envMask knobs; no DB reads.
 func applyPayload(envCfg ratelimit.Config, envMask ratelimit.EnvMasks, payload rateLimitSettingPayload) ratelimit.Config {
 	base := envCfg
 	if payload.Profile != "" {
@@ -144,9 +134,7 @@ func rateLimitSourceForTier(t ratelimit.Tier, payload rateLimitSettingPayload, h
 	return "default"
 }
 
-// applyRateLimitSettingToRegistry reads the current setting + env and
-// reloads the registry. Called once at server startup and again after
-// every write to the settings pane. Returns the effective config.
+// applyRateLimitSettingToRegistry reloads the registry from the current setting and env, at startup and after each settings write.
 func (s *Server) applyRateLimitSettingToRegistry(ctx context.Context) (ratelimit.Config, error) {
 	cfg, _, _, _, err := resolveRateLimitConfig(ctx, s.store)
 	if err != nil {
@@ -156,9 +144,7 @@ func (s *Server) applyRateLimitSettingToRegistry(ctx context.Context) (ratelimit
 	return cfg, nil
 }
 
-// tierJSON is the wire representation of one tier's effective config
-// returned by GET /v1/admin/settings. Source is "env" | "override" |
-// "default"; Window is a duration string ("5m", "1h") for readability.
+// tierJSON is one tier's effective config in GET /v1/admin/settings; Source is env, override or default.
 type tierJSON struct {
 	Rate        float64 `json:"rate,omitempty"`
 	Burst       int     `json:"burst,omitempty"`
@@ -168,11 +154,7 @@ type tierJSON struct {
 	Source      string  `json:"source"`
 }
 
-// buildRateLimitSettingResponse assembles the "rate_limit" field of
-// the GET /v1/admin/settings response: profile + per-tier effective
-// values + per-tier source + locked flag. Returns nil on a hard
-// error; the rest of the settings response degrades without the
-// rate-limit block.
+// buildRateLimitSettingResponse assembles the rate_limit settings field; nil on a hard error so the rest of the response still works.
 func (s *Server) buildRateLimitSettingResponse(ctx context.Context) map[string]interface{} {
 	cfg, payload, hasPayload, envMask, err := resolveRateLimitConfig(ctx, s.store)
 	if err != nil {
@@ -181,9 +163,7 @@ func (s *Server) buildRateLimitSettingResponse(ctx context.Context) map[string]i
 	return buildRateLimitResponse(cfg, payload, hasPayload, envMask)
 }
 
-// buildRateLimitResponse serializes the effective config + per-tier
-// source into the wire shape. Separate from buildRateLimitSettingResponse
-// so the preview handler can reuse it without a DB read.
+// buildRateLimitResponse serializes the config; split out so the preview handler avoids a DB read.
 func buildRateLimitResponse(cfg ratelimit.Config, payload rateLimitSettingPayload, hasPayload bool, envMask ratelimit.EnvMasks) map[string]interface{} {
 	all := ratelimit.AllTiers()
 	tiers := make(map[string]tierJSON, len(all))
@@ -210,10 +190,7 @@ func buildRateLimitResponse(cfg ratelimit.Config, payload rateLimitSettingPayloa
 	}
 }
 
-// handleRateLimitPreview computes the effective config for a proposed
-// payload without persisting it. Used by the Manage Instance UI to
-// update the table live as the owner changes the profile dropdown or
-// edits override fields.
+// handleRateLimitPreview computes the effective config for a payload without persisting it.
 func (s *Server) handleRateLimitPreview(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.requireOwnerActor(w, r); err != nil {
 		return
@@ -239,11 +216,7 @@ func formatDuration(d time.Duration) string {
 	return d.String()
 }
 
-// handleUpdateRateLimitSetting validates and persists a rate-limit
-// setting payload. Invoked from handleUpdateSettings when the request
-// includes a rate_limit field. On success, the registry is reloaded
-// and the new effective config is the one returned by the subsequent
-// GET response.
+// handleUpdateRateLimitSetting validates and persists a rate-limit payload, then reloads the registry.
 func (s *Server) handleUpdateRateLimitSetting(ctx context.Context, p *rateLimitSettingPayload) error {
 	if s.rateLimit.Config().Locked {
 		return ratelimit.ErrLocked
@@ -291,9 +264,7 @@ func (s *Server) handleUpdateRateLimitSetting(ctx context.Context, p *rateLimitS
 		return err
 	}
 
-	// Persist and reload. We always store the exact caller-supplied
-	// payload so the UI can round-trip values even when a future
-	// profile change would otherwise clobber them.
+	// Store the caller's payload as-is so the UI can round-trip values.
 	encoded, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("encode ratelimit_config: %w", err)

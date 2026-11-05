@@ -26,9 +26,6 @@ func TestRequestHeadersLoadRules(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// Any entry may pin any header it forwards, or none: groundcover's
-	// entry loads without its backend pin, which the catalog's own checks
-	// require, so a catalog written before the field keeps working.
 	other := strings.Replace(groundcoverEntry, `"mcp.groundcover.com"`, `"api.example.com"`, 1)
 	for name, doc := range map[string]string{
 		"groundcover without a pin":       strings.Replace(groundcoverEntry, pin+`,`, ``, 1),
@@ -42,7 +39,6 @@ func TestRequestHeadersLoadRules(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// The name is stored canonical, so a lower-case spelling pins the same header.
 	c, err := Parse([]byte(`{"entries":[` + strings.Replace(groundcoverEntry, `"name":"X-Backend-Id"`, `"name":"x-backend-id"`, 1) + `]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -52,9 +48,6 @@ func TestRequestHeadersLoadRules(t *testing.T) {
 	}
 }
 
-// Every request needs each limited header exactly once, with a listed value:
-// one missing, repeated, joined with another or naming another backend is
-// refused, whatever its method.
 func TestRequestHeadersCheckRequests(t *testing.T) {
 	e := groundcoverCatalog(t)
 	header := func(values ...string) http.Header {
@@ -81,7 +74,6 @@ func TestRequestHeadersCheckRequests(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// An entry that limits no header takes any.
 	other, err := Parse([]byte(`{"entries":[` + strings.Replace(strings.Replace(groundcoverEntry, `"mcp.groundcover.com"`, `"api.example.com"`, 1),
 		`"requestHeaders":[{"name":"X-Backend-Id","values":["us-backend"]}],`, ``, 1) + `]}`))
 	if err != nil {

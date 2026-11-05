@@ -9,16 +9,12 @@ import (
 	"time"
 )
 
-// defaultStartupRetry is how long startup keeps retrying Vault before it
-// gives up. It stays under a startup probe of 75 checks 2 s apart (150 s),
-// so a Vault blip delays a start instead of crash-looping the Pod.
+// defaultStartupRetry stays under the startup probe's 150 s so a Vault blip delays a start instead of crash-looping the Pod.
 const defaultStartupRetry = 120 * time.Second
 
-// maxStartupRetry bounds AGENT_VAULT_STARTUP_RETRY_SECONDS.
 const maxStartupRetry = 3600
 
-// startupRetryWindow reads AGENT_VAULT_STARTUP_RETRY_SECONDS: 0 tries once,
-// unset is 120. Anything else is a misconfiguration and fails startup at once.
+// startupRetryWindow reads AGENT_VAULT_STARTUP_RETRY_SECONDS: 0 tries once, unset is 120, anything else fails startup.
 func startupRetryWindow(getenv func(string) string) (time.Duration, error) {
 	raw := getenv("AGENT_VAULT_STARTUP_RETRY_SECONDS")
 	if raw == "" {
@@ -31,15 +27,12 @@ func startupRetryWindow(getenv func(string) string) (time.Duration, error) {
 	return time.Duration(n) * time.Second, nil
 }
 
-// startupRetry is the window in force, set once at startup.
 var startupRetry = defaultStartupRetry
 
 // startupBackoff is the wait after each failed attempt, doubling to 10 s.
 var startupBackoff = time.Second
 
-// retryAtStartup runs attempt until it succeeds or the startup window has
-// passed, and returns the last error. Each failure is logged by what failed
-// and its error text, which carries no secret values.
+// retryAtStartup runs attempt until it succeeds or the window passes and returns the last error; logged errors carry no secrets.
 func retryAtStartup(logger *slog.Logger, what string, attempt func() error) error {
 	deadline := time.Now().Add(startupRetry)
 	wait := startupBackoff
@@ -66,9 +59,7 @@ func retryAtStartup(logger *slog.Logger, what string, attempt func() error) erro
 	}
 }
 
-// boundedAttempt runs one attempt under a deadline even if it ignores its
-// context. A result that arrives after the deadline goes to late, so a client
-// it built can be closed instead of left running.
+// boundedAttempt enforces a deadline even if attempt ignores its context; a late result goes to late so it can be closed.
 func boundedAttempt[T any](timeout time.Duration, run func(context.Context) (T, error), late func(T)) (T, error) {
 	type result struct {
 		v   T

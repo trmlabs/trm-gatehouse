@@ -30,23 +30,15 @@ func (t BrowserToken) String() string {
 func (t BrowserToken) GoString() string           { return t.String() }
 func (t BrowserToken) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(t.String())) }
 
-// Auth0Tokens logs test users in and caches each access token until a
-// quarter of its life remains. An entry logs in with Auth0's password-realm
-// grant through a confidential client, or, when it names one, through an
-// automated-auth service (see automatedAuthLogin). The user's password and
-// the client secret or service key come from Vault on each login and are
-// never cached here. The login keeps no refresh token and never follows a
-// redirect: the request body holds the secrets.
+// Auth0Tokens logs test users in and caches each access token until a quarter of its life remains.
+// Secrets come from Vault on each login and are never cached; the login keeps no refresh token and never follows a redirect.
 type Auth0Tokens struct {
 	Keys interface {
 		Get(context.Context, KeyRef) (Secret, error)
 	}
 	Client        *http.Client // must dial only the Auth0 domains in the catalog
 	AutomatedAuth *http.Client // must dial only the automated-auth services in the catalog
-	// Revoked reports each refresh-token revocation after an automated-auth
-	// sign-in, for the audit trail: outcome "refresh_revoked" or
-	// "revoke_failed", Auth0's status (0 without an answer), and how long the
-	// revocation took, retries included.
+	// Revoked reports each refresh-token revocation after an automated-auth sign-in, for the audit trail.
 	Revoked func(binding, outcome string, status int, took time.Duration)
 	Now     func() time.Time
 
@@ -54,8 +46,7 @@ type Auth0Tokens struct {
 	states map[string]*signIn
 }
 
-// signIn is one entry's sign-in state: its last token, its last attempt,
-// and the attempt in progress.
+// signIn is one entry's sign-in state.
 type signIn struct {
 	token     BrowserToken
 	held      bool // token is set
@@ -72,19 +63,13 @@ type signInCall struct {
 
 var ErrBrowserLogin = errors.New("browser test-user login failed")
 
-// reloginInterval bounds sign-ins to one attempt per entry per interval,
-// whatever the outcome: a worker can make the API refuse a request, or a
-// sign-in fail, on purpose, and each attempt is a real login (for
-// automated-auth, a browser on a shared service) that also mints a refresh
-// token. Invalidate also keeps a token younger than this.
+// reloginInterval allows one sign-in attempt per entry per interval, whatever the outcome: each attempt is a real login that mints a refresh token.
 const reloginInterval = time.Minute
 
-// ReloginInterval is how long a failed sign-in keeps refusing: no entry signs
-// in again sooner, so a broker tells the agent to wait this long.
+// ReloginInterval is how long a failed sign-in keeps refusing.
 const ReloginInterval = reloginInterval
 
-// signInTimeout bounds a sign-in, which runs detached from the request that
-// started it.
+// signInTimeout bounds a sign-in, which runs detached from the request that started it.
 const signInTimeout = 90 * time.Second
 
 func (a *Auth0Tokens) now() time.Time {
@@ -100,10 +85,7 @@ func (a *Auth0Tokens) fresh(t BrowserToken) bool {
 }
 
 // Token returns the current access token for a browser-session entry.
-// Requests that need a sign-in share one attempt, which runs detached from
-// any one of them: a request that gives up ends only its own wait. After an
-// attempt, the entry makes no other for reloginInterval; until then it
-// serves its last token while that is still valid, and otherwise fails.
+// Concurrent requests share one detached sign-in; within reloginInterval the last token serves while valid.
 func (a *Auth0Tokens) Token(ctx context.Context, e *Entry) (BrowserToken, error) {
 	if e == nil || e.BrowserSession == nil {
 		return BrowserToken{}, ErrBrowserLogin
@@ -164,8 +146,7 @@ func (a *Auth0Tokens) signIn(ctx context.Context, e *Entry, st *signIn, call *si
 	close(call.done)
 }
 
-// Invalidate drops an entry's token after the API refused it, unless the
-// token is younger than reloginInterval.
+// Invalidate drops an entry's token after the API refused it, unless younger than reloginInterval.
 func (a *Auth0Tokens) Invalidate(e *Entry) {
 	key := cacheKey(e)
 	a.mu.Lock()
@@ -177,10 +158,7 @@ func (a *Auth0Tokens) Invalidate(e *Entry) {
 	st.token, st.held = BrowserToken{}, false
 }
 
-// Prune drops the token and sign-in state of every entry the catalog no
-// longer holds, or holds with different sign-in settings, so a removed
-// entry's token does not stay in memory until the broker restarts. A
-// sign-in in progress for one finishes for its waiters and is then dropped.
+// Prune drops the token and sign-in state of every entry the catalog no longer holds, or holds with different sign-in settings.
 func (a *Auth0Tokens) Prune(c Catalog) {
 	keep := map[string]bool{}
 	for i := range c.entries {
@@ -240,8 +218,7 @@ func (a *Auth0Tokens) login(ctx context.Context, e *Entry) (BrowserToken, error)
 	if a.Client == nil {
 		return BrowserToken{}, ErrBrowserLogin
 	}
-	// A 307 or 308 would re-send the body, secrets included, to wherever it
-	// points; the login answers from the Auth0 domain or not at all.
+	// A 307 or 308 would re-send the body, secrets included, to wherever it points.
 	client := *a.Client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	issued := a.now()
@@ -273,9 +250,7 @@ func (a *Auth0Tokens) login(ctx context.Context, e *Entry) (BrowserToken, error)
 	return BrowserToken{access: out.AccessToken, life: life, Claims: claims, Expires: issued.Add(life)}, nil
 }
 
-// loginScope is the app's scope without offline_access. The broker never
-// uses a refresh token, and each one Auth0 issued would stay live after the
-// access token is dropped.
+// loginScope drops offline_access: a refresh token would stay live after the access token is dropped.
 func loginScope(scope string) string {
 	var kept []string
 	for _, s := range strings.Fields(scope) {
@@ -287,14 +262,10 @@ func loginScope(scope string) string {
 }
 
 // Claims a browser seed may carry: who the user is, never what proves it.
-// Protocol and session claims (nonce, at_hash, sid and the like) are dropped;
-// the seed sets its own iss, aud, iat and exp.
 var protocolClaims = map[string]bool{"iss": true, "aud": true, "exp": true, "nbf": true, "iat": true, "jti": true, "azp": true,
 	"nonce": true, "auth_time": true, "at_hash": true, "c_hash": true, "acr": true, "amr": true, "sid": true, "cnf": true, "sub_jwk": true}
 
-// idTokenClaims reads the ID token's payload. The token came straight from
-// Auth0 over verified TLS in answer to the broker's own login, so its
-// signature is not what makes it trustworthy here.
+// idTokenClaims reads the ID token's payload; it came straight from Auth0 over verified TLS, so the signature is not checked.
 func idTokenClaims(token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

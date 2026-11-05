@@ -14,12 +14,8 @@ import (
 	"golang.org/x/text/secure/precis"
 )
 
-// scramClient drives the client side of a SASL SCRAM-SHA-256 exchange
-// (RFC 5802 / RFC 7677) as PostgreSQL speaks it. The proxy authenticates to the
-// upstream database with a Vault-issued username/password using this mechanism.
-//
-// Channel binding is not implemented (gs2 header "n,,"). Use verify-full for
-// authenticated upstream TLS; this client does not support SCRAM-SHA-256-PLUS.
+// scramClient drives the client side of a SASL SCRAM-SHA-256 exchange (RFC 5802 / RFC 7677) as PostgreSQL
+// speaks it.
 type scramClient struct {
 	password    string
 	clientNonce string
@@ -33,9 +29,7 @@ type scramClient struct {
 // scramMechanism is the only SASL mechanism the proxy offers upstream.
 const scramMechanism = "SCRAM-SHA-256"
 
-// newSCRAMClient builds a client for the given password with a fresh random
-// client nonce. The nonce is 18 random bytes, base64-encoded — comfortably
-// above the RFC-recommended minimum and matching libpq's sizing.
+// newSCRAMClient builds a client for the given password with a fresh random client nonce.
 func newSCRAMClient(password string) (*scramClient, error) {
 	raw := make([]byte, 18)
 	if _, err := rand.Read(raw); err != nil {
@@ -48,17 +42,14 @@ func newSCRAMClient(password string) (*scramClient, error) {
 	return &scramClient{password: password, clientNonce: base64.StdEncoding.EncodeToString(raw)}, nil
 }
 
-// firstMessage returns the SCRAM client-first message
-// ("n,,n=,r=<clientNonce>"). PostgreSQL derives the username from the startup
-// packet and ignores the SCRAM "n=" field, so it is sent empty, as libpq does.
+// firstMessage returns the SCRAM client-first message ("n,,n=,r=<clientNonce>").
 func (s *scramClient) firstMessage() string {
 	s.firstBare = "n=,r=" + s.clientNonce
 	return "n,," + s.firstBare
 }
 
-// finalMessage consumes the server-first message and returns the client-final
-// message carrying the client proof. It also computes the server signature the
-// caller later verifies via checkServerFinal.
+// finalMessage consumes the server-first message and returns the client-final message carrying the client
+// proof.
 func (s *scramClient) finalMessage(serverFirst string) (string, error) {
 	combinedNonce, salt, iterations, err := parseServerFirst(serverFirst)
 	if err != nil {
@@ -93,9 +84,8 @@ func (s *scramClient) finalMessage(serverFirst string) (string, error) {
 	return finalWithoutProof + ",p=" + base64.StdEncoding.EncodeToString(clientProof), nil
 }
 
-// checkServerFinal verifies the server's proof of the shared secret from the
-// server-final message ("v=<ServerSignature>"). A mismatch means the upstream
-// does not hold the expected password and the session must be aborted.
+// checkServerFinal verifies the server's proof of the shared secret from the server-final message
+// ("v=<ServerSignature>").
 func (s *scramClient) checkServerFinal(serverFinal string) error {
 	for _, part := range strings.Split(serverFinal, ",") {
 		if strings.HasPrefix(part, "v=") {

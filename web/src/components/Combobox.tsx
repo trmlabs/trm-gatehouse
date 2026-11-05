@@ -19,10 +19,7 @@ interface ComboboxProps {
   placeholder?: string;
 }
 
-/**
- * A text input with a suggestion popover. Typing filters the options;
- * text that matches nothing behaves exactly like a plain Input.
- */
+/** A text input with a suggestion popover; text matching nothing behaves like a plain Input. */
 export default function Combobox({ value, onChange, options, onSelect, placeholder }: ComboboxProps) {
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(0);

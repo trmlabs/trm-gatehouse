@@ -74,9 +74,8 @@ func TestPooledServerConnectionsCarryTheIdleInTransactionLimit(t *testing.T) {
 	}
 }
 
-// At its credential's expiry the broker closes the server connection itself,
-// so a session holding one ends even if the Vault role's revocation does not
-// terminate backends.
+// At its credential's expiry the broker closes the server connection itself, so a session holding one ends
+// even if the Vault role's revocation does not terminate backends.
 func TestPooledSessionEndsWhenItsCredentialExpires(t *testing.T) {
 	t.Parallel()
 	lease := newLease()
@@ -131,9 +130,8 @@ func TestPooledSessionCapsPreparedStatements(t *testing.T) {
 	}
 }
 
-// kill detaches the server connection under the session lock and closes it,
-// so it can never have returned to the pool, and to another client, by the
-// time its cancel is sent.
+// kill detaches the server connection under the session lock and closes it, so it can never have returned to
+// the pool, and to another client, by the time its cancel is sent.
 func TestKillDetachesAndClosesTheServerConnection(t *testing.T) {
 	b := New("127.0.0.1:0", Options{Pool: &PoolOptions{}, Leases: &fakeMinter{lease: newLease()}})
 	t.Cleanup(b.pools.close)

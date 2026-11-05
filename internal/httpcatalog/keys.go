@@ -12,12 +12,10 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// Logical is the Vault read the key cache needs; *vaultapi.Logical has it.
 type Logical interface {
 	ReadWithDataWithContext(ctx context.Context, path string, data map[string][]string) (*vaultapi.Secret, error)
 }
 
-// Secret is a key value and its KV version. It prints as its version only.
 type Secret struct {
 	value   string
 	Version int
@@ -28,13 +26,7 @@ func (s Secret) String() string             { return fmt.Sprintf("http-key(v%d)"
 func (s Secret) GoString() string           { return s.String() }
 func (s Secret) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(s.String())) }
 
-// Keys caches each key for TTL, so the broker reads Vault about once a
-// minute per key instead of once per request. A new KV version is picked up
-// within TTL, or sooner after Invalidate. A key deleted in Vault is refused
-// from the first read after that, so within TTL: the cached copy is dropped
-// and the refusal is cached for TTL like a key. Only an unreachable or
-// failing Vault keeps a cached key in use, for up to MaxStale past its TTL,
-// then requests fail.
+// Keys caches each key for TTL so the broker reads Vault about once a minute per key; a deleted key is refused (and the refusal cached) from the first read after, and only an unreachable Vault keeps a cached key in use, for up to MaxStale past TTL.
 type Keys struct {
 	Vault    Logical
 	TTL      time.Duration // default and maximum 1 minute
@@ -47,9 +39,7 @@ type Keys struct {
 	invalidated map[KeyRef]time.Time
 }
 
-// invalidateInterval bounds vendor-triggered refetches: a vendor or attacker
-// answering 401 to every call can cause at most one extra Vault read per key
-// per interval.
+// invalidateInterval bounds vendor-triggered refetches: a vendor answering 401 to every call causes at most one extra Vault read per key per interval.
 const invalidateInterval = 30 * time.Second
 
 type cachedKey struct {
@@ -60,19 +50,12 @@ type cachedKey struct {
 
 var ErrKeyUnavailable = errors.New("destination key unavailable")
 
-// maxKeyBytes bounds a key the broker sends in a header.
 const maxKeyBytes = 8192
 
-// ErrKeyDeleted means Vault answered and has no usable key: the secret or its
-// current version is deleted or destroyed, or the field is missing or empty.
-// It is an ErrKeyUnavailable that no cached copy outlives.
+// ErrKeyDeleted means Vault answered with no usable key (secret or version deleted, or field empty); no cached copy outlives it.
 var ErrKeyDeleted = fmt.Errorf("%w: deleted in Vault", ErrKeyUnavailable)
 
-// ErrKeyNotHeaderSafe means Vault answered with a key no header may carry: one
-// holding a byte outside printable ASCII (0x21 to 0x7e), such as a trailing
-// newline or a space, or longer than maxKeyBytes. It is an ErrKeyDeleted, so
-// it is refused and cached the same way, but tells the operator the value
-// needs fixing, not restoring.
+// ErrKeyNotHeaderSafe means the key holds a byte outside printable ASCII or exceeds maxKeyBytes; refused like ErrKeyDeleted, but the operator must fix the value.
 var ErrKeyNotHeaderSafe = fmt.Errorf("%w: not header-safe", ErrKeyDeleted)
 
 func (k *Keys) settings() (time.Duration, time.Duration, time.Time) {
@@ -91,8 +74,6 @@ func (k *Keys) settings() (time.Duration, time.Duration, time.Time) {
 	return ttl, stale, now
 }
 
-// Get returns the current key for ref. Concurrent misses for one key share a
-// single Vault read.
 func (k *Keys) Get(ctx context.Context, ref KeyRef) (Secret, error) {
 	ttl, stale, now := k.settings()
 	k.mu.Lock()
@@ -121,7 +102,6 @@ func (k *Keys) Get(ctx context.Context, ref KeyRef) (Secret, error) {
 	secret, err := k.read(ctx, ref)
 	switch {
 	case errors.Is(err, ErrKeyDeleted):
-		// A revoke: drop the cached key now rather than serving it as stale.
 		k.mu.Lock()
 		k.cache[ref] = cachedKey{fetched: now, gone: err}
 		k.mu.Unlock()
@@ -145,9 +125,7 @@ func (c cachedKey) result() (Secret, error) {
 	return c.secret, nil
 }
 
-// Invalidate drops a cached key after the vendor rejects it, so the next
-// request reads the newest version. It acts at most once per key every 30
-// seconds; further calls in that window are ignored.
+// Invalidate drops a cached key after the vendor rejects it, at most once per key every 30 seconds.
 func (k *Keys) Invalidate(ref KeyRef) {
 	_, _, now := k.settings()
 	k.mu.Lock()
@@ -162,20 +140,13 @@ func (k *Keys) Invalidate(ref KeyRef) {
 	delete(k.cache, ref)
 }
 
-// read never puts Vault's response or the key into an error. It returns
-// ErrKeyDeleted when Vault answered without a usable key (ErrKeyNotHeaderSafe
-// when the key is one no header may carry), and
-// ErrKeyUnavailable when there was no answer: a network, permission or
-// server error, or a sealed Vault.
+// read never puts Vault's response or the key into an error; ErrKeyUnavailable means there was no answer.
 func (k *Keys) read(ctx context.Context, ref KeyRef) (Secret, error) {
 	if k.Vault == nil {
 		return Secret{}, ErrKeyUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	// The client turns a 404 into a nil secret, or into one whose data is
-	// null when the current version is deleted or destroyed; every other
-	// failure is an error.
 	resp, err := k.Vault.ReadWithDataWithContext(ctx, ref.Mount+"/data/"+ref.Path, nil)
 	if err != nil {
 		return Secret{}, ErrKeyUnavailable

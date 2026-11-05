@@ -37,9 +37,7 @@ func (*ingressLeases) Renew(context.Context, string, time.Duration) (time.Time, 
 }
 func (*ingressLeases) Revoke(context.Context, string) error { return nil }
 
-// Both real ingress implementations consume the same real resolver here.
-// Kubernetes, Vault issuance and the PostgreSQL destination are synthetic;
-// passing this test establishes integration wiring, not deployed acceptance.
+// Both real ingress implementations use the same real resolver; Kubernetes, Vault and PostgreSQL are synthetic, so this establishes wiring, not deployed acceptance.
 type ingressDenial struct {
 	name   string
 	change func()

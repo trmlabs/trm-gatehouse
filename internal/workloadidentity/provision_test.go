@@ -28,7 +28,6 @@ func poolBinding(pool string) Binding {
 		ImageDigests: []string{"sha256:" + strings.Repeat("a", 64)}}
 }
 
-// poolConfig is a valid policy holding these bindings.
 func poolConfig(t *testing.T, bindings ...Binding) Config {
 	t.Helper()
 	tls := httptest.NewTLSServer(http.NotFoundHandler())
@@ -42,7 +41,6 @@ func poolConfig(t *testing.T, bindings ...Binding) Config {
 		Issuer: "https://issuer.example.test", Audience: "workers", Bindings: bindings}
 }
 
-// provisioned runs ProvisionPools on one pool binding without IDs.
 func provisioned(t *testing.T, s PoolStore, pool string) Binding {
 	t.Helper()
 	c, err := ProvisionPools(context.Background(), poolConfig(t, poolBinding(pool)), s, discard)
@@ -52,7 +50,6 @@ func provisioned(t *testing.T, s PoolStore, pool string) Binding {
 	return c.Bindings[0]
 }
 
-// authorized applies the readiness check, which uses admission's store checks.
 func authorized(t *testing.T, s Store, b Binding) bool {
 	t.Helper()
 	ok, err := (&Resolver{config: Config{Bindings: []Binding{b}}, store: s}).BindingsAuthorized(context.Background())
@@ -114,14 +111,11 @@ func TestProvisionPoolsKeepsOperatorChanges(t *testing.T) {
 	}
 }
 
-// With no race, each refusal names why and writes nothing: no agent, and no
-// new grant.
 func TestProvisionPoolsRefusesWhatItCannotOwn(t *testing.T) {
 	ctx, s := context.Background(), storetest.Open(t)
 	if _, err := s.CreateAgent(ctx, "taken-pool", "user-id", "member"); err != nil {
 		t.Fatal(err)
 	}
-	// A vault a member made and administers.
 	secrets, err := s.CreateVault(ctx, "team-secrets")
 	if err != nil {
 		t.Fatal(err)
@@ -171,8 +165,7 @@ func TestProvisionPoolsRefusesWhatItCannotOwn(t *testing.T) {
 	}
 }
 
-// lostRace creates each record once before the caller's own create, as a
-// replica that started first would.
+// lostRace creates each record once before the caller's own create, as a replica that started first would.
 type lostRace struct{ *store.SQLStore }
 
 func (l lostRace) CreateVaultWithSetting(ctx context.Context, name, key, value string) (*store.Vault, error) {
@@ -215,7 +208,6 @@ func TestProvisionPoolsSettlesReplicaRaces(t *testing.T) {
 	assertOne(t, s, "shared-pool")
 }
 
-// stalled never answers a lookup until its deadline.
 type stalled struct{ *store.SQLStore }
 
 func (stalled) GetAgentByName(ctx context.Context, _ string) (*store.Agent, error) {

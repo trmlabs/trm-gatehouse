@@ -248,9 +248,7 @@ func TestDisambiguateSlug(t *testing.T) {
 	}
 }
 
-// TestAssignSlugNamesAvoidingAdoptsByHostPath pins that an empty-Name
-// incoming whose (Host, Path) uniquely matches an existing entry
-// adopts that entry's Name instead of auto-slugging.
+// TestAssignSlugNamesAvoidingAdoptsByHostPath pins that an empty-Name entry matching one existing (Host, Path) adopts its Name.
 func TestAssignSlugNamesAvoidingAdoptsByHostPath(t *testing.T) {
 	existing := []Service{{Name: "stripe-prod", Host: "api.stripe.com"}}
 	incoming := []Service{{Host: "api.stripe.com"}}
@@ -260,11 +258,7 @@ func TestAssignSlugNamesAvoidingAdoptsByHostPath(t *testing.T) {
 	}
 }
 
-// TestAssignSlugNamesAvoidingReservesExistingForCrossHostCollision pins
-// the cross-host collision guard: when Slugify maps the incoming Host to
-// a slug that already names an unrelated existing service (e.g.
-// `github.com` and `*.github.com` both yield `github-com`), the auto-
-// slug lands on a -2 suffix instead of silently replacing.
+// TestAssignSlugNamesAvoidingReservesExistingForCrossHostCollision pins that a slug colliding with an unrelated existing service gets a -2 suffix.
 func TestAssignSlugNamesAvoidingReservesExistingForCrossHostCollision(t *testing.T) {
 	existing := []Service{{Name: "github-com", Host: "*.github.com"}}
 	incoming := []Service{{Host: "github.com"}}
@@ -274,12 +268,7 @@ func TestAssignSlugNamesAvoidingReservesExistingForCrossHostCollision(t *testing
 	}
 }
 
-// TestAssignSlugNamesAvoidingAmbiguousHostPathFallsThrough pins that an
-// ambiguous (Host, Path) — 2+ existing matches with distinct Names —
-// skips the adoption branch and the entry takes the auto-slug path
-// instead. broker.Validate's duplicate-Name check does not catch this
-// shape (different Names, same Host), so the helper's hpCount>1 guard
-// is the load-bearing defense.
+// TestAssignSlugNamesAvoidingAmbiguousHostPathFallsThrough pins that 2+ distinct-Name matches skip adoption; the hpCount>1 guard is the only defense.
 func TestAssignSlugNamesAvoidingAmbiguousHostPathFallsThrough(t *testing.T) {
 	existing := []Service{
 		{Name: "stripe-a", Host: "api.stripe.com"},
@@ -294,9 +283,7 @@ func TestAssignSlugNamesAvoidingAmbiguousHostPathFallsThrough(t *testing.T) {
 	}
 }
 
-// TestAssignSlugNamesAvoidingNilExistingMatchesAssignSlugNames pins that
-// passing nil existing reproduces the intra-slice-only behavior of the
-// original AssignSlugNames.
+// TestAssignSlugNamesAvoidingNilExistingMatchesAssignSlugNames pins that nil existing behaves like AssignSlugNames.
 func TestAssignSlugNamesAvoidingNilExistingMatchesAssignSlugNames(t *testing.T) {
 	svcs := []Service{
 		{Host: "api.anthropic.com"},
@@ -710,10 +697,7 @@ func TestValidateHostRejectsInternalNames(t *testing.T) {
 }
 
 func TestValidateHostAllowsInternalInDevMode(t *testing.T) {
-	// Single-label names always fail hostLabelPattern. The dev-mode
-	// override is for multi-label internal names like
-	// localhost.localdomain — which pass the format check but are
-	// blocked by default to dodge SSRF against cloud-metadata hosts.
+	// Single-label names always fail hostLabelPattern; dev mode only allows multi-label internal names, blocked by default against SSRF.
 	t.Setenv("AGENT_VAULT_DEV_MODE", "true")
 	if err := ValidateHost("localhost.localdomain"); err != nil {
 		t.Errorf("ValidateHost(localhost.localdomain) in dev mode: %v", err)
@@ -728,10 +712,7 @@ func TestValidateHostRejectsBareWildcardAndShallow(t *testing.T) {
 	}
 }
 
-// TestValidateConfigEnforcesHostSafety pins that the direct upsert path
-// (broker.Validate) now rejects IP addresses and internal hosts — the
-// proposal flow has always done this, but admins doing a direct POST
-// to /v1/vaults/{name}/services used to slip through.
+// TestValidateConfigEnforcesHostSafety pins that the direct upsert path rejects IP addresses and internal hosts.
 func TestValidateConfigEnforcesHostSafety(t *testing.T) {
 	t.Setenv("AGENT_VAULT_DEV_MODE", "")
 	cases := []struct{ name, host string }{

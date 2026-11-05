@@ -8,9 +8,7 @@ import (
 	"time"
 )
 
-// Dialect abstracts the few SQL differences between SQLite and PostgreSQL.
-// The shared SQLStore implementation delegates to these methods so that
-// a single codebase serves both backends.
+// Dialect abstracts the SQL differences between SQLite and PostgreSQL.
 type Dialect interface {
 	// Name returns the dialect identifier ("sqlite" or "postgres").
 	Name() string
@@ -19,9 +17,7 @@ type Dialect interface {
 	// SQLite uses '?' as-is; PostgreSQL uses $1, $2, etc.
 	Rebind(query string) string
 
-	// FormatTime converts a Go time.Time into the value passed to SQL
-	// parameters. SQLite stores timestamps as TEXT strings; PostgreSQL
-	// accepts time.Time natively for TIMESTAMPTZ columns.
+	// FormatTime converts a time.Time to a SQL parameter; SQLite stores TEXT, PostgreSQL takes time.Time.
 	FormatTime(t time.Time) interface{}
 
 	// ScanTime converts a value scanned from a timestamp column back into
@@ -43,14 +39,10 @@ type Dialect interface {
 	// a Go bool. SQLite returns integers; PostgreSQL returns bool.
 	ScanBool(src interface{}) (bool, error)
 
-	// InsertReturningID executes an INSERT and returns the auto-generated
-	// integer ID. SQLite uses LastInsertId(); PostgreSQL appends
-	// RETURNING id and scans the result.
+	// InsertReturningID executes an INSERT and returns the generated integer ID.
 	InsertReturningID(ctx context.Context, execer interface{}, query string, args ...interface{}) (int64, error)
 
-	// ForUpdateClause returns the SQL fragment appended to SELECT
-	// statements for row-level locking. Returns "" for SQLite (no-op)
-	// and "FOR UPDATE" for PostgreSQL.
+	// ForUpdateClause returns the row-locking fragment: "" for SQLite, "FOR UPDATE" for PostgreSQL.
 	ForUpdateClause() string
 }
 
@@ -216,9 +208,7 @@ func (PostgresDialect) InsertReturningID(ctx context.Context, execer interface{}
 
 func (PostgresDialect) ForUpdateClause() string { return "FOR UPDATE" }
 
-// rebindDollar replaces '?' placeholders with $1, $2, ... for PostgreSQL.
-// Only replaces '?' outside of single-quoted string literals. Handles
-// escaped quotes (”) inside string literals correctly.
+// rebindDollar replaces '?' with $1, $2, ... for PostgreSQL, outside single-quoted string literals.
 func rebindDollar(query string) string {
 	var b strings.Builder
 	b.Grow(len(query) + 16)

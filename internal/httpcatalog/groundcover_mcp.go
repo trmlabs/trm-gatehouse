@@ -13,42 +13,27 @@ import (
 	"unicode/utf8"
 )
 
-// groundcover's hosted MCP server answers every tool on one path, so an
-// entry's paths and methods cannot tell one tool from another. A groundcover
-// key's data scope limits what most tools read, but groundcover does not
-// apply it to every tool: monitor issues, for one, come back for every
-// cluster and backend the tenant has. So for this host the broker reads each
-// request's JSON-RPC message and forwards only the ones a query client sends
-// to run the log and metric tools: initialize, the initialized notification
-// and a tools/call naming query_logs or query_metrics. Every other method or
-// tool is refused, tools/list included, as are a batch, a repeated or
-// unknown key, a body it cannot read as one message, and an argument the
-// tool does not list or one that could reach another signal (see
-// groundcoverMCPArguments). A GET (the server's event stream) and a DELETE
-// (ending the session) carry no message and pass with no body.
+// groundcover's MCP server answers every tool on one path, and its data scope is not applied to every tool (monitor issues span every cluster and backend). So the broker forwards only initialize, the initialized notification, and tools/call for query_logs or query_metrics.
+// Every other method or tool, a batch, a repeated or unknown key, an unreadable body, and an argument that could reach another signal are refused (groundcoverMCPArguments); GET and DELETE carry no message and pass.
 const (
 	groundcoverMCPHost = "mcp.groundcover.com"
 	groundcoverMCPPath = "/api/mcp"
-	// groundcoverMCPDepth bounds how many levels below the message a value
-	// may sit, far deeper than a tool call's arguments need.
+	// groundcoverMCPDepth bounds how deep a value may sit below the message.
 	groundcoverMCPDepth = 32
 )
 
-// groundcoverMCPMethods maps each JSON-RPC method the broker forwards to the
-// operation its audit row names; a tools/call row names its tool instead.
+// groundcoverMCPMethods maps each forwarded JSON-RPC method to the operation its audit row names; a tools/call row names its tool.
 var groundcoverMCPMethods = map[string]string{
 	"initialize":                "groundcover.initialize",
 	"notifications/initialized": "groundcover.initialized",
 	"tools/call":                "",
 }
 
-// groundcoverMCPTools maps each tool a tools/call may name to its operation.
 var groundcoverMCPTools = map[string]string{
 	"query_logs":    "groundcover.query_logs",
 	"query_metrics": "groundcover.query_metrics",
 }
 
-// mcpKind is the JSON type a tool argument's value must have.
 type mcpKind int
 
 const (
@@ -57,12 +42,7 @@ const (
 	mcpTexts                // a list of strings
 )
 
-// groundcoverMCPArguments lists the arguments each tool call may carry, with
-// the type of each: the ones groundcover documents for the tool, less
-// backend_id and tenant_uuid, which would pick another backend or tenant than
-// the entry's X-Backend-Id (see RequestHeader). Any other argument is
-// refused, as is a value of another type, so no object or list can sit where
-// a string belongs and hide a key groundcover reads.
+// groundcoverMCPArguments lists the arguments each tool may carry, less backend_id and tenant_uuid, which would pick another backend than the entry's X-Backend-Id. Any other argument or type is refused so no object or list hides a key groundcover reads.
 var groundcoverMCPArguments = map[string]map[string]mcpKind{
 	"query_logs": {"query": mcpText, "period": mcpText, "start": mcpText, "end": mcpText},
 	"query_metrics": {
@@ -72,41 +52,24 @@ var groundcoverMCPArguments = map[string]map[string]mcpKind{
 	},
 }
 
-// groundcoverCrossSignal matches gcQL's _from, in any case and not as part
-// of a longer name, and a prefix of it ending in a wildcard, such as _fr*,
-// which can match it as a field name. A query_logs subquery reads another
-// signal through it, monitor issues among them, which the key's data scope
-// does not hold. A client that never correlates signals never sends it.
+// groundcoverCrossSignal matches gcQL's _from (any case, or a wildcard prefix such as _fr*), through which a query_logs subquery reads another signal outside the key's data scope.
 var groundcoverCrossSignal = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:_from(?:[^a-z0-9_]|$)|_(?:f(?:r(?:o)?)?)?\*)`)
 
-// groundcoverSubqueryPipe matches the gcQL pipes that run a subquery, join
-// and union, in any case and not as part of a longer name.
 var groundcoverSubqueryPipe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:join|union)(?:[^a-z0-9_]|$)`)
 
-// groundcoverSubqueryFilter matches the start of a gcQL filter whose list can
-// be a subquery: in(), contains_any() or contains_all().
 var groundcoverSubqueryFilter = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])(?:in|contains_any|contains_all)\s*\(`)
 
-// groundcoverAlerts matches the ALERTS series (ALERTS_FOR_STATE too) in any
-// case, and the names a PromQL selector could reach it by instead: __name__,
-// alertname and alertstate.
+// groundcoverAlerts matches the ALERTS series in any case and the PromQL names that could reach it (__name__, alertname, alertstate).
 var groundcoverAlerts = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_:])(?:alerts|(?:__name__|alertname|alertstate)(?:[^a-z0-9_:]|$))`)
 
-// The refusals CheckMCP returns: ErrMCPShape for a request it cannot read as
-// one message on the server's path, ErrMCPTool for a method or tool it does
-// not forward, ErrMCPArgument for an argument the tool does not list, of the
-// wrong type, or one that could reach another signal.
+// CheckMCP errors: ErrMCPShape (unreadable message or path), ErrMCPTool (method or tool not forwarded), ErrMCPArgument (unlisted, wrong type, or could reach another signal).
 var (
 	ErrMCPShape    = errors.New("not one MCP message the broker reads")
 	ErrMCPTool     = errors.New("MCP method or tool not forwarded")
 	ErrMCPArgument = errors.New("MCP tool argument not forwarded")
 )
 
-// CheckMCP holds a request to groundcover's MCP server to the messages the
-// broker forwards, and returns the operation its audit row names. It allows
-// every request to any other host. method is the HTTP method, path and
-// rawQuery the request's, contentTypes every Content-Type value and body the
-// whole request body.
+// CheckMCP holds a request to groundcover's MCP server to the messages the broker forwards and returns the operation its audit row names; every other host is allowed.
 func (e *Entry) CheckMCP(method, path, rawQuery string, contentTypes []string, body []byte) (string, error) {
 	if e == nil || e.Host != groundcoverMCPHost {
 		return "", nil
@@ -198,11 +161,7 @@ func (e *Entry) CheckMCP(method, path, rawQuery string, contentTypes []string, b
 	return operation, nil
 }
 
-// mcpArgument reports whether value has the type kind names and none of its
-// strings could reach another signal: no backslash, which gcQL and PromQL
-// read as an escape, and no _from in either tool; in query_logs no join or
-// union pipe and no pipe inside a subquery filter's list; in query_metrics no
-// way to the ALERTS series.
+// mcpArgument checks the type and that no string could reach another signal: no backslash, no _from, in query_logs no join or union pipe or pipe inside a subquery filter, in query_metrics no way to ALERTS.
 func mcpArgument(tool string, kind mcpKind, value any) bool {
 	var texts []string
 	switch v := value.(type) {
@@ -246,13 +205,7 @@ func mcpArgument(tool string, kind mcpKind, value any) bool {
 	return true
 }
 
-// mcpMessage decodes body as one JSON object in valid UTF-8 with no key
-// repeated at any depth, nested at most groundcoverMCPDepth deep, and no
-// string holding a control byte other than tab, newline and carriage return
-// or U+FFFD (which a lone surrogate escape decodes to). Another parser could
-// read a repeated key, a cut string or a dropped byte differently from this
-// one, so the broker would check one message and the server act on another.
-// Numbers stay json.Number.
+// mcpMessage decodes one JSON object with no repeated key, bounded depth and no control byte or U+FFFD in strings, so another parser cannot read the message differently from this one. Numbers stay json.Number.
 func mcpMessage(body []byte) (map[string]any, error) {
 	if !utf8.Valid(body) {
 		return nil, ErrMCPShape
@@ -330,8 +283,6 @@ func mcpValue(dec *json.Decoder, depth int) (any, error) {
 	return tok, nil
 }
 
-// mcpPlainString reports whether s holds no control byte other than tab,
-// newline and carriage return, and no U+FFFD.
 func mcpPlainString(s string) bool {
 	for _, r := range s {
 		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f || r == utf8.RuneError {
@@ -341,10 +292,7 @@ func mcpPlainString(s string) bool {
 	return true
 }
 
-// mcpPipedFilter reports whether a pipe sits inside the list of a gcQL filter
-// that can take a subquery. Where the list ends is found twice, once skipping
-// quoted text and once not, and the later end counts, so a quote read
-// differently from gcQL cannot close the list early.
+// mcpPipedFilter reports a pipe inside a subquery-capable filter list; the later of two ends (skipping quotes or not) counts, so a quote read differently from gcQL cannot close the list early.
 func mcpPipedFilter(s string) bool {
 	for _, loc := range groundcoverSubqueryFilter.FindAllStringIndex(s, -1) {
 		open := loc[1] - 1
@@ -356,9 +304,6 @@ func mcpPipedFilter(s string) bool {
 	return false
 }
 
-// mcpListEnd returns the index just past the parenthesis that closes the one
-// at open, or len(s) if none does. With quotes, a parenthesis between double,
-// single or back quotes is not counted.
 func mcpListEnd(s string, open int, quotes bool) int {
 	depth := 0
 	var quote byte

@@ -13,17 +13,9 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// The cross-cluster listener serves agents in another cluster, through the
-// shared proxy there and a private link. It admits only proxy-attested
-// identities, and carries both protocols on one port: after the TLS front's
-// PROXY header, a shared proxy's PostgreSQL stream opens with its
-// attestation preamble and its HTTP stream with CONNECT. Every other start is
-// closed. Routed connections join the existing HTTP proxy and PostgreSQL
-// broker listeners, tagged so those admit them only as proxy-attested.
+// The cross-cluster listener admits only proxy-attested identities and carries both protocols on one port: a PostgreSQL stream opens with its attestation preamble, HTTP with CONNECT; anything else is closed.
 
-// EnableCrossCluster opens the cross-cluster listener on 127.0.0.1, behind a
-// TLS front in the same Pod that sends a PROXY header. It needs the
-// credential proxy.
+// EnableCrossCluster opens the listener on 127.0.0.1 behind a same-Pod TLS front that sends a PROXY header. It needs the credential proxy.
 func (s *Server) EnableCrossCluster(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host != "127.0.0.1" {
@@ -102,9 +94,6 @@ func (r *refusals) refuse(limit string) {
 
 const crossClusterRouteTimeout = 5 * time.Second
 
-// mergedListener yields the connections of an existing listener plus those a
-// dispatcher injects. Closing it closes the existing listener and stops the
-// injections.
 type mergedListener struct {
 	net.Listener
 	injected chan net.Conn
@@ -155,8 +144,6 @@ func (m *mergedListener) Close() error {
 	return m.Listener.Close()
 }
 
-// inject hands a routed connection to the listener's server, or closes it
-// when the listener has closed.
 func (m *mergedListener) inject(c net.Conn) {
 	select {
 	case m.injected <- c:
@@ -167,18 +154,13 @@ func (m *mergedListener) inject(c net.Conn) {
 
 var errUnrouted = errors.New("cross-cluster connection is neither attested HTTP nor PostgreSQL")
 
-// The places a cross-cluster connection can go.
 const (
 	routeHTTP        = "http"
 	routePostgres    = "postgres"
 	routeCertificate = "certificate"
 )
 
-// routeCrossCluster reads the TLS front's PROXY header and the first eight
-// bytes after it, without consuming them for the server that gets the
-// connection, and says where it goes. A shared proxy's request for its
-// serving certificate is an HTTP POST; that server gets the bytes after the
-// PROXY header, with the proxy's address as the connection's remote address.
+// routeCrossCluster peeks the PROXY header and first eight bytes without consuming them. A shared proxy's certificate request (HTTP POST) goes to the certificate server with the proxy's address as remote address.
 func routeCrossCluster(c net.Conn) (net.Conn, string, error) {
 	_ = c.SetReadDeadline(time.Now().Add(crossClusterRouteTimeout))
 	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
@@ -204,8 +186,6 @@ func routeCrossCluster(c net.Conn) (net.Conn, string, error) {
 	return nil, "", errUnrouted
 }
 
-// peerConn replays the bytes routing read and reports the address the TLS
-// front named as its remote address.
 type peerConn struct {
 	net.Conn
 	prefix io.Reader
@@ -235,10 +215,7 @@ func (c *peerConn) Read(b []byte) (int, error) {
 
 func (c *peerConn) RemoteAddr() net.Addr { return c.peer }
 
-// serveCrossCluster routes each connection of l to the PostgreSQL broker's,
-// the HTTP proxy's or the proxy-certificate listener; any may be nil, and its
-// traffic is then closed. It returns when l closes, or with the error of an
-// accept that will not recover (see acceptLoop).
+// serveCrossCluster routes each connection of l to the broker, proxy or certificate listener; a nil target closes its traffic.
 func serveCrossCluster(l net.Listener, httpLn, pgLn *mergedListener, certLn *injectedListener, limits CrossClusterLimits, logger *slog.Logger) error {
 	pending, open, certificate := make(slots, limits.Pending), make(slots, limits.Open), make(slots, limits.Certificate)
 	refused := &refusals{logger: logger}
@@ -290,8 +267,6 @@ func onClose(c net.Conn, release func()) net.Conn {
 	return c
 }
 
-// injectedListener yields only the connections a dispatcher injects: the
-// proxy-certificate server has no listener of its own.
 type injectedListener struct {
 	addr     net.Addr
 	injected chan net.Conn

@@ -20,9 +20,6 @@ import (
 	"time"
 )
 
-// activityBroker stands in for the broker's cross-cluster listener: CONNECT
-// like the HTTP proxy, and the two proxy activity routes over a map, two rows
-// to a page.
 type activityBroker struct {
 	srv         *httptest.Server
 	caFile      string
@@ -32,18 +29,12 @@ type activityBroker struct {
 	refuseHosts atomic.Bool // answer every CONNECT 403, as for a host outside the catalog
 	failRead    atomic.Bool
 	failRecord  atomic.Bool
-	// history is when the binding's history began; zero until a report.
-	history time.Time
-	// streams is each replica's report sequence.
-	streams map[string]int64
-	// onRead, if set, runs after a read takes its view.
-	onRead func()
-	// tunnels are the open CONNECT tunnels, for dropTunnels.
-	tunnels []net.Conn
+	history     time.Time
+	streams     map[string]int64
+	onRead      func()
+	tunnels     []net.Conn
 }
 
-// dropTunnels kills every open tunnel as a dead process would: no TLS
-// close_notify and a TCP reset.
 func (b *activityBroker) dropTunnels() {
 	b.mu.Lock()
 	tunnels := b.tunnels
@@ -156,10 +147,6 @@ func (b *activityBroker) row(owner string) (SandboxActivity, bool) {
 	return r, ok
 }
 
-// With durable activity, the replica reports its Sandboxes' use to the
-// broker, and its activity report merges in every replica's history from the
-// broker, keeping the later time and the shorter retention. If the broker's
-// view cannot be read, the report is this replica's alone and says so.
 func TestDurableActivityOutlivesTheReplica(t *testing.T) {
 	t.Parallel()
 	broker := newActivityBroker(t)
@@ -202,7 +189,6 @@ func TestDurableActivityOutlivesTheReplica(t *testing.T) {
 	if seen, _ := sandboxSeen(report, "sandbox-pod-a"); time.Since(seen) > 5*time.Second {
 		t.Fatalf("the later time did not win: %v", seen)
 	}
-	// The local path never reads the broker: this replica's own activity only.
 	resp, err := http.Get("http://" + admin + ActivityLocalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -219,9 +205,6 @@ func TestDurableActivityOutlivesTheReplica(t *testing.T) {
 	}
 }
 
-// Nothing is sent while nothing is new; only newer times are reported, each
-// accepted report's sequence is remembered, a failed report is retried, and
-// the last one goes out when the relay stops.
 func TestDurableActivityReportsNewerTimesAndOnStop(t *testing.T) {
 	broker := newActivityBroker(t)
 	f := newRelayFixture(t)
@@ -257,7 +240,6 @@ func TestDurableActivityReportsNewerTimesAndOnStop(t *testing.T) {
 	if r, ok := broker.row("sb-2"); !ok || !r.LastSeen.Equal(now) {
 		t.Fatalf("the report on stop: %v %v", r, ok)
 	}
-	// The broker refuses: the row stays pending for the next report.
 	broker.failRecord.Store(true)
 	a.record("ns", "sb-3", now)
 	if d.push(context.Background()) == nil || len(a.pending()) != 1 {
@@ -265,8 +247,6 @@ func TestDurableActivityReportsNewerTimesAndOnStop(t *testing.T) {
 	}
 }
 
-// A loss this replica read in the broker's view is reported once even with
-// nothing new, a refused attempt is retried, and nothing more is sent after.
 func TestDurableActivityReportsAnOwedLossOnce(t *testing.T) {
 	broker := newActivityBroker(t)
 	f := newRelayFixture(t)
@@ -287,8 +267,6 @@ func TestDurableActivityReportsAnOwedLossOnce(t *testing.T) {
 	}
 }
 
-// A replica that holds nothing still reports a loss it reads in the broker's
-// view: the full report shows it its stream behind its acknowledgment.
 func TestDurableActivityReportsALossReadInTheView(t *testing.T) {
 	broker := newActivityBroker(t)
 	f := newRelayFixture(t)
@@ -306,7 +284,6 @@ func TestDurableActivityReportsALossReadInTheView(t *testing.T) {
 	}
 }
 
-// durableActivity needs the admin listener and the CONNECT upstream.
 func TestDurableActivityValidation(t *testing.T) {
 	sf := startShared(t, false)
 	c := sf.f.c
@@ -329,8 +306,6 @@ func TestDurableActivityValidation(t *testing.T) {
 	}
 }
 
-// Entries the broker took but no longer holds (a restored or emptied table)
-// are reported again; ones it holds are not.
 func TestDurableActivityRepushesWhatTheBrokerLost(t *testing.T) {
 	now := time.Now().UTC()
 	a := newActivity(now, time.Hour)
@@ -354,10 +329,6 @@ func TestDurableActivityRepushesWhatTheBrokerLost(t *testing.T) {
 	}
 }
 
-// An acknowledgment a retention old is forgotten, the broker's or the
-// replica's own, whichever is shorter: everything it covered is past
-// retention, and the broker may have pruned the stream, so an idle replica
-// never reads its pruned stream as a loss.
 func TestDurableActivityForgetsAnOldAcknowledgment(t *testing.T) {
 	for name, tc := range map[string]struct {
 		keep, retention, age time.Duration
@@ -380,8 +351,6 @@ func TestDurableActivityForgetsAnOldAcknowledgment(t *testing.T) {
 	}
 }
 
-// A report acknowledged while the full report reads the broker's view is not
-// a loss: the acknowledgment is read before the view.
 func TestDurableActivityReportDuringTheReadIsNoLoss(t *testing.T) {
 	broker := newActivityBroker(t)
 	f := newRelayFixture(t)
@@ -394,7 +363,6 @@ func TestDurableActivityReportDuringTheReadIsNoLoss(t *testing.T) {
 	broker.mu.Lock()
 	broker.rows["sb-1"] = SandboxActivity{Namespace: "ns", OwnerUID: "sb-1", LastSeen: used}
 	broker.streams["aaaa0001"] = 5
-	// This replica's next report lands just after the view was taken.
 	broker.onRead = func() {
 		d.mu.Lock()
 		d.acked = 6
@@ -412,10 +380,6 @@ func TestDurableActivityReportDuringTheReadIsNoLoss(t *testing.T) {
 	}
 }
 
-// A refused report or an unreadable view records when the broker was last
-// unreachable, and the activity report carries it for the janitor; a broker
-// that answers again does not clear it, so the janitor's hold runs one idle
-// window from the last failure. A read the caller gave up on records nothing.
 func TestDurableActivityRecordsWhenTheBrokerWasUnreachable(t *testing.T) {
 	broker := newActivityBroker(t)
 	f := newRelayFixture(t)

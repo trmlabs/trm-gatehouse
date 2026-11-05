@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// A store copied to the shared store leaves <name>.migrated. Starting on
-// SQLite again must refuse, not create a new, empty store beside it.
+// A copied store leaves <name>.migrated; starting on SQLite again must refuse, not create an empty store.
 func TestOpenStoreRefusesAMigratedSQLiteStore(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent-vault.db")
@@ -36,7 +35,6 @@ func TestOpenStoreOpensSQLiteWithoutTheMarker(t *testing.T) {
 	_ = db.Close()
 }
 
-// A marker that cannot be checked refuses too.
 func TestOpenStoreRefusesWhenTheMarkerCannotBeChecked(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs a non-root POSIX user")

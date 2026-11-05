@@ -12,8 +12,6 @@ import (
 )
 
 // AuditTrail records one row per session event from verified identity only.
-// Admit gates new sessions on the trail being writable and checkpointed.
-// *auditchain.Chain implements it. A nil trail disables auditing.
 type AuditTrail interface {
 	Admit() error
 	Record(auditchain.Event) error
@@ -40,9 +38,8 @@ func (b *Broker) auditDenied(e auditchain.Event, outcome string) {
 	_ = b.auditRecord(e)
 }
 
-// watchAudit ends every open session when the audit trail fails: Admit
-// already refuses new ones, and nothing an open session does could be
-// recorded any more.
+// watchAudit ends every open session when the audit trail fails: Admit already refuses new ones, and nothing
+// an open session does could be recorded any more.
 func (b *Broker) watchAudit() {
 	trail, ok := b.opts.Audit.(interface{ Failed() <-chan struct{} })
 	if !ok {

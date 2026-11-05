@@ -19,10 +19,8 @@ import (
 	"time"
 )
 
-// BrowserOptions describes one controller-owned task, never agent input.
 // Authorize must check the live pinned agent Pod UID and the actual socket peer.
 // Audit must acknowledge local admission recording or return an error.
-// The upstream browser broker remains the mandatory durable audit authority.
 type BrowserOptions struct {
 	Endpoint  string
 	CA        []byte
@@ -33,7 +31,6 @@ type BrowserOptions struct {
 	Audit     func(context.Context, string, string) error
 }
 
-// BrowserRelay exposes only create/check/close for a single fixed browser task.
 // Its broker handle and fresh workload proofs never enter agent responses.
 type BrowserRelay struct {
 	options   BrowserOptions
@@ -72,8 +69,7 @@ func NewBrowserRelay(options BrowserOptions) (*BrowserRelay, error) {
 		if err != nil {
 			return nil, errBrowserUnavailable
 		}
-		// A delayed TLS handshake must not admit a proof after pair withdrawal.
-		// Cleanup has no peer in its context and remains possible after withdrawal.
+		// A delayed TLS handshake must not admit a proof after pair withdrawal; cleanup has no peer and stays possible.
 		if peer, _ := ctx.Value(browserPeerKey{}).(string); peer != "" {
 			if relay.allowed(ctx, peer) != nil {
 				_ = connection.Close()
@@ -126,8 +122,7 @@ func browserInput(r *http.Request) bool {
 	return json.Unmarshal(data, &value) == nil && value != nil && len(value) == 0
 }
 
-// call sends only server-selected fields and reads only bounded JSON. No upstream
-// headers or errors are copied into the agent response.
+// call sends only server-selected fields; no upstream headers or errors reach the agent response.
 func (b *BrowserRelay) call(ctx context.Context, path string, input any, expectedStatus int, peer string) (map[string]json.RawMessage, error) {
 	proof, err := b.options.Proof(ctx)
 	if err != nil || len(proof) > 16377 || !browserProof.MatchString(proof) {
@@ -189,14 +184,11 @@ func (b *BrowserRelay) call(ctx context.Context, path string, input any, expecte
 	return output, nil
 }
 
-// cleanup deliberately does not require an active pair: withdrawal must still
-// attempt physical browser closure. Broker expiry remains the crash fallback.
+// cleanup needs no active pair: withdrawal must still attempt browser closure.
 func (b *BrowserRelay) cleanup(ctx context.Context) error {
 	if b.handle == "" {
 		if b.uncertain {
-			// The broker may own a live browser whose handle never reached us.
-			// Do not report closure or retry creation; operator reconciliation
-			// and broker expiry remain necessary.
+			// The broker may own a live browser whose handle never reached us; do not report closure or retry creation.
 			return errBrowserCleanupUnknown
 		}
 		return nil
@@ -240,7 +232,6 @@ func (b *BrowserRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if b.allowed(ctx, r.RemoteAddr) != nil {
 		// A wrong peer must not be able to terminate the legitimate task.
-		// The controller independently closes the relay on actual pair loss.
 		browserError(w, http.StatusForbidden)
 		return
 	}
@@ -323,8 +314,7 @@ func (b *BrowserRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// Close permanently ends admission and attempts broker cleanup. The controller
-// must call this on task expiry, pairing loss and shutdown, not just HTTP traffic.
+// Close must run on task expiry, pairing loss and shutdown, not only on HTTP traffic.
 func (b *BrowserRelay) Close(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

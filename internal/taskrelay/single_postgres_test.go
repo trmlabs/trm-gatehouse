@@ -19,17 +19,12 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// catalogBackend is one broker PostgreSQL listener for every database: it
-// reads the shared proxy's attestation line, then the startup, and records
-// which database each session asked for.
 type catalogBackend struct {
 	raw           net.Listener
 	arrivals      atomic.Int32
 	databases     chan string
 	cancellations chan []byte
-	// refuse, if set, names databases the broker refuses as not in the
-	// pool's catalog, as the real broker does.
-	refuse func(database string) bool
+	refuse        func(database string) bool
 }
 
 func newCatalogBackend(t *testing.T) *catalogBackend {
@@ -42,7 +37,6 @@ func newCatalogBackend(t *testing.T) *catalogBackend {
 	return &catalogBackend{raw: l, databases: make(chan string, 16), cancellations: make(chan []byte, 4)}
 }
 
-// serve starts answering once the fixture's certificate exists.
 func (b *catalogBackend) serve(cert tls.Certificate) {
 	l := tls.NewListener(b.raw, &tls.Config{Certificates: []tls.Certificate{cert}})
 	go func() {
@@ -105,9 +99,6 @@ func catalogNames(n int) []string {
 	return names
 }
 
-// openRouted runs one client through the single port: an optional
-// SSLRequest or GSSENCRequest (declined in plaintext), the startup naming
-// database, the placeholder, then the broker's ready frames.
 func openRouted(t *testing.T, sf *sharedFixture, first uint32, database string) (net.Conn, []byte) {
 	t.Helper()
 	c := sf.dial(t, sf.f.c.PostgresListener.Listen)
@@ -140,11 +131,6 @@ func openRouted(t *testing.T, sf *sharedFixture, first uint32, database string) 
 	}
 }
 
-// One port serves a catalog of thousands: each name in it reaches the broker
-// as that database, whether the client asked for TLS or GSS encryption first
-// or not; a name outside it, or none, is refused with the catalog words and
-// never reaches the broker; and a cancellation on the port reaches the
-// broker socket that session used.
 func TestSharedPostgresListenerRoutesByCatalog(t *testing.T) {
 	names := catalogNames(5000)
 	backend := newCatalogBackend(t)
@@ -205,9 +191,6 @@ func TestSharedPostgresListenerRoutesByCatalog(t *testing.T) {
 	}
 }
 
-// The single port is shared mode only, needs at least one database, and
-// refuses a bad or repeated name, a listen address another listener uses,
-// and a session file. Its size is not capped by count.
 func TestPostgresListenerValidation(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
@@ -243,8 +226,6 @@ func TestPostgresListenerValidation(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// A rendered config with the whole catalog loads: the file bound is sized
-	// for the route table.
 	c := base()
 	c.TLSCertFile, c.TLSKeyFile, c.Deadline = "", "", time.Time{}
 	c.PostgresListener.Databases = make([]string, 20000)

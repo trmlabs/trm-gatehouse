@@ -11,14 +11,9 @@ import (
 type ClientSession struct {
 	Token   string `json:"token"`
 	Address string `json:"address"`
-	// Email of the account that minted Token. Cached so re-auth on
-	// expiry can skip the email prompt; empty for sessions saved by
-	// older clients.
+	// Email of the account that minted Token, cached so re-auth skips the prompt; empty for older clients.
 	Email string `json:"email,omitempty"`
-	// DeviceLabel is the label this CLI sent when minting the session.
-	// Cached so silent re-auth (withReauthRetry) preserves the operator's
-	// `--device-label` choice instead of falling back to os.Hostname().
-	// Empty for sessions saved by older clients.
+	// DeviceLabel is cached so silent re-auth keeps the operator's `--device-label`; empty for older clients.
 	DeviceLabel string `json:"device_label,omitempty"`
 }
 

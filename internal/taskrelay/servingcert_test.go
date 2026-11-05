@@ -32,9 +32,6 @@ import (
 
 var proxyNames = []string{"gatehouse-proxy.agent-sandbox.svc", "gatehouse-proxy.agent-sandbox.svc.cluster.local"}
 
-// testIssuer stands in for the broker's cross-cluster listener: it answers
-// CONNECT like the HTTP proxy and signs certificate requests like the
-// proxy-certificate route, with its own CA.
 type testIssuer struct {
 	srv     *httptest.Server
 	caFile  string
@@ -117,8 +114,6 @@ func (ti *testIssuer) serve(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"certificate": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), "chain": string(ti.caPEM)})
 }
 
-// startIssued runs a shared proxy with a broker-issued certificate on its
-// CONNECT listener, one PostgreSQL binding and the single PostgreSQL port.
 func startIssued(t *testing.T, ttl time.Duration) (*sharedFixture, *testIssuer) {
 	t.Helper()
 	ti := newTestIssuer(t, ttl)
@@ -132,14 +127,10 @@ func startIssued(t *testing.T, ttl time.Duration) (*sharedFixture, *testIssuer) 
 	return sf, ti
 }
 
-// dialProxy opens TLS to a proxy listener the way an agent would: verifying
-// the broker CA and the proxy's Service name.
 func (ti *testIssuer) dialProxy(address string) (*tls.Conn, error) {
 	return tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp", address, &tls.Config{RootCAs: ti.roots, ServerName: proxyNames[0]})
 }
 
-// pgUpgrade sends optional GSSENCRequest, then SSLRequest, expects 'S' and
-// returns the TLS session.
 func (ti *testIssuer) pgUpgrade(t *testing.T, address string, gssFirst bool) *tls.Conn {
 	t.Helper()
 	c, e := net.DialTimeout("tcp", address, time.Second)
@@ -172,11 +163,6 @@ func startupFor(database string) []byte {
 	return b
 }
 
-// With a broker-issued certificate every agent-facing listener is TLS under
-// the broker CA: CONNECT, each PostgreSQL binding and the single port. A
-// PostgreSQL client gets 'S' for its SSLRequest (after 'N' for GSS
-// encryption); a plaintext startup or cancellation is refused in fixed words.
-// The request carried the proxy's own token and only its names.
 func TestBrokerIssuedTLSOnEveryListener(t *testing.T) {
 	t.Parallel()
 	sf, ti := startIssued(t, time.Hour)
@@ -217,7 +203,6 @@ func TestBrokerIssuedTLSOnEveryListener(t *testing.T) {
 			plain.Close()
 		}
 	}
-	// The single port still routes by catalog inside TLS.
 	secure := ti.pgUpgrade(t, sf.f.c.PostgresListener.Listen, false)
 	secure.Write(startupFor("not-in-catalog"))
 	if typ, body, e := readPGFrame(secure, 8192); e != nil || typ != 'E' || sqlState(body) != "3D000" {
@@ -229,7 +214,6 @@ func TestBrokerIssuedTLSOnEveryListener(t *testing.T) {
 	}
 }
 
-// connectStatus sends a CONNECT and returns the response status, 0 if none.
 func connectStatus(c net.Conn) int {
 	io.WriteString(c, "CONNECT approved.test:443 HTTP/1.1\r\nHost: approved.test:443\r\n\r\n")
 	response, e := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: "CONNECT"})
@@ -250,9 +234,6 @@ func servedSerial(t *testing.T, ti *testIssuer, address string) (*big.Int, error
 	return c.ConnectionState().PeerCertificates[0].SerialNumber, nil
 }
 
-// The proxy renews at two thirds of the certificate's life on a new key,
-// keeps serving the old one while the broker refuses, and refuses every
-// handshake once it has expired with no replacement.
 func TestBrokerIssuedCertificateRenewsAndExpires(t *testing.T) {
 	sf, ti := startIssued(t, 3*time.Second)
 	address := sf.f.c.Connect.Listen
@@ -274,8 +255,7 @@ func TestBrokerIssuedCertificateRenewsAndExpires(t *testing.T) {
 	if n := ti.issued.Load(); n != 2 {
 		t.Fatalf("%d issuances by four fifths of the lifetime, want 2", n)
 	}
-	// The issuer counts the renewal when it answers; the proxy installs the
-	// new certificate just after, so wait for it to be served.
+	// The issuer counts the renewal when it answers; wait for the proxy to serve the new certificate.
 	second, e := servedSerial(t, ti, address)
 	for deadline := leaf.NotBefore.Add(life * 9 / 10); (e != nil || second.Cmp(first) == 0) && time.Now().Before(deadline); {
 		time.Sleep(20 * time.Millisecond)
@@ -290,13 +270,10 @@ func TestBrokerIssuedCertificateRenewsAndExpires(t *testing.T) {
 	}
 	renewed := c.ConnectionState().PeerCertificates[0]
 	c.Close()
-	// Broker down: the current certificate serves until it expires.
 	if _, e := servedSerial(t, ti, address); e != nil {
 		t.Fatalf("current certificate withdrawn before expiry: %v", e)
 	}
 	time.Sleep(time.Until(renewed.NotAfter) + 300*time.Millisecond)
-	// The proxy offers no certificate at all: even a client whose clock says
-	// the expired one is still current gets none.
 	earlier := &tls.Config{RootCAs: ti.roots, ServerName: proxyNames[0], Time: func() time.Time { return renewed.NotBefore.Add(time.Second) }}
 	if c, e := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp", address, earlier); e == nil {
 		c.Close()
@@ -325,8 +302,6 @@ func TestBrokerIssuedCertificateRenewsAndExpires(t *testing.T) {
 	t.Fatal("serving did not resume once the broker issued again")
 }
 
-// The issued certificate must be for the proxy's own key, current, for
-// server authentication, and name nothing beyond the configured names.
 func TestBrokerIssuedCertificateChecks(t *testing.T) {
 	ti := newTestIssuer(t, time.Hour)
 	s := newServingCert(&ServingTLSConfig{Mode: brokerIssued, Names: proxyNames}, UpstreamConfig{})
@@ -366,9 +341,6 @@ func TestBrokerIssuedCertificateChecks(t *testing.T) {
 	}
 }
 
-// Broker-issued TLS is shared mode only, takes the place of certificate
-// files, needs the CONNECT upstream to ask over, and only lower-case DNS
-// names, each once.
 func TestServingTLSValidation(t *testing.T) {
 	t.Parallel()
 	f := newRelayFixture(t)
@@ -407,12 +379,9 @@ func TestServingTLSValidation(t *testing.T) {
 	}
 }
 
-// While the broker refuses the first certificate, the proxy serves nothing
-// and says so in the audit at each interval.
 func TestBrokerIssuedStartupWaitIsLogged(t *testing.T) {
 	waitingLogInterval = 200 * time.Millisecond
 	t.Cleanup(func() { waitingLogInterval = time.Minute })
-	// No proof file: every request fails before reaching a broker.
 	s := newServingCert(&ServingTLSConfig{Mode: brokerIssued, Names: proxyNames}, UpstreamConfig{})
 	var rows atomic.Int32
 	s.waiting = func() { rows.Add(1) }

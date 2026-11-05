@@ -332,10 +332,7 @@ func TestBolt_PostgresStillServedOnTheSameListener(t *testing.T) {
 	}
 }
 
-// pymgclient without autocommit sends BEGIN, COMMIT and ROLLBACK as queries,
-// which Memgraph cannot plan. The broker carries them out as the Bolt
-// messages, so a read entry still runs every query in a read transaction it
-// rolls back, and a write inside one is still refused.
+// pymgclient without autocommit sends BEGIN, COMMIT and ROLLBACK as queries, which Memgraph cannot plan.
 func TestBolt_TransactionStatementsOnAReadEntry(t *testing.T) {
 	f := startBoltFixture(t, nil)
 	c := signedIn(t, f)

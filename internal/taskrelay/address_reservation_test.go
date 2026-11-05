@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// freeAddress keeps its port bound, so no other listener can be given it
-// between the test choosing it and the relay binding it.
 func TestAReservedAddressStaysBoundUntilTheRelayTakesIt(t *testing.T) {
 	address := freeAddress(t)
 	if other, e := net.Listen("tcp", address); e == nil {
@@ -30,7 +28,6 @@ func TestAReservedAddressStaysBoundUntilTheRelayTakesIt(t *testing.T) {
 	if !awaitBound(address, nil) {
 		t.Fatal("an address the relay took does not count as bound")
 	}
-	// The relay now owns the listener; a second bind of the address is a real one and fails.
 	if other, e := listenReserved("tcp", address); e == nil {
 		other.Close()
 		t.Fatal("a reserved address was handed over twice")
@@ -61,8 +58,6 @@ func closedChannel() <-chan struct{} {
 	return c
 }
 
-// A sidecar's configured addresses must be loopback, and so must the sockets a
-// caller's listen hands it: one bound on every interface is refused and closed.
 func TestASidecarRefusesAListenerOffLoopback(t *testing.T) {
 	f := newRelayFixture(t)
 	c := FixedConfig{TaskID: "pool-worker", Deadline: time.Now().Add(time.Hour), AuditFile: filepath.Join(t.TempDir(), "audit.jsonl"), Self: true,

@@ -193,10 +193,10 @@ Every command in this phase runs on `av-broker` until you exit.
 <Step title="Install Agent Vault">
 
 ```bash
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh
+git clone https://github.com/trmlabs/trm-gatehouse.git && cd trm-gatehouse && make build && sudo mv agent-vault /usr/local/bin/
 ```
 
-The script detects your architecture, verifies the signed release, and drops the binary at `/usr/local/bin/agent-vault`.
+This needs Go and Node.js on the machine. It builds the binary and places it at `/usr/local/bin/agent-vault`.
 
 </Step>
 
@@ -355,7 +355,7 @@ In a **fresh terminal on your laptop** (leave the SSH tunnel to `av-broker` runn
 
 ```bash
 ssh -i ~/.ssh/agent-vault-lab root@<hermes-vps-public-ip>
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh
+git clone https://github.com/trmlabs/trm-gatehouse.git && cd trm-gatehouse && make build && sudo mv agent-vault /usr/local/bin/
 ```
 
 Every command from here through starting the gateway runs on `hermes-vps`. On this box the AV CLI is a client wrapper; no server runs here.

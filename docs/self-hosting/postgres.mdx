@@ -3,10 +3,6 @@ title: "PostgreSQL Database"
 description: "Deploy Agent Vault with PostgreSQL for production and multi-instance setups"
 ---
 
-import EnterpriseCTA from "/snippets/enterprise-cta.mdx";
-
-<EnterpriseCTA />
-
 ## Overview
 
 Agent Vault uses an embedded SQLite database by default, which requires no setup. For production deployments, or when running multiple instances, switch to PostgreSQL.
@@ -125,8 +121,6 @@ Save the output in your platform's secret store (Kubernetes Secrets, Docker secr
   The SQLite file is left intact. If anything goes wrong, remove `DATABASE_URL` and restart to fall back immediately.
 </Tip>
 
-<EnterpriseCTA />
-
 ## Example: Kubernetes
 
 A minimal setup with two replicas. The MITM proxy terminates TLS itself, so it needs a Layer-4 (TCP) load balancer. The API/UI can sit behind a standard HTTP Ingress.
@@ -148,7 +142,7 @@ spec:
     spec:
       containers:
         - name: agent-vault
-          image: infisical/agent-vault:latest
+          image: gatehouse:local
           ports:
             - name: api
               containerPort: 14321
@@ -175,7 +169,7 @@ spec:
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /health
+              path: /readyz
               port: api
             initialDelaySeconds: 3
             periodSeconds: 5
@@ -237,7 +231,7 @@ services:
       retries: 5
 
   agent-vault-1:
-    image: infisical/agent-vault
+    image: gatehouse:local
     ports:
       - "14321:14321"
       - "14322:14322"
@@ -249,7 +243,7 @@ services:
         condition: service_healthy
 
   agent-vault-2:
-    image: infisical/agent-vault
+    image: gatehouse:local
     ports:
       - "14323:14321"
       - "14324:14322"
@@ -286,8 +280,6 @@ In production, place an L4 load balancer (HAProxy, nginx stream, cloud LB) in fr
 - **Advisory locks**: Service-config writes acquire a Postgres advisory lock scoped to the vault, preventing concurrent writes from producing an inconsistent config. Reads are lock-free.
 - **Two listener types**: The API (`:14321`) is standard HTTP -- put it behind an L7 load balancer with TLS termination. The MITM proxy (`:14322`) does its own TLS handshake with upstreams, so the load balancer must do TCP (L4) passthrough.
 
-<EnterpriseCTA />
-
 ## Rollback
 
 If you need to revert to a single-instance deployment:
@@ -300,7 +292,7 @@ The SQLite file is never modified during Postgres operation, so it remains a val
 
 ## Operational notes
 
-- **Health checks**: `GET /health` pings the Postgres connection and returns `{"status":"ok"}` or 503. Use this for load-balancer health probes and Kubernetes liveness/readiness checks.
+- **Health checks**: `GET /health` pings the Postgres connection and returns `{"status":"ok"}` or 503; it also fails once the signed audit trail has stopped for good. Use it for liveness. `GET /readyz` returns 503 while an instance cannot serve (the store unreachable, shutting down, or the signed audit trail stopped). Use it for readiness and load-balancer health probes, so traffic moves to an instance that can serve.
 - **Connection pooling**: Each instance maintains its own connection pool (default: 25 max open, 10 idle, 5-minute lifetime). Tune per-instance with `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, and `DB_CONN_MAX_LIFETIME` environment variables. For large deployments (10+ instances), consider placing PgBouncer between Agent Vault and Postgres to limit the aggregate connection count.
 - **Rate limiting** is per-instance, not cluster-wide. If you run 3 replicas with the default profile, effective cluster-wide limits are roughly 3x the per-instance values. Adjust `AGENT_VAULT_RATELIMIT_PROFILE` if needed.
 - **Background tickers** (log retention, credential sync) run independently on every instance. They are idempotent, so duplicate work is harmless.

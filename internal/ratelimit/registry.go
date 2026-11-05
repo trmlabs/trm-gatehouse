@@ -7,10 +7,7 @@ import (
 	"time"
 )
 
-// Registry owns all per-tier limiters in a single process. It is safe
-// for concurrent use. Call New() once at server construction; callers
-// hold on to it and pass it into middleware and handlers that need to
-// perform explicit allow/acquire calls (like login's email bucket).
+// Registry owns all per-tier limiters in one process and is safe for concurrent use.
 type Registry struct {
 	cfg atomic.Pointer[Config]
 
@@ -37,11 +34,7 @@ func New(cfg Config) *Registry {
 // Config returns a copy of the current effective config.
 func (r *Registry) Config() Config { return *r.cfg.Load() }
 
-// Reload replaces the registry's config. Existing per-key state is
-// preserved where possible (sliding histories, bucket token counts);
-// tier capacities and rates update in place. The global semaphore is
-// rebuilt if the capacity changes — in-flight holders will release to
-// the old semaphore and new requests acquire on the new one.
+// Reload replaces the config, keeping per-key state; the global semaphore is rebuilt if its capacity changes.
 func (r *Registry) Reload(newCfg Config) {
 	old := r.cfg.Load()
 	r.cfg.Store(&newCfg)
@@ -99,9 +92,7 @@ func (r *Registry) build(cfg Config) {
 			r.failures[t] = newFailureCounter(tc)
 		}
 	}
-	// TierProxy layers a per-key concurrency semaphore on top of its
-	// token bucket; the bucket smooths sustained traffic, the sem
-	// bounds in-flight slow upstream calls.
+	// TierProxy adds a per-key concurrency semaphore on top of its token bucket.
 	if cfg.Tiers[TierProxy].Concurrency > 0 {
 		r.kSemaphores[TierProxy] = newKeyedSemaphore(cfg.Tiers[TierProxy], 2*time.Second)
 	}
@@ -115,12 +106,7 @@ func (r *Registry) build(cfg Config) {
 	})
 }
 
-// Check peeks at the current state for tier+key without recording an
-// event. Returns Deny when the budget is exhausted, AllowOK otherwise.
-// Used as a pre-gate before expensive work (auth lookups) so that
-// recording can be deferred to the failure path via Allow. Only
-// sliding-window tiers support a true read-only peek; other tier
-// types fail open so they never silently consume budget.
+// Check peeks at tier+key without recording an event; only sliding-window tiers peek, others fail open.
 func (r *Registry) Check(tier Tier, key string) Decision {
 	if r.cfg.Load().Off || key == "" {
 		return AllowOK(0, 0)
@@ -133,9 +119,7 @@ func (r *Registry) Check(tier Tier, key string) Decision {
 	return AllowOK(0, 0)
 }
 
-// Allow records one event against tier for key and returns a Decision.
-// Off configs return AllowOK. Unknown/unset tiers fail open (AllowOK).
-// Empty key fails open too (the middleware treats "" as "skip").
+// Allow records one event for key against tier; off, unknown or empty-key cases fail open.
 func (r *Registry) Allow(tier Tier, key string) Decision {
 	if r.cfg.Load().Off || key == "" {
 		return AllowOK(0, 0)
@@ -151,9 +135,7 @@ func (r *Registry) Allow(tier Tier, key string) Decision {
 	return AllowOK(0, 0)
 }
 
-// AllowGlobalRPS is the single-bucket rate check applied to every
-// request. Keyed on a constant ("global") inside the bucket map so the
-// tokenBucketMap eviction machinery is reused without special-casing.
+// AllowGlobalRPS is the single-bucket rate check applied to every request.
 func (r *Registry) AllowGlobalRPS() Decision {
 	if r.cfg.Load().Off {
 		return AllowOK(0, 0)
@@ -181,9 +163,7 @@ func (r *Registry) AcquireGlobal(ctx context.Context) (func(), Decision) {
 	return sem.acquire(ctx)
 }
 
-// ProxyEnforcement is the outcome of Registry.EnforceProxy. On denial,
-// Release is nil and the caller emits a 429 using Decision + ErrCode
-// + Message. On allow, defer Release() to free the concurrency slot.
+// ProxyEnforcement is the outcome of EnforceProxy; on allow, defer Release to free the concurrency slot.
 type ProxyEnforcement struct {
 	Allowed  bool
 	Release  func()
@@ -192,9 +172,7 @@ type ProxyEnforcement struct {
 	Message  string
 }
 
-// EnforceProxy runs the two TierProxy checks (token bucket first,
-// concurrency semaphore second) for one proxy request on the MITM
-// forward handler.
+// EnforceProxy runs the TierProxy token bucket then concurrency semaphore for one MITM request.
 func (r *Registry) EnforceProxy(ctx context.Context, actorID, vaultID string) ProxyEnforcement {
 	if r == nil || r.cfg.Load().Off || actorID == "" || vaultID == "" {
 		return ProxyEnforcement{Allowed: true, Release: func() {}}
@@ -224,9 +202,7 @@ func (r *Registry) acquireKeyed(ctx context.Context, tier Tier, key string) (fun
 	return k.acquire(ctx, key)
 }
 
-// FailureCheck reports whether key is still allowed to attempt. Used
-// for verification-code invalidation (not a rate limit — a failure
-// budget).
+// FailureCheck reports whether key may still attempt; a failure budget, not a rate limit.
 func (r *Registry) FailureCheck(tier Tier, key string) bool {
 	if r.cfg.Load().Off || key == "" {
 		return true

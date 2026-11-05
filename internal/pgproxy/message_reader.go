@@ -6,9 +6,7 @@ import (
 	"io"
 )
 
-// messageReader prevents pgproto3's chunk reader from consuming bytes from the
-// next wire message. After ReadyForQuery/PasswordMessage, the connection can be
-// handed to the raw relay without losing pipelined queries or notifications.
+// messageReader prevents pgproto3's chunk reader from consuming bytes from the next wire message.
 // It buffers only a header, never an attacker-controlled body length.
 type messageReader struct {
 	reader    io.Reader

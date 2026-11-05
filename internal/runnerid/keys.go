@@ -22,9 +22,7 @@ const (
 	minRSABits     = 2048
 )
 
-// jwks caches one issuer's signing keys, by kid, for an hour. An unknown kid
-// or stale keys refetch at most every 30 seconds, one fetch at a time, and the
-// last good set keeps serving within its hour when a fetch fails.
+// jwks caches one issuer's signing keys by kid for an hour. An unknown kid or stale keys refetch at most every 30 seconds, one fetch at a time; the last good set serves within its hour when a fetch fails.
 type jwks struct {
 	mu        sync.Mutex
 	keys      map[string]crypto.PublicKey
@@ -48,8 +46,7 @@ func (c *jwks) lookup(ctx context.Context, kid, url string, client *http.Client,
 		c.mu.Unlock()
 		return k, true
 	}
-	// One fetch at a time, outside the lock: concurrent verifies wait for it
-	// instead of each holding the lock across a network call.
+	// One fetch at a time, outside the lock, so concurrent verifies wait instead of holding the lock across a network call.
 	if wait := c.inflight; wait != nil {
 		c.mu.Unlock()
 		select {
@@ -93,14 +90,12 @@ func (c *jwks) current(kid string, now func() time.Time) (crypto.PublicKey, bool
 	return c.keys[kid], !c.failed
 }
 
-// RefuseRedirects is an http.Client CheckRedirect that follows no redirect:
-// the signing keys come only from the configured https URL.
+// RefuseRedirects is an http.Client CheckRedirect that follows no redirect: signing keys come only from the configured https URL.
 func RefuseRedirects(*http.Request, []*http.Request) error {
 	return errors.New("runner JWKS redirect refused")
 }
 
-// fetchKeys reads a JWKS: P-256 keys for ES256 (Anthropic) and RSA keys of at
-// least 2048 bits for RS256 (Cursor). Each verifier accepts only its own kind.
+// fetchKeys reads a JWKS: P-256 keys for ES256 and RSA keys of at least 2048 bits for RS256; each verifier accepts only its own kind.
 func fetchKeys(ctx context.Context, url string, client *http.Client) (map[string]crypto.PublicKey, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second, CheckRedirect: RefuseRedirects}

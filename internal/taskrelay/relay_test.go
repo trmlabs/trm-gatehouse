@@ -93,8 +93,6 @@ func (f *relayFixture) upstream(t *testing.T, address string) UpstreamConfig {
 	return UpstreamConfig{Address: address, ServerName: "127.0.0.1", CAFile: f.c.TLSCertFile, ProofFile: p, Audience: "gatehouse"}
 }
 
-// reservations holds each address freeAddress chose until the relay under test
-// takes its listener over, keyed by that address.
 var reservations sync.Map
 
 type reservation struct {
@@ -102,9 +100,7 @@ type reservation struct {
 	taken    chan struct{} // closed when the relay has taken the listener
 }
 
-// freeAddress binds a loopback port and keeps it bound, so nothing else on the
-// machine can be handed the same port before the relay binds it. runReserved
-// hands the relay this listener in place of a second bind.
+// freeAddress keeps its port bound so nothing else gets it before the relay binds it.
 func freeAddress(t *testing.T) string {
 	t.Helper()
 	l, e := net.Listen("tcp", "127.0.0.1:0")
@@ -120,9 +116,7 @@ func freeAddress(t *testing.T) string {
 	return address
 }
 
-// hangUpAddress is the address of a broker that closes every connection at
-// once. A relay dialing it cannot reach its upstream, as when a connection is
-// refused, and the port is never released for something else to take.
+// hangUpAddress is a broker that closes every connection at once; the port is never released.
 func hangUpAddress(t *testing.T) string {
 	t.Helper()
 	l, e := net.Listen("tcp", "127.0.0.1:0")
@@ -142,8 +136,6 @@ func hangUpAddress(t *testing.T) string {
 	return l.Addr().String()
 }
 
-// listenReserved binds like net.Listen, except that an address freeAddress
-// reserved gets its already bound listener.
 func listenReserved(network, address string) (net.Listener, error) {
 	if v, ok := reservations.LoadAndDelete(address); ok {
 		r := v.(*reservation)
@@ -153,16 +145,11 @@ func listenReserved(network, address string) (net.Listener, error) {
 	return net.Listen(network, address)
 }
 
-// runReserved is Run for addresses freeAddress reserved.
 func runReserved(ctx context.Context, c FixedConfig) error {
 	return RunWithListen(ctx, c, listenReserved)
 }
 
-// awaitBound waits until the relay has taken over the listener reserved for
-// address. Until then a dial succeeds against the held socket although the
-// relay has bound nothing. It reports false if stop closes or 30 seconds pass
-// first; a nil stop never closes. An address nothing reserved, or one already
-// taken, counts as bound.
+// awaitBound waits until the relay has taken the reserved listener; until then a dial succeeds against the held socket.
 func awaitBound(address string, stop <-chan struct{}) bool {
 	v, ok := reservations.Load(address)
 	if !ok {
@@ -178,7 +165,6 @@ func awaitBound(address string, stop <-chan struct{}) bool {
 	}
 }
 
-// mustBeBound fails the test unless the relay takes over address's listener.
 func mustBeBound(t *testing.T, address string) {
 	t.Helper()
 	if !awaitBound(address, nil) {
@@ -217,8 +203,7 @@ func (f *relayFixture) start(t *testing.T) {
 			t.Fatal("relay did not bind")
 		}
 	}
-	// Polls until the listener answers; the bound only stops a broken start,
-	// so it is wide enough for a full -race suite on a loaded runner.
+	// The bound only stops a broken start; wide enough for a loaded -race run.
 	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); {
 		conn, e := net.DialTimeout("tcp", address, 20*time.Millisecond)
 		if e == nil {
@@ -483,8 +468,6 @@ func TestPostgresCustodyAndCancellation(t *testing.T) {
 		t.Fatal("accepted stale cancellation key")
 	default:
 	}
-	// The accepted cancel and both rejected ones are journaled, so the audit
-	// separates a forwarded cancellation from a guessed or stale key.
 	if n := countAuditOutcome(t, f.c.AuditFile, "cancel"); n != 1 {
 		t.Fatalf("forwarded cancel produced %d cancel rows, want 1", n)
 	}

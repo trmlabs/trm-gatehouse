@@ -76,17 +76,9 @@ type Server struct {
 	logger        *slog.Logger        // structured logger for per-request observability
 	rateLimit     *ratelimit.Registry // tiered rate limiter; shared with the MITM ingress
 	logSink       requestlog.Sink     // per-request persistence sink; never nil (Nop default)
-	// httpListener, when set, is the socket Start serves on instead of binding
-	// httpServer.Addr. A test sets it so it never has to choose a free port,
-	// release it and hope nothing takes it before Start binds it.
+	// httpListener, when set, is served instead of binding httpServer.Addr; tests set it to avoid port races.
 	httpListener net.Listener
-	// touchCache short-circuits per-request session-touch writes. With
-	// db.SetMaxOpenConns(1), every UPDATE — even a no-op — opens the
-	// single WAL writer slot. Caching the last-touch wall-clock per
-	// token keeps the steady state at one SQL write per session per
-	// touchInterval; the SQL throttle remains as a defense-in-depth
-	// backstop. Bounded by a periodic prune (see runTouchCachePruner)
-	// that drops entries past the throttle window.
+	// touchCache throttles session-touch writes because each UPDATE takes the single WAL writer slot; pruned periodically.
 	touchCache sync.Map // raw token (string) -> time.Time
 	// infisicalClient is nil when INFISICAL_URL is unset; create handlers
 	// reject kind="infisical" then.
@@ -96,16 +88,13 @@ type Server struct {
 	// infisicalDynamic resolves Infisical dynamic-secret leases on demand; built
 	// in Run alongside the syncer when a client is attached. Nil disables it.
 	infisicalDynamic *infisical.DynamicResolver
-	// hashicorpClient is nil when VAULT_ADDR is unset; create handlers reject
-	// kind="hashicorp" then.
+	// hashicorpClient is nil when VAULT_ADDR is unset; create handlers then reject kind="hashicorp".
 	hashicorpClient *hashicorp.Client
-	// hashicorpSyncer is built in Run; exposed for manual-refresh RefreshOnce.
 	hashicorpSyncer *hashicorp.Syncer
 	credentialProxy bool
 	oauthRefresher  *oauth.Refresher
 	telemetry       *telemetry.Telemetry
-	// pgBroker is the PostgreSQL credential-brokering TCP listener; nil when
-	// --postgres-port is 0 or no database services are configured.
+	// pgBroker is nil when --postgres-port is 0 or no database services are configured.
 	cleanupObserverServer *http.Server
 	crossClusterAddr      string                 // loopback address of the cross-cluster listener, or ""
 	crossClusterLimits    CrossClusterLimits     // zero fields take the defaults
@@ -115,8 +104,10 @@ type Server struct {
 	pgBroker              *pgproxy.Broker
 	pgTLS                 *pgTLSFront // the broker's own TLS listener for pgBroker, or nil
 	readiness             []readinessCheck
+	liveness              []readinessCheck
 	pgLeaseCloser         interface{ Close(context.Context) error }
 	shutdownFuncs         []func()
+	finalShutdownFuncs    []func()
 	shutdownTimeout       time.Duration // 0: the default 5s
 	storeOK               atomic.Int64  // Unix ms of the last good store ping; 0 before the first
 }
@@ -131,35 +122,25 @@ func (s *Server) lockVault(ctx context.Context, vaultID string) (func(), error) 
 // MITM ingress can share the same tier state (see cmd/server.go).
 func (s *Server) RateLimit() *ratelimit.Registry { return s.rateLimit }
 
-// AttachMITM registers an optional transparent MITM proxy whose lifecycle
-// is bound to this Server: Start launches it, and SIGINT/SIGTERM/Shutdown
-// stops it alongside the HTTP server.
+// AttachMITM registers an optional MITM proxy whose lifecycle is bound to this Server.
 func (s *Server) AttachMITM(p *mitm.Proxy) { s.mitm = p }
 
 // AttachInfisical registers the Infisical client. Must be called before Start.
 func (s *Server) AttachInfisical(c *infisical.Client) { s.infisicalClient = c }
 
-// AttachInfisicalSyncer pre-wires a syncer instead of letting Start build one
-// from the attached client. Used by tests to inject a fake fetcher; in prod
-// Start auto-builds one when the field is nil.
+// AttachInfisicalSyncer pre-wires a syncer instead of letting Start build one; used by tests to inject a fake fetcher.
 func (s *Server) AttachInfisicalSyncer(syncer *infisical.Syncer) { s.infisicalSyncer = syncer }
 
-// AttachHashicorp registers the HashiCorp Vault client. Must be called before Start.
+// AttachHashicorp must be called before Start.
 func (s *Server) AttachHashicorp(c *hashicorp.Client) { s.hashicorpClient = c }
 
-// HashicorpClient returns the attached HashiCorp Vault client, or nil when
-// VAULT_ADDR is unset. The PostgreSQL broker uses it to mint dynamic database
-// credentials.
+// HashicorpClient returns the attached client, or nil when VAULT_ADDR is unset.
 func (s *Server) HashicorpClient() *hashicorp.Client { return s.hashicorpClient }
 
-// AttachPostgresBroker registers the optional PostgreSQL credential-brokering
-// TCP listener whose lifecycle is bound to this Server: Start launches it, and
-// SIGINT/SIGTERM/Shutdown stops it alongside the HTTP server. Must be called
-// before Start.
+// AttachPostgresBroker binds the broker's lifecycle to this Server. Must be called before Start.
 func (s *Server) AttachPostgresBroker(b *pgproxy.Broker) { s.pgBroker = b }
 
-// EnableProxyCertificates serves shared proxies' certificate requests on the
-// cross-cluster listener, which must also be enabled.
+// EnableProxyCertificates requires the cross-cluster listener to be enabled.
 func (s *Server) EnableProxyCertificates(i *proxycert.Issuer) error {
 	if err := i.Validate(); err != nil {
 		return err
@@ -168,8 +149,7 @@ func (s *Server) EnableProxyCertificates(i *proxycert.Issuer) error {
 	return nil
 }
 
-// EnableProxyActivity serves shared proxies' activity reports and reads on
-// the cross-cluster listener, which must also be enabled.
+// EnableProxyActivity requires the cross-cluster listener to be enabled.
 func (s *Server) EnableProxyActivity(a *proxyactivity.Service) error {
 	if err := a.Validate(); err != nil {
 		return err
@@ -178,8 +158,7 @@ func (s *Server) EnableProxyActivity(a *proxyactivity.Service) error {
 	return nil
 }
 
-// SetShutdownTimeout sets how long a graceful stop waits for in-flight work,
-// such as tunnel requests the proxy drains. Zero keeps the default 5s.
+// SetShutdownTimeout sets the graceful-stop wait for in-flight work; zero keeps the default 5s.
 func (s *Server) SetShutdownTimeout(d time.Duration) { s.shutdownTimeout = d }
 
 func (s *Server) shutdownBudget() time.Duration {
@@ -189,10 +168,14 @@ func (s *Server) shutdownBudget() time.Duration {
 	return 5 * time.Second
 }
 
-// AttachReadiness adds a named check to GET /readyz. Every check must pass for
-// the replica to receive traffic; names, never values, appear in the response.
+// AttachReadiness adds a named check to GET /readyz; names, never values, appear in the response.
 func (s *Server) AttachReadiness(name string, check func() bool) {
 	s.readiness = append(s.readiness, readinessCheck{name: name, check: check})
+}
+
+// AttachLiveness adds a named check to GET /health, which a liveness probe restarts on; attach only what a restart fixes.
+func (s *Server) AttachLiveness(name string, check func() bool) {
+	s.liveness = append(s.liveness, readinessCheck{name: name, check: check})
 }
 
 type readinessCheck struct {
@@ -200,14 +183,10 @@ type readinessCheck struct {
 	check func() bool
 }
 
-// AttachHashicorpSyncer pre-wires a syncer instead of letting Start build one
-// from the attached client. Used by tests to inject a fake fetcher; in prod
-// Start auto-builds one when the field is nil.
+// AttachHashicorpSyncer injects a syncer (tests use a fake fetcher); Start builds one when nil.
 func (s *Server) AttachHashicorpSyncer(syncer *hashicorp.Syncer) { s.hashicorpSyncer = syncer }
 
-// AttachLogSink swaps the per-request log sink. Safe to call once at
-// startup, before the HTTP server begins accepting connections. nil
-// resets to a Nop sink.
+// AttachLogSink swaps the per-request log sink; call once at startup, nil resets to a Nop sink.
 func (s *Server) AttachLogSink(sink requestlog.Sink) {
 	if sink == nil {
 		sink = requestlog.Nop{}
@@ -223,9 +202,7 @@ func (s *Server) LogSink() requestlog.Sink { return s.logSink }
 // default), captureEvent is a no-op.
 func (s *Server) AttachTelemetry(t *telemetry.Telemetry) { s.telemetry = t }
 
-// captureEvent sends a telemetry event if telemetry is configured.
-// actor may be nil for pre-auth endpoints (login, register); callers
-// pass what they already have and never re-resolve from the DB.
+// captureEvent sends a telemetry event if configured; actor may be nil for pre-auth endpoints.
 func (s *Server) captureEvent(r *http.Request, event string, actor *Actor, extra map[string]string) {
 	if s.telemetry == nil {
 		return
@@ -279,18 +256,13 @@ func (s *Server) CredentialProvider() brokercore.CredentialProvider {
 		EncKey:     s.encKey,
 		Refresher:  s.oauthRefresher,
 	}
-	// Late-bind via an adapter: the MITM proxy captures this provider at attach
-	// time, before Start() builds s.infisicalDynamic. The adapter reads the
-	// field per request, so resolution works regardless of init order.
+	// Late-bind via an adapter: the proxy captures this provider before Start() builds s.infisicalDynamic.
 	p.Dynamic = lateDynamicResolver{s}
 	p.RequestSecrets = requestSecrets{s}
 	return p
 }
 
-// lateDynamicResolver defers to s.infisicalDynamic, which Start() builds after
-// the MITM proxy has already captured the credential provider. Reading the
-// field per call (never snapshotting it) keeps the broker's static and dynamic
-// resolution behaving identically regardless of attach/Start ordering.
+// lateDynamicResolver reads s.infisicalDynamic per call because Start() builds it after the MITM proxy captured the provider.
 type lateDynamicResolver struct{ s *Server }
 
 func (l lateDynamicResolver) Resolve(ctx context.Context, vaultID, key string) (string, bool, error) {
@@ -300,10 +272,7 @@ func (l lateDynamicResolver) Resolve(ctx context.Context, vaultID, key string) (
 	return l.s.infisicalDynamic.Resolve(ctx, vaultID, key)
 }
 
-// revokeDynamicLeases revokes a vault's outstanding dynamic-secret leases on
-// disconnect/reconfigure. The in-memory cache is evicted synchronously so no
-// stale lease is served after this returns; the upstream revoke is backgrounded
-// so a slow Infisical can't stall the response.
+// revokeDynamicLeases evicts the lease cache synchronously and revokes upstream in the background so a slow Infisical cannot stall the response.
 func (s *Server) revokeDynamicLeases(vaultID string) {
 	if s.infisicalDynamic == nil {
 		return
@@ -311,10 +280,7 @@ func (s *Server) revokeDynamicLeases(vaultID string) {
 	s.infisicalDynamic.RevokeVaultAsync(vaultID)
 }
 
-// credentialStoreAdapter satisfies brokercore.CredentialStore by adding
-// the typed UnmatchedHostPolicy lookup on top of the generic store.
-// The setting key lives at the server layer; the store stays a generic
-// key/value sink.
+// credentialStoreAdapter adds the typed UnmatchedHostPolicy lookup to brokercore.CredentialStore over the generic store.
 type credentialStoreAdapter struct {
 	Store
 }
@@ -411,7 +377,6 @@ type Store interface {
 	GetBrokerConfig(ctx context.Context, vaultID string) (*store.BrokerConfig, error)
 	SetBrokerConfig(ctx context.Context, vaultID, servicesJSON string) (*store.BrokerConfig, error)
 
-	// Database services (managed PostgreSQL-broker upstreams, per vault)
 	UpsertDatabaseService(ctx context.Context, svc store.DatabaseService) (*store.DatabaseService, error)
 	SeedDatabaseService(ctx context.Context, svc store.DatabaseService) (bool, error)
 	GetDatabaseService(ctx context.Context, vaultID, name string) (*store.DatabaseService, error)
@@ -560,9 +525,7 @@ func (a *Actor) DisplayLabel() string {
 	return a.ID
 }
 
-// actorByID hydrates an Actor from a stored (id, type) pair. Used when an
-// actor is referenced by foreign-key columns (e.g. created_by on a scoped
-// session row) rather than by the calling session.
+// actorByID hydrates an Actor from a stored (id, type) pair, e.g. a created_by column.
 func (s *Server) actorByID(ctx context.Context, actorID, actorType string) (*Actor, error) {
 	switch actorType {
 	case "user":
@@ -627,9 +590,7 @@ func (s *Server) requireOwnerActor(w http.ResponseWriter, r *http.Request) (*Act
 	return actor, nil
 }
 
-// requireInstanceMember rejects no-access actors. Use for instance-scoped
-// actions (create vault, create invites, list actors) that don't already
-// require owner. Auth and own-profile reads should keep using requireActor.
+// requireInstanceMember rejects no-access actors on instance-scoped actions that do not already require owner.
 func (s *Server) requireInstanceMember(w http.ResponseWriter, r *http.Request) (*Actor, error) {
 	actor, err := s.requireActor(w, r)
 	if err != nil {
@@ -657,10 +618,7 @@ func (s *Server) guardLastOwner(ctx context.Context, w http.ResponseWriter, acti
 	return false
 }
 
-// requireVaultAccess checks that the session has access to the given vault.
-// For scoped sessions (VaultID set): checks that the session's vault matches.
-// For instance-level sessions: resolves actor and checks the unified vault_grants table.
-// Returns the actor (nil for scoped sessions) or writes an error response.
+// requireVaultAccess checks that the session may access the vault; returns the actor (nil for scoped sessions) or writes an error.
 func (s *Server) requireVaultAccess(w http.ResponseWriter, r *http.Request, vaultID string) (*Actor, error) {
 	sess := sessionFromContext(r.Context())
 	if sess == nil {
@@ -751,8 +709,6 @@ func roleSatisfies(role, requiredRole string) bool {
 }
 
 // requireVaultMember checks that the session has member+ access to the vault.
-// For scoped sessions: requires sess.VaultRole is "member" or "admin".
-// For instance-level sessions: checks the unified vault_grants table.
 func (s *Server) requireVaultMember(w http.ResponseWriter, r *http.Request, vaultID string) (*Actor, error) {
 	sess := sessionFromContext(r.Context())
 	if sess == nil {
@@ -808,11 +764,7 @@ func (s *Server) assertBuiltinCredentialStore(w http.ResponseWriter, ctx context
 	return true
 }
 
-// requireProposalReview checks proposal approve/reject access.
-// Scoped sessions require admin role (proxy-scoped sessions cannot self-approve).
-// Instance-level sessions require member+ — proxy-role actors are forbidden so
-// that a proxy cannot approve a proposal it raised and trick the broker into
-// injecting credentials toward an attacker-controlled host.
+// requireProposalReview gates proposal approve/reject; proxy-role actors are forbidden so a proxy cannot approve its own proposal.
 func (s *Server) requireProposalReview(w http.ResponseWriter, r *http.Request, vaultID string) (*Actor, error) {
 	sess := sessionFromContext(r.Context())
 	if sess == nil {
@@ -860,10 +812,7 @@ func limitBody(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// New creates a new Server listening on the given address.
-// The initialized parameter indicates whether at least one owner account exists.
-// When false, all endpoints except /health and POST /v1/init return 503.
-// logger must be non-nil; tests can pass slog.New(slog.DiscardHandler).
+// New creates a Server on the given address; while uninitialized, all endpoints except /health and POST /v1/init return 503.
 func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, initialized bool, baseURL string, logger *slog.Logger) *Server {
 	mux := http.NewServeMux()
 
@@ -1003,10 +952,7 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	mux.HandleFunc("DELETE /v1/vaults/{name}/databases/{db}", s.requireInitialized(s.requireAuth(actorAuthed(s.handleDatabaseRemove))))
 	mux.HandleFunc("GET /v1/vaults/{name}/logs", s.requireInitialized(s.requireAuth(actorAuthed(s.handleVaultLogsList))))
 	mux.HandleFunc("GET /v1/vaults/{name}/discovered-hosts", s.requireInitialized(s.requireAuth(actorAuthed(s.handleDiscoveredHosts))))
-	// Public static reads — immutable payloads with no credentials on
-	// the wire. TierGlobal is the only useful backstop; TierAuth would
-	// punish `vault run` (CA fetch per invocation) and the dashboard
-	// (re-mount poll) without defending any real surface.
+	// Public static reads carry no credentials, so only TierGlobal applies; TierAuth would punish `vault run` CA fetches.
 	mux.HandleFunc("GET /v1/service-catalog", s.requireInitialized(s.handleServiceCatalog))
 	mux.HandleFunc("GET /v1/skills/cli", s.requireInitialized(s.handleSkillCLI))
 	// CA PEM is not wrapped in requireInitialized — the CA lifecycle is
@@ -1045,11 +991,7 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	webFS, _ := fs.Sub(webDistFS, "webdist")
 	static := http.FileServer(http.FS(webFS))
 	mux.Handle("GET /assets/", cacheStatic(cacheImmutable, static))
-	// Files Vite copies verbatim out of web/public/. index.html links the
-	// favicons and the built CSS references /fonts/, so without these routes
-	// they 404 despite being embedded, and the UI silently falls back to
-	// system fonts. Their names carry no content hash, so they get a modest
-	// lifetime instead of immutable.
+	// Files Vite copies verbatim from web/public/ (favicons, fonts) need routes or they 404; names are unhashed so cache lifetime is modest.
 	mux.Handle("GET /fonts/", cacheStatic(cacheDay, static))
 	mux.Handle("GET /favicon.svg", cacheStatic(cacheDay, static))
 	mux.Handle("GET /favicon.png", cacheStatic(cacheDay, static))
@@ -1074,25 +1016,14 @@ func New(addr string, store Store, encKey []byte, notifier *notify.Notifier, ini
 	return s
 }
 
-// Cache lifetimes for the embedded frontend build output. /assets/ filenames
-// carry a Vite content hash, so those bytes never change and a rebuild emits
-// new names. Files copied verbatim from web/public/ (favicons, fonts) keep
-// stable names across builds, so they get a modest lifetime instead.
+// Cache lifetimes: /assets/ names carry a content hash so are immutable; files copied from web/public/ keep stable names so get a modest lifetime.
 const (
 	cacheImmutable = "public, max-age=31536000, immutable"
 	cacheDay       = "public, max-age=86400"
 )
 
-// cacheStatic sets Cache-Control on responses from the embedded build output.
-// Without it browsers refetch every asset on each load: embed.FS reports a zero
-// ModTime, so http.FileServer sends neither Last-Modified nor ETag and there is
-// nothing to revalidate against. index.html is served separately by handleSPA
-// with no-store, so new builds are still picked up immediately.
-//
-// Only successful responses are marked. During a rolling upgrade a browser can
-// load index.html from an already-updated instance and request its chunks from
-// one still serving the previous build; caching that 404 for a year would wedge
-// the UI for that browser until it cleared its cache.
+// cacheStatic sets Cache-Control on embedded build output, which has no ModTime or ETag to revalidate against.
+// Only successful responses are marked: during a rolling upgrade a cached 404 chunk would wedge the UI for a year.
 func cacheStatic(cacheControl string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(&staticCacheWriter{ResponseWriter: w, cacheControl: cacheControl}, r)
@@ -1124,10 +1055,7 @@ func (w *staticCacheWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// requireInitialized returns 503 when no owner account exists yet.
-// In multi-instance (Postgres HA) deployments another instance may have
-// handled registration, so we re-check the DB when the in-memory flag is
-// false, throttled to once every 2 seconds to avoid per-request queries.
+// requireInitialized returns 503 when no owner exists, re-checking the DB at most every 2 seconds for multi-instance deployments.
 func (s *Server) requireInitialized(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.initialized.Load() {
@@ -1157,9 +1085,13 @@ func (s *Server) requireInitialized(next http.HandlerFunc) http.HandlerFunc {
 // Start starts the server and blocks until shutdown.
 // It listens for SIGINT/SIGTERM to shut down gracefully.
 func (s *Server) Start() error {
-	// Vault logins are revoked last, after the database cleanup below has
-	// revoked its sessions with them, on a short budget inside the Pod's
-	// termination grace.
+	// Registered first so it runs last, after the Vault logins are revoked.
+	defer func() {
+		for _, fn := range s.finalShutdownFuncs {
+			fn()
+		}
+	}()
+	// Vault logins are revoked last, after the database cleanup that needs them.
 	if s.hashicorpClient != nil {
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), vaultCloseTimeout)
@@ -1167,7 +1099,6 @@ func (s *Server) Start() error {
 			s.hashicorpClient.CloseContext(ctx)
 		}()
 	}
-	// Release journal ownership on every exit, including startup failures.
 	if s.pgLeaseCloser != nil {
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1204,9 +1135,7 @@ func (s *Server) Start() error {
 		}
 	}
 
-	// Bind synchronously so EADDRINUSE returns from Start() before any pidfile
-	// work happens. Keeps a foreground invocation against an already-running
-	// daemon from clobbering the daemon's PID file.
+	// Bind synchronously so EADDRINUSE returns before pidfile work and cannot clobber a running daemon's PID file.
 	httpLn := s.httpListener
 	var err error
 	if httpLn == nil {
@@ -1242,8 +1171,7 @@ func (s *Server) Start() error {
 	} else if s.pgTLS != nil {
 		return fmt.Errorf("the PostgreSQL TLS listener requires the PostgreSQL broker")
 	}
-	// A listener whose accept loop cannot recover sends here, so the server
-	// stops and the Pod restarts instead of refusing clients in silence.
+	// An unrecoverable accept loop sends here so the Pod restarts instead of refusing clients silently.
 	errCh := make(chan error, 8)
 	if s.crossClusterAddr != "" {
 		if s.pgTLS != nil {
@@ -1266,8 +1194,6 @@ func (s *Server) Start() error {
 		}
 		var certLn *injectedListener
 		if s.proxyCerts != nil || s.proxyActivity != nil {
-			// A shared proxy's own requests: its serving certificate and its
-			// Sandboxes' activity.
 			mux := http.NewServeMux()
 			if s.proxyCerts != nil {
 				s.proxyCerts.Register(mux)
@@ -1324,11 +1250,7 @@ func (s *Server) Start() error {
 		go s.watchStore(pruneCtx)
 	}
 
-	// Each external-store syncer's done channel closes once its Run has
-	// returned AND drained its in-flight refresh goroutines. We block on all
-	// of them before WipeBytes so a refresh mid-AES-GCM never reads a zeroed
-	// s.encKey (silently produces garbage ciphertext that lands in the
-	// credentials table).
+	// Block on every syncer's in-flight refreshes before WipeBytes: a refresh mid-AES-GCM must never read a zeroed encKey.
 	var syncerDones []chan struct{}
 	runSyncer := func(run func(context.Context)) {
 		done := make(chan struct{})
@@ -1437,8 +1359,7 @@ func (s *Server) Start() error {
 	defer cancel()
 
 	fmt.Println("shutting down server...")
-	// Start every shutdown together so one slow subsystem cannot consume the
-	// database broker's entire revoke budget before it even closes sessions.
+	// Start every shutdown together so one slow subsystem cannot consume the database broker's revoke budget.
 	var shutdownWG sync.WaitGroup
 	shutdown := func(name string, fn func(context.Context) error) {
 		shutdownWG.Add(1)
@@ -1464,9 +1385,6 @@ func (s *Server) Start() error {
 		return fmt.Errorf("server shutdown: %w", httpErr)
 	}
 
-	// Stop background workers (syncers + touch-cache pruner) and wait for every
-	// external-store syncer's in-flight refreshes to drain before zeroing
-	// s.encKey.
 	stopWorkers()
 	deadline := time.After(5 * time.Second)
 	for _, done := range syncerDones {
@@ -1489,8 +1407,6 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// beginShutdown turns readiness false and stops new database credential
-// issuance before any listener drains, so the drain sees no new work.
 func (s *Server) beginShutdown() {
 	s.shuttingDown.Store(true)
 	if drain, ok := s.pgLeaseCloser.(interface{ BeginDrain() }); ok {
@@ -1500,9 +1416,7 @@ func (s *Server) beginShutdown() {
 
 var errTooManyPendingCodes = errors.New("too many pending verification codes")
 
-// vaultCloseTimeout bounds revoking the Vault logins at shutdown. A drain of
-// AGENT_VAULT_SHUTDOWN_SECONDS, the 5 s database cleanup and this must fit in
-// the Pod's termination grace.
+// vaultCloseTimeout: the shutdown drain, the 5s database cleanup, this and the 5s audit flush must fit in the Pod's termination grace.
 const vaultCloseTimeout = 5 * time.Second
 
 const passwordResetTTL = 15 * time.Minute
@@ -1515,15 +1429,10 @@ type loginRequest struct {
 	DeviceLabel string `json:"device_label,omitempty"` // optional, e.g. CLI hostname
 }
 
-// maxDeviceLabelRunes caps device_label values. Counts runes (not bytes)
-// so a multi-byte character at the boundary can't be sliced mid-encoding
-// into invalid UTF-8. 64 runes covers any RFC 1035 hostname plus a CI
-// suffix at a worst-case 256-byte storage cost.
+// maxDeviceLabelRunes caps device_label in runes so a multi-byte character is never cut into invalid UTF-8.
 const maxDeviceLabelRunes = 64
 
-// truncateDeviceLabel sanitizes the user-supplied label: strips control
-// characters and caps the length in runes. Empty input returns ""
-// (caller decides on a default).
+// truncateDeviceLabel strips control characters and caps length in runes; empty input returns "".
 func truncateDeviceLabel(label string) string {
 	label = strings.TrimSpace(label)
 	if label == "" {
@@ -1547,10 +1456,7 @@ type loginResponse struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
-// registerResponse is the JSON shape returned by POST /v1/auth/register.
-// Token and ExpiresAt are populated only on the auto-login path
-// (currently: the first-user owner registration); other paths leave them
-// empty and set RequiresVerification.
+// registerResponse is the JSON returned by POST /v1/auth/register; Token and ExpiresAt are set only on the auto-login path.
 type registerResponse struct {
 	Email                string `json:"email"`
 	Role                 string `json:"role,omitempty"`
@@ -1562,12 +1468,7 @@ type registerResponse struct {
 	ExpiresAt            string `json:"expires_at,omitempty"`
 }
 
-// userSessionAbsoluteTTL caps how long a user-login session can survive
-// regardless of activity. userSessionIdleTTL is the inactivity window:
-// any user session whose last_used_at is older than this is rejected at
-// auth time (see Session.IsExpired). Tuned for "log in once, stay logged
-// in" — a year max, drops dead after a month of disuse so a stolen
-// session.json doesn't grant indefinite undetected access.
+// userSessionAbsoluteTTL caps a user session's lifetime; userSessionIdleTTL rejects sessions unused that long, limiting a stolen session.json.
 const (
 	userSessionAbsoluteTTL = 365 * 24 * time.Hour
 	userSessionIdleTTL     = 30 * 24 * time.Hour
@@ -1587,10 +1488,7 @@ func (s *Server) ipKeyer() ratelimit.Keyer {
 	return ratelimit.IPKey(clientIP)
 }
 
-// actorKeyer returns a ratelimit.Keyer that keys on the authenticated
-// actor (user or agent). Returns "" if no session is on the context;
-// the middleware then skips the check, which is safe because actor
-// tiers are wrapped *after* requireAuth.
+// actorKeyer keys the rate limiter on the authenticated actor; "" without a session is safe since actor tiers wrap requireAuth.
 func (s *Server) actorKeyer() ratelimit.Keyer {
 	return ratelimit.ActorKey(func(r *http.Request) string {
 		sess := sessionFromContext(r.Context())
@@ -1604,10 +1502,7 @@ func (s *Server) actorKeyer() ratelimit.Keyer {
 	})
 }
 
-// tier wraps handler with a rate-limit check for tier keyed by keyer.
-// On denial the middleware writes a 429 with standard headers; on
-// allow, it calls handler. This is the canonical way new routes in
-// server.go register tier enforcement.
+// tier wraps handler with a rate-limit check for tier keyed by keyer, writing 429 on denial.
 func (s *Server) tier(t ratelimit.Tier, keyer ratelimit.Keyer) func(http.HandlerFunc) http.HandlerFunc {
 	return s.rateLimit.HandlerFunc(t, keyer, s.logger)
 }
@@ -1644,12 +1539,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// maybeTouchSession bumps last_used_at on user sessions and refreshes
-// last_ip / last_user_agent, gated by an in-memory cache so the SQL
-// layer is hit at most once per session per TouchInterval. The store-
-// side WHERE-clause throttle is preserved as defense in depth (e.g. a
-// process restart resets the cache). Empty ip/ua leave existing column
-// values unchanged via COALESCE in the store.
+// maybeTouchSession bumps last_used_at, last_ip and last_user_agent behind an in-memory cache; the store-side throttle remains as defense in depth.
 func (s *Server) maybeTouchSession(ctx context.Context, sess *store.Session, rawToken, ip, userAgent string) {
 	if sess == nil || sess.UserID == "" {
 		return
@@ -1664,11 +1554,7 @@ func (s *Server) maybeTouchSession(ctx context.Context, sess *store.Session, raw
 	_ = s.store.TouchSession(ctx, rawToken, ip, userAgent)
 }
 
-// pruneTouchCache drops entries past the throttle window. We use 2×
-// TouchInterval so a still-active session — touched within the last
-// minute — isn't evicted only to be re-stored on its next request;
-// anything older than that has zero correctness value because the SQL
-// throttle would let the next write through anyway.
+// pruneTouchCache drops entries past 2x TouchInterval so active sessions are not evicted and re-stored.
 func (s *Server) pruneTouchCache() {
 	cutoff := time.Now().Add(-2 * store.TouchInterval)
 	s.touchCache.Range(func(key, val any) bool {
@@ -1679,10 +1565,7 @@ func (s *Server) pruneTouchCache() {
 	})
 }
 
-// runTouchCachePruner drives pruneTouchCache on a ticker until ctx is
-// cancelled. Spawned by Start; stopped via the deferred WithCancel
-// cancel so a Start error path or a second Start cycle never leaks the
-// goroutine or panics on a re-closed channel.
+// runTouchCachePruner runs pruneTouchCache on a ticker until ctx is cancelled.
 func (s *Server) runTouchCachePruner(ctx context.Context) {
 	ticker := time.NewTicker(store.TouchInterval)
 	defer ticker.Stop()
@@ -1702,9 +1585,7 @@ const (
 	scopedSessionDefaultTTL = 24 * time.Hour // when ttl_seconds is unset
 )
 
-// isSecureRequest reports whether the request arrived over TLS, deriving
-// the verdict from the trusted server-side baseURL when r.TLS is nil so
-// X-Forwarded-Proto cannot spoof it.
+// isSecureRequest reports whether the request arrived over TLS, using the trusted baseURL so X-Forwarded-Proto cannot spoof it.
 func isSecureRequest(r *http.Request, baseURL string) bool {
 	if r.TLS != nil {
 		return true
@@ -1729,9 +1610,7 @@ func sessionCookie(r *http.Request, baseURL, value string, maxAge int) *http.Coo
 // timePtr returns a pointer to the given time value.
 func timePtr(t time.Time) *time.Time { return &t }
 
-// formatExpiresAt returns a formatted RFC3339 (UTC) string for an optional
-// time, or an empty string if the time is nil. Used for any *time.Time we
-// surface to API clients — expiry, last-used, etc.
+// formatExpiresAt returns an RFC3339 UTC string for an optional time, or "" if nil.
 func formatExpiresAt(t *time.Time) string {
 	if t == nil {
 		return ""

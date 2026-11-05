@@ -14,13 +14,9 @@ type relayAudit struct {
 	mu     sync.Mutex
 	file   *os.File
 	config FixedConfig
-	// stdout: a shared proxy may write its rows to standard output, for the
-	// logging pipeline, with no file to sync.
 	stdout bool
 }
 
-// StdoutAudit is the audit file a shared proxy may name to write its rows to
-// standard output.
 const StdoutAudit = "/dev/stdout"
 
 func newAudit(c FixedConfig) (*relayAudit, error) {
@@ -35,7 +31,6 @@ func openAudit(c FixedConfig, syncDirectory func(string) error) (*relayAudit, er
 		}
 		return a, nil
 	}
-	// Paired and sidecar relays keep a durable, synced file.
 	if c.AuditFile == StdoutAudit {
 		return nil, errDenied
 	}
@@ -55,8 +50,7 @@ func openAudit(c FixedConfig, syncDirectory func(string) error) (*relayAudit, er
 	return a, nil
 }
 
-// Persist creation of the journal's directory entry before acknowledging any
-// mapping. The backing persistent volume must honor file and directory fsync.
+// The backing persistent volume must honor file and directory fsync.
 func syncAuditDirectory(path string) error {
 	directory, e := os.Open(path)
 	if e != nil {
@@ -72,8 +66,6 @@ func (a *relayAudit) record(protocol, outcome string) error {
 	return a.recordAgent(protocol, outcome, nil)
 }
 
-// recordAgent writes one row; a shared proxy's admissions name the agent Pod,
-// its namespace and the images it pulled.
 func (a *relayAudit) recordAgent(protocol, outcome string, agent *workloadidentity.Attestation) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

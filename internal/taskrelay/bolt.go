@@ -11,13 +11,8 @@ import (
 	"github.com/Infisical/agent-vault/internal/bolt"
 )
 
-// BoltListenerConfig is one Bolt port (Neo4j and Memgraph drivers, bolt://
-// and neo4j:// URIs) routed by the user name the client logs in with: the
-// user name is the catalog entry's name and the password is Placeholder. The
-// relay swaps the placeholder for its proof and forwards to the one upstream,
-// which authorizes the entry per pool. Entries is the route table; Routes
-// "broker", in its place, forwards any well-formed name and leaves the
-// decision to the broker's catalog, so a new entry needs no change here.
+// BoltListenerConfig is one Bolt port routed by login user name (the catalog entry) with Placeholder as password.
+// Routes "broker" forwards any well-formed name and leaves the decision to the broker's catalog.
 type BoltListenerConfig struct {
 	Listen      string         `json:"listen"`
 	Upstream    UpstreamConfig `json:"upstream"`
@@ -26,11 +21,8 @@ type BoltListenerConfig struct {
 	Placeholder string         `json:"placeholder"`
 }
 
-// maxBoltListeners bounds a sidecar's Bolt ports: one per broker it reaches.
 const maxBoltListeners = 4
 
-// validBolt checks a sidecar's Bolt ports with the listener check its mode
-// applies (loopback and unique in a sidecar).
 func (c FixedConfig) validBolt(check func(listen string, upstream UpstreamConfig) error) error {
 	if len(c.BoltListeners) > maxBoltListeners {
 		return errConfig
@@ -43,16 +35,11 @@ func (c FixedConfig) validBolt(check func(listen string, upstream UpstreamConfig
 	return nil
 }
 
-// maxBoltAuthBytes bounds the HELLO and LOGON messages read before
-// admission. Real ones are a few hundred bytes.
 const maxBoltAuthBytes = 16 << 10
 
-// maxBoltResponseBytes bounds each broker answer to the opening messages.
 const maxBoltResponseBytes = 64 << 10
 
-// Bolt failure codes the relay authors, in the broker's Gatehouse family.
-// Drivers classify by the second dotted part: a ClientError is not retried, a
-// TransientError is.
+// Drivers retry a TransientError and not a ClientError (second dotted part).
 const (
 	boltUnauthorized = "Gatehouse.ClientError.Security.Unauthorized"
 	boltProtocol     = "Gatehouse.ClientError.Request.Invalid"
@@ -61,17 +48,7 @@ const (
 	boltEnded        = "Gatehouse.TransientError.General.SessionEnded"
 )
 
-// bolt relays one Bolt connection. The relay answers the version handshake
-// itself, reads the client's HELLO (and, from Bolt 5.1, LOGON), and checks
-// the user name against the route table and the password against the
-// placeholder. Only then is the connection admitted, the proof read and the
-// broker dialed: the relay sends the session preamble, the client's own
-// handshake bytes, the HELLO, and the login with the placeholder replaced by
-// the proof, then relays bytes both ways. The worker never sees the proof.
-//
-// From Bolt 5.1 HELLO carries no login, so the relay answers it at once, as
-// the broker does, and a client may wait for that answer before its LOGON.
-// The broker's own answer to the forwarded HELLO is then dropped.
+// bolt relays one connection: validates the login against routes and the placeholder, then swaps in the proof; the worker never sees it.
 func (r *relay) bolt(conn net.Conn, l *BoltListenerConfig, route func(name string) bool) {
 	_ = conn.SetDeadline(minTime(r.config.Deadline, time.Now().Add(r.handshake())))
 	peer := conn.RemoteAddr().String()
@@ -148,8 +125,7 @@ func (r *relay) bolt(conn net.Conn, l *BoltListenerConfig, route func(name strin
 	end := &ending{}
 	stopWatch := r.watchPeer(peer, agent, func() { end.set(endWithdrawn); _ = conn.Close(); _ = up.Close() })
 	defer stopWatch()
-	// The preamble lines and the opening go in one write: the broker reads
-	// the lines, sees the Bolt magic, and answers the version.
+	// The preamble lines and the opening go in one write so the broker sees the Bolt magic after the lines.
 	var out []byte
 	if attestation != "" {
 		out = append(out, "GHATTS1 "+attestation+"\n"...)
@@ -176,9 +152,7 @@ func (r *relay) bolt(conn net.Conn, l *BoltListenerConfig, route func(name strin
 	if r.pair.check(r.ctx, peer) != nil {
 		return
 	}
-	// The broker answers each opening message. Hold the answers until every
-	// one succeeded, so the established row is written before the worker can
-	// use the session; a failure is passed on as the broker worded it.
+	// Hold the answers until all succeed so the established row precedes any worker use.
 	var answers []byte
 	for i := range opening.messages {
 		raw, e := bolt.ReadRaw(upIn, maxBoltResponseBytes)
@@ -216,15 +190,11 @@ func (r *relay) bolt(conn net.Conn, l *BoltListenerConfig, route func(name strin
 	copyTunnel(r.ctx, conn, in, up, upIn, expiry, end)
 }
 
-// boltOpening is the client's HELLO and, from Bolt 5.1, its LOGON, as read.
 type boltOpening struct {
 	messages []*bolt.Structure
-	// login is the index of the message that carries the credentials.
-	login int
+	login    int
 }
 
-// withProof encodes the opening with the placeholder replaced by proof. The
-// login carries exactly the scheme, the user name and the proof.
 func (o boltOpening) withProof(proof string) ([]byte, error) {
 	var out []byte
 	for i, m := range o.messages {
@@ -249,14 +219,9 @@ func (o boltOpening) withProof(proof string) ([]byte, error) {
 	return out, nil
 }
 
-// boltAuthKeys are the HELLO and LOGON keys that carry credentials. Only the
-// relay's scheme, user name and proof reach the broker.
+// Only the relay's own scheme, user name and proof reach the broker.
 var boltAuthKeys = map[string]bool{"scheme": true, "principal": true, "credentials": true, "realm": true, "parameters": true}
 
-// readBoltLogin reads the client's opening for version: HELLO with the login
-// below Bolt 5.1; HELLO without one, answered on out, then LOGON, from 5.1.
-// It returns the opening and the user name, or the reason it was refused
-// ("eof" when the client left without sending one).
 func readBoltLogin(in io.Reader, out io.Writer, version bolt.Version, route func(string) bool, placeholder string) (boltOpening, string, string) {
 	var o boltOpening
 	split := version.AtLeast(5, 1)
@@ -282,8 +247,7 @@ func readBoltLogin(in io.Reader, out io.Writer, version bolt.Version, route func
 		}
 		o.messages = append(o.messages, m)
 		if split && tag == bolt.TagHello {
-			// From 5.1 HELLO carries no login; one that does is refused
-			// rather than forwarded with a credential the relay did not set.
+			// From 5.1 HELLO carries no login; one that does is refused, not forwarded with a credential the relay did not set.
 			for key := range boltAuthKeys {
 				if _, present := extra[key]; present {
 					return o, "", "bad-opening"
@@ -309,20 +273,14 @@ func readBoltLogin(in io.Reader, out io.Writer, version bolt.Version, route func
 	return o, "", "bad-opening"
 }
 
-// boltHelloAnswer is the relay's answer to a HELLO from Bolt 5.1: the same
-// server agent the broker names.
 var boltHelloAnswer = bolt.Success(map[string]any{"server": "Neo4j/5.2.0 compatible graph database server - Memgraph through Gatehouse", "connection_id": "gatehouse"})
 
-// boltRefusals are the relay's fixed words for a login it refuses before the
-// broker is dialed.
 var boltRefusals = map[string]refusal{
 	"bad-opening": {boltProtocol, "Gatehouse: send HELLO (and LOGON from Bolt 5.1) with basic auth: the catalog entry's name as the user and the placeholder password"},
 	"placeholder": {boltUnauthorized, "Gatehouse: wrong placeholder password for this port; use basic auth with the placeholder password"},
 	"no-entry":    {boltUnauthorized, "Gatehouse: this user name is not a Gatehouse catalog entry for your pool; use the entry's name as the user"},
 }
 
-// boltRefusalReason is a broker refusal's reason for the relay's audit: the
-// broker's reason code, or "unknown".
 func boltRefusalReason(raw []byte) string {
 	m, e := bolt.Decode(raw)
 	if e != nil {
@@ -338,6 +296,4 @@ func boltRefusalReason(raw []byte) string {
 	return "unknown"
 }
 
-// boltReasonKey is the FAILURE metadata key in which the broker names its
-// reason for a refusal.
 const boltReasonKey = "gatehouse_reason"

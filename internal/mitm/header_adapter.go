@@ -25,26 +25,16 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// HeaderAdapter replaces the strict profile's per-vault services with an
-// operator catalog: per-binding hosts, path prefixes and methods, a key from
-// Vault injected into one header, and signed audit rows. Workers send at
-// most a placeholder; the key exists only inside the broker.
+// HeaderAdapter replaces the strict profile's per-vault services with an operator catalog: bindings, a Vault key injected into one header, and signed audit rows. Workers send at most a placeholder.
 type HeaderAdapter struct {
-	// Catalog is read once per request, so a reloaded catalog applies to the
-	// next request; an httpcatalog.Catalog or a live *httpcatalog.Source.
+	// Catalog is read per request, so a reloaded catalog applies to the next request.
 	Catalog interface{ Current() httpcatalog.Catalog }
-	// Runner verifies Claude runner session tokens for claude-session pools,
-	// and Cursor run tokens for cursor-session and cursor-automation pools
-	// when it is a runnerid.Verifiers; Entitlements answers live group
-	// membership. Without them, entries above T0 are refused on those pools,
-	// and every entry on a cursor-automation pool, whose owner check needs
-	// the directory at T0 too.
+	// Runner verifies Claude runner and Cursor run tokens (a runnerid.Verifiers); Entitlements answers live group membership. Without them, entries above T0 are refused on those pools, and every entry on a cursor-automation pool.
 	Runner interface {
 		Verify(context.Context, string) (runnerid.Session, error)
 	}
 	Entitlements *entitlement.Cache
-	// Sessions pins each runner session to the first Pod presenting it.
-	// Without it, claude-session and Cursor pools refuse every session.
+	// Sessions pins each runner session to the first Pod presenting it; without it, claude-session and Cursor pools refuse every session.
 	Sessions authorize.Binder
 	Keys     interface {
 		Get(context.Context, httpcatalog.KeyRef) (httpcatalog.Secret, error)
@@ -62,30 +52,24 @@ type HeaderAdapter struct {
 		Token(ctx context.Context, app githubapp.App, repo string, permissions githubapp.Permissions) (githubapp.Token, error)
 		Invalidate(app githubapp.App, repo string, permissions githubapp.Permissions)
 	}
-	// BrowserTokens logs browser-session test users in. Without it, those
-	// requests are refused.
+	// BrowserTokens logs browser-session test users in; without it, those requests are refused.
 	BrowserTokens interface {
 		Token(context.Context, *httpcatalog.Entry) (httpcatalog.BrowserToken, error)
 		Invalidate(*httpcatalog.Entry)
 	}
-	// GCPTokens mints per-entry Google tokens for gcp entries. Without it,
-	// those requests are refused.
+	// GCPTokens mints per-entry Google tokens; without it, gcp entries are refused.
 	GCPTokens interface {
 		Token(context.Context, *httpcatalog.Entry) (httpcatalog.GCPToken, error)
 		Invalidate(*httpcatalog.Entry)
 	}
-	// Decoys are the decoy credentials planted in worker sessions (see
-	// package decoy), read per request. Without them, none is recognized.
+	// Decoys are the decoy credentials planted in worker sessions (see package decoy), read per request.
 	Decoys interface{ Current() *decoy.Set }
-	// ClientCertificates reads the client certificates entries present to
-	// their upstreams (see clientcert.go). Without it, those entries are
-	// refused.
+	// ClientCertificates reads the client certificates entries present upstream (see clientcert.go); without it, those entries are refused.
 	ClientCertificates interface {
 		Get(context.Context, httpcatalog.ClientCertificateRef) (*httpcatalog.ClientCertificate, error)
 		Invalidate(httpcatalog.ClientCertificateRef)
 	}
-	// ClientTokens mints the access tokens of clientCredentials entries.
-	// Without it, those entries are refused.
+	// ClientTokens mints the access tokens of clientCredentials entries; without it, those entries are refused.
 	ClientTokens interface {
 		Token(context.Context, *httpcatalog.Entry) (httpcatalog.Secret, error)
 		Invalidate(*httpcatalog.Entry)
@@ -114,18 +98,12 @@ func (a *HeaderAdapter) decoys() *decoy.Set {
 
 const placeholderMarker = "__vault_"
 
-// adapterDeny records a refusal, with the target the caller asked for, before
-// answering with its reason (refusal.go). A passing refusal answers 503 or
-// 429 with Retry-After whatever status the caller chose, and the row records
-// the status sent. If the row cannot be written the caller still learns
-// nothing beyond "audit_unavailable".
+// adapterDeny records a refusal with the target the caller asked for, then answers with its reason (refusal.go). A passing refusal answers 503 or 429 with Retry-After and the row records the status sent; if the row cannot be written, the caller learns only "audit_unavailable".
 func (p *Proxy) adapterDeny(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome string) {
 	p.adapterDenyAs(w, event, target, status, outcome, refusalCode(outcome), 0)
 }
 
-// adapterDenyAs is adapterDeny with the code the agent sees given apart from
-// the audit outcome, and, from a rate limiter, its own wait (0 for none) in
-// place of the code's fixed Retry-After.
+// adapterDenyAs is adapterDeny with the agent-visible code apart from the audit outcome, and a limiter's own wait in place of the fixed Retry-After.
 func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, target string, status int, outcome, code string, wait time.Duration) {
 	code, status, kind := refusalFor(code, status)
 	kind = kind.after(wait)
@@ -137,28 +115,19 @@ func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, tar
 	writeRefusal(w, status, code, kind)
 }
 
-// adapterRateDeny refuses a request over its workload's rate for an entry,
-// with the limiter's own wait as Retry-After.
 func (p *Proxy) adapterRateDeny(w http.ResponseWriter, event auditchain.Event, target string, d ratelimit.Decision) {
 	p.adapterDenyAs(w, event, target, http.StatusTooManyRequests, "rate_limited", "rate_limited", d.RetryAfter)
 }
 
-// outcomeDecoy refuses a request that presented a decoy credential: proof the
-// session went looking for secrets, so the row pages.
+// outcomeDecoy refuses a request that presented a decoy credential: proof the session went looking for secrets, so the row pages.
 const outcomeDecoy = "decoy_credential"
 
-// refuseDecoy refuses a request that presented a decoy credential and records
-// which decoy and where: binding "decoy/<owner pool>/<name>" and the surface
-// as the decision. It never forwards, and the row never holds the value. The
-// caller sees the same 403 as any refusal.
+// refuseDecoy records which decoy and where (binding "decoy/<owner pool>/<name>", the surface as the decision), never the value, and never forwards; the caller sees the same 403 as any refusal.
 func (p *Proxy) refuseDecoy(w http.ResponseWriter, event auditchain.Event, target string, m decoy.Match) {
-	// The decoy may be in the path.
 	event.Binding, event.Decision, event.Path = "decoy/"+m.Label, m.Surface, ""
 	p.adapterDeny(w, event, target, http.StatusForbidden, outcomeDecoy)
 }
 
-// refuseDecoyBody refuses a request whose body, already read, holds a decoy
-// credential, and reports whether it did.
 func (p *Proxy) refuseDecoyBody(w http.ResponseWriter, event auditchain.Event, target string, body []byte) bool {
 	m, ok := p.adapter.decoys().Body(body)
 	if ok {
@@ -167,10 +136,7 @@ func (p *Proxy) refuseDecoyBody(w http.ResponseWriter, event auditchain.Event, t
 	return ok
 }
 
-// refuseDecoyAtProxy refuses a CONNECT or absolute-form request whose own URL
-// or headers carry a decoy credential, such as one sent as the proxy
-// password, and reports whether it did. scope is nil when identity was not
-// established, and the row then names no pool.
+// refuseDecoyAtProxy refuses a CONNECT or absolute-form request whose URL or headers carry a decoy; scope is nil before identity, and the row then names no pool.
 func (p *Proxy) refuseDecoyAtProxy(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope) bool {
 	if !p.strictCredentialProxy || !p.adapter.valid() {
 		return false
@@ -187,34 +153,27 @@ func (p *Proxy) refuseDecoyAtProxy(w http.ResponseWriter, r *http.Request, targe
 	return true
 }
 
-// adapterUnauthenticatedDeny replaces the SQL audit for refusals that happen
-// before identity is known, so every refusal lands in the signed trail. wait
-// is a rate limiter's own wait, or 0.
+// adapterUnauthenticatedDeny puts refusals that happen before identity is known into the signed trail.
 func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, wait time.Duration) {
-	p.adapterIdentityDeny(w, r, a, status, "", nil, wait)
+	p.adapterIdentityDeny(w, r, a, status, "refused", "", nil, wait)
 }
 
-// adapterIdentityDeny records a refusal with the identity check that refused
-// it, as a fixed code in the row's decision field ("" when none applies), and
-// for a signing-key refusal the token's kid and the connection's peer.
-func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, reason string, key *brokercore.KeyDenial, wait time.Duration) {
+// adapterIdentityDeny records the identity check that refused as a fixed code in the decision field, plus a signing-key refusal's kid and the connection's peer.
+func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, outcome, reason string, key *brokercore.KeyDenial, wait time.Duration) {
 	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Decision: reason}
 	if key != nil {
 		event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 	}
-	p.adapterDenyAs(w, event, requestedTarget(r), status, "refused", identityRefusalCode(status), wait)
+	p.adapterDenyAs(w, event, requestedTarget(r), status, outcome, identityRefusalCode(status), wait)
 }
 
 type connectTargetKey struct{}
 
-// withConnectTarget marks a request inside a tunnel with the tunnel's CONNECT
-// target, the host and port the broker checked.
 func withConnectTarget(ctx context.Context, target string) context.Context {
 	return context.WithValue(ctx, connectTargetKey{}, target)
 }
 
-// requestedTarget is the host a refusal records: inside a tunnel, its CONNECT
-// target rather than the Host header the client chose for this request.
+// requestedTarget is the host a refusal records: inside a tunnel, its CONNECT target, not the client's Host header.
 func requestedTarget(r *http.Request) string {
 	if target, ok := r.Context().Value(connectTargetKey{}).(string); ok {
 		return target
@@ -222,9 +181,6 @@ func requestedTarget(r *http.Request) string {
 	return r.Host
 }
 
-// gitOperation names a matched git request for the audit row: "git.push"
-// for the receive-pack service, "git.fetch" for upload-pack, or "" when no
-// repository matched.
 func gitOperation(git httpcatalog.GitRequest) string {
 	switch {
 	case git.Entry == nil:
@@ -235,10 +191,7 @@ func gitOperation(git httpcatalog.GitRequest) string {
 	return "git.fetch"
 }
 
-// githubAPIOperation names a github-api request for the audit row: the
-// repository operation its route belongs to, or "graphql" for a GraphQL
-// request no route admits, so those refusals can be counted apart from other
-// unlisted paths. Never the path itself.
+// githubAPIOperation names a github-api request for the audit row: its route's operation, or "graphql" for a GraphQL request no route admits; never the path.
 func githubAPIOperation(api httpcatalog.GitRequest, path string) string {
 	if api.Operation != "" {
 		return api.Operation
@@ -249,9 +202,7 @@ func githubAPIOperation(api httpcatalog.GitRequest, path string) string {
 	return ""
 }
 
-// auditPath is the path a row records for r, as sent and without its query;
-// empty for a CONNECT. Rows record it once the caller is authenticated, and
-// never for a browser-session host (see forwardCatalog).
+// auditPath is the path a row records, without its query; empty for a CONNECT and never recorded for a browser-session host.
 func auditPath(r *http.Request) string {
 	if r.Method == http.MethodConnect || r.URL == nil {
 		return ""
@@ -292,13 +243,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	catalog := a.Catalog.Current()
-	// A web app's paths can carry what its links hand out, such as a
-	// one-time sign-in link, so rows for a browser-session host name no path.
+	// A web app's paths can carry one-time sign-in links, so rows for a browser-session host name no path.
 	if !catalog.BrowserHost(host, port) {
 		event.Path = auditPath(r)
 	}
-	// A decoy anywhere in the URL or headers is refused before routing, so
-	// every entry kind, and a host or path no entry lists, is covered.
+	// A decoy anywhere in the URL or headers is refused before routing, for every entry kind and any host or path.
 	if m, ok := a.decoys().Request(r); ok {
 		p.refuseDecoy(w, event, target, m)
 		return
@@ -316,10 +265,8 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		p.registerSubagent(w, r, target, scope, event, catalog)
 		return
 	}
-	// Every matched entry passes the authorization model before any credential
-	// is fetched: pool ceiling, then the verified requester's entitlements.
-	// who is the requester the last check authorized; a git or github-api
-	// request is narrowed to that requester's own branches (ForRequester).
+	// Every matched entry passes the authorization model before any credential is fetched.
+	// who is the requester the last check authorized; git and github-api requests are narrowed to that requester's own branches.
 	var who authorize.Requester
 	refused := func(entry *httpcatalog.Entry, err error) bool {
 		if err != nil || entry == nil {
@@ -360,12 +307,8 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		if err != nil {
 			attribute()
 		}
-		// A code-returning route also needs the git entry it relies on to
-		// authorize this requester, so it never reaches past a clone. That
-		// second check runs last and overwrites the event's tier, decision and
-		// groups, so a files or compare audit row names the github-api binding
-		// with the git entry's tier and groups. That is intended: both entries
-		// admitted the request, and the git entry is what guards the code.
+		// A code-returning route also needs its git entry to authorize the requester, so it never reaches past a clone.
+		// That second check runs last and overwrites the event's tier, decision and groups, so the row shows the git entry's.
 		if !refused(api.Entry, err) && (api.CloneEntry == nil || !refused(api.CloneEntry, nil)) {
 			p.forwardGitHubAPI(w, r, target, scope, event, api.ForRequester(who.BranchSegment()), withWriteGrant(who, api, err))
 		}
@@ -417,15 +360,13 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, entry.MaxRequestBytes+1))
 	if err == nil && int64(len(body)) <= entry.MaxRequestBytes && isGRPC(r) {
-		// Checked and forwarded as uncompressed messages.
 		var outcome string
 		if body, outcome = grpcPlainMessages(body, r.Header.Get("Grpc-Encoding"), entry.MaxRequestBytes); outcome != "" {
 			deny(grpcBodyStatus(outcome), outcome)
 			return
 		}
 	}
-	// A model API's body quotes whatever the agent read, so only its headers
-	// and URL count as presenting a decoy.
+	// A model API's body quotes what the agent read, so only its headers and URL count as presenting a decoy.
 	if err == nil && !entry.Transcript && p.refuseDecoyBody(w, event, target, body) {
 		return
 	}
@@ -440,24 +381,17 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	case bytes.Contains(body, []byte(placeholderMarker)):
-		// Keys go only in the catalog header; a placeholder elsewhere would
-		// reach the vendor verbatim.
+		// Keys go only in the catalog header; a placeholder elsewhere would reach the vendor verbatim.
 		deny(http.StatusBadRequest, "placeholder_misplaced")
 		return
 	case entry.CheckRequestFields(r.URL.Path, r.URL.RawQuery, r.Header.Values("Content-Type"), body) != nil:
-		// A limited parameter (a Slack channel) missing, repeated, placed
-		// twice or not listed, or a key the method does not take.
 		deny(http.StatusForbidden, "request_field")
 		return
 	case entry.CheckRequestHeaders(r.Header) != nil:
-		// A limited header (groundcover's X-Backend-Id) missing, repeated or
-		// not listed.
 		deny(http.StatusForbidden, "request_header")
 		return
 	}
-	// groundcover's MCP server takes every tool on one path, so the broker
-	// reads the message itself and forwards only the methods, tools and
-	// arguments it allows (httpcatalog.CheckMCP); the row names the tool.
+	// groundcover's MCP server takes every tool on one path, so the broker reads the message and forwards only allowed methods, tools and arguments (httpcatalog.CheckMCP); the row names the tool.
 	if operation, mcpErr := entry.CheckMCP(r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Values("Content-Type"), body); mcpErr != nil {
 		status := http.StatusForbidden
 		if errors.Is(mcpErr, httpcatalog.ErrMCPShape) {
@@ -544,16 +478,13 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	defer enf.Release()
-	// An entry with a client certificate may carry no header key.
 	var secret httpcatalog.Secret
 	switch {
 	case entry.ClientCredentials != nil && a.ClientTokens == nil:
 		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	case entry.ClientCredentials != nil:
-		// The key is an access token minted from the client in Vault. A Vault
-		// error is refused as for a stored key; a failed mint as
-		// token_unavailable.
+		// The key is an access token minted from the client in Vault; a Vault error is refused as for a stored key, a failed mint as token_unavailable.
 		if secret, err = a.ClientTokens.Token(r.Context(), entry); err != nil {
 			outcome := "token_unavailable"
 			if errors.Is(err, httpcatalog.ErrKeyUnavailable) {
@@ -626,20 +557,16 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		done.Duration = time.Since(admittedAt).Milliseconds()
 		_ = a.Audit.Record(done)
 	}
-	// A client certificate's key signs the handshake inside the broker and is
-	// sent nowhere, so no response can echo it; only a header key is screened.
+	// A client certificate's key signs the handshake in the broker and is sent nowhere, so only a header key is screened.
 	values := map[string]string{}
 	if entry.HeaderCredential() {
 		values["key"], values["credential"] = secret.Value(), credential
 	}
 	if entry.BasicUser {
-		// The encoded user name alone, as a vendor might echo it.
 		values["basic"] = strings.TrimPrefix(credential, "Basic ")
 	}
 	if entry.BasicPair {
-		// The password alone; the encoded pair is already one of the key's
-		// screened encodings. The user half is usually a public key, so it is
-		// not screened.
+		// The password alone; the user half is usually a public key and is not screened.
 		values["password"] = password
 	}
 	needles := secretRepresentations(values)
@@ -648,9 +575,8 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		screen = p.screenResponse(event.Operation, event)
 	}
 	p.relayScreenedAs(w, out, needles, entry.MaxResponseBytes, finish, func(*http.Response) {
-		// The vendor may have rotated or revoked the key or certificate; read
-		// the newest next. A minted token is minted again, at most once a
-		// minute.
+		// The vendor may have rotated or revoked the key or certificate; read the newest next.
+		// A minted token is minted again, at most once a minute.
 		switch {
 		case entry.ClientCredentials != nil:
 			a.ClientTokens.Invalidate(entry)
@@ -663,16 +589,13 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}, nil, screen)
 }
 
-// relayScreened sends out upstream and streams the response back, refusing
-// compressed or upgraded responses and any that carry a needle. rejected runs
-// on a 401 or 403 and may look at the response to decide what it means. tooLarge, when set, reports that the request body was cut
-// off at its limit.
+// relayScreened sends upstream and streams the response back, refusing compressed or upgraded responses and any that carry a needle.
+// rejected runs on a 401 or 403; tooLarge reports that the request body was cut off at its limit.
 func (p *Proxy) relayScreened(w http.ResponseWriter, out *http.Request, needles [][]byte, limit int64, finish func(int, string), rejected func(*http.Response), tooLarge func() bool) {
 	p.relayScreenedAs(w, out, needles, limit, finish, rejected, tooLarge, nil)
 }
 
-// relayScreenedAs is relayScreened with a change to the upstream response, made
-// by adjust before its headers are screened and relayed.
+// relayScreenedAs is relayScreened with adjust changing the upstream response before its headers are screened.
 func (p *Proxy) relayScreenedAs(w http.ResponseWriter, out *http.Request, needles [][]byte, limit int64, finish func(int, string), rejected func(*http.Response), tooLarge func() bool, adjust func(*http.Response)) {
 	resp, err := p.upstreamFor(out).RoundTrip(out)
 	if err != nil {
@@ -697,9 +620,7 @@ func (p *Proxy) relayScreenedAs(w http.ResponseWriter, out *http.Request, needle
 	p.relayResponse(w, resp, needles, limit, finish, rejected)
 }
 
-// relayResponse streams an upstream response back as relayScreened does, and
-// closes it. Over HTTP/2 it also screens and relays the response trailers,
-// where a gRPC call's status arrives.
+// relayResponse streams an upstream response back as relayScreened does and closes it; over HTTP/2 it also screens the trailers, where a gRPC status arrives.
 func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needles [][]byte, limit int64, finish func(int, string), rejected func(*http.Response)) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -739,23 +660,16 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 	switch {
 	case outcome == "completed":
 	case grpc != nil && outcome != "client_gone":
-		// The status is already sent; end the call with an error status so
-		// the client drops what it read rather than seeing a clean end.
+		// The status is already sent; end the call with an error status so the client drops what it read.
 		grpc.fail(grpcStreamStatus(outcome), "gatehouse: response "+outcome)
 	default:
-		// The status line is already sent; abort the connection (over HTTP/2,
-		// the stream) so the worker sees a truncated response rather than a
-		// clean end. A gRPC call reclassified as client_gone lands here, not in
-		// grpc.fail: the worker closed its own request, so no one is left to
-		// read an error status, and the abort only ends a stream it already left.
+		// The status line is already sent; abort the connection (or HTTP/2 stream) so the worker sees a truncated response.
+		// A gRPC call reclassified as client_gone lands here, not in grpc.fail, since no one is left to read a status.
 		panic(http.ErrAbortHandler)
 	}
 }
 
-// settleStream names a failed stream's cause. A worker that closed its
-// request (an MCP client ends a stream once it has its answer) fails the
-// upstream body read too: the vendor did not fail, so the audit row must not
-// say it did.
+// settleStream names a failed stream's cause: a worker that closed its request fails the upstream body read too, and the audit row must not blame the vendor.
 func settleStream(outcome string, req *http.Request) string {
 	if outcome == "upstream_error" && req != nil && req.Context().Err() != nil {
 		return "client_gone"
@@ -763,8 +677,7 @@ func settleStream(outcome string, req *http.Request) string {
 	return outcome
 }
 
-// relayTrailers screens an HTTP/2 response's trailers, where a gRPC call's
-// status and message arrive, and sends them unless one carries a needle.
+// relayTrailers screens an HTTP/2 response's trailers and sends them unless one carries a needle.
 func relayTrailers(w http.ResponseWriter, trailer http.Header, needles [][]byte) string {
 	if headersContain(trailer, needles) {
 		return "secret_echo"
@@ -805,13 +718,8 @@ func headersContain(h http.Header, needles [][]byte) bool {
 	return false
 }
 
-// screenedCopy streams the body, flushing each chunk for server-sent events.
-// It holds back only a tail that could be the start of the key, so a key
-// split across reads is still seen before any part of it reaches the worker,
-// while ordinary events pass through at once. With frames, a gRPC body, it
-// releases that tail whenever the bytes so far end a message, which no key
-// can straddle (framesSafe), so a streamed message is never held for the
-// next one; a compressed message, which it could not screen, ends the copy.
+// screenedCopy streams the body, flushing each chunk and holding back only a tail that could be the start of the key, so a split key is seen before any part reaches the worker.
+// With frames (a gRPC body) it releases the tail whenever the bytes end a message (framesSafe); a compressed message ends the copy.
 func screenedCopy(w http.ResponseWriter, body io.Reader, needles [][]byte, limit int64, frames *grpcFrames) string {
 	flusher, _ := w.(http.Flusher)
 	var pending []byte
@@ -859,8 +767,7 @@ func screenedCopy(w http.ResponseWriter, body io.Reader, needles [][]byte, limit
 	}
 }
 
-// partialSuffix is the length of the longest tail of data that is a proper
-// prefix of some needle.
+// partialSuffix is the length of the longest tail of data that is a proper prefix of some needle.
 func partialSuffix(data []byte, needles [][]byte) int {
 	longest := 0
 	for _, needle := range needles {

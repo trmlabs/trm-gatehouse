@@ -101,7 +101,7 @@ file, and prints no secrets.`,
 	},
 }
 
-// readAuditHeads reads audit heads output. An empty path means no head check.
+// readAuditHeads reads audit heads output; an empty path skips the head check.
 func readAuditHeads(path string) ([]auditchain.Head, error) {
 	if path == "" {
 		return nil, nil

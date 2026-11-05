@@ -68,7 +68,8 @@ Install the Agent Vault CLI on the host or in the container image where OpenClaw
     Add the `agent-vault` binary to the image where OpenClaw runs.
 
     ```dockerfile
-    COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+    # Build gatehouse:local first with `make docker` in this repository.
+    COPY --from=gatehouse:local /usr/local/bin/agent-vault /usr/local/bin/agent-vault
     ```
 
     ### 2. Set the entrypoint

@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// With pooling on, client sessions share server connections and one
-// credential; with it off (every other test in this package) each session
-// mints its own, unchanged.
+// With pooling on, client sessions share server connections and one credential; with it off (every other test
+// in this package) each session mints its own, unchanged.
 func TestPooledSessionsShareServerConnectionsAndOneCredential(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)

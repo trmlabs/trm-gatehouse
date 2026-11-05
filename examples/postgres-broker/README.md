@@ -1,4 +1,4 @@
-# PostgreSQL credential broker — end-to-end demo
+# PostgreSQL credential broker: end-to-end demo
 
 Agent Vault's PostgreSQL broker lets an agent connect to a database carrying
 **only its Agent Vault token**. Agent Vault mints a
@@ -85,7 +85,7 @@ The example uses an agent with one vault grant, so the broker can infer the vaul
 
 ## Managing databases at runtime
 
-Enable the broker with an empty store, then add databases with the CLI — the
+Enable the broker with an empty store, then add databases with the CLI. The
 broker resolves them live, so there is no restart:
 
 ```bash

@@ -10,9 +10,7 @@ import (
 
 const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
-// profiledPools parses today's Cursor and Claude pools twice: once with no
-// harnesses (profiles derived from the pool) and once with explicit harness
-// entries, so each decision can be compared between the two.
+// profiledPools parses the Cursor and Claude pools with and without explicit harness entries so decisions can be compared.
 func profiledPools(t *testing.T) (derived, explicit httpcatalog.Catalog) {
 	t.Helper()
 	pools := `"pools":[{"name":"cursor","namespace":"cursor","serviceAccount":"worker"},
@@ -60,8 +58,7 @@ func TestExplicitProfilesDecideAsDerivedOnes(t *testing.T) {
 			t.Errorf("%+v: derived %+v %q, explicit %+v %q", c, dWho, dRefusal, eWho, eRefusal)
 		}
 	}
-	// The pinned pair: the explicit Claude profile still pins a session to
-	// its first Pod.
+	// The explicit Claude profile still pins a session to its first Pod.
 	ep, _ := explicit.Pool("claude")
 	b := &authorizetest.MemBinder{}
 	if _, refusal := Resolve(ctx, ep, "alice", Claims{Pod: "pod-a"}, oneToken{}, b); refusal != "" {

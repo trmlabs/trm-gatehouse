@@ -12,8 +12,7 @@ func TestProxyAuditWriteFailuresAreAtomic(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 	r := ProxyAudit{RequestID: "request-1", VaultID: "vault", ActorType: "workload", ActorID: "actor", Destination: "example.test", Service: "service", Method: "GET", Decision: "allow"}
-	// Simulate a failure after the statement has touched storage. Transaction
-	// rollback must leave no acknowledged attempt, even with an AFTER trigger.
+	// A failure after the statement touched storage must roll back, leaving no acknowledged attempt.
 	_, err := s.db.Exec(`CREATE TRIGGER fail_audit_insert AFTER INSERT ON credential_proxy_audit BEGIN SELECT RAISE(ABORT,'injected storage failure'); END`)
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +75,7 @@ func TestProxyAuditCancellationIsNotAcknowledged(t *testing.T) {
 	}
 }
 
-// Exit without closing the SQL connection to model process loss after the
-// acknowledged attempt and before any final outcome write.
+// Exits without closing the SQL connection, modelling process loss before any final outcome write.
 func TestProxyAuditAbruptProcessExit(t *testing.T) {
 	const envKey = "AGENT_VAULT_AUDIT_CRASH_TEST_DB"
 	if path := os.Getenv(envKey); path != "" {

@@ -1,6 +1,4 @@
-// Package auditchain writes the broker's tamper-evident audit trail: one JSON
-// row per event on stdout, chained per replica boot by HMAC and checkpointed by
-// a Vault Transit signature, plus the verifier that checks it offline.
+// Package auditchain writes the broker's HMAC-chained, Transit-checkpointed audit trail and verifies it offline.
 package auditchain
 
 import (
@@ -14,8 +12,7 @@ import (
 // RowType tags audit rows so a log sink can select them from other output.
 const RowType = "gatehouse.audit.v1"
 
-// Events. Every row is one of these; rows the chain writes itself are
-// chain_start, checkpoint, checkpoint_failed and key_rotated.
+// Events. The chain writes chain_start, checkpoint, checkpoint_failed and key_rotated itself.
 const (
 	EventChainStart       = "chain_start"
 	EventSessionOpen      = "session_open"
@@ -36,9 +33,8 @@ const (
 // Causes are the fixed codes an upstream_error row's cause may carry.
 var Causes = []string{"dial_timeout", "tls_handshake", "conn_refused", "conn_reset", "dns", "tls_certificate", "response_timeout", "other"}
 
-// Row is one audit record. It carries identifiers and fixed outcome codes
-// only: never a credential, token or query text. The one free-text field is
-// UpstreamMessage, and a message that echoes agent-supplied text can enter it.
+// Row is one audit record. It carries identifiers and fixed outcome codes only: never a credential, token or query text.
+// UpstreamMessage is the one free-text field and can echo agent-supplied text.
 type Row struct {
 	Type      string `json:"type"`
 	Replica   string `json:"replica"`
@@ -53,11 +49,7 @@ type Row struct {
 	Session   string `json:"session,omitempty"`   // broker-generated session ID
 	Outcome   string `json:"outcome,omitempty"`   // fixed code
 	Requester string `json:"requester,omitempty"` // developer identity, only from a verified source
-	// Authorization decision fields (see mitm authorize). On an automation
-	// row, requester is the person the run's token names, or empty when it
-	// names none, and decides nothing: the Automation is decided on its own
-	// catalog entries, so the row records tier and decision only, with no
-	// groups, cacheAgeSec, requesterOID or requesterDepartment.
+	// On an automation row, requester decides nothing: only tier and decision are recorded, with no groups, cacheAgeSec, requesterOID or requesterDepartment.
 	RequesterKind string `json:"requesterKind,omitempty"` // person, agent, workload, automation or none
 	RequesterOID  string `json:"requesterOID,omitempty"`  // Entra object ID of the person named by requester
 	TokenSHA256   string `json:"tokenSHA256,omitempty"`   // runner session token hash; never the token
@@ -65,60 +57,33 @@ type Row struct {
 	Decision      string `json:"decision,omitempty"`
 	Groups        string `json:"groups,omitempty"` // required groups checked
 	CacheAgeSec   int64  `json:"cacheAgeSec,omitempty"`
-	// Identity refusals at the token's signing key: the kid the token
-	// claimed ("invalid" plus a 12-hex SHA-256 prefix when it is not a plain
-	// identifier) and the connection's peer address. Never the token.
+	// Kid is the claimed key id ("invalid" plus a 12-hex SHA-256 prefix when not a plain identifier); Peer is the connection's address.
 	Kid       string `json:"kid,omitempty"`
 	KidSHA256 string `json:"kidSHA256,omitempty"`
 	Peer      string `json:"peer,omitempty"`
-	// Proxy certificate rows: the issued certificate's serial number in
-	// lower-case hex and its notAfter in RFC 3339 UTC.
+	// Serial is lower-case hex; NotAfter is RFC 3339 UTC.
 	Serial   string `json:"serial,omitempty"`
 	NotAfter string `json:"notAfter,omitempty"`
 	DNSNames string `json:"dnsNames,omitempty"`
-	// Refusals: the host, and port when given, the caller asked for, in
-	// canonical lower-case form, or "invalid" when it is not a DNS name or IP
-	// address. Never a path, query or header.
+	// Target is the refused host[:port] in canonical form, or "invalid".
 	Target string `json:"target,omitempty"`
-	// Operation is what an HTTP row asked to do, from the broker's fixed
-	// vocabulary: a github-api repository operation such as "pr.open",
-	// "git.fetch" or "git.push", "graphql" for a GitHub GraphQL request no
-	// route admits, the Slack Web API method a Slack entry's listed path
-	// names, such as "slack.conversations_history", or the groundcover MCP
-	// message forwarded, such as "groundcover.query_logs". On a graph
-	// database row, "bolt.session" or "bolt.query". Never a path, body or
-	// query text.
+	// Operation is from the broker's fixed vocabulary, such as "pr.open", "git.push", "graphql",
+	// "slack.conversations_history", "groundcover.query_logs", "bolt.session" or "bolt.query".
 	Operation string `json:"operation,omitempty"`
-	// Branch is, on a git push row, the refs the push changes (comma-separated,
-	// "+N" for any that do not fit) or the one a refused push was refused
-	// for; on a pull request write (opening one, a comment, edit, label or
-	// ready, over REST or GraphQL) or a CI restart (pr.update_branch,
-	// actions.rerun, actions.rerun_failed), the head branch the request named
-	// or GitHub reported for the pull request or run. "invalid" when it is not
-	// a plain name (see BranchField); empty when the lookup failed before
-	// GitHub named one.
+	// Branch is the pushed refs (comma-separated, "+N" for any that do not fit) on a push row,
+	// or the head branch on a pull request write or CI restart. "invalid" when not a plain name; empty if the lookup failed.
 	Branch string `json:"branch,omitempty"`
-	// Database is the database name a refused PostgreSQL session asked for,
-	// before any catalog entry matched it, or "invalid" when it is not a plain
-	// name (see DatabaseField).
+	// Database is the name a refused PostgreSQL session asked for, or "invalid".
 	Database string `json:"database,omitempty"`
-	// RequesterDepartment is the person's Entra department, as the directory
-	// lookup that decided an entry returned it (see DepartmentField). Present
-	// only when an entry needed that lookup.
+	// RequesterDepartment is the Entra department, present only when an entry needed the lookup.
 	RequesterDepartment string `json:"requesterDepartment,omitempty"`
-	// Source and Automation are what a verified Cursor run token said: how
-	// the run started (AUTOMATIONS for an Automation) and the Automation's
-	// id. AutomationName and AutomationOwner (its owning team) are the
-	// catalog's for that Automation, on a pool that decides per Automation.
+	// Source and Automation come from the verified Cursor run token; AutomationName and AutomationOwner from the catalog.
 	Source          string `json:"source,omitempty"`
 	Automation      string `json:"automation,omitempty"`
 	AutomationName  string `json:"automationName,omitempty"`
 	AutomationOwner string `json:"automationOwner,omitempty"`
-	// PullRequest is the pull request number a GitHub REST request names;
-	// Route is the catalog route it matched (such as "read-pull"); GitEntry is
-	// the git entry that authorized a code read.
-	// Cause is why an upstream_error row failed, from the fixed list in
-	// Causes: never an error message.
+	// PullRequest, Route and GitEntry name the GitHub request's pull request, matched catalog route and authorizing git entry.
+	// Cause is why an upstream_error row failed, from the fixed list in Causes: never an error message.
 	Cause string `json:"cause,omitempty"`
 	// Match is the SHA-256 in lower-case hex of the text an injection_flagged row matched, never the text.
 	Match string `json:"match,omitempty"`
@@ -134,20 +99,12 @@ type Row struct {
 	SignedMAC       string `json:"signedMAC,omitempty"`
 	Signature       string `json:"signature,omitempty"` // checkpoint: Transit "vault:vN:..." signature
 	PrevKey         int    `json:"prevKeyVersion,omitempty"`
-	// Path is the request path an HTTP row is about, as the worker sent it
-	// and PathField bounds it, without the query. A gRPC call's path names
-	// its service and method, such as /example.v1.Reads/ReadRows. Never a
-	// query, header or body, and absent on a decoy refusal.
+	// Path is the request path an HTTP row is about, without the query; a gRPC call's path names its service and method.
+	// Never a query, header or body, and absent on a decoy refusal.
 	Path string `json:"path,omitempty"`
-	// Settings is, on an automation_settings row, the names of the settings
-	// served, comma-separated in order. Never a value.
+	// Settings is the names of the settings served on an automation_settings row, never a value.
 	Settings string `json:"settings,omitempty"`
-	// GraphQLErrors is, on the response row of a GitHub GraphQL call whose
-	// answer carried a top-level errors array (outcome graphql_error), what
-	// GraphQL named: comma-separated TYPE@path entries, the error's type and
-	// its path (dot-joined field names and list indexes), "-" where it gave
-	// none, with "+N" for entries that do not fit (see GraphQLErrorsField).
-	// Never an error message or any of the data.
+	// GraphQLErrors summarizes a GraphQL response's top-level errors as TYPE@path entries (see GraphQLErrorsField), never a message or data.
 	GraphQLErrors string `json:"graphqlErrors,omitempty"`
 	// Run is the verified Cursor run's cloud_agent_id.
 	Run string `json:"run,omitempty"`
@@ -160,15 +117,7 @@ type Row struct {
 	PrevCheckpointMAC string `json:"prevCheckpointMAC,omitempty"`
 	KeyVersion        int    `json:"keyVersion"`
 	Prev              string `json:"prev"`
-	// MACVersion selects the MAC input: absent (0) is v1, written before the
-	// authorization fields existed; 2 adds them; 3 adds the signing-key
-	// refusal fields; 4 adds the proxy certificate fields; 5 adds the refused
-	// target; 6 adds the operation, the refused database and the requester's
-	// department; 7 adds a CI restart's branch; 8 adds the run's source and
-	// Automation; 9 adds the request path; 10 adds the settings served, the
-	// GraphQL error summary and a GitHub request's pull request, route and git
-	// entry; 11 adds the upstream error cause, 12 the injection match, 13 the upstream error message;
-	// MACVersionCurrent (14) adds the run and parent run, and covers every field.
+	// MACVersion selects the MAC input; absent (0) is v1. See macInput.
 	MACVersion int    `json:"macVersion,omitempty"`
 	MAC        string `json:"mac"`
 }
@@ -176,17 +125,8 @@ type Row struct {
 // MACVersionCurrent is the MAC input every new row uses.
 const MACVersionCurrent = 14
 
-// macInput encodes every field except MAC with explicit lengths, so no two
-// distinct rows share an input regardless of field contents. Version 2 adds
-// the authorization fields and the version itself, and version 3 the
-// signing-key refusal fields, and version 4 the proxy certificate fields, and
-// version 5 the refused target, and version 6 the operation, the refused
-// database and the requester's department, and version 7 a CI restart's
-// branch, and version 8 the run's source and Automation, and version 9 the
-// request path, and version 10 the settings served and the GraphQL error
-// summary. Older versions are kept only to verify rows written before
-// them, and a row carrying a field its version's MAC does not cover fails
-// verification (see v2Only through v14Only).
+// macInput encodes every field except MAC with explicit lengths, so no two distinct rows share an input.
+// Older versions only verify rows written before them; a row with a field its version does not cover fails (see v2Only through v14Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,

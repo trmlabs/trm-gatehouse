@@ -9,8 +9,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// attestedPools is two agent-sandbox namespaces behind one shared proxy: one
-// decides per person from the attested requester, the other for the pool.
+// attestedPools is two namespaces behind one shared proxy: one decides per person, the other per pool.
 func attestedPools(t *testing.T) (person, pool httpcatalog.Pool) {
 	t.Helper()
 	domain := `"trustDomain":{"issuer":"https://container.googleapis.com/v1/projects/s/locations/l/clusters/sandbox","keys":"remote","audience":"gatehouse"}`

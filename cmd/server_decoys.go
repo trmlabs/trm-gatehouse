@@ -18,22 +18,14 @@ var sharedDecoys struct {
 	started bool
 }
 
-// Decoys are polled like the catalog, and reread in full on a slower cycle so
-// a head write that never landed cannot leave a stale set in force for long.
+// A full reread on a slower cycle covers a head write that never landed.
 const (
 	decoyPollInterval = 30 * time.Second
 	decoyFullReload   = 10 * time.Minute
 )
 
-// decoySource loads the decoy credentials planted in worker sessions once per
-// process, for the HTTP adapter and the PostgreSQL broker alike, when
-// AGENT_VAULT_DECOY_VAULT_PREFIX names where they live (mount/prefix of a KV
-// version 2 layout; see decoy.VaultLoader). Unset, it returns nil and no
-// decoy is recognized.
-//
-// Decoys never stop the broker: a load that fails is logged and the last good
-// set stays in force, or none before the first. Logs name a decoy by its
-// label, never its value.
+// decoySource loads decoy credentials once per process for both brokers when AGENT_VAULT_DECOY_VAULT_PREFIX is set.
+// A failed load is logged and the last good set stays in force; logs name a decoy by label, never value.
 func decoySource(ctx context.Context, client *hashicorp.Client, getenv func(string) string, logger *slog.Logger) (*decoy.Source, error) {
 	sharedDecoys.Lock()
 	defer sharedDecoys.Unlock()
@@ -66,7 +58,6 @@ func decoySource(ctx context.Context, client *hashicorp.Client, getenv func(stri
 	if err == nil {
 		logger.Info("decoy credentials loaded", slog.Int("count", source.Current().Len()), slog.Int("version", source.Version()))
 	}
-	// ctx is the server's lifetime context, so the watch runs until exit.
 	go source.Watch(ctx, decoyPollInterval, decoyFullReload, load, report)
 	sharedDecoys.source, sharedDecoys.started = source, true
 	return source, nil

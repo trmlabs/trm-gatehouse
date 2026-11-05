@@ -14,10 +14,7 @@ func init() {
 	})
 }
 
-// postgresBaselineSQL creates the full Postgres schema equivalent to
-// SQLite migrations 001-050. Embedded as a raw SQL string because
-// defining 20+ GORM model structs just for a one-time baseline is
-// unnecessary overhead.
+// postgresBaselineSQL creates the full Postgres schema equivalent to SQLite migrations 001-050, as raw SQL.
 const postgresBaselineSQL = `
 CREATE TABLE vaults (
     id         TEXT PRIMARY KEY,

@@ -13,16 +13,13 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// Logical is the subset of the Vault client the chain uses. The broker
-// supplies its own authenticated client; *vaultapi.Logical satisfies it.
+// Logical is the subset of the Vault client the chain uses; *vaultapi.Logical satisfies it.
 type Logical interface {
 	ReadWithDataWithContext(ctx context.Context, path string, data map[string][]string) (*vaultapi.Secret, error)
 	WriteWithContext(ctx context.Context, path string, data map[string]interface{}) (*vaultapi.Secret, error)
 }
 
-// KVKeys reads the HMAC key from a KV version 2 secret. Each KV version is a
-// key version; writing a new version rotates the key. Field holds the key as
-// standard base64 of at least 32 random bytes.
+// KVKeys reads the HMAC key from a KV v2 secret; each KV version is a key version. Field holds at least 32 random bytes as standard base64.
 type KVKeys struct {
 	Vault Logical
 	Mount string
@@ -71,8 +68,7 @@ func (k KVKeys) read(ctx context.Context, version int) (Key, error) {
 	return NewKey(got, raw)
 }
 
-// TransitSigner signs checkpoints with an ed25519 Transit key, which never
-// leaves Vault.
+// TransitSigner signs checkpoints with an ed25519 Transit key.
 type TransitSigner struct {
 	Vault Logical
 	Mount string

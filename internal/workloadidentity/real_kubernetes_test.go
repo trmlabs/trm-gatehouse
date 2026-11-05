@@ -19,10 +19,8 @@ import (
 
 var workloadKubeconfig = flag.String("workload-kubeconfig", "", "isolated kubeconfig for kind-credential-proxy-identity (required with realkubernetes)")
 
-// TestRealKubernetesProjectedIdentity uses an explicitly isolated local kind
-// API. It creates disposable resources and waits for a real 600-second proof
-// to expire. HTTP/PG listeners are real; destinations and lease issuance remain
-// synthetic. No part of this test establishes production network isolation.
+// TestRealKubernetesProjectedIdentity uses an isolated local kind API and waits for a real 600-second proof to expire;
+// destinations and lease issuance are synthetic, so it establishes no production network isolation.
 func TestRealKubernetesProjectedIdentity(t *testing.T) {
 	if *workloadKubeconfig == "" {
 		t.Fatal("pass -args -workload-kubeconfig /path/to/isolated/kubeconfig")
@@ -57,8 +55,7 @@ func TestRealKubernetesProjectedIdentity(t *testing.T) {
 	ns := fmt.Sprintf("identity-%d", time.Now().UnixNano())
 	kube("create", "namespace", ns)
 	t.Cleanup(func() {
-		// Deletion is scoped to resources created by this test. Never emit tokens
-		// or kubectl output, including during cleanup errors.
+		// Deletion is scoped to resources this test created; never emit tokens or kubectl output.
 		for _, args := range [][]string{{"delete", "namespace", ns, "--wait=false"}, {"delete", "clusterrolebinding", ns}, {"delete", "clusterrole", ns}} {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := exec.CommandContext(ctx, "kubectl", append([]string{"--kubeconfig", *workloadKubeconfig, "--context", "kind-credential-proxy-identity"}, args...)...).Run()
@@ -158,8 +155,7 @@ func TestRealKubernetesProjectedIdentity(t *testing.T) {
 	if scope, err := r.ResolveForProxy(context.Background(), replacement, ""); err != nil || scope.WorkloadID == "" {
 		t.Fatal("replacement pod's new proof denied")
 	}
-	// Keep the expiry pod alive. This checks actual elapsed-time expiration of
-	// a runtime-issued token, rather than mutating a clock or JWT claims.
+	// Keep the expiry pod alive to check real elapsed-time expiry of a runtime-issued token.
 	remaining := time.Until(time.Unix(expiry.Expires, 0).Add(time.Second))
 	if remaining > 0 {
 		t.Logf("waiting %s for actual projected-token expiry", remaining.Round(time.Second))

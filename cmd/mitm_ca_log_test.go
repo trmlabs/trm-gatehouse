@@ -16,8 +16,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/crypto"
 )
 
-// memoryCAStore keeps the CA's root in memory, so the test can read back the
-// encrypted key the CA saved.
 type memoryCAStore struct{ state *ca.CAStateRecord }
 
 func (m *memoryCAStore) GetCAState(context.Context) (*ca.CAStateRecord, error) { return m.state, nil }
@@ -44,8 +42,7 @@ func caLogLines(t *testing.T, logs *bytes.Buffer) []map[string]any {
 	return lines
 }
 
-// The broker logs its public interception root once in credential-proxy
-// mode, exactly as it serves it, and never anything of its key.
+// The broker logs its public interception root once in credential-proxy mode, never its key.
 func TestInterceptionCALoggedOnlyInCredentialProxyMode(t *testing.T) {
 	masterKey := bytes.Repeat([]byte{7}, 32)
 	for _, credentialProxy := range []bool{true, false} {
@@ -93,7 +90,6 @@ func TestInterceptionCALoggedOnlyInCredentialProxyMode(t *testing.T) {
 	}
 }
 
-// A CA that fails to initialize logs nothing.
 func TestInterceptionCAFailureLogsNothing(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
@@ -105,7 +101,6 @@ func TestInterceptionCAFailureLogsNothing(t *testing.T) {
 	}
 }
 
-// Anything but a single certificate is never logged as one.
 func TestInterceptionCALogRefusesOtherPEM(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))

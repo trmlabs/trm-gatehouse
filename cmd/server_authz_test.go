@@ -174,9 +174,6 @@ func TestGraphSettings(t *testing.T) {
 	}
 }
 
-// Each person's directory budget is a setting: today's 60 by default, and any
-// positive count up to a ceiling that is itself a setting, 6,000 by default.
-// A budget over the ceiling fails at start rather than removing the guard.
 func TestEntitlementLookupsPerMinute(t *testing.T) {
 	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
 	with := func(budget, ceiling string) map[string]string {

@@ -12,11 +12,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/broker"
 )
 
-// randomSentinel returns a long, lowercase, hyphen-prefixed token whose
-// character class cannot collide with UPPER_SNAKE_CASE credential key
-// names. This matters for the redaction assertion: a naive sentinel like
-// "SECRET_12345" could be a substring of a key name and produce a false
-// positive when the log contains the key.
+// randomSentinel returns a lowercase hyphen-prefixed token that cannot collide with UPPER_SNAKE_CASE key names.
 func randomSentinel(t *testing.T) string {
 	t.Helper()
 	b := make([]byte, 32)
@@ -26,9 +22,7 @@ func randomSentinel(t *testing.T) string {
 	return "sentinel-" + strings.ToLower(base64.RawURLEncoding.EncodeToString(b))
 }
 
-// TestLogProxyEvent_NoSecretLeak proves the debug log line never contains
-// the resolved credential value across all four broker auth types — the
-// core redaction guardrail called out in the plan.
+// TestLogProxyEvent_NoSecretLeak proves the debug log never contains the credential value for all four auth types.
 func TestLogProxyEvent_NoSecretLeak(t *testing.T) {
 	encKey := make32(0xAB)
 
@@ -116,9 +110,7 @@ func TestLogProxyEvent_NoSecretLeak(t *testing.T) {
 	}
 }
 
-// TestLogProxyEvent_CredentialMissingCarriesMetadata verifies that even
-// when credential resolution fails, the InjectResult still carries the
-// matched service + credential key names so the log line remains useful.
+// TestLogProxyEvent_CredentialMissingCarriesMetadata verifies a failed resolution still carries service and key names.
 func TestLogProxyEvent_CredentialMissingCarriesMetadata(t *testing.T) {
 	encKey := make32(0xCD)
 	f := newFakeCredStore()

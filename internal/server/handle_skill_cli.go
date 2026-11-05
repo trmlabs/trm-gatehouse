@@ -2,10 +2,8 @@ package server
 
 import "net/http"
 
-// The embedded agent skill served at GET /v1/skills/cli: the single markdown
-// doc compiled into the binary from cmd/skill_cli.md. Unrelated to the
-// per-vault Skills resource in handle_skills.go — this one is instance-wide,
-// unauthenticated, and read-only.
+// The embedded agent skill served at GET /v1/skills/cli, compiled from cmd/skill_cli.md.
+// Instance-wide, unauthenticated, read-only; unrelated to the per-vault Skills resource.
 
 // SetSkillCLI sets the embedded CLI skill content.
 func (s *Server) SetSkillCLI(cli string) {

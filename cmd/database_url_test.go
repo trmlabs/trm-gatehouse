@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// The store URL can come from a file so a mounted Secret never enters the
-// environment; the value never appears in an error.
+// The store URL can come from a file; the value never appears in an error.
 func TestDatabaseURLFromFile(t *testing.T) {
 	dir := t.TempDir()
 	// Built in pieces so the synthetic URL does not read as a credential.
@@ -69,5 +69,86 @@ func TestDatabaseURLFromFile(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	if url, err := databaseURL(); err != nil || url != "" || sharedStoreConfigured() {
 		t.Fatalf("no store set: %q %v", url, err)
+	}
+}
+
+// A Secret volume rotates by repointing a symlink; the change check must see that even when size and mtime match.
+func TestDatabaseURLChangedSeesASymlinkSwap(t *testing.T) {
+	dir := t.TempDir()
+	stamp := time.Unix(1_700_000_000, 0)
+	versions := map[string]string{"v1": "postgres://broker:" + "synthetic-one" + "@db.internal/s", "v2": "postgres://broker:" + "synthetic-two" + "@db.internal/s"}
+	for name, body := range versions {
+		sub := filepath.Join(dir, name)
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(sub, "url")
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(file, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	point := func(version string) {
+		tmp := filepath.Join(dir, "..data_tmp")
+		_ = os.Remove(tmp)
+		if err := os.Symlink(version, tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, filepath.Join(dir, "..data")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	point("v1")
+	if err := os.Symlink(filepath.Join("..data", "url"), filepath.Join(dir, "url")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_URL_FILE", filepath.Join(dir, "url"))
+
+	changed := databaseURLChanged()
+	if changed() {
+		t.Fatal("reported a change before any")
+	}
+	point("v2")
+	if !changed() {
+		t.Fatal("missed the symlink swap")
+	}
+	if changed() {
+		t.Fatal("reported the same swap twice")
+	}
+	if url, err := databaseURL(); err != nil || !strings.Contains(url, "synthetic-two") {
+		t.Fatalf("the swapped file was not read: %v", err)
+	}
+
+	t.Setenv("DATABASE_URL_FILE", "")
+	if databaseURLChanged() != nil {
+		t.Fatal("a check with no file")
+	}
+}
+
+// A rotation between the baseline stamp and the read is reported as a change, not swallowed into the baseline.
+func TestDatabaseURLWithChangeSeesARotationDuringTheRead(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "url")
+	write := func(v string) {
+		t.Helper()
+		if err := os.WriteFile(file, []byte("postgres://u:"+v+"@h/db\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("synthetic-one")
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_URL_FILE", file)
+	afterURLStamp = func() { write("synthetic-two-longer") }
+	t.Cleanup(func() { afterURLStamp = func() {} })
+
+	url, changed, err := databaseURLWithChange()
+	if err != nil || !strings.Contains(url, "synthetic-two") {
+		t.Fatalf("read %v", err)
+	}
+	if !changed() {
+		t.Fatal("a rotation between the stamp and the read became the baseline")
 	}
 }

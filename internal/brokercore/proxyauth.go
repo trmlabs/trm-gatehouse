@@ -6,28 +6,8 @@ import (
 	"strings"
 )
 
-// ParseProxyAuth extracts an Agent Vault session token and optional vault
-// hint from a Proxy-Authorization header.
-//
-// Supported forms:
-//   - Bearer <token>                        — token only, no vault hint
-//   - Basic base64(<token>)                 — token only, no vault hint
-//   - Basic base64(<token>:<vault-name>)    — token + vault hint
-//
-// The Basic form maps directly to HTTPS_PROXY / HTTP_PROXY URLs (both
-// env vars take the same proxy URL — the listener accepts CONNECT for
-// https:// upstreams and absolute-form forward-proxy requests for
-// http:// upstreams on the same port):
-//
-//	HTTPS_PROXY=http://<token>@host:port          (scoped session)
-//	HTTPS_PROXY=http://<token>:<vault>@host:port  (instance-level agent token)
-//
-// Vault names are config-validated as UPPER/lowercase alphanumeric + hyphens,
-// so they cannot contain a colon; splitting on the first colon in the decoded
-// userinfo is unambiguous.
-//
-// Returns ErrInvalidSession when the header is missing, malformed, or of an
-// unsupported scheme. Higher-level handlers map this to 407.
+// ParseProxyAuth extracts a session token and optional vault hint from a Proxy-Authorization header (Bearer or Basic).
+// Vault names cannot contain a colon, so splitting userinfo on the first colon is unambiguous.
 func ParseProxyAuth(r *http.Request) (token, vaultHint string, err error) {
 	h := r.Header.Get("Proxy-Authorization")
 	if h == "" {

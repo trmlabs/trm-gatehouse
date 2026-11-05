@@ -12,11 +12,6 @@ import (
 	"testing"
 )
 
-// The plaintext-database switch exists only in the e2e build. These tests
-// keep it out of what ships: no release build file sets the e2e tag, and a
-// default build of the catalog and the server command has no way to turn
-// the switch on.
-
 var e2eTag = regexp.MustCompile(`\be2e\b`)
 
 func repoRoot(t *testing.T) string {
@@ -89,7 +84,6 @@ func TestDefaultBuildHasNoPlaintextSwitch(t *testing.T) {
 						}
 					}
 				case *ast.CallExpr:
-					// Only the e2e build may store true in the switch.
 					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Store" {
 						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "plaintextDatabases" {
 							t.Errorf("%s/%s sets plaintextDatabases in the default build", dir, file)

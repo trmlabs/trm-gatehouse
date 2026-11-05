@@ -63,10 +63,7 @@ func CountSourceTables(src *SQLStore) ([]TableCount, error) {
 	return counts, nil
 }
 
-// CountDestinationData checks whether the destination database contains any
-// user-created data beyond the baseline schema seed (the default vault and
-// its broker_config). Returns a non-empty description of what was found,
-// or empty string if the destination is clean.
+// CountDestinationData describes any user-created data beyond the baseline seed, or returns empty if the destination is clean.
 func CountDestinationData(dst *SQLStore) (string, error) {
 	checks := []struct {
 		label string
@@ -98,24 +95,17 @@ func CountDestinationData(dst *SQLStore) (string, error) {
 	return "", nil
 }
 
-// MigrateData copies all data from src (SQLite) to dst (Postgres) in
-// foreign-key dependency order. Both stores must already be open and
-// fully migrated. The caller should ensure that dst is empty (aside from
-// the seeded default vault row).
-//
-// progressFn is called with (tableName, rowCount) after each table is copied.
+// MigrateData copies src (SQLite) to dst (Postgres) in foreign-key order; both must be migrated and dst empty apart from the seeded default vault.
+// progressFn is called with (tableName, rowCount) after each table.
 func MigrateData(ctx context.Context, src, dst *SQLStore, progressFn func(table string, rows int)) error {
 	_, err := MigrateDataWithCA(ctx, src, dst, "", progressFn)
 	return err
 }
 
-// MigrateDataWithCA is MigrateData that also moves the interception CA from
-// caDir on disk into the same transaction, so a failure anywhere leaves the
-// destination empty and a rerun starts clean. Nothing else can make a rerun
-// refuse with "destination database already contains data" halfway. It
-// reports whether a CA was moved from disk; an empty caDir moves none.
+// MigrateDataWithCA also moves the CA from caDir in the same transaction, so a failure leaves the destination empty and a rerun starts clean.
+// It reports whether a CA was moved; an empty caDir moves none.
 func MigrateDataWithCA(ctx context.Context, src, dst *SQLStore, caDir string, progressFn func(table string, rows int)) (bool, error) {
-	// Read and parse the CA files before writing anything.
+	// Parse the CA files before writing anything.
 	var ca *CAState
 	if caDir != "" {
 		var err error
@@ -123,9 +113,7 @@ func MigrateDataWithCA(ctx context.Context, src, dst *SQLStore, caDir string, pr
 			return false, err
 		}
 	}
-	// Use a single Postgres transaction for the entire copy so we get
-	// atomic all-or-nothing semantics. Tables are copied in FK
-	// dependency order so referential integrity is maintained.
+	// Single transaction for all-or-nothing copy; tables go in FK dependency order.
 	tx, err := dst.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("beginning destination transaction: %w", err)
@@ -240,9 +228,7 @@ func convertTime(src interface{}, srcDialect, dstDialect Dialect) (interface{}, 
 	return dstDialect.FormatTime(t), nil
 }
 
-// convertBool reads a boolean value from a SQLite row and formats it for the
-// destination dialect. Coalesces nil to false (handles nullable SQLite
-// INTEGER columns mapped to NOT NULL BOOLEAN in Postgres).
+// convertBool formats a SQLite boolean for the destination, coalescing nil to false for NOT NULL BOOLEAN columns.
 func convertBool(src interface{}, srcDialect, dstDialect Dialect) (interface{}, error) {
 	if src == nil {
 		return dstDialect.BoolVal(false), nil
@@ -1253,10 +1239,7 @@ func copyCAState(ctx context.Context, src *SQLStore, tx *sql.Tx, dstDialect Dial
 	return 1, nil
 }
 
-// MigrateCAFromDisk reads the CA certificate and encrypted key from disk
-// and inserts them into the destination store's ca_state table.
-// Returns (true, nil) if the CA was migrated, (false, nil) if the files
-// were not found on disk (not an error), or (false, err) on failure.
+// MigrateCAFromDisk copies the CA cert and encrypted key from disk into ca_state; returns (false, nil) if the files are absent.
 func MigrateCAFromDisk(ctx context.Context, dst *SQLStore, caDir string) (bool, error) {
 	state, err := readCAFromDisk(caDir)
 	if err != nil || state == nil {
@@ -1268,8 +1251,6 @@ func MigrateCAFromDisk(ctx context.Context, dst *SQLStore, caDir string) (bool, 
 	return true, nil
 }
 
-// readCAFromDisk reads and parses the CA files in caDir, or returns nil when
-// there are none.
 func readCAFromDisk(caDir string) (*CAState, error) {
 	certPath := caDir + "/ca.crt.pem"
 	keyPath := caDir + "/ca.key.enc"
@@ -1342,10 +1323,8 @@ func parseEncryptedKeyJSON(data []byte) (nonce, ciphertext []byte, err error) {
 	return nonce, ciphertext, nil
 }
 
-// brokerTables are the credential broker's tables. Their columns have the same
-// types in both dialects, so rows copy as they are. Pending database cleanup
-// records must survive the move: each is a credential still to revoke. They
-// arrive without an owner, so the first live broker claims and revokes them.
+// brokerTables copy as-is (same column types in both dialects). Pending cleanup records must survive: each is a credential still to revoke.
+// They arrive without an owner, so the first live broker claims them.
 var brokerTables = []struct {
 	table string
 	reset map[string]any

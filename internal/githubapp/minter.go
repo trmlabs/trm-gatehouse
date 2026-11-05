@@ -1,7 +1,4 @@
-// Package githubapp mints short-lived GitHub App installation tokens scoped to
-// one repository and the minimum permissions, for the broker to inject into
-// git-over-HTTPS. The App's private key is held by a signer (Vault Transit by
-// default) and never by a worker; tokens never appear in logs or errors.
+// Package githubapp mints short-lived GitHub App installation tokens scoped to one repository; the App key is held by a signer, never a worker.
 package githubapp
 
 import (
@@ -26,14 +23,12 @@ type App struct {
 	InstallationID int64
 }
 
-// JWTSigner returns an RS256 (RSASSA-PKCS1-v1_5, SHA-256) signature over
-// input with the App's private key.
+// JWTSigner returns an RS256 signature over input with the App's private key.
 type JWTSigner interface {
 	SignRS256(ctx context.Context, input []byte) ([]byte, error)
 }
 
-// Permissions is the scope a token is minted with, beyond metadata read,
-// which every token has. Only these permissions can ever be requested.
+// Permissions is the scope a token is minted with beyond metadata read; only these can be requested.
 type Permissions struct {
 	Contents     string // "", "read" or "write"
 	PullRequests string // "" or "write"
@@ -43,26 +38,16 @@ type Permissions struct {
 	Statuses     string // "" or "read"
 }
 
-// ContentsRead and ContentsWrite are the git fetch and push scopes;
-// PullRequestsWrite opens pull requests and comments on them. Opening one
-// also reads its head and base refs, which GitHub checks with contents read
-// ("not all refs are readable" without it), so that scope carries it.
+// PullRequestsWrite carries contents read because GitHub checks the head and base refs with it.
 var (
 	ContentsRead      = Permissions{Contents: "read"}
 	ContentsWrite     = Permissions{Contents: "write"}
 	PullRequestsWrite = Permissions{Contents: "read", PullRequests: "write"}
-	// ActionsRead reads workflow runs, jobs, logs and artifacts;
-	// DeploymentsRead reads deployments and their statuses.
-	ActionsRead     = Permissions{Actions: "read"}
-	DeploymentsRead = Permissions{Deployments: "read"}
-	// ChecksRead reads a commit's check runs and their annotations;
-	// StatusesRead reads a commit's statuses.
-	ChecksRead   = Permissions{Checks: "read"}
-	StatusesRead = Permissions{Statuses: "read"}
-	// ActionsWrite runs a workflow run again. UpdateBranch merges a pull
-	// request's base into its head: GitHub asks an App for contents write on
-	// the head repository besides pull requests write. It also marks a draft
-	// ready, which GitHub refuses an App without contents write.
+	ActionsRead       = Permissions{Actions: "read"}
+	DeploymentsRead   = Permissions{Deployments: "read"}
+	ChecksRead        = Permissions{Checks: "read"}
+	StatusesRead      = Permissions{Statuses: "read"}
+	// UpdateBranch and marking a draft ready need contents write besides pull requests write.
 	ActionsWrite = Permissions{Actions: "write"}
 	UpdateBranch = Permissions{Contents: "write", PullRequests: "write"}
 )
@@ -100,8 +85,7 @@ func (p Permissions) request() map[string]string {
 type Token struct {
 	value string
 	Repo  string
-	// RepoID is GitHub's numeric id of Repo, from the one repository the
-	// token's answer lists, or 0 when GitHub did not give one.
+	// RepoID is GitHub's numeric id of Repo, or 0 when GitHub gave none.
 	RepoID      int64
 	Permissions Permissions
 	Expires     time.Time
@@ -117,28 +101,22 @@ func (t Token) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(t.String())) 
 
 var ErrUnavailable = errors.New("github installation token unavailable")
 
-// Minter mints and caches tokens per (installation, repository, access). A
-// token is reused until ten minutes before it expires; concurrent requests
-// for one key share a single mint, and a failed mint is not retried for five
-// seconds, so a broken App cannot be hammered.
+// Minter mints and caches tokens per (installation, repository, access), reusing one until ten minutes before expiry.
+// Concurrent requests share a mint, and a failed mint is not retried for five seconds.
 type Minter struct {
 	Signer JWTSigner
 	API    string // default https://api.github.com
 	Client *http.Client
 	Now    func() time.Time
-	// Scope returns what the catalog grants an installation; tokens are
-	// refused while the installation on GitHub is wider (see scope.go).
+	// Scope returns what the catalog grants an installation; tokens are refused while GitHub's installation is wider.
 	Scope func(installation int64) Scope
-	// ScopeMode decides what an installation beyond the catalog does: empty
-	// or ScopeRefuse stops its tokens, ScopeWarn reports and serves.
+	// ScopeMode: empty or ScopeRefuse stops tokens for an over-wide installation, ScopeWarn reports and serves.
 	ScopeMode ScopeMode
-	// ScopeTimeout bounds one installation check, every repository page
-	// included. Default 5 minutes.
+	// ScopeTimeout bounds one installation check including all pages. Default 5 minutes.
 	ScopeTimeout time.Duration
 	Log          *slog.Logger
 
-	// scopeMu guards the verdicts only; checks run outside it, one per
-	// installation at a time.
+	// scopeMu guards the verdicts only; checks run outside it, one per installation.
 	scopeMu       sync.Mutex
 	scopes        map[int64]scopeVerdict
 	scopeChecking map[int64]chan struct{}
@@ -216,8 +194,7 @@ func (m *Minter) Token(ctx context.Context, app App, repo string, permissions Pe
 	return t, nil
 }
 
-// Invalidate drops a cached token after GitHub rejects it, at most once per
-// key every 30 seconds.
+// Invalidate drops a cached token after GitHub rejects it, at most once per key every 30 seconds.
 func (m *Minter) Invalidate(app App, repo string, permissions Permissions) {
 	key := tokenKey{app.InstallationID, strings.ToLower(repo), permissions}
 	m.mu.Lock()
@@ -236,8 +213,7 @@ func (m *Minter) Invalidate(app App, repo string, permissions Permissions) {
 	delete(m.cache, key)
 }
 
-// Prune revokes and drops every cached token keep no longer allows, after a
-// catalog change removes or narrows a repository's grant.
+// Prune revokes and drops every cached token keep no longer allows.
 func (m *Minter) Prune(keep func(installation int64, repo string, p Permissions) bool) {
 	m.mu.Lock()
 	var gone []string
@@ -253,8 +229,7 @@ func (m *Minter) Prune(keep func(installation int64, repo string, p Permissions)
 	}
 }
 
-// RevokeAll revokes and drops every cached token, for shutdown and drain:
-// a token GitHub still honours for up to an hour must not outlive the broker.
+// RevokeAll revokes every cached token on shutdown, since GitHub honours one for up to an hour.
 func (m *Minter) RevokeAll() { m.Prune(func(int64, string, Permissions) bool { return false }) }
 
 func (m *Minter) api() string {
@@ -327,8 +302,7 @@ func (m *Minter) mint(ctx context.Context, app App, key tokenKey) (Token, error)
 	if json.Unmarshal(data, &granted) != nil || !tokenShape(granted.Token) || !granted.ExpiresAt.After(m.now().Add(refreshBefore)) {
 		return Token{}, ErrUnavailable
 	}
-	// Refuse a token broader than requested: more repositories or any other
-	// permission. It is revoked rather than left valid.
+	// Refuse and revoke a token broader than requested.
 	wide := len(granted.Repositories) != 1 || !strings.EqualFold(granted.Repositories[0].FullName, key.repo)
 	for name, level := range granted.Permissions {
 		if want, ok := requested[name]; !ok || level != want {
@@ -337,7 +311,7 @@ func (m *Minter) mint(ctx context.Context, app App, key tokenKey) (Token, error)
 	}
 	for name, want := range requested {
 		if name != "metadata" && granted.Permissions[name] != want {
-			wide = true // a requested permission is missing: refuse now rather than fail later
+			wide = true // a requested permission is missing
 		}
 	}
 	if wide {
@@ -361,14 +335,10 @@ func (m *Minter) revoke(api string, client *http.Client, token string) {
 	}
 }
 
-// maxTokenBytes bounds an installation token. GitHub's stateless format,
-// ghs_<app id>_<JWT>, is about 520 characters and varies with its claims;
-// 4096 leaves room for growth and still fits any request header.
+// maxTokenBytes bounds an installation token (about 520 characters today) and fits any request header.
 const maxTokenBytes = 4096
 
-// tokenShape checks only what makes a token safe to put in a header: a
-// plausible length and URL-safe base64 characters, with the dots of the JWT
-// in the stateless format. GitHub asks clients to treat the value as opaque.
+// tokenShape checks only that a token is safe in a header: plausible length and URL-safe base64 plus dots. The value is otherwise opaque.
 func tokenShape(t string) bool {
 	if len(t) < 20 || len(t) > maxTokenBytes {
 		return false

@@ -1,17 +1,7 @@
 //go:build loadpg
 
-// Scale / stress harness for the PostgreSQL broker, guarded by the `loadpg`
-// build tag and skipped unless pointed at a running Vault (database engine
-// configured) + PostgreSQL. It models a CRM deploying many agents that open DB
-// connections through the broker, and asserts the three scaling invariants:
-// no dangling connections/roles under churn, a bounded connection count (the DB
-// is never saturated beyond the cap), and long-lived sessions surviving churn.
-//
-//	VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root \
-//	AV_TEST_VAULT_MOUNT=database AV_TEST_VAULT_ROLE=readonly \
-//	AV_TEST_PG_UPSTREAM=127.0.0.1:5433 AV_TEST_PG_DB=appdb \
-//	AV_TEST_PG_ADMIN='postgres://vault_admin:vault-bootstrap-pw@127.0.0.1:5433/appdb?sslmode=disable' \
-//	go test -tags loadpg ./internal/server/ -run LoadPG -v -timeout 15m
+// Scale harness for the PostgreSQL broker, skipped unless pointed at a running Vault (database engine) and PostgreSQL.
+// Run with the AV_TEST_* and VAULT_* env set: go test -tags loadpg ./internal/server/ -run LoadPG -v -timeout 15m
 package server
 
 import (
@@ -33,8 +23,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// loadAuth maps each token to its own actor id, modeling distinct agents (so
-// the per-actor lease cap does not conflate independent agents).
 type loadAuth struct{}
 
 func (loadAuth) Authenticate(_ context.Context, token, _ string) (*pgproxy.AgentScope, error) {
@@ -89,8 +77,6 @@ func buildLoadBroker(t *testing.T, env loadEnv, maxConns int) (*pgproxy.Broker, 
 	return broker, ln.Addr().String()
 }
 
-// countMinted returns the number of live upstream connections and the number of
-// dangling roles whose names Vault generated (prefix "v-").
 func countMinted(t *testing.T, admin *pgx.Conn) (conns, roles int) {
 	t.Helper()
 	ctx := context.Background()
@@ -107,9 +93,6 @@ func connectAgent(ctx context.Context, addr, token, database string) (*pgx.Conn,
 	return pgx.Connect(ctx, fmt.Sprintf("postgres://agent:%s@%s/%s?sslmode=prefer", token, addr, database))
 }
 
-// TestLoadPG_ChurnNoDangling drives many short-lived connect->query->disconnect
-// cycles from distinct agents and asserts that upstream connections, dangling
-// roles, and goroutines all return to baseline.
 func TestLoadPG_ChurnNoDangling(t *testing.T) {
 	env := loadEnvOrSkip(t)
 	total := intEnv("AV_LOAD_TOTAL", 200)
@@ -195,7 +178,6 @@ func TestLoadPG_ChurnNoDangling(t *testing.T) {
 		t.Logf("connect latency (including failed attempts): p50=%s p95=%s p99=%s", samples[(len(samples)-1)*50/100], samples[(len(samples)-1)*95/100], samples[(len(samples)-1)*99/100])
 	}
 
-	// Settle: upstream connections and roles must drain back to baseline.
 	waitForDrain(t, admin, baseConns, baseRoles, 30*time.Second)
 
 	runtime.GC()
@@ -209,9 +191,6 @@ func TestLoadPG_ChurnNoDangling(t *testing.T) {
 	}
 }
 
-// TestLoadPG_SaturationCap offers far more concurrent connections than the
-// broker's MaxConns and asserts the upstream DB connection count never exceeds
-// the cap (the database is never saturated), while nothing dangles afterward.
 func TestLoadPG_SaturationCap(t *testing.T) {
 	env := loadEnvOrSkip(t)
 	const maxConns = 15
@@ -226,7 +205,6 @@ func TestLoadPG_SaturationCap(t *testing.T) {
 	_, addr := buildLoadBroker(t, env, maxConns)
 	baseConns, baseRoles := countMinted(t, admin)
 
-	// Hold connections open so the cap is under sustained pressure.
 	release := make(chan struct{})
 	var wg sync.WaitGroup
 	var held int64
@@ -247,7 +225,6 @@ func TestLoadPG_SaturationCap(t *testing.T) {
 		}()
 	}
 
-	// Sample the upstream connection count while the burst is held.
 	var peak int
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
@@ -266,8 +243,6 @@ func TestLoadPG_SaturationCap(t *testing.T) {
 	waitForDrain(t, admin, baseConns, baseRoles, 30*time.Second)
 }
 
-// TestLoadPG_LongLivedUnderChurn holds a cohort of long-lived sessions open and
-// keeps them usable while short-lived churn runs around them.
 func TestLoadPG_LongLivedUnderChurn(t *testing.T) {
 	env := loadEnvOrSkip(t)
 	admin, err := pgx.Connect(context.Background(), env.adminDSN)
@@ -291,7 +266,6 @@ func TestLoadPG_LongLivedUnderChurn(t *testing.T) {
 		longConns = append(longConns, conn)
 	}
 
-	// Churn short-lived connections concurrently.
 	stop := make(chan struct{})
 	var churnWG sync.WaitGroup
 	for w := 0; w < 20; w++ {
@@ -314,7 +288,6 @@ func TestLoadPG_LongLivedUnderChurn(t *testing.T) {
 		}(w)
 	}
 
-	// Repeatedly exercise the long-lived sessions during the churn window.
 	for round := 0; round < 5; round++ {
 		time.Sleep(600 * time.Millisecond)
 		for i, conn := range longConns {
@@ -336,10 +309,7 @@ func TestLoadPG_LongLivedUnderChurn(t *testing.T) {
 	waitForDrain(t, admin, baseConns, baseRoles, 30*time.Second)
 }
 
-// TestLoadPG_RenewalRealVault holds a session open across several role TTLs and
-// asserts it stays usable — exercising real Vault lease renewal end to end.
-// Requires the Vault role's default_ttl to be short (e.g. 8s) and max_ttl
-// comfortably larger than the hold window.
+// Requires the Vault role's default_ttl to be short (e.g. 8s) and max_ttl well above the hold window.
 func TestLoadPG_RenewalRealVault(t *testing.T) {
 	env := loadEnvOrSkip(t)
 	hold := time.Duration(intEnv("AV_LOAD_RENEW_HOLD_SEC", 22)) * time.Second
@@ -379,9 +349,6 @@ func TestLoadPG_RenewalRealVault(t *testing.T) {
 	waitForDrain(t, admin, baseConns, baseRoles, 30*time.Second)
 }
 
-// TestLoadPG_AbruptTermination hard-closes the TCP socket mid-session (RST)
-// across many iterations and asserts nothing dangles — the teardown path must
-// fire on abnormal termination, not just clean disconnects.
 func TestLoadPG_AbruptTermination(t *testing.T) {
 	env := loadEnvOrSkip(t)
 	iterations := intEnv("AV_LOAD_ABRUPT", 120)
@@ -416,8 +383,6 @@ func TestLoadPG_AbruptTermination(t *testing.T) {
 			if err != nil {
 				return
 			}
-			// Establish the session, then hard-close the underlying socket
-			// (RST-like) without a clean Terminate.
 			var n int
 			_ = conn.QueryRow(ctx, "SELECT count(*) FROM customers").Scan(&n)
 			if raw := conn.PgConn().Conn(); raw != nil {
@@ -438,8 +403,6 @@ func TestLoadPG_AbruptTermination(t *testing.T) {
 	}
 }
 
-// waitForDrain polls until upstream connections and roles return to baseline,
-// failing with the observed counts if they do not (a dangling leak).
 func waitForDrain(t *testing.T, admin *pgx.Conn, baseConns, baseRoles int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -466,8 +429,6 @@ func intEnv(key string, def int) int {
 	return def
 }
 
-// Two Vault roles and two databases share one broker; saturating their shared
-// endpoint must not misroute a session or leave generated roles behind.
 func TestLoadPG_MultipleDatabases(t *testing.T) {
 	env := loadEnvOrSkip(t)
 	secondDB, secondRole := os.Getenv("AV_TEST_PG_SECOND_DB"), os.Getenv("AV_TEST_VAULT_SECOND_ROLE")
@@ -589,7 +550,6 @@ func TestLoadPG_DisconnectStopsActiveQuery(t *testing.T) {
 	if !running {
 		t.Fatal("query did not start")
 	}
-	// Simulate a crashed client without sending a protocol Terminate or Cancel.
 	_ = agent.PgConn().Conn().Close()
 	<-done
 	deadline = time.Now().Add(5 * time.Second)

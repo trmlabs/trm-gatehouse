@@ -226,9 +226,8 @@ func (r departmentResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _
 	return r.svc, nil
 }
 
-// session_open records how long admission took, the credential mint
-// included, and the person's object ID and department as the directory gave
-// them.
+// session_open records how long admission took, the credential mint included, and the person's object ID and
+// department as the directory gave them.
 func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)
@@ -252,9 +251,8 @@ func TestBrokerSessionOpenRecordsAdmissionTimeAndDepartment(t *testing.T) {
 	}
 }
 
-// automationResolver reports a listed Automation's run, as the catalog
-// resolver does: the person the run's token names, the owning team, and no
-// directory answer. It refuses when refusal is set.
+// automationResolver reports a listed Automation's run, as the catalog resolver does: the person the run's
+// token names, the owning team, and no directory answer.
 type automationResolver struct {
 	svc     *DatabaseService
 	refusal string
@@ -273,9 +271,8 @@ func (r automationResolver) ResolveDatabase(ctx context.Context, _ AgentScope, _
 	return r.svc, nil
 }
 
-// A database row from an Automation's run names the person whose run it is
-// as the requester, with the run's source, the Automation and its owning
-// team, admitted or refused.
+// A database row from an Automation's run names the person whose run it is as the requester, with the run's
+// source, the Automation and its owning team, admitted or refused.
 func TestBrokerRowsNameAnAutomationsRun(t *testing.T) {
 	for _, refusal := range []string{"", "automation_not_granted"} {
 		lease := newLease()

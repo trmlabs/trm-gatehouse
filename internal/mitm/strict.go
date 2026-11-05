@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,8 +26,7 @@ const strictResponseLimit = 1 << 20
 
 var strictPlaceholder = regexp.MustCompile(`^__vault_[A-Z][A-Z0-9_]*__$`)
 
-// strictAttempt never copies a request URL, arbitrary header, method, or body.
-// Routing metadata is included only after an exact configured host matched.
+// strictAttempt never copies a request URL, arbitrary header, method or body; routing metadata is included only after an exact configured host matched.
 func strictAttempt(scope *brokercore.ProxyScope, inject *brokercore.InjectResult, method, host, target, decision string) requestlog.Attempt {
 	a := requestlog.Attempt{ActorType: "unknown", Method: "UNKNOWN", Decision: decision}
 	if method == "GET" || method == "HEAD" {
@@ -48,24 +48,21 @@ func strictAttempt(scope *brokercore.ProxyScope, inject *brokercore.InjectResult
 	return a
 }
 
-// Bound storage admission synchronously, including overload denials. There is
-// no per-denial background writer or queue to grow when storage is unavailable.
+// Bound storage admission synchronously, overload denials included: no per-denial background writer or queue grows when storage is unavailable.
 func (p *Proxy) beginStrictAudit(ctx context.Context, a requestlog.Attempt) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return p.durableAudit.Begin(ctx, a)
 }
 
-// finishStrictAudit detaches audit completion from client disconnects, but bounds
-// the storage operation. An error leaves the acknowledged attempt unknown.
+// finishStrictAudit detaches audit completion from client disconnects but bounds the storage operation; an error leaves the attempt unknown.
 func (p *Proxy) finishStrictAudit(ctx context.Context, id, result string, status int) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	return p.durableAudit.Finish(ctx, id, requestlog.Outcome{Result: result, Status: status})
 }
 
-// strictDeny refuses before the catalog. wait is a rate limiter's own wait,
-// sent as Retry-After by the catalog adapter, or 0.
+// strictDeny refuses before the catalog; wait is a limiter's own wait, sent as Retry-After by the catalog adapter, or 0.
 func (p *Proxy) strictDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, wait time.Duration) {
 	if p.adapter != nil {
 		if !p.adapter.valid() {
@@ -98,12 +95,9 @@ func (p *Proxy) strictUnauthenticatedDeny(w http.ResponseWriter, r *http.Request
 	p.strictDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, 0)
 }
 
-// strictAuthLimitDeny is strictUnauthenticatedDeny for an address over its
-// failed sign-in budget: a 429 whose Retry-After is the limiter's own wait,
-// which can be minutes, not a fixed few seconds.
+// strictAuthLimitDeny is strictUnauthenticatedDeny for an address over its failed sign-in budget: a 429 with the limiter's own wait as Retry-After.
 func (p *Proxy) strictAuthLimitDeny(w http.ResponseWriter, r *http.Request, d ratelimit.Decision) {
-	// On the static-token listener the row names the agent id the token
-	// claimed and the peer, so an operator can see whose attempts are limited.
+	// On the static-token listener the row names the claimed agent id and the peer.
 	if onlyStaticToken(connKinds(r.Context())) && p.adapter != nil && p.adapter.valid() {
 		key := &brokercore.KeyDenial{}
 		if token, _, err := brokercore.ParseProxyAuth(r); err == nil {
@@ -115,7 +109,7 @@ func (p *Proxy) strictAuthLimitDeny(w http.ResponseWriter, r *http.Request, d ra
 		if key.Kid == "" {
 			key.Kid = "invalid"
 		}
-		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusTooManyRequests, "identity_rate_limited", key, d.RetryAfter)
+		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusTooManyRequests, "refused", "identity_rate_limited", key, d.RetryAfter)
 		return
 	}
 	p.strictDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), http.StatusTooManyRequests, d.RetryAfter)
@@ -124,16 +118,31 @@ func (p *Proxy) strictAuthLimitDeny(w http.ResponseWriter, r *http.Request, d ra
 // keysUnavailableRetry is the wait an agent is told after a signing-key fetch failed.
 const keysUnavailableRetry = 5 * time.Second
 
-// strictIdentityDeny refuses a caller whose identity was not admitted (403), or 503 with Retry-After when its signing keys could not be fetched.
+// DefaultIdentityRetry is the Retry-After for an identity check the broker could not complete, so three retries span a minute; AGENT_VAULT_MITM_IDENTITY_RETRY_SECONDS overrides it.
+const DefaultIdentityRetry = 20 * time.Second
+
+// MaxIdentityRetry caps AGENT_VAULT_MITM_IDENTITY_RETRY_SECONDS so a mistyped value cannot hold agents for hours or overflow.
+const MaxIdentityRetry = 10 * time.Minute
+
+// strictIdentityDeny refuses a caller whose identity was not admitted (403), or 503 with Retry-After when its signing keys could not be fetched or a check could not complete.
 // With the catalog's signed audit, the row names the refusing check.
 func (p *Proxy) strictIdentityDeny(w http.ResponseWriter, r *http.Request, err error) {
 	reason := brokercore.DenialReason(err)
+	unavailable := brokercore.DenialUnavailable(err)
 	if p.adapter != nil && p.adapter.valid() && reason != "" {
-		status, wait := http.StatusForbidden, time.Duration(0)
-		if reason == runnerid.ReasonKeysUnavailable {
+		status, outcome, wait := http.StatusForbidden, "refused", time.Duration(0)
+		switch {
+		case unavailable:
+			status, outcome, wait = http.StatusServiceUnavailable, "broker_unavailable", p.identityRetry
+		case reason == runnerid.ReasonKeysUnavailable:
 			status, wait = http.StatusServiceUnavailable, keysUnavailableRetry
 		}
-		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, "identity_"+reason, brokercore.DenialKey(err), wait)
+		p.adapterIdentityDeny(w, r, strictAttempt(nil, nil, r.Method, "", "", "deny"), status, outcome, "identity_"+reason, brokercore.DenialKey(err), wait)
+		return
+	}
+	if unavailable {
+		w.Header().Set("Retry-After", strconv.Itoa(int(p.identityRetry/time.Second)))
+		p.strictUnauthenticatedDeny(w, r, http.StatusServiceUnavailable)
 		return
 	}
 	p.strictUnauthenticatedDeny(w, r, http.StatusForbidden)
@@ -150,8 +159,7 @@ func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, ho
 	}
 	attempt := strictAttempt(scope, nil, r.Method, host, target, "deny")
 	deny := func(status int) { p.strictDeny(w, r, attempt, status, 0) }
-	// The first release is a read-only, header-only workflow. Reject unsupported
-	// request surfaces before reading any Vault credential or opening upstream.
+	// Read-only, header-only workflow: reject unsupported request surfaces before reading any Vault credential or opening upstream.
 	if scope == nil {
 		deny(http.StatusForbidden)
 		return
@@ -164,8 +172,7 @@ func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, ho
 		deny(http.StatusBadRequest)
 		return
 	}
-	// Refuse an absolute request target inside CONNECT; routing is always pinned
-	// to the authenticated tunnel target, including the expected Host authority.
+	// Refuse an absolute request target inside CONNECT; routing is pinned to the authenticated tunnel target.
 	expected := hostHeaderForScheme("https", target)
 	if r.URL.IsAbs() || (r.Host != target && r.Host != expected) {
 		deny(http.StatusBadRequest)
@@ -191,14 +198,12 @@ func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, ho
 		deny(http.StatusForbidden)
 		return
 	}
-	// Wildcard destinations are outside this release: only configured exact hosts
-	// may contribute routing metadata or receive credentials.
+	// Wildcard destinations are unsupported: only exact configured hosts may contribute routing metadata or receive credentials.
 	if inject == nil || inject.Passthrough || inject.MatchedName == "" || inject.MatchedHost != host || len(inject.Headers) > 0 || len(inject.Substitutions) == 0 || len(inject.CredentialKeys) == 0 {
 		deny(http.StatusForbidden)
 		return
 	}
-	// Fixed parameters come only from the matched operator configuration. Incoming
-	// query strings and bodies remain forbidden above, including exact copies.
+	// Fixed parameters come only from the matched operator configuration; incoming query strings and bodies stay forbidden.
 	fixed := broker.Service{Host: inject.MatchedHost, Path: inject.MatchedPath, FixedQuery: inject.FixedQuery}
 	if fixed.ValidateFixedQuery() != nil || (inject.FixedQuery != nil && (r.Method != http.MethodGet || inject.MatchedPath != r.URL.Path || r.URL.RawPath != "" || (inject.MatchedPort == nil && port != 443))) {
 		deny(http.StatusForbidden)
@@ -243,9 +248,7 @@ func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, ho
 			}
 		}
 	}
-	// The strict profile forwards only the supported credential carriers.
-	// Arbitrary headers can change destination routing, methods or identity.
-	// Transport-owned headers are constructed below, never copied from callers.
+	// Forward only supported credential carriers: arbitrary headers can change routing, methods or identity, and transport-owned headers are constructed below.
 	for _, name := range []string{"Authorization", "X-Api-Key"} {
 		for _, value := range r.Header.Values(name) {
 			out.Header.Add(name, value)
@@ -268,8 +271,7 @@ func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, ho
 			if basic {
 				encoded := strings.TrimPrefix(marker, "Basic ")
 				decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
-				// Only an exact placeholder username and empty password are supported.
-				// Canonical encoding also excludes whitespace and ambiguous encodings.
+				// Only an exact placeholder username and empty password are supported; canonical encoding excludes whitespace and ambiguous encodings.
 				if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded || !strings.HasSuffix(string(decoded), ":") {
 					deny(http.StatusBadRequest)
 					return
@@ -291,8 +293,7 @@ func (p *Proxy) forwardStrict(w http.ResponseWriter, r *http.Request, target, ho
 					return
 				}
 				out.SetBasicAuth(secret, "")
-				// Base64(secret + ":") is not necessarily an encoding of secret
-				// alone. Include the actual Basic payload in response screening.
+				// Base64(secret + ":") is not necessarily an encoding of secret alone, so screen the actual Basic payload too.
 				responseSecrets["basic:"+marker] = secret + ":"
 			} else {
 				out.Header.Set(name, prefix+secret)

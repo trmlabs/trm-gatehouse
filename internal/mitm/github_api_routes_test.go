@@ -25,9 +25,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/injection"
 )
 
-// routesFixture fronts a fake api.github.com for a repository that grants
-// every optional github-api route. Each route answers only to a token minted
-// with exactly the scope it needs, and the fake records what GitHub received.
+// routesFixture fronts a fake api.github.com for a repository granting every optional route; each route answers only to a token with exactly its scope.
 type routesFixture struct {
 	*apiFixture
 	received     []string // "METHOD path?query body" for every request after the scope reads
@@ -41,8 +39,6 @@ func newRoutesFixture(t *testing.T) *routesFixture {
 	return newRoutesFixtureWith(t, func(catalog string) string { return catalog })
 }
 
-// newRoutesFixtureWith is newRoutesFixture with its catalog document passed
-// through change first.
 func newRoutesFixtureWith(t *testing.T, change func(catalog string) string) *routesFixture {
 	t.Helper()
 	saved := githubDownloadHosts
@@ -97,9 +93,7 @@ func newRoutesFixtureWith(t *testing.T, change func(catalog string) string) *rou
 		f.mu.Unlock()
 		want, ok := need[kind]
 		if kind == "pulls" && r.Method == http.MethodGet && scope == readyScope {
-			// pr.ready reads its target with the token it marks it ready with.
-			// A dispatch's contents write token is refused the pull request,
-			// as GitHub refused it on staging.
+			// pr.ready reads its target with the token it marks ready with; a dispatch's contents write token is refused the pull request.
 			want = scope
 		}
 		if !ok || scope != want {
@@ -108,10 +102,7 @@ func newRoutesFixtureWith(t *testing.T, change func(catalog string) string) *rou
 		}
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		// Reads the broker makes to check a target: pull requests 12 (the
-		// pool's own), 30 (under the repository's pull request prefix) and 13
-		// (another pool's); comments 5 (the App's, on 30), 6 (a person's) and 8
-		// (another App's).
+		// Reads the broker makes to check a target: pull requests 12 (pool's own), 30 (repository prefix), 13 (another pool's); comments 5 (the App's, on 30), 6 (a person's), 8 (another App's).
 		switch r.Method + " " + r.URL.Path {
 		case "GET /repos/example-org/example-repo/pulls/12":
 			fmt.Fprint(w, `{"number":12,"node_id":"PR_twelve","head":{"ref":"cursor/pool-agent/x","repo":{"full_name":"example-org/example-repo"}}}`)
@@ -199,8 +190,7 @@ func newRoutesFixtureWith(t *testing.T, change func(catalog string) string) *rou
 	t.Cleanup(github.Close)
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(github.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
-	// The API on api.example.com and git on example.com, as api.github.com
-	// and github.com: a code read uses the git entry on the matching host.
+	// The API on api.example.com and git on example.com stand for api.github.com and github.com.
 	f.host = "api.example.com"
 	catalog, err := httpcatalog.Parse([]byte(change(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"api.example.com","port":%d,"kind":"github-api",
 		"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",
@@ -246,13 +236,9 @@ func (f *routesFixture) last() string {
 
 const routeRepo = "/repos/example-org/example-repo"
 
-// readyScope is the token scope GitHub asks for to mark a draft ready.
 const readyScope = `{"contents":"write","metadata":"read","pull_requests":"write"}`
 
-// readyAnswers are what the fake GitHub answers readyMutation for each pull
-// request, as GitHub answers it: 12 and 30 become ready, 41 is refused inside
-// an HTTP 200 (as for a token without contents write), and 42 stays a draft.
-// Any other pull request gets 401.
+// readyAnswers are the fake's answers to readyMutation: 12 and 30 become ready, 41 is refused inside an HTTP 200, 42 stays a draft, any other gets 401.
 var readyAnswers = map[string]string{
 	"PR_twelve": `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":12,"isDraft":false}}}}`,
 	"PR_thirty": `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":30,"isDraft":false}}}}`,
@@ -283,7 +269,6 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 		{"GET", routeRepo + "/deployments?environment=preview-30", "", "GET " + routeRepo + "/deployments?environment=preview-30"},
 		{"POST", routeRepo + "/pulls/30/ready", "", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_thirty"}}`},
 		{"POST", routeRepo + "/pulls/12/ready", "{}", `POST /graphql {"query":"` + readyMutation + `","variables":{"id":"PR_twelve"}}`},
-		// The reads gh run list, view and watch make, and a CI verifier's reads of a commit.
 		{"GET", routeRepo + "/actions/workflows/ci.yml", "", "GET " + routeRepo + "/actions/workflows/ci.yml"},
 		{"GET", routeRepo + "/actions/runs/9?exclude_pull_requests=true", "", "GET " + routeRepo + "/actions/runs/9?exclude_pull_requests=true"},
 		{"GET", routeRepo + "/check-runs/9/annotations?per_page=100", "", "GET " + routeRepo + "/check-runs/9/annotations?per_page=100"},
@@ -306,8 +291,7 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 			t.Errorf("%s %s: %d %s\n got  %s\n want %s", tc.method, tc.path, code, body, f.last(), tc.want)
 		}
 	}
-	// A comment read by id reaches GitHub with the pull request scope; the fake
-	// answers it without logging it, so the audit row is what shows it passed.
+	// A comment read by id reaches GitHub with the pull request scope; the fake does not log it, so the audit row shows it passed.
 	if code, body := f.post(t, "GET", routeRepo+"/issues/comments/5", "Bearer "+githubTokenPlaceholder, ""); code != 200 || f.audit.last().Outcome != "completed" || f.audit.last().Operation != "pr.read" {
 		t.Errorf("read a comment: %d %s %+v", code, body, f.audit.last())
 	}
@@ -343,11 +327,7 @@ func TestGitHubAPIRoutesReachGitHubRebuilt(t *testing.T) {
 	}
 }
 
-// GitHub answers a ready mutation it refuses with HTTP 200 and an errors list.
-// The broker reads the whole answer: a pull request GitHub did not mark ready
-// is a 502 with a fixed body and a graphql_error row, so gh exits non-zero,
-// and the log names the pull request and the error types but never GitHub's
-// message. Every mutation carries contents write besides pull requests write.
+// GitHub answers a refused ready mutation with HTTP 200 and an errors list; the broker turns it into a 502 with a fixed body and a graphql_error row, logging error types but never GitHub's message.
 func TestGitHubAPIReadyChecksGitHubsAnswer(t *testing.T) {
 	f := newRoutesFixture(t)
 	code, body := f.post(t, "POST", routeRepo+"/pulls/30/ready", "", "")
@@ -380,7 +360,6 @@ func TestGitHubAPIReadyChecksGitHubsAnswer(t *testing.T) {
 	if logs := f.logs.String(); strings.Contains(logs, "Resource not accessible") {
 		t.Errorf("GitHub's message reached the log: %s", logs)
 	}
-	// Any status but 200 is relayed as before.
 	if code, body := f.post(t, "POST", routeRepo+"/pulls/43/ready", "", ""); code != 401 || f.audit.last().Outcome != "completed" || f.audit.last().Status != 401 {
 		t.Errorf("401 from GitHub: %d %s, row %+v", code, body, f.audit.last())
 	}
@@ -397,8 +376,6 @@ func TestGitHubAPIReadyChecksGitHubsAnswer(t *testing.T) {
 	}
 }
 
-// readyRefused accepts only an answer that shows the pull request asked for
-// as no longer a draft.
 func TestReadyRefused(t *testing.T) {
 	for _, tc := range []struct {
 		answer, reason string
@@ -437,9 +414,7 @@ func TestGitHubAPIDownloadsFollowOnlyGitHubsRedirect(t *testing.T) {
 	}
 }
 
-// A comment read by id is held to a pull request in reach, as an edit is: a
-// person's comment on one is readable, a plain issue's comment is refused with
-// an audit row and no body reaches the worker.
+// A comment read by id is held to a pull request in reach: a plain issue's comment is refused with an audit row and no body reaches the worker.
 func TestGitHubAPIRoutesReadCommentsOnPullRequestsOnly(t *testing.T) {
 	f := newRoutesFixture(t)
 	if code, body := f.post(t, "GET", routeRepo+"/issues/comments/6", "Bearer "+githubTokenPlaceholder, ""); code != 200 || f.audit.last().Outcome != "completed" || f.audit.last().Operation != "pr.read" {
@@ -451,8 +426,6 @@ func TestGitHubAPIRoutesReadCommentsOnPullRequestsOnly(t *testing.T) {
 	}
 }
 
-// Writes to an existing pull request reach only the pool's own and those under
-// the repository's pull request prefixes; a comment edit only the App's own.
 func TestGitHubAPIRoutesRefuseOtherTargets(t *testing.T) {
 	f := newRoutesFixture(t)
 	for _, tc := range []struct {
@@ -469,8 +442,6 @@ func TestGitHubAPIRoutesRefuseOtherTargets(t *testing.T) {
 		{"POST", routeRepo + "/issues/30/labels", `["preview"]`, "request_shape"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"deploy","client_payload":{"pr_number":30}}`, "request_shape"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":"x"}`, "request_shape"},
-		// A dispatch acts only on a pull request in the pool's reach, named
-		// where the broker can read it; any payload it cannot resolve is refused.
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":13}}`, "pull_request_target"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":"13"}}`, "pull_request_target"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build"}`, "request_shape"},
@@ -517,9 +488,7 @@ func TestGitHubAPIRoutesRefuseOtherTargets(t *testing.T) {
 	}
 }
 
-// A dispatch's token holds contents write alone, so the broker reads the pull
-// request it names with a pull requests token, and a read GitHub refuses is
-// logged with GitHub's status, never its message or the token.
+// A dispatch's token holds contents write alone, so the target is read with a pull requests token; a refused read is logged with GitHub's status, never its message or the token.
 func TestGitHubAPIDispatchReadsItsTargetWithPullRequests(t *testing.T) {
 	f := newRoutesFixture(t)
 	if code, body := f.post(t, "POST", routeRepo+"/dispatches", "", `{"event_type":"preview-build","client_payload":{"pr_number":30}}`); code != 200 || f.audit.last().Outcome != "completed" {
@@ -537,9 +506,7 @@ func TestGitHubAPIDispatchReadsItsTargetWithPullRequests(t *testing.T) {
 	}
 }
 
-// A pool named in a repository's poolOperations uses only those operations
-// there, and its dispatch reaches only a pull request in its own reach, not
-// one under another pool's pull request prefixes.
+// A pool named in poolOperations uses only those operations there, and its dispatch reaches only a pull request in its own reach.
 func TestGitHubAPIPoolOperations(t *testing.T) {
 	f := newRoutesFixtureWith(t, func(catalog string) string {
 		return strings.NewReplacer(`"pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write",`,
@@ -552,9 +519,7 @@ func TestGitHubAPIPoolOperations(t *testing.T) {
 		{"GET", routeRepo + "/pulls/12", "", "completed"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":12}}`, "completed"},
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":30}}`, "completed"},
-		// Another pool's pull request, under its own pull request prefix.
 		{"POST", routeRepo + "/dispatches", `{"event_type":"preview-build","client_payload":{"pr_number":14}}`, "pull_request_target"},
-		// Operations the repository has and this pool does not.
 		{"POST", routeRepo + "/issues/12/comments", `{"body":"x"}`, "pool"},
 		{"POST", routeRepo + "/pulls", `{"head":"cursor/pool-agent/x","base":"main"}`, "pool"},
 		{"GET", routeRepo + "/pulls?state=open", "", "pool"},
@@ -568,9 +533,7 @@ func TestGitHubAPIPoolOperations(t *testing.T) {
 	}
 }
 
-// An Automation's pool reaches no GitHub API operation on a repository whose
-// line does not name it in poolOperations, whatever the repository grants:
-// every route is refused before a token is minted or GitHub is asked.
+// An Automation's pool reaches no operation on a repository that does not name it in poolOperations; every route is refused before a token is minted.
 func TestGitHubAPIAutomationPoolNeedsPoolOperations(t *testing.T) {
 	f := newRoutesFixtureWith(t, func(catalog string) string {
 		return strings.Replace(catalog, `{"entries":[`, `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],"entries":[`, 1)

@@ -1,16 +1,7 @@
 //go:build realvault
 
-// Real HashiCorp Vault integration test for the database secrets-engine reader.
-// Guarded by the `realvault` build tag and skipped unless pointed at a running
-// Vault (VAULT_ADDR + a token/AppRole) whose database engine is configured with
-// a role that mints PostgreSQL credentials. It drives the real Client against
-// real Vault and verifies the minted credential against real PostgreSQL:
-//
-//	VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root \
-//	AV_TEST_VAULT_MOUNT=database AV_TEST_VAULT_ROLE=readonly \
-//	AV_TEST_PG_UPSTREAM=127.0.0.1:5433 AV_TEST_PG_DB=appdb \
-//	AV_TEST_PG_ADMIN='postgres://vault_admin:vault-bootstrap-pw@127.0.0.1:5433/appdb?sslmode=disable' \
-//	go test -tags realvault ./internal/hashicorp/ -run RealVault -v
+// Real-Vault test for the database reader; run `go test -tags realvault ./internal/hashicorp/ -run RealVault`
+// with VAULT_ADDR, a token or AppRole, and the AV_TEST_VAULT_* and AV_TEST_PG_* variables set.
 package hashicorp
 
 import (
@@ -43,7 +34,6 @@ func TestRealVault_DatabaseEngine_EndToEnd(t *testing.T) {
 		t.Fatalf("NewClient against real Vault: %v", err)
 	}
 
-	// Two reads must produce two distinct dynamic credentials.
 	first, err := client.ReadDatabaseCredential(ctx, mount, role)
 	if err != nil {
 		t.Fatalf("first ReadDatabaseCredential: %v", err)
@@ -61,7 +51,6 @@ func TestRealVault_DatabaseEngine_EndToEnd(t *testing.T) {
 		t.Fatalf("malformed credential: %+v", first)
 	}
 
-	// The minted credential must actually authenticate to PostgreSQL.
 	userDSN := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", first.Username, first.Password, upstream, database)
 	conn, err := pgx.Connect(ctx, userDSN)
 	if err != nil {
@@ -82,7 +71,6 @@ func TestRealVault_DatabaseEngine_EndToEnd(t *testing.T) {
 		}
 	}
 
-	// Revocation must drop the role in Postgres.
 	if err := client.RevokeLease(ctx, first.LeaseID); err != nil {
 		t.Fatalf("RevokeLease: %v", err)
 	}

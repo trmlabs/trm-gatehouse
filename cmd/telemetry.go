@@ -24,9 +24,7 @@ func initTelemetry() {
 	tel = telemetry.New(posthogAPIKey, version)
 }
 
-// clientHeaderTransport wraps an http.RoundTripper and injects the
-// X-AV-Client header on every outbound request so the server can
-// attribute actions to CLI vs. web vs. direct API callers.
+// clientHeaderTransport injects X-AV-Client on every request so the server can attribute callers.
 type clientHeaderTransport struct {
 	base http.RoundTripper
 }

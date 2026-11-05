@@ -63,9 +63,7 @@ func NewSyncer(s SyncerStore, fetcher SecretsFetcher, dek []byte, logger *slog.L
 	}
 }
 
-// Run loops until ctx is cancelled, then waits for in-flight refreshes to
-// finish. Return implies no goroutine is still reading s.dek, so the server
-// can safely wipe it on shutdown.
+// Run loops until ctx is cancelled, then waits for in-flight refreshes so the server can safely wipe s.dek.
 func (s *Syncer) Run(ctx context.Context) {
 	if s.fetcher == nil {
 		s.logger.Info("infisical syncer disabled (no client)")
@@ -112,9 +110,7 @@ func (s *Syncer) tick(ctx context.Context) {
 	}
 }
 
-// RefreshOnce runs a single synchronous refresh, reusing the periodic
-// syncer's in-flight guard. On failure refresh updates the row's health
-// and returns the error so the caller can map it to an HTTP status.
+// RefreshOnce runs one synchronous refresh under the syncer's in-flight guard and returns any error.
 func (s *Syncer) RefreshOnce(ctx context.Context, cs store.VaultCredentialStore) error {
 	if s.fetcher == nil {
 		return ErrSyncerDisabled
@@ -194,9 +190,7 @@ func (s *Syncer) refresh(ctx context.Context, cs store.VaultCredentialStore) err
 		return nil
 	}
 
-	// Replace + UpdateHealth are intentionally not in one transaction: a rare
-	// failure here leaves fresh credentials with stale last_synced_at, which
-	// the next tick reconciles. Credentials are authoritative.
+	// Replace and UpdateHealth are not one transaction: a failure leaves stale last_synced_at, which the next tick reconciles.
 	if err := s.store.UpdateVaultCredentialStoreHealth(ctx, cs.VaultID, store.SyncStatusOK, "", s.clock()); err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, context.Canceled) {
 		s.logger.Warn("updating health=ok failed",
 			slog.String("vault_id", cs.VaultID),

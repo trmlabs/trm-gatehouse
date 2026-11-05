@@ -26,8 +26,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// automationRunsFor names five Automations that run on one Pod, so one claimed
-// run serves them all: each token is one Automation's run.
+// automationRunsFor names five Automations on one Pod; each token is one Automation's run.
 var automationRunsFor = cursorRunner{
 	"reader":   automationWriteRun("auto-reader"),
 	"writer":   automationWriteRun("auto-writer"),
@@ -40,11 +39,7 @@ func automationWriteRun(automation string) runnerid.Session {
 	return runnerid.Session{Kind: runnerid.KindPerson, Subject: "owner@example.com", Owner: "user:1", Run: "bc-1", Source: "AUTOMATIONS", Automation: automation}
 }
 
-// writeGrantCatalogFor is one Automation pool with a git entry and a github-api
-// entry on one repository, where the pool may push factory/ and open, read,
-// list, comment on and update the branch of pull requests. Five Automations
-// list both entries and differ only in write: an empty list, both entries, the
-// github-api entry only, the git entry only, and no write key at all.
+// writeGrantCatalogFor is one pool with a git and a github-api entry; five Automations differ only in their write list (empty, both, github-api only, git only, no key).
 const writeGrantCatalogFor = `{"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"worker","identity":"cursor-automation"}],
  "entries":[
   {"name":"github-api","host":"api.example.com","kind":"github-api","pools":["pool-agent"],"git":{"appID":7,"installationID":42,"repos":[
@@ -89,7 +84,6 @@ func newAutomationWriteFixture(t *testing.T) *automationWriteFixture {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/pulls/12" {
-			// The pool's own pull request: its head is under factory/.
 			_, _ = io.WriteString(w, `{"number":12,"node_id":"PR_twelve","head":{"ref":"factory/x","repo":{"full_name":"example-org/example-repo"}}}`)
 			return
 		}
@@ -125,8 +119,6 @@ func newAutomationWriteFixture(t *testing.T) *automationWriteFixture {
 	return f
 }
 
-// send makes one request through the broker as one Automation's run, and
-// returns the status and the refusal code the broker answered with, if any.
 func (f *automationWriteFixture) send(t *testing.T, automation, method, host, path, body string) (int, string) {
 	t.Helper()
 	client := newTrustingClient(f.proxyURL, url.User("workload-token"), f.roots)
@@ -151,16 +143,8 @@ func (f *automationWriteFixture) counts() (minted, received int) {
 	return f.minted, len(f.received)
 }
 
-// What an Automation may do on GitHub follows its own block, not the pool's:
-// every Automation here lists the same two entries on the same pool, yet one
-// with an empty write list fetches and reads only, one with write on both
-// entries pushes and changes pull requests, and one with write on a single
-// entry does only what that entry carries. One whose block has no write key
-// keeps everything the pool gives, so a broker that reads write changes
-// nothing until a catalog sets it. A CI restart is a branch update that
-// reaches no further than a push, so it needs both. A refused request is answered before
-// a token is minted and never reaches GitHub, and its audit row names the
-// Automation and the entry.
+// Write access follows the Automation's own block, not the pool's, and a CI restart needs both entries.
+// A refused request mints no token, never reaches GitHub, and its audit row names the Automation and entry.
 func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 	f := newAutomationWriteFixture(t)
 	const (
@@ -182,9 +166,7 @@ func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 	pushAdvert := request{"push advertisement", git, "GET", "/example-org/example-repo.git/info/refs?service=git-receive-pack", "", "github"}
 	push := request{"push", git, "POST", "/example-org/example-repo.git/git-receive-pack", "0000", "github"}
 	restart := request{"update a branch", api, "PUT", app + "/pulls/12/update-branch", "", "github-api"}
-	// allowed lists, for each Automation, the requests it may make; every other
-	// one is refused. A push is tried only where it is refused: allowed, it
-	// needs a real pack.
+	// allowed lists the requests each Automation may make; a push is tried only where refused, since an allowed one needs a real pack.
 	allowed := map[string][]request{
 		"reader":   nil,
 		"writer":   {open, comment, pushAdvert, push, restart},
@@ -228,9 +210,7 @@ func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 			}
 		}
 		if automation == "reader" {
-			// The Automation with an empty write list changed nothing: GitHub
-			// received its list and its fetch (the read of pull request 12
-			// is the fake's own answer) and nothing else.
+			// The empty-write Automation changed nothing: GitHub saw only its list and fetch.
 			f.mu.Lock()
 			received := append([]string(nil), f.received...)
 			f.mu.Unlock()
@@ -246,13 +226,7 @@ func TestAutomationWriteGrantDecidesGitHubWrites(t *testing.T) {
 	}
 }
 
-// Over GraphQL, where gh reads and writes through one endpoint, an Automation
-// whose write list leaves out the github-api entry is served every recorded gh
-// command that only reads (pr view, pr list, pr checks, pr diff, repo view)
-// and refused at the first mutation of the rest, or at a read that needs a
-// write operation, before any lookup or token; the same pool's Automation
-// with the grant, and one with no write key, are served all of them. GitHub
-// receives no mutation from the first.
+// Over GraphQL, an Automation without the github-api write entry is served read-only gh commands and refused at the first mutation, before any lookup or token.
 func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 	f := newGraphQLFixture(t)
 	ops := append([]string{"graphql"}, allPullRequestOps...)
@@ -274,9 +248,7 @@ func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 	f.proxy.adapter.Entitlements = &entitlement.Cache{Source: directory{}}
 
 	f.as(t, "reader")
-	// A refused write is answered before any token is minted or GitHub is
-	// asked which repository its pull request, named only by node ID, is in:
-	// this is the fixture's first request, so nothing is cached.
+	// A refused write is answered before any token or repository lookup; this is the first request, so nothing is cached.
 	f.mu.Lock()
 	mintedBefore, lookupsBefore := len(f.mintedFor), f.lookups
 	f.mu.Unlock()
@@ -334,12 +306,7 @@ func TestAutomationWriteGrantDecidesGitHubGraphQL(t *testing.T) {
 	}
 }
 
-// An Automation lists two github-api entries on one host and names only the
-// first in write. A mutation by node ID on a pull request in the second entry's
-// repository passes the early check, since the first entry grants write, and is
-// refused only by the check made once the entry is chosen: the write grant is
-// the chosen entry's, not any entry's. GitHub receives the first mutation and
-// not the second.
+// The write grant is the chosen entry's, not any entry's: a mutation in the second entry's repository is refused once the entry is chosen.
 func TestAutomationWriteGrantIsThatOfTheEntryTheGraphQLRequestReaches(t *testing.T) {
 	const ops = `["graphql","pr.read","pr.comment"]`
 	repoA := `{"repo":"example-org/example-repo","access":"write","operations":` + ops + `,"pullRequestPrefixes":["factory/"],"poolOperations":{"pool-agent":` + ops + `}}`

@@ -12,25 +12,14 @@ import (
 	"strings"
 )
 
-// HTTP/2 and gRPC on the catalog adapter's tunnels.
-//
-// A tunnel offers h2 only to a host whose catalog entries set http2 (see
-// handleConnect); every other host keeps HTTP/1.1 exactly as before. A
-// request that arrived over HTTP/2 is forwarded over HTTP/2 on connections
-// the broker reuses, and its response trailers are screened and relayed. A
-// gRPC call is a POST whose messages are length-prefixed frames in the body
-// and whose status comes back in trailers.
+// HTTP/2 and gRPC on the catalog adapter: a tunnel offers h2 only to a host whose catalog entries set http2 (see handleConnect).
+// A request that arrived over HTTP/2 is forwarded over HTTP/2 and its response trailers are screened.
 
-// DefaultHTTP2MaxStreams bounds the concurrent requests on one worker's
-// HTTP/2 tunnel. Each costs a goroutine and its buffers, as an HTTP/1.1
-// tunnel does; a client that wants more opens another tunnel.
-// AGENT_VAULT_MITM_HTTP2_MAX_STREAMS overrides it.
+// DefaultHTTP2MaxStreams bounds concurrent requests on one worker's HTTP/2 tunnel; AGENT_VAULT_MITM_HTTP2_MAX_STREAMS overrides it.
 const DefaultHTTP2MaxStreams = 1000
 
 type http2Key struct{}
 
-// withHTTP2 marks a request that reached the broker over HTTP/2, so its
-// upstream request goes over HTTP/2 too.
 func withHTTP2(ctx context.Context) context.Context {
 	return context.WithValue(ctx, http2Key{}, true)
 }
@@ -40,8 +29,7 @@ func viaHTTP2(ctx context.Context) bool {
 	return h2
 }
 
-// isGRPC reports whether r is a gRPC call: HTTP/2 with a gRPC content type
-// (application/grpc, +proto, +json and the like; not gRPC-Web).
+// isGRPC reports whether r is a gRPC call: HTTP/2 with a gRPC content type (not gRPC-Web).
 func isGRPC(r *http.Request) bool {
 	if r.ProtoMajor != 2 {
 		return false
@@ -50,23 +38,14 @@ func isGRPC(r *http.Request) bool {
 	return ct == "application/grpc" || strings.HasPrefix(ct, "application/grpc+") || strings.HasPrefix(ct, "application/grpc;")
 }
 
-// grpcCompressedRequest reports a gRPC call whose messages the client
-// compressed with anything but gzip. The broker could not check them for
-// decoys or placeholders, so the call is refused. gzip, which some clients
-// send unasked (Temporal's Rust-based SDKs, Python's among them), is
-// decompressed and forwarded uncompressed (grpcPlainMessages).
+// grpcCompressedRequest reports a gRPC call compressed with anything but gzip, which the broker cannot check for decoys or placeholders and so refuses; gzip is handled by grpcPlainMessages.
 func grpcCompressedRequest(r *http.Request) bool {
 	enc := r.Header.Get("Grpc-Encoding")
 	return enc != "" && enc != "identity" && enc != "gzip"
 }
 
-// grpcPlainMessages rewrites a gRPC request body as the same messages, each
-// uncompressed, so every byte the broker checks is a byte the upstream reads;
-// the broker never forwards grpc-encoding. A message flagged compressed is
-// gunzipped, and only when the call names gzip. A body that does not split
-// into whole messages, or a message that does not decompress, is refused as
-// request_shape, and messages past limit once decompressed as
-// request_too_large.
+// grpcPlainMessages rewrites a gRPC request body with each message uncompressed, so every byte the broker checks is a byte the upstream reads.
+// A body not splitting into whole messages, or a message that does not decompress, is refused as request_shape; past limit, request_too_large.
 func grpcPlainMessages(body []byte, encoding string, limit int64) ([]byte, string) {
 	out := make([]byte, 0, len(body))
 	for len(body) > 0 {
@@ -106,7 +85,6 @@ func grpcPlainMessages(body []byte, encoding string, limit int64) ([]byte, strin
 	return out, ""
 }
 
-// grpcBodyStatus is the HTTP status of a grpcPlainMessages refusal.
 func grpcBodyStatus(outcome string) int {
 	if outcome == "request_too_large" {
 		return http.StatusRequestEntityTooLarge
@@ -114,12 +92,7 @@ func grpcBodyStatus(outcome string) int {
 	return http.StatusBadRequest
 }
 
-// authorityMatches reports whether a request inside a tunnel names the
-// tunnel's host: target itself, the host alone when the port is the scheme's
-// default, or, over HTTP/2, the host alone on any port. gRPC clients often
-// send the bare host as the authority: grpc-go when the client sets a TLS
-// server name, and Temporal's Rust-based SDKs their TLS domain. The request
-// still goes to the tunnel's own port.
+// authorityMatches reports whether a request inside a tunnel names the tunnel's host: target itself, the host alone on the scheme's default port, or over HTTP/2 the host alone on any port, as gRPC clients often send it.
 func authorityMatches(r *http.Request, target string) bool {
 	if r.Host == target || r.Host == hostHeaderForScheme("https", target) {
 		return true
@@ -128,15 +101,12 @@ func authorityMatches(r *http.Request, target string) bool {
 	return err == nil && viaHTTP2(r.Context()) && r.Host == host
 }
 
-// prepareGRPC sets the gRPC protocol headers the broker owns on an upstream
-// call: te, which gRPC servers use to detect a proxy that drops trailers, and
-// an uncompressed response, so every byte that returns is screened.
+// prepareGRPC sets the headers the broker owns: te, and an uncompressed response so every returned byte is screened.
 func prepareGRPC(out *http.Request) {
 	out.Header.Set("Te", "trailers")
 	out.Header.Set("Grpc-Accept-Encoding", "identity")
 }
 
-// gRPC status codes (google.golang.org/grpc/codes).
 const (
 	grpcOK                 = 0
 	grpcUnknown            = 2
@@ -150,10 +120,7 @@ const (
 	grpcUnauthenticated    = 16
 )
 
-// grpcStatusFor maps the HTTP status of a broker refusal, or of an upstream
-// answer that was not gRPC, to the gRPC status a client acts on. A passing
-// refusal (it carries Retry-After) is UNAVAILABLE, which gRPC clients retry,
-// and a lasting 503 is FAILED_PRECONDITION, which they do not.
+// grpcStatusFor maps the HTTP status of a broker refusal or non-gRPC upstream answer to a gRPC status; a passing refusal (Retry-After) is UNAVAILABLE, which clients retry, and a lasting 503 is FAILED_PRECONDITION, which they do not.
 func grpcStatusFor(status int, passing bool) int {
 	switch status {
 	case http.StatusBadRequest:
@@ -177,16 +144,11 @@ func grpcStatusFor(status int, passing bool) int {
 	return grpcUnknown
 }
 
-// maxGRPCMessage bounds grpc-message: gRPC clients refuse response metadata
-// past 8 KiB in all, and the broker's own text is one line.
+// maxGRPCMessage bounds grpc-message: clients refuse response metadata past 8 KiB.
 const maxGRPCMessage = 1024
 
-// grpcWriter answers a gRPC call the way gRPC clients read a failure when the
-// broker refuses it, or the upstream answers with an HTTP error: status 200,
-// no messages, and grpc-status and grpc-message trailers, with Retry-After
-// also as grpc-retry-pushback-ms. The refusal code stays in RefusalHeader.
-// Without it a client would report only "unexpected HTTP status". A 200
-// passes through untouched; fail ends one that is already streaming.
+// grpcWriter answers a refusal or upstream HTTP error the way gRPC clients read a failure: status 200, no messages, grpc-status and grpc-message trailers.
+// The refusal code stays in RefusalHeader; a 200 passes through untouched.
 type grpcWriter struct {
 	http.ResponseWriter
 	wroteHeader bool
@@ -216,14 +178,12 @@ func (g *grpcWriter) WriteHeader(status int) {
 		h.Set(http.TrailerPrefix+"Grpc-Retry-Pushback-Ms", strconv.Itoa(seconds*1000))
 	}
 	if !refused {
-		// An upstream error page or a broker transport error: say which
-		// status, never the body.
+		// An upstream error page or a broker transport error: say which status, never the body.
 		h.Set(http.TrailerPrefix+"Grpc-Message", grpcMessage("HTTP "+strconv.Itoa(status)+" "+http.StatusText(status)))
 	}
 }
 
-// Write passes a 200's body through. After a refusal it keeps the broker's
-// one-line text as grpc-message, since a gRPC client never shows a body.
+// Write passes a 200's body through; after a refusal it keeps the broker's text as grpc-message.
 func (g *grpcWriter) Write(p []byte) (int, error) {
 	if !g.wroteHeader {
 		g.WriteHeader(http.StatusOK)
@@ -240,9 +200,7 @@ func (g *grpcWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// fail ends a call whose response is already streaming with a gRPC status in
-// its trailers, so the client discards what it has instead of reading a
-// clean end.
+// fail ends a call already streaming with a gRPC status in its trailers, so the client discards what it has.
 func (g *grpcWriter) fail(code int, message string) {
 	if !g.wroteHeader {
 		g.WriteHeader(http.StatusOK)
@@ -259,8 +217,7 @@ func (g *grpcWriter) Flush() {
 
 func (g *grpcWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
-// grpcMessage percent-encodes text for grpc-message, as the gRPC wire format
-// requires for anything outside printable ASCII and for "%" itself.
+// grpcMessage percent-encodes text for grpc-message, as the wire format requires.
 func grpcMessage(text string) string {
 	var b strings.Builder
 	for i := 0; i < len(text); i++ {
@@ -274,9 +231,7 @@ func grpcMessage(text string) string {
 	return b.String()
 }
 
-// grpcCallStatus is the grpc-status a gRPC response ended with, from its
-// trailers or, for a response with no messages, its headers; -1 when it
-// carries none.
+// grpcCallStatus is the grpc-status a response ended with, or -1.
 func grpcCallStatus(resp *http.Response) int {
 	v := resp.Trailer.Get("Grpc-Status")
 	if v == "" {
@@ -289,8 +244,6 @@ func grpcCallStatus(resp *http.Response) int {
 	return code
 }
 
-// grpcFrames follows a gRPC body's length-prefixed messages: a 5-byte header
-// (a compression flag and a big-endian length), then the message.
 type grpcFrames struct {
 	header     [5]byte
 	have       int    // header bytes read for the current message
@@ -298,8 +251,6 @@ type grpcFrames struct {
 	compressed bool   // a message set the compression flag
 }
 
-// advance consumes b and reports whether the bytes so far end exactly at a
-// message boundary.
 func (f *grpcFrames) advance(b []byte) bool {
 	for len(b) > 0 {
 		if f.have < len(f.header) {
@@ -325,9 +276,7 @@ func (f *grpcFrames) advance(b []byte) bool {
 	return f.have == 0
 }
 
-// framesSafe reports whether no needle holds a byte a message header can
-// start with. Then no needle can straddle a message boundary, since the next
-// byte after one is a header's compression flag, 0 or 1.
+// framesSafe reports whether no needle holds a byte a message header can start with, so no needle straddles a message boundary.
 func framesSafe(needles [][]byte) bool {
 	for _, n := range needles {
 		for _, c := range n {
@@ -339,12 +288,7 @@ func framesSafe(needles [][]byte) bool {
 	return true
 }
 
-// upstreamFor is the transport for an upstream request: HTTP/2 only when the
-// worker's request arrived over HTTP/2, which a gRPC server needs, else the
-// HTTP/1.1 transport. The HTTP/2 one is built from the HTTP/1.1 one on first
-// use, with its dialer, egress checks and TLS verification.
-// A request that presents a client certificate takes that certificate's
-// transport instead (clientcert.go).
+// upstreamFor is the transport for an upstream request: HTTP/2 only when the worker's request arrived over HTTP/2, else HTTP/1.1; a request presenting a client certificate takes that certificate's transport (clientcert.go).
 func (p *Proxy) upstreamFor(out *http.Request) http.RoundTripper {
 	h2 := viaHTTP2(out.Context())
 	if presented, ok := clientCertificateFrom(out.Context()); ok {
@@ -363,8 +307,7 @@ func (p *Proxy) upstreamFor(out *http.Request) http.RoundTripper {
 	return p.h2Upstream.Load()
 }
 
-// newUpstream builds a transport from the HTTP/1.1 one, with its dialer,
-// egress checks and TLS verification; for HTTP/2, HTTP/2 only.
+// newUpstream builds a transport from the HTTP/1.1 one, with its dialer, egress checks and TLS verification.
 func (p *Proxy) newUpstream(h2 bool) *http.Transport {
 	t := p.upstream.Clone()
 	if !h2 {
@@ -372,25 +315,17 @@ func (p *Proxy) newUpstream(h2 bool) *http.Transport {
 	}
 	t.Protocols = new(http.Protocols)
 	t.Protocols.SetHTTP2(true)
-	// Calls share connections, as HTTP/2 intends. Strict mode turns off
-	// HTTP/1.1 keep-alives so the transport never resends a request on a
-	// reused connection that may have reached the server; HTTP/2 resends
-	// only one the server refused unprocessed (GOAWAY past it, or
-	// REFUSED_STREAM). Without HTTP/1.1 here, an upstream that does not
-	// offer HTTP/2 fails the call rather than reusing HTTP/1.1 connections.
+	// Calls share connections. Strict mode turns off HTTP/1.1 keep-alives so a request is never resent on a reused connection; without HTTP/1.1 here, an upstream not offering HTTP/2 fails the call.
 	t.DisableKeepAlives = false
 	return t
 }
 
-// grpcCompressedResponse reports a gRPC response that compresses its
-// messages despite the broker asking for none: it could not be screened.
+// grpcCompressedResponse reports a response that compresses despite the broker asking for none; it could not be screened.
 func grpcCompressedResponse(h http.Header) bool {
 	enc := h.Get("Grpc-Encoding")
 	return enc != "" && enc != "identity"
 }
 
-// grpcStreamStatus is the status that ends a gRPC call whose response the
-// broker stopped relaying mid-stream.
 func grpcStreamStatus(outcome string) int {
 	switch outcome {
 	case "response_too_large":

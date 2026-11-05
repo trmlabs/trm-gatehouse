@@ -28,7 +28,6 @@ func TestDatabaseServiceCRUD(t *testing.T) {
 		t.Fatalf("CreateVault: %v", err)
 	}
 
-	// A fresh vault has no services.
 	list, err := s.ListDatabaseServices(ctx, ns.ID)
 	if err != nil {
 		t.Fatalf("ListDatabaseServices: %v", err)
@@ -37,12 +36,10 @@ func TestDatabaseServiceCRUD(t *testing.T) {
 		t.Fatalf("expected no services, got %d", len(list))
 	}
 
-	// Get on a missing service reports not-found.
 	if _, err := s.GetDatabaseService(ctx, ns.ID, "nope"); err != sql.ErrNoRows {
 		t.Fatalf("expected sql.ErrNoRows, got %v", err)
 	}
 
-	// Upsert creates the row and returns it fully populated.
 	created, err := s.UpsertDatabaseService(ctx, sampleService(ns.ID, "alloy"))
 	if err != nil {
 		t.Fatalf("UpsertDatabaseService: %v", err)
@@ -57,7 +54,6 @@ func TestDatabaseServiceCRUD(t *testing.T) {
 		t.Fatalf("expected timestamps set: %+v", created)
 	}
 
-	// Get returns the same row.
 	got, err := s.GetDatabaseService(ctx, ns.ID, "alloy")
 	if err != nil {
 		t.Fatalf("GetDatabaseService: %v", err)
@@ -67,8 +63,7 @@ func TestDatabaseServiceCRUD(t *testing.T) {
 	}
 }
 
-// TestDatabaseServiceEmptySSLModeNormalizes pins that an empty sslmode is stored
-// as "prefer" rather than tripping the column's CHECK constraint.
+// An empty sslmode is stored as "prefer" rather than tripping the CHECK constraint.
 func TestDatabaseServiceEmptySSLModeNormalizes(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
@@ -99,8 +94,7 @@ func TestDatabaseServiceUpsertIsIdempotentByName(t *testing.T) {
 		t.Fatalf("first upsert: %v", err)
 	}
 
-	// Re-upsert the same name with changed coordinates: same row (id + created_at
-	// preserved), fields overwritten in place, not a duplicate.
+	// Re-upsert overwrites in place: same id and created_at, no duplicate.
 	changed := sampleService(ns.ID, "example-db")
 	changed.Upstream = "db.example:5433"
 	changed.Role = "rw"
@@ -131,7 +125,6 @@ func TestDatabaseServiceListOrderedAndScopedByVault(t *testing.T) {
 	v1, _ := s.CreateVault(ctx, "vault-one")
 	v2, _ := s.CreateVault(ctx, "vault-two")
 
-	// Insert out of order in v1; v2 gets its own service.
 	for _, name := range []string{"zeta", "alpha", "mu"} {
 		if _, err := s.UpsertDatabaseService(ctx, sampleService(v1.ID, name)); err != nil {
 			t.Fatalf("upsert %s: %v", name, err)
@@ -155,7 +148,7 @@ func TestDatabaseServiceListOrderedAndScopedByVault(t *testing.T) {
 		}
 	}
 
-	// A different vault sees only its own service — no cross-vault leakage.
+	// A different vault sees only its own service.
 	other, _ := s.ListDatabaseServices(ctx, v2.ID)
 	if len(other) != 1 || other[0].Name != "other" {
 		t.Fatalf("expected v2 to see only its own service, got %+v", other)
@@ -170,7 +163,6 @@ func TestDatabaseServiceDelete(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	// Deleting an existing service reports true.
 	deleted, err := s.DeleteDatabaseService(ctx, ns.ID, "citus")
 	if err != nil {
 		t.Fatalf("DeleteDatabaseService: %v", err)
@@ -182,7 +174,6 @@ func TestDatabaseServiceDelete(t *testing.T) {
 		t.Fatalf("expected gone after delete, got %v", err)
 	}
 
-	// Deleting a missing service reports false, not an error.
 	deleted, err = s.DeleteDatabaseService(ctx, ns.ID, "citus")
 	if err != nil {
 		t.Fatalf("second delete errored: %v", err)
@@ -204,7 +195,7 @@ func TestDatabaseServiceCascadeDeleteWithVault(t *testing.T) {
 		t.Fatalf("DeleteVault: %v", err)
 	}
 
-	// The FK cascade must have removed the service row along with the vault.
+	// The FK cascade removes the service with the vault.
 	list, err := s.ListDatabaseServices(ctx, ns.ID)
 	if err != nil {
 		t.Fatalf("ListDatabaseServices: %v", err)

@@ -18,17 +18,8 @@ import (
 	"time"
 )
 
-// The real Temporal clients through the broker, opt-in: a Temporal CLI dev
-// server (temporal server start-dev, plaintext gRPC) behind a front that
-// accepts only client certificates, as Temporal Cloud does, and the broker
-// presenting the entry's certificate. Set GATEHOUSE_TEMPORAL_DEV_ADDR to the
-// dev server's host:port, and GATEHOUSE_TEMPORAL_PYTHON (a Python with the
-// temporalio package) and GATEHOUSE_TEMPORAL_CLI (the temporal binary) for
-// the clients to run.
+// Opt-in: real Temporal clients through the broker against a dev server behind an mTLS front. Set GATEHOUSE_TEMPORAL_DEV_ADDR, GATEHOUSE_TEMPORAL_PYTHON and GATEHOUSE_TEMPORAL_CLI to run.
 
-// temporalProbe is the Python SDK's side: connect through the broker as an
-// HTTP CONNECT proxy, trusting only the broker's CA and holding no client
-// certificate, read, then try three writes.
 const temporalProbe = `
 import asyncio, json, sys
 from temporalio.client import Client, TLSConfig
@@ -62,9 +53,7 @@ async def main():
 asyncio.run(main())
 `
 
-// temporalFront serves TLS for temporal.example.com, takes client
-// certificates only from the fixture's client CA, records each call's method
-// and certificate, and relays it to the dev server over plaintext HTTP/2.
+// temporalFront serves TLS for temporal.example.com, takes client certificates from the fixture's client CA, and relays to the dev server.
 func temporalFront(t *testing.T, f *clientCertFixture, devAddr string) string {
 	t.Helper()
 	h2c := &http.Transport{Protocols: new(http.Protocols)}
@@ -104,8 +93,7 @@ func TestTemporalClientsThroughTheBroker(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
-	// A workflow to read, started on the dev server directly. No worker
-	// polls its task queue, so it stays running.
+	// A workflow to read; no worker polls its task queue, so it stays running.
 	workflowID := "gatehouse-read-probe-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	if cli == "" {
 		t.Skip("GATEHOUSE_TEMPORAL_CLI is needed to start the workflow the clients read")
@@ -140,7 +128,7 @@ func TestTemporalClientsThroughTheBroker(t *testing.T) {
 			t.Fatalf("Python SDK reads: %+v", got)
 		}
 		for name, result := range map[string]string{"start": got.Start, "signal": got.Signal, "terminate": got.Terminate} {
-			// The SDK prints the status as its number: 7 is PERMISSION_DENIED.
+			// The SDK prints the status as a number: 7 is PERMISSION_DENIED.
 			if !strings.HasPrefix(result, "RPCError: 7 ") || !strings.Contains(result, "gatehouse refused: unlisted") {
 				t.Errorf("Python SDK %s: %s", name, result)
 			}
@@ -169,9 +157,6 @@ func TestTemporalClientsThroughTheBroker(t *testing.T) {
 		}
 	}
 
-	// What the clients called: every call that reached Temporal presented
-	// the entry's certificate and was a listed read; every other one was
-	// refused at the broker.
 	reached, refused := map[string]int{}, map[string]int{}
 	for _, c := range f.grpcSide.all() {
 		reached[strings.TrimPrefix(c.method, workflowService)]++

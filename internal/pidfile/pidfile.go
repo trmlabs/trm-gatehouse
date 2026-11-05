@@ -42,11 +42,7 @@ func Write(pid int) error {
 	return os.Rename(tmp, path)
 }
 
-// WriteIfFree atomically writes pid only if no live process other than the
-// caller owns the file. Stale files (process gone) are overwritten. Returns
-// ErrAlreadyRunning when the existing PID points at a different live process —
-// callers should treat this as "another server beat me to it" and avoid
-// removing the file on shutdown.
+// WriteIfFree writes pid unless a different live process owns the file, returning ErrAlreadyRunning.
 func WriteIfFree(pid int) error {
 	if existing, err := Read(); err == nil {
 		if existing != pid && IsRunning(existing) {

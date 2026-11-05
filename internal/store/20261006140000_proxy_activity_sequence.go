@@ -2,13 +2,8 @@ package store
 
 import "gorm.io/gorm"
 
-// A report stream per proxy replica within a binding: a sequence that each
-// report the replica gets accepted advances by one. A replica remembers the
-// last number acknowledged to it; a later report carrying a number its stream
-// no longer reaches, or a stream that is gone, means the store lost writes
-// (a restore to an earlier point) and the binding's history restarts. Only the
-// replica itself advances its stream, so another replica's reports cannot
-// overtake a loss. Streams unused for the retention time are pruned.
+// A gap or missing stream means the store lost writes (a restore) and the binding's history restarts.
+// Only the replica advances its own stream; unused streams are pruned after the retention time.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		if err := db.Exec(`CREATE TABLE IF NOT EXISTS proxy_activity_stream (

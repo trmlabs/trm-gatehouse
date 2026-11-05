@@ -1,6 +1,4 @@
-// Package authorize is the one place both protocol adapters decide who stands
-// behind a request and whether that requester may use a catalog entry: the
-// lesser of the pool's tier ceiling and the verified person's entitlements.
+// Package authorize decides who stands behind a request and whether it may use a catalog entry: the lesser of the pool's tier ceiling and the person's entitlements.
 package authorize
 
 import (
@@ -19,15 +17,12 @@ type Verifier interface {
 	Verify(context.Context, string) (runnerid.Session, error)
 }
 
-// CursorVerifier checks a Cursor run's identity token. A Verifier that also
-// implements it (runnerid.Verifiers) serves cursor-session pools.
+// CursorVerifier checks a Cursor run's identity token.
 type CursorVerifier interface {
 	VerifyCursor(context.Context, string) (runnerid.Session, error)
 }
 
-// AttestedPersons names the person behind a login a shared proxy attested:
-// the Entra user principal name, or "" for no person. runnerid.ErrUnverifiable
-// means no domain is configured.
+// AttestedPersons returns the Entra UPN behind an attested login, or "" for no person; runnerid.ErrUnverifiable means no domain is configured.
 type AttestedPersons interface {
 	AttestedPerson(login string) (string, error)
 }
@@ -36,11 +31,9 @@ type AttestedPersons interface {
 type Claims struct {
 	Pod        string // the verified Pod UID
 	ClaimedRun string // the Cursor run the spawn hook recorded on the Pod
-	// AttestedRequester is the login a shared proxy attested from the Pod's
-	// requester annotation.
+	// AttestedRequester is the login a shared proxy attested from the Pod's requester annotation.
 	AttestedRequester string
-	// TokenAgent is the Automation a verified static agent token names, the
-	// one identity here that no Pod stands behind; empty for every other.
+	// TokenAgent is the Automation a verified static token names; no Pod stands behind it.
 	TokenAgent string
 	// PodRef and NotAfter locate the Pod and its deadline for a parent registering a subagent; zero for a non-pool-Pod identity.
 	PodRef   brokercore.PodRef
@@ -51,39 +44,30 @@ type Claims struct {
 	TokenOwner string
 }
 
-// SourceStaticToken is the audit row's Source for an Automation admitted by
-// its static token, where a Cursor run's would be AUTOMATIONS.
+// SourceStaticToken is the audit Source for an Automation admitted by its static token.
 const SourceStaticToken = "STATIC_TOKEN"
 
 // SourceGumloopOIDC is the audit row's Source for an Automation admitted by a Gumloop ID token.
 const SourceGumloopOIDC = "GUMLOOP_OIDC"
 
-// podOwnerPin is how long a Pod stays pinned to the first Cursor run owner it
-// presents. Pod UIDs never repeat, so the pin only has to outlive the Pod;
-// a day is far past any worker's lifetime and costs one row.
+// podOwnerPin is how long a Pod stays pinned to the first Cursor run owner it presents.
+// Pod UIDs never repeat, so a day is far past any worker's lifetime.
 const podOwnerPin = 24 * time.Hour
 
-// Binder pins a runner session to the first Pod that presents it, across
-// every broker replica, and returns the Pod it is pinned to. The pin lasts
-// until the token expires.
+// Binder pins a runner session to the first Pod that presents it, across replicas, until the token expires.
 type Binder interface {
 	BindRunnerSession(ctx context.Context, tokenSHA256, pod string, expires time.Time) (string, error)
 }
 
-// Requester is who stands behind a request. TokenSHA256 identifies the runner
-// session token without keeping it.
+// Requester is who stands behind a request.
 type Requester struct {
 	Kind        string // person, agent, workload, automation or none
 	Subject     string // the person's email, the agent, or the Automation's id
 	TokenSHA256 string
-	// Source and Automation are what a verified Cursor run token says about
-	// how the run started, on any pool, for the audit row.
+	// Source and Automation come from the verified Cursor run token, for the audit row.
 	Source     string
 	Automation string
-	// AutomationName and AutomationOwner (the owning team) are the
-	// catalog's, for a listed Automation on a cursor-automation pool, and
-	// RunPerson is the person the verified run token names, or "" when it
-	// names none. Only the audit row reads them.
+	// AutomationName, AutomationOwner and RunPerson (the person the run token names) are read only by the audit row.
 	AutomationName  string
 	AutomationOwner string
 	RunPerson       string
@@ -97,12 +81,8 @@ type Requester struct {
 	owner, team string
 }
 
-// MayWrite reports whether the requester gets the pool's write grant on a git
-// or github-api entry: a push, or a GitHub operation that writes. Anyone but
-// an Automation does, since the pool's own prefixes and operations are what
-// limit a person or a workload. So does an Automation whose block has no write
-// key. One whose block has it does only on the entries it names, so an empty
-// list fetches and reads only.
+// MayWrite reports whether the requester gets the pool's write grant on a git or github-api entry.
+// Anyone but an Automation does; an Automation does only on the entries its write key names, and an empty list means read only.
 func (r Requester) MayWrite(entry string) bool {
 	if r.Kind != "automation" {
 		return true
@@ -110,10 +90,7 @@ func (r Requester) MayWrite(entry string) bool {
 	return r.grant != nil && r.grant.Writes(entry)
 }
 
-// Settings are the plain settings the catalog lists for the requester's
-// Automation, nil for anyone else: a person, a workload, or a run on a pool
-// that does not decide per Automation. The map is the catalog's; it is never
-// changed.
+// Settings are the plain settings the catalog lists for the requester's Automation, nil for anyone else.
 func (r Requester) Settings() map[string]string {
 	if r.Kind != "automation" || r.grant == nil {
 		return nil
@@ -121,8 +98,7 @@ func (r Requester) Settings() map[string]string {
 	return r.grant.Settings
 }
 
-// Audited is the verified identity an audit row names as the requester: the
-// person, the agent, or the person an Automation's run token names, if any.
+// Audited is the verified identity an audit row names as the requester.
 func (r Requester) Audited() string {
 	switch r.Kind {
 	case "person", "agent":
@@ -133,45 +109,11 @@ func (r Requester) Audited() string {
 	return ""
 }
 
-// BranchSegment is the branch segment a {requester} push prefix names for
-// this requester (httpcatalog.RequesterSegment): a person's email, or an
-// Automation's id; "" for anyone else, who then gets no branch there.
+// BranchSegment is the {requester} push-prefix segment: a person's email or an Automation's id, else "".
 func (r Requester) BranchSegment() string { return httpcatalog.RequesterSegment(r.Kind, r.Subject) }
 
-// Resolve derives the requester for a pool from the session token the sidecar
-// relayed (empty when none), as the pool's harness profile says. It returns a
-// refusal code when a presented token is invalid, was issued for another
-// runner pool, or arrives on a profile whose requester is not a session: a
-// bad token is refused even for T0, never silently ignored. A session-jwt
-// profile with no session has no person: T0 only.
-//
-// A session token is a bearer credential, so it is pinned to the first Pod
-// that presents it: the same token from another Pod is refused
-// (session_pod_mismatch), and without a binder or a Pod the session is
-// refused (session_unbindable).
-//
-// A Cursor token is a bearer credential any process on a worker can mint for
-// that worker's run, so it counts only on the Pod the spawn hook created for
-// that run: its run must equal claimedRun, the run the controller recorded on
-// the live Pod (session_run). And since runs on one Pod share its workspace, a
-// cursor-session Pod is also pinned to the first run owner it presents: a run
-// by anyone else on that Pod is refused (session_pod_owner).
-//
-// A cursor-oidc profile decides for the person behind each run, so every
-// request on it must name one, T0 included: a request with no token
-// (session_missing) or whose run names no person, such as a Cursor service
-// account's or an owner outside the configured domains (no_person), is
-// refused, never served as the pool. The refusal is that one request's: other
-// Pods, and other requests on the same Pod, are decided on their own token.
-// A run an Automation started is refused there too (automation_on_person_pool)
-// unless the pool sets AutomationRunsAsPerson: served as its person, it would
-// get every entry the pool grants instead of the Automation's own list.
-//
-// A cursor-automation pool decides for the Automation that started each run,
-// so every request on it must come from one the catalog lists, T0 included: a
-// run any other way, such as a person's from the web or Slack
-// (not_automation), or by an Automation the catalog does not list
-// (automation_unlisted), is refused unless a listed Automation's run registered it as a subagent.
+// Resolve derives the requester for a pool from the relayed session token, returning a refusal code on failure.
+// Session and Cursor tokens are bearers, pinned to the first Pod (and for Cursor, run and owner) that presents them.
 func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier, b Binder) (Requester, string) {
 	pod, claimedRun := claims.Pod, claims.ClaimedRun
 	who := Requester{Kind: "none"}
@@ -179,14 +121,11 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 		return resolveTokenAgent(pool, session, claims)
 	}
 	requester := pool.Profile().RequesterKind()
-	// An attested requester counts only on a profile that takes its person
-	// from one; on any other, a proxy fault must not lend a person to a pool,
-	// so it is refused rather than ignored.
+	// A proxy fault must not lend a person to a pool whose profile does not take one.
 	if claims.AttestedRequester != "" && requester != httpcatalog.RequesterPodAnnotation {
 		return who, "requester_unexpected"
 	}
-	// Only a session sidecar relays a session. One arriving on any other
-	// profile is a misconfigured or forged channel, never ignored.
+	// A session on any other profile is a misconfigured or forged channel.
 	if session != "" && requester != httpcatalog.RequesterSessionJWT && requester != httpcatalog.RequesterCursorOIDC {
 		return who, "session_unexpected"
 	}
@@ -257,9 +196,8 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 					return who, "not_automation"
 				}
 				a, ok := pool.Automation(s.Automation)
-				// A block with a token hash is an agent that proves itself
-				// by that token alone; a run token naming its id is refused,
-				// so a vendor's ids and the catalog's agent ids never alias.
+				// A block with a token hash is an agent that proves itself by that token alone;
+				// a run token naming its id is refused, so vendor ids and catalog agent ids never alias.
 				if !ok || a.HasOwnIdentity() {
 					return who, "automation_unlisted"
 				}
@@ -270,10 +208,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 				}
 				return who, ""
 			}
-			// Either sign of an Automation counts, so a token carrying only
-			// one of them is not served as a person by default. A new
-			// automated source that sets neither would still be served as
-			// its person.
+			// Either sign of an Automation counts; a new automated source that sets neither would still be served as a person.
 			if (s.Source == runnerid.SourceAutomations || s.Automation != "") && !pool.AutomationRunsAsPerson {
 				return who, "automation_on_person_pool"
 			}
@@ -283,8 +218,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 		}
 		who.Kind, who.Subject = string(s.Kind), s.Subject
 	case httpcatalog.RequesterPodAnnotation:
-		// The proxy admits no Pod in such a namespace without a requester,
-		// so a missing one is a fault, never a pool-level session.
+		// The proxy admits no such Pod without a requester, so a missing one is a fault.
 		if claims.AttestedRequester == "" {
 			return who, "requester_missing"
 		}
@@ -300,19 +234,14 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 			who.Kind, who.Subject = "person", person
 		}
 	default:
-		// A requester kind this broker cannot verify. The catalog refuses
-		// such a profile at load; this keeps the decision closed regardless.
+		// The catalog refuses such a profile at load; this keeps the decision closed regardless.
 		return who, "requester_unverifiable"
 	}
 	return who, ""
 }
 
-// resolveTokenAgent decides for an Automation admitted by its static token. It
-// is the Automation the catalog lists, with the block's own entries, and no
-// person: nothing a client sends can add one. The pool must have a
-// static-token harness and the block a token hash; either missing refuses
-// (automation_unlisted), as does a run session on the same connection
-// (session_unexpected), since a token agent has no runner session.
+// resolveTokenAgent decides for an Automation admitted by its static token, with no person. The pool needs a
+// static-token harness and the block a token hash (else automation_unlisted); a run session is refused (session_unexpected).
 func resolveTokenAgent(pool httpcatalog.Pool, session string, claims Claims) (Requester, string) {
 	who := Requester{Kind: "none"}
 	if claims.AttestedRequester != "" {
@@ -337,13 +266,7 @@ func resolveTokenAgent(pool httpcatalog.Pool, session string, claims Claims) (Re
 	return who, ""
 }
 
-// Attribute names the run behind a request for a refusal that comes before any
-// entry is authorized (an unlisted host, path or method), so its audit row
-// carries the same Source, Automation, AutomationName and AutomationOwner an
-// authorized row would: the run token's own source and Automation id whenever
-// a Cursor run's token verifies, listed or not, and the catalog's name and
-// owner when the pool lists that Automation. Nothing else is decided here, and
-// a token that does not verify, or no token, names nothing.
+// Attribute names the run behind a refusal made before any entry is authorized, as an authorized row would.
 func Attribute(ctx context.Context, pool httpcatalog.Pool, session string, claims Claims, v Verifier) Requester {
 	if claims.TokenAgent != "" {
 		who, _ := resolveTokenAgent(pool, "", Claims{TokenAgent: claims.TokenAgent, TokenSource: claims.TokenSource})
@@ -364,10 +287,7 @@ func Attribute(ctx context.Context, pool httpcatalog.Pool, session string, claim
 	return who
 }
 
-// Decide applies the entitlement decision for one entry. On a
-// cursor-automation pool the requester is granted the entry only when the
-// catalog lists it for the run's Automation; entitlement.Decide refuses
-// anything else there (automation_not_granted), at every tier.
+// Decide applies the entitlement decision for one entry; on a cursor-automation pool only entries listed for the Automation are granted (automation_not_granted).
 func Decide(ctx context.Context, cache *entitlement.Cache, pool httpcatalog.Pool, entry httpcatalog.Entry, who Requester) entitlement.Decision {
 	requester := entitlement.Requester{Kind: who.Kind, Subject: who.Subject}
 	if a, ok := pool.Automation(who.Subject); ok && who.Kind == "automation" {

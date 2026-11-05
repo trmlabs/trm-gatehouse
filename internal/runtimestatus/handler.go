@@ -1,7 +1,5 @@
-// Package runtimestatus defines a read-only cleanup observation, broker-wide or
-// for one requested agent.
-// Server exposure is opt-in and requires a dedicated live workload authorizer
-// and a consistent broker/cleanup snapshot. No default observer is installed.
+// Package runtimestatus defines a read-only cleanup observation, broker-wide or for one requested agent.
+// Server exposure is opt-in and needs a dedicated live workload authorizer; no default observer is installed.
 package runtimestatus
 
 import (
@@ -15,12 +13,8 @@ import (
 	"time"
 )
 
-// Observation contains no credential, lease, binding or session identifiers.
-// Actor and workload identifiers key Attributed; the handler serializes them
-// only to a caller whose authorization grants the agent list. Consistent must
-// be false if admission changed during the snapshot. Healthy includes current
-// cleanup ownership and provider authorization, not just a running listener.
-// Zero counts do not prove database-side absence.
+// Observation contains no credential, lease, binding or session identifiers. Actor and workload identifiers key Attributed and are serialized only to a caller authorized for the agent list. Consistent must be false if admission changed during the snapshot.
+// Healthy includes current cleanup ownership and provider authorization, not just a running listener; zero counts do not prove database-side absence.
 type Observation struct {
 	Initialized       bool
 	Healthy           bool
@@ -28,11 +22,8 @@ type Observation struct {
 	ActiveConnections int
 	UnfinishedCleanup int
 	UnknownCleanup    int
-	// Attributed partitions the totals by the actor and runtime instance that
-	// caused them. An entry with an empty WorkloadID counts against every
-	// instance of its actor. Unattributed holds connections not yet
-	// authenticated and cleanup records with no actor (written before
-	// attribution existed); they count against every actor.
+	// Attributed partitions the totals by the actor and runtime instance that caused them. An empty WorkloadID counts against every instance of its actor.
+	// Unattributed holds unauthenticated connections and cleanup records with no actor; they count against every actor.
 	Attributed   map[Attribution]Counts
 	Unattributed Counts
 }
@@ -52,9 +43,7 @@ func (c Counts) add(other Counts) Counts {
 	return Counts{c.ActiveConnections + other.ActiveConnections, c.UnfinishedCleanup + other.UnfinishedCleanup, c.UnknownCleanup + other.UnknownCleanup}
 }
 
-// ForActor returns the counts that gate admission for one actor: its own
-// across every instance, plus every unattributed connection and record, so
-// unknown ownership fails closed.
+// ForActor returns the counts that gate admission for one actor: its own across every instance plus every unattributed connection and record, so unknown ownership fails closed.
 func (o Observation) ForActor(actorID string) Counts {
 	total := o.Unattributed
 	for owner, c := range o.Attributed {
@@ -97,16 +86,12 @@ type Snapshot func(context.Context) (Observation, error)
 
 // Access is what a verified observer proof may read beyond the totals.
 type Access struct {
-	// ListAgents permits the agents=all view, which names every actor and
-	// runtime instance with outstanding work. Grant it only to the admission
-	// controller that created those agents.
+	// ListAgents permits the agents=all view, which names every actor and runtime instance with outstanding work; grant it only to the admission controller that created those agents.
 	ListAgents bool
 }
 
-// Authorize must verify a dedicated observer's current workload proof and live
-// Pod against operator-owned policy, and return that binding's access. It must
-// not use owner tokens or give the observer a proxy grant. The HTTP handler
-// supplies no fallback authentication.
+// Authorize must verify a dedicated observer's current workload proof and live Pod against operator-owned policy and return that binding's access.
+// It must not use owner tokens or give the observer a proxy grant; the handler supplies no fallback authentication.
 type Authorize func(context.Context, string) (Access, error)
 
 // Grants reports whether every configured proxy workload binding still holds
@@ -120,12 +105,9 @@ type response struct {
 	UnfinishedCleanup int    `json:"unfinishedCleanup"`
 	UnknownCleanup    int    `json:"unknownCleanup"`
 	ObservedAt        string `json:"observedAt"`
-	// ProxyGrants is "authorized", "missing" or "unknown" when a Grants check
-	// is configured, so a caller can refuse to admit a workload the broker
-	// would deny. Omitted otherwise.
+	// ProxyGrants is "authorized", "missing" or "unknown" when a Grants check is configured, so a caller can refuse a workload the broker would deny; omitted otherwise.
 	ProxyGrants string `json:"proxyGrants,omitempty"`
-	// Agent answers for the actor named by the agent query parameter. Omitted
-	// without one, so existing responses are unchanged.
+	// Agent answers for the actor named by the agent query parameter; omitted without one.
 	Agent *agentResponse `json:"agent,omitempty"`
 	// agentList fields appear only for agents=all, and only when the snapshot
 	// partitions exactly; their absence means the list is unknown.
@@ -139,9 +121,7 @@ type agentResponse struct {
 	UnknownCleanup    int    `json:"unknownCleanup"`
 }
 
-// agentList reports unattributed work once instead of folding it into each
-// entry. The caller must treat any unattributed count as blocking every agent,
-// and an entry with an empty workloadUID as blocking every instance of its agent.
+// agentList reports unattributed work once. A caller must treat any unattributed count as blocking every agent, and an empty workloadUID as blocking every instance of its agent.
 type agentList struct {
 	Agents                     []agentEntry `json:"agents"`
 	UnattributedConnections    int          `json:"unattributedConnections"`
@@ -209,10 +189,8 @@ func parseQuery(raw string) (query, bool) {
 	return query{agentID: id}, true
 }
 
-// New returns an isolated handler, not a server route. Callers must first stop
-// old admission, then obtain this observation over verified transport from the
-// expected dedicated broker. A ready response is reconciliation state only;
-// independent database evidence remains necessary for acceptance.
+// New returns an isolated handler, not a server route. Callers must first stop old admission, then obtain this observation over verified transport from the expected dedicated broker;
+// a ready response is reconciliation state only, and independent database evidence remains necessary.
 func New(authorize Authorize, snapshot Snapshot, grants ...Grants) (http.Handler, error) {
 	if len(grants) > 1 || (len(grants) == 1 && grants[0] == nil) {
 		return nil, errors.New("at most one grants check")
@@ -274,8 +252,7 @@ func New(authorize Authorize, snapshot Snapshot, grants ...Grants) (http.Handler
 				code = http.StatusOK
 			}
 			if q.list {
-				// The list keeps the broker-wide status code. A snapshot whose
-				// partition disagrees with its totals cannot be listed.
+				// The list keeps the broker-wide status code; a snapshot whose partition disagrees with its totals cannot be listed.
 				if observation.partitioned() {
 					result.agentList = newAgentList(observation)
 				} else {
@@ -283,8 +260,7 @@ func New(authorize Authorize, snapshot Snapshot, grants ...Grants) (http.Handler
 				}
 			}
 			if q.agentID != "" {
-				// With an agent, the status code answers for that agent alone.
-				// A snapshot whose partition disagrees with its totals cannot.
+				// With an agent, the status code answers for that agent alone; an inconsistent partition cannot.
 				code = http.StatusServiceUnavailable
 				if observation.partitioned() {
 					counts := observation.ForActor(q.agentID)

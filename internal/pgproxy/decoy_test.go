@@ -12,10 +12,8 @@ import (
 // A synthetic decoy database password; never a real credential.
 const decoyPassword = "synthetic-decoy-db-password-3a7f0c"
 
-// A decoy sent as the password is refused before it reaches the
-// authenticator or a credential is minted, with the row naming the decoy and
-// the database asked for. The client sees an ordinary authentication failure,
-// and an agent token still gets through.
+// A decoy sent as the password is refused before it reaches the authenticator or a credential is minted, with
+// the row naming the decoy and the database asked for.
 func TestBrokerRefusesADecoyPassword(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)

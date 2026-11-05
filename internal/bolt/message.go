@@ -7,8 +7,7 @@ import (
 	"io"
 )
 
-// Message tags. Requests come from the client, summaries and records from
-// the server.
+// Message tags: requests from the client, summaries and records from the server.
 const (
 	TagHello     byte = 0x01
 	TagGoodbye   byte = 0x02
@@ -35,9 +34,8 @@ var ErrTooLarge = errors.New("bolt: message too large")
 
 var errNotMessage = errors.New("bolt: message is not a structure")
 
-// ReadRaw reads one chunked message and returns its bytes. A chunk header of
-// zero ends a message; a zero header with no chunks before it is a keepalive
-// (NOOP) and is skipped. max bounds the message, not each chunk.
+// ReadRaw reads one chunked message. A zero chunk header ends it; a zero header with no chunks is a keepalive (NOOP) and skipped.
+// max bounds the message, not each chunk.
 func ReadRaw(r io.Reader, max int) ([]byte, error) {
 	var out []byte
 	var header [2]byte
@@ -84,8 +82,7 @@ func Frame(msg []byte) []byte {
 	return append(out, 0, 0)
 }
 
-// Tag returns a raw message's tag without decoding its fields, so a relay can
-// pass records through untouched.
+// Tag returns a raw message's tag without decoding, so a relay can pass records through.
 func Tag(raw []byte) (byte, error) {
 	if len(raw) < 2 || raw[0] < 0xB0 || raw[0] > 0xBF {
 		return 0, errNotMessage
@@ -93,7 +90,6 @@ func Tag(raw []byte) (byte, error) {
 	return raw[1], nil
 }
 
-// Decode reads a raw message as a structure.
 func Decode(raw []byte) (*Structure, error) {
 	v, err := Unpack(raw)
 	if err != nil {
@@ -106,13 +102,11 @@ func Decode(raw []byte) (*Structure, error) {
 	return s, nil
 }
 
-// Encode packs a message.
 func Encode(tag byte, fields ...any) ([]byte, error) {
 	return Pack(&Structure{Tag: tag, Fields: fields})
 }
 
-// Map returns field i as a map, or nil when it is absent. A field of another
-// type is an error.
+// Map returns field i as a map, or nil when absent; another type is an error.
 func (s *Structure) Map(i int) (map[string]any, error) {
 	if i >= len(s.Fields) || s.Fields[i] == nil {
 		return nil, nil
@@ -124,7 +118,6 @@ func (s *Structure) Map(i int) (map[string]any, error) {
 	return m, nil
 }
 
-// Success is a SUCCESS message carrying metadata.
 func Success(metadata map[string]any) []byte {
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -133,18 +126,14 @@ func Success(metadata map[string]any) []byte {
 	return b
 }
 
-// Failure is a FAILURE message. Drivers read the second dotted part of code
-// as the classification (ClientError, TransientError, DatabaseError), so a
-// code shaped "Gatehouse.TransientError.X.Y" is retried and
-// "Gatehouse.ClientError.X.Y" is not. Bolt 5.7 and later read the GQL fields;
-// earlier versions ignore them.
+// Failure is a FAILURE message. Drivers read the second dotted part of code as the classification (ClientError, TransientError, DatabaseError);
+// Bolt 5.7+ also reads the GQL fields.
 func Failure(code, message string) []byte {
 	b, _ := Encode(TagFailure, map[string]any{"code": code, "message": message})
 	return b
 }
 
-// Ignored is an IGNORED message, the answer to every request after a failure
-// until RESET.
+// Ignored is the answer to every request after a failure until RESET.
 func Ignored() []byte {
 	b, _ := Encode(TagIgnored)
 	return b

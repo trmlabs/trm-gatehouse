@@ -92,9 +92,8 @@ func (s *agentSession) close() {
 	_ = s.conn.Close()
 }
 
-// connectExpectCode drives the agent handshake and returns the SQLSTATE of the
-// FATAL error the broker sends, or "OK" if it reached ready, or "" on transport
-// failure.
+// connectExpectCode drives the agent handshake and returns the SQLSTATE of the FATAL error the broker sends,
+// or "OK" if it reached ready, or "" on transport failure.
 func connectExpectCode(t *testing.T, addr, token, database string) string {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -150,9 +149,8 @@ func TestBroker_RefusesCleartextWithoutTLS(t *testing.T) {
 		Databases: &fakeResolver{svc: &DatabaseService{Name: "svc", Addr: upstream.addr(), Mount: "database", Role: "readonly", SSLMode: "disable"}},
 		Leases:    minter,
 	})
-	// The broker must refuse to send the password in the clear -> upstream
-	// connect fails -> the agent gets an 08006, and the (already minted) lease is
-	// revoked.
+	// The broker must refuse to send the password in the clear -> upstream connect fails -> the agent gets an
+	// 08006, and the (already minted) lease is revoked.
 	if code := connectExpectCode(t, addr, "tok", "appdb"); code != "08006" {
 		t.Fatalf("expected 08006 (connection failure), got %q", code)
 	}

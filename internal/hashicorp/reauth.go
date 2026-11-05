@@ -16,13 +16,8 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// Database session child tokens die with the parent login that created them,
-// and a JWT login has a fixed maximum lifetime. Instead of restarting the
-// broker to replace that login, JWT mode logs in again on a schedule, mints
-// new sessions only under a young login, and keeps each older login until its
-// last session ends. There is no ceiling on older logins: each ends at its
-// fixed maximum lifetime, so at most that lifetime divided by the refresh
-// interval are ever held. Token and AppRole modes keep their single login.
+// Child session tokens die with the parent login, which has a fixed maximum lifetime. JWT mode logs in again on a schedule, mints only under a young login,
+// and keeps older logins until their last session ends, so at most maxLifetime/interval logins are held. Token and AppRole modes keep their single login.
 const (
 	defaultReauthInterval     = 20 * time.Minute
 	defaultMinSessionLifetime = 35 * time.Minute
@@ -54,8 +49,7 @@ type heldLogin struct {
 	renewedAt  time.Time
 	pending    int
 	children   map[string]time.Time
-	// revokeWarned: a failed revoke of this login was already logged as a
-	// warning; later retries log at debug, so one stuck login is one warning.
+	// revokeWarned: later failed revokes of this login log at debug, so one stuck login is one warning.
 	revokeWarned bool
 }
 
@@ -79,10 +73,8 @@ type loginSet struct {
 	opts    reauthOptions
 }
 
-// acquire reserves the current login for one session mint. The returned
-// function records the session's accessor, or "" when no session was created.
-// Vault reports a session's own TTL, but the session dies with its parent, so
-// the parent's fixed maximum is also returned as the session's real ceiling.
+// acquire reserves the current login for one session mint. The returned function records the session's accessor, or "" if none was created.
+// The parent's fixed maximum is returned as the session's real ceiling, since the session dies with its parent.
 func (s *loginSet) acquire(now time.Time) (string, time.Time, func(string, time.Time), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -104,7 +96,6 @@ func (s *loginSet) acquire(now time.Time) (string, time.Time, func(string, time.
 	}, nil
 }
 
-// forget removes an ended session from whichever login created it.
 func (s *loginSet) forget(accessor string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,9 +106,7 @@ func (s *loginSet) forget(accessor string) {
 	}
 }
 
-// idle removes older logins that need no further custody and returns those
-// that must be revoked: no live session and no mint in flight. A login past
-// its maximum lifetime is already gone in Vault and is only dropped.
+// idle removes older logins needing no custody and returns those to revoke (no live session, no mint in flight); one past its maximum is only dropped.
 func (s *loginSet) idle(now time.Time) []*heldLogin {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -148,9 +137,7 @@ func (s *loginSet) requeue(l *heldLogin) {
 	s.retired = append(s.retired, l)
 }
 
-// drain removes and returns every login that needs no further custody, the
-// current one included, for revocation at Close. A login with a live session
-// stays: revoking it would end the session.
+// drain removes every login needing no custody, the current one included, for revocation at Close; a login with a live session stays.
 func (s *loginSet) drain() []*heldLogin {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -177,7 +164,6 @@ func (s *loginSet) rotationDue(now time.Time) bool {
 	return s.current == nil || !now.Before(s.current.issued.Add(s.opts.interval))
 }
 
-// rotate makes next current and retires the previous login.
 func (s *loginSet) rotate(next *heldLogin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -247,9 +233,8 @@ func readJWT(path string) (string, error) {
 	return jwt, nil
 }
 
-// jwtLogin reads the projected token fresh, because the kubelet rotates it in
-// place. The maximum lifetime is measured from before the request, so the
-// broker's view of expiry is never later than Vault's.
+// jwtLogin reads the projected token fresh since the kubelet rotates it in place; the maximum lifetime is measured from before the request,
+// so the broker's view of expiry is never later than Vault's.
 func jwtLogin(ctx context.Context, base *vaultapi.Client, c jwtConfig, now func() time.Time) (*heldLogin, error) {
 	jwt, err := readJWT(c.tokenFile)
 	if err != nil {
@@ -318,8 +303,6 @@ func revokeToken(base *vaultapi.Client, token string) {
 	_ = api.Auth().Token().RevokeSelfWithContext(ctx, "")
 }
 
-// reauthLoop renews every held login, replaces the current one when due and
-// revokes older logins whose sessions have all ended.
 func (c *Client) reauthLoop(ctx context.Context) {
 	defer close(c.reauthDone)
 	ticker := time.NewTicker(c.logins.opts.tick)
@@ -373,8 +356,7 @@ func (c *Client) loginAgainLocked(ctx context.Context) error {
 	return nil
 }
 
-// policyMissing reports whether a new login already lacked policy since the
-// last scheduled login.
+// policyMissing reports whether a new login already lacked policy since the last scheduled login.
 func (c *Client) policyMissing(policy string) bool {
 	c.missingMu.Lock()
 	defer c.missingMu.Unlock()
@@ -390,19 +372,12 @@ func (c *Client) markPolicyMissing(policy string) {
 	c.missingPolicies[policy] = true
 }
 
-// deniedReloginAfter is how old the current login must be before a denied
-// session mint logs in again. A denial on a younger login means the policy
-// itself is missing, not that the login predates it, so this bounds the
-// logins a misconfigured database can cause to one a minute per replica,
-// whatever the number of agents asking.
+// deniedReloginAfter is how old the login must be before a denied mint logs in again; a denial on a younger login means the policy is missing, which bounds logins to one a minute per replica.
 const deniedReloginAfter = time.Minute
 
 var errLoginLacksPolicy = errors.New("vault refused this database's session policy to the broker's current login")
 
-// reloginAfterDenial replaces the login that Vault refused a database
-// session, because a login only holds the policies that existed when it was
-// issued: a database the catalog added since needs a new login. Concurrent
-// denials share one new login.
+// reloginAfterDenial replaces a login Vault refused a database session, since a login holds only policies that existed when issued; concurrent denials share one new login.
 func (c *Client) reloginAfterDenial(ctx context.Context, denied string) error {
 	c.loginMu.Lock()
 	defer c.loginMu.Unlock()
@@ -449,12 +424,8 @@ func (c *Client) renewLogin(ctx context.Context, l *heldLogin, now time.Time) {
 	c.logins.mu.Unlock()
 }
 
-// revokeIdle revokes each older login as soon as its last session has ended.
-// A transient failure is retried at the next tick until the login's maximum
-// lifetime, when Vault ends it anyway; the first failure of a login is a
-// warning naming its class, and the retries after it log at debug. A login
-// whose policy does not grant revoke-self is released at once: it holds no
-// session, and it ends at its maximum lifetime.
+// revokeIdle revokes each older login once its last session ends, retrying transient failures each tick until Vault ends it at its maximum; the first failure is a warning, retries log at debug.
+// A login whose policy lacks revoke-self is released at once.
 func (c *Client) revokeIdle(ctx context.Context) {
 	for _, l := range c.logins.idle(c.clock()) {
 		result, failure := c.revokeLogin(ctx, l)
@@ -464,8 +435,7 @@ func (c *Client) revokeIdle(ctx context.Context) {
 		case loginRevokeRefused:
 			c.logger.Info("vault older login released: its policy does not grant revoke-self, so it ends at its maximum lifetime")
 		default:
-			// idle handed this login to this call alone; once requeued, another
-			// tick or session end may take it, so read and set the flag first.
+			// idle handed this login to this call alone; once requeued another caller may take it, so read and set the flag first.
 			warned := l.revokeWarned
 			l.revokeWarned = true
 			c.logins.requeue(l)
@@ -490,9 +460,7 @@ const (
 	loginRevokeRefused // Vault answered 403: no revoke-self in the login's policy
 )
 
-// loginRevokeFailure classifies a failed revoke for the log, from a fixed set:
-// "client" (no API client), "timeout", "status" (Vault answered with status)
-// or "network". It never carries Vault's message or the token.
+// loginRevokeFailure classifies a failed revoke for the log as client, timeout, status or network; it never carries Vault's message or the token.
 type loginRevokeFailure struct {
 	class  string
 	status int
@@ -521,11 +489,8 @@ func (c *Client) revokeLogin(ctx context.Context, l *heldLogin) (loginRevokeResu
 	}
 }
 
-// Close stops login refresh and revokes every held login with no live
-// session, the current one included; the client mints nothing afterwards. A
-// login still holding a session, or whose revoke fails, ends at its Vault
-// maximum lifetime. Token and AppRole logins are the operator's and are
-// never revoked.
+// Close stops refresh and revokes every held login with no live session; the client mints nothing afterwards. A login with a session or a failed revoke ends at its Vault maximum;
+// Token and AppRole logins are the operator's and never revoked.
 func (c *Client) Close() { c.CloseContext(context.Background()) }
 
 // CloseContext is Close within ctx, for a shutdown that must end in time.
@@ -557,9 +522,7 @@ func (c *Client) clock() time.Time {
 	return time.Now()
 }
 
-// Ready reports whether a new database session could be minted now. Token and
-// AppRole modes keep one login, which they never renew: they are ready until
-// it expires, and always for a login that does not expire.
+// Ready reports whether a new database session could be minted now; Token and AppRole modes are ready until their single login expires, always if it never does.
 func (c *Client) Ready() bool {
 	if c == nil {
 		return false

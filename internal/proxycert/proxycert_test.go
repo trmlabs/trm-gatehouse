@@ -70,8 +70,7 @@ func keyUsage(bits ...int) asn1.BitString {
 	return b
 }
 
-// A request may carry the extensions a serving certificate needs and nothing
-// else: server authentication alone, and digital signature or key agreement.
+// A request may carry only the extensions a serving certificate needs: server authentication alone, and digital signature or key agreement.
 func TestCheckRequestAllowsServingExtensions(t *testing.T) {
 	key := p256(t)
 	csr := csrPEM(t, key, x509.CertificateRequest{DNSNames: proxyNames, ExtraExtensions: []pkix.Extension{
@@ -339,9 +338,7 @@ func TestIssuerValidate(t *testing.T) {
 	}
 }
 
-// Vault serials start with a zero nibble about one time in sixteen. The row
-// records lower-case hex with no leading zeros, which the audit trail
-// accepts, so those certificates issue like any other.
+// Vault serials start with a zero nibble about one time in sixteen; the audit row takes lower-case hex with no leading zeros, so those certificates issue like any other.
 func TestIssuedSerialsRecordWithoutLeadingZeros(t *testing.T) {
 	csr := csrPEM(t, p256(t), x509.CertificateRequest{DNSNames: proxyNames})
 	for want, serial := range map[string]*big.Int{"abc": big.NewInt(0x0abc), "0": big.NewInt(0), "7f00aa01": big.NewInt(0x7f00aa01)} {
@@ -360,8 +357,7 @@ func TestIssuedSerialsRecordWithoutLeadingZeros(t *testing.T) {
 	}
 }
 
-// Issuance is limited per proxy binding: past its burst a proxy gets 429 and
-// nothing reaches Vault, and the bucket refills over the hour.
+// Issuance is limited per proxy binding: past its burst a proxy gets 429, nothing reaches Vault, and the bucket refills over the hour.
 func TestIssuanceIsRateLimitedPerBinding(t *testing.T) {
 	signer, audit := newSigner(t), &fakeAudit{}
 	issuer := &Issuer{Mount: "pki-gatehouse-proxy", Role: "proxy", Names: proxyNames, TTL: 24 * time.Hour, Signer: signer, Verifier: &fakeVerifier{}, Audit: audit, PerHour: 60, Burst: 3}

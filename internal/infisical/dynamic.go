@@ -51,11 +51,7 @@ type nameCacheEntry struct {
 	fetchedAt time.Time
 }
 
-// DynamicResolver mints, caches, renews, and revokes Infisical dynamic-secret
-// leases, exposing each lease field as a credential value named
-// <DYNAMIC_SECRET_NAME>_<FIELD> (UPPER_SNAKE_CASE). Leased values live only in
-// memory; the store tracks lease IDs so they can be revoked on
-// disconnect/shutdown and swept (orphans) on the next startup.
+// DynamicResolver mints, caches, renews, and revokes dynamic-secret leases as <DYNAMIC_SECRET_NAME>_<FIELD> credentials held only in memory.
 type DynamicResolver struct {
 	fetcher DynamicFetcher
 	store   DynamicLeaseStore
@@ -68,9 +64,7 @@ type DynamicResolver struct {
 	names  map[string]nameCacheEntry // vaultID -> discovered dynamic secrets
 }
 
-// NewDynamicResolver constructs a resolver. A nil fetcher is tolerated and
-// makes every Resolve a no-op (ok=false), so callers needn't special-case the
-// Infisical-disabled path.
+// NewDynamicResolver constructs a resolver; a nil fetcher makes every Resolve a no-op.
 func NewDynamicResolver(s DynamicLeaseStore, fetcher DynamicFetcher, logger *slog.Logger) *DynamicResolver {
 	return &DynamicResolver{
 		fetcher: fetcher,
@@ -82,10 +76,7 @@ func NewDynamicResolver(s DynamicLeaseStore, fetcher DynamicFetcher, logger *slo
 	}
 }
 
-// Resolve returns the value for a credential key if it maps to a dynamic-secret
-// field in vaultID. ok=false means "not a dynamic credential" (caller keeps its
-// own not-found error); a non-nil error is a real failure (bad config, upstream
-// down, lease mint failed).
+// Resolve returns the value for a dynamic-secret key; ok=false means not a dynamic credential, an error is a real failure.
 func (r *DynamicResolver) Resolve(ctx context.Context, vaultID, key string) (string, bool, error) {
 	cfg, ok, err := r.vaultConfig(ctx, vaultID)
 	if err != nil || !ok {
@@ -110,20 +101,14 @@ func (r *DynamicResolver) Resolve(ctx context.Context, vaultID, key string) (str
 	return val, ok, nil
 }
 
-// EnumeratedCredential is one concrete leased field exposed as a credential.
-// Value is SECRET — never log it. When Unavailable is set the lease could not
-// be minted (e.g. the machine identity lacks lease permission), so Value is
-// empty and Key is the field prefix; it exists so the secret is still visible.
+// EnumeratedCredential is one leased field; Value is SECRET, and empty when Unavailable is set.
 type EnumeratedCredential struct {
 	Key         string
 	Value       string
 	Unavailable bool
 }
 
-// Enumerate expands every dynamic secret at the vault's path into its concrete
-// <PREFIX>_<FIELD> credentials, MINTING a lease for each (cached and shared with
-// Resolve). A secret whose lease fails becomes a single Unavailable entry rather
-// than vanishing. Returns (nil, nil) when the vault is not Infisical-backed.
+// Enumerate expands each dynamic secret into <PREFIX>_<FIELD> credentials, minting a lease for each; failures become Unavailable entries.
 func (r *DynamicResolver) Enumerate(ctx context.Context, vaultID string) ([]EnumeratedCredential, error) {
 	cfg, ok, err := r.vaultConfig(ctx, vaultID)
 	if err != nil || !ok {
@@ -185,9 +170,7 @@ func (r *DynamicResolver) vaultConfig(ctx context.Context, vaultID string) (Vaul
 	return cfg, true, nil
 }
 
-// matchDynamicKey finds the dynamic secret whose sanitized name is the longest
-// prefix of key (followed by '_'), returning that name and the remaining
-// field suffix. Longest-prefix wins so "DB" doesn't shadow "DB_REPLICA".
+// matchDynamicKey finds the dynamic secret whose name is the longest prefix of key, so "DB" does not shadow "DB_REPLICA".
 func matchDynamicKey(key string, names []DynamicSecretInfo) (name, suffix string, ok bool) {
 	bestLen := -1
 	for _, ds := range names {
@@ -334,9 +317,7 @@ func (r *DynamicResolver) persistLease(ctx context.Context, vaultID string, e *l
 	}
 }
 
-// revokeUpstream best-effort revokes one lease and logs failures. Returns true
-// when the upstream revoke succeeded, so callers can choose whether to also
-// forget the persisted row.
+// revokeUpstream best-effort revokes one lease and reports whether it succeeded.
 func (r *DynamicResolver) revokeUpstream(ctx context.Context, cfg VaultConfig, leaseID string) bool {
 	if err := r.fetcher.RevokeLease(ctx, cfg, leaseID); err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -370,10 +351,7 @@ func (r *DynamicResolver) RevokeVault(ctx context.Context, vaultID string) {
 	r.revokeRefs(ctx, r.evictAndCollect(ctx, vaultID))
 }
 
-// RevokeVaultAsync evicts the cache and collects the leases to revoke
-// synchronously — so no stale lease is served and the set is captured before
-// any FK cascade removes the rows — then revokes them upstream in the
-// background, where a slow Infisical can't stall the API response.
+// RevokeVaultAsync evicts the cache and collects leases synchronously, then revokes upstream in the background.
 func (r *DynamicResolver) RevokeVaultAsync(vaultID string) {
 	if r.fetcher == nil {
 		return
@@ -386,9 +364,7 @@ func (r *DynamicResolver) RevokeVaultAsync(vaultID string) {
 	}()
 }
 
-// evictAndCollect drops the vault's cached leases and names, then returns every
-// lease to revoke: the persisted rows (authoritative — includes orphans left by
-// a prior process) unioned with any cached lease whose row never persisted.
+// evictAndCollect drops the vault's cached leases and returns every lease to revoke, persisted or cache-only.
 func (r *DynamicResolver) evictAndCollect(ctx context.Context, vaultID string) []leaseRef {
 	if r.fetcher == nil {
 		return nil
@@ -472,10 +448,7 @@ func (r *DynamicResolver) Close(ctx context.Context) {
 	}
 }
 
-// SweepOrphans revokes lease rows that survived a restart. After a restart the
-// in-memory credential values are gone, so any tracked lease is unusable and is
-// revoked + forgotten. Skips IDs already live in this process (created since
-// startup). Intended to run in a background goroutine.
+// SweepOrphans revokes lease rows that survived a restart, skipping IDs live in this process.
 func (r *DynamicResolver) SweepOrphans(ctx context.Context) {
 	if r.fetcher == nil {
 		return

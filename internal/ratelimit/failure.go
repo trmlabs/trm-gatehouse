@@ -2,13 +2,7 @@ package ratelimit
 
 import "sync"
 
-// failureCounter tracks failed attempts per key (typically email).
-// Semantics differ from a rate limiter: the counter only increments on
-// recordFailure; it does not decay with time. A successful operation
-// calls reset. Callers use check() to gate retries — when a caller
-// hits the cap, the underlying credential (verification code, password
-// reset code) is considered burned and the caller must request a new
-// one. Thread-safe.
+// failureCounter counts failed attempts per key and never decays; hitting the cap burns the code, so the caller must request a new one.
 type failureCounter struct {
 	mu       sync.Mutex
 	attempts map[string]int
@@ -50,11 +44,7 @@ func (f *failureCounter) check(key string) bool {
 	return f.attempts[key] < f.max
 }
 
-// record increments the failure counter for key. On overflow, evicts
-// an arbitrary other entry — Go's map iteration is randomized so the
-// victim is unpredictable, but under a mass-enumeration attack the
-// caller's ~10000-key cap means we're throttling anyway; losing an
-// occasional legitimate counter just lets that email try again.
+// record increments key's counter; on overflow it evicts an arbitrary entry, which only lets one email retry.
 func (f *failureCounter) record(key string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

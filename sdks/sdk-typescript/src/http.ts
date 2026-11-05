@@ -36,14 +36,7 @@ const DEFAULT_ADDRESS = "http://localhost:14321";
 const ENV_TOKEN = "AGENT_VAULT_TOKEN";
 const ENV_ADDR = "AGENT_VAULT_ADDR";
 
-/**
- * Internal HTTP client that wraps `fetch` with Agent Vault conventions.
- *
- * - Injects `Authorization: Bearer` and `Content-Type: application/json` headers
- * - Handles timeouts via `AbortController`
- * - Parses error responses into `ApiError`
- * - Supports immutable derivation via `withHeaders()` for X-Vault injection
- */
+/** Internal HTTP client wrapping `fetch` with Agent Vault auth headers, timeouts and `ApiError` parsing. */
 export class HttpClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -59,10 +52,7 @@ export class HttpClient {
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
   }
 
-  /**
-   * Resolve a `ClientConfig` (from constructor args and/or env vars) into an `HttpClient`.
-   * Token resolution: config > env var > throw. Address resolution: config > env var > default.
-   */
+  /** Resolve a `ClientConfig` into an `HttpClient`; token is config > env var > throw, address is config > env var > default. */
   static fromConfig(config?: ClientConfig): HttpClient {
     const cfg = config ?? {};
     const token = cfg.token ?? process.env[ENV_TOKEN];
@@ -86,10 +76,7 @@ export class HttpClient {
     return this.baseUrl;
   }
 
-  /**
-   * Returns a new HttpClient with additional default headers merged in.
-   * The original instance is not modified.
-   */
+  /** Returns a new HttpClient with extra default headers merged in; the original is unchanged. */
   withHeaders(extra: Record<string, string>): HttpClient {
     return new HttpClient({
       baseUrl: this.baseUrl,
@@ -205,11 +192,7 @@ export class HttpClient {
     return (await response.json()) as T;
   }
 
-  /**
-   * Perform an HTTP request and return the raw Response without parsing or
-   * throwing on non-2xx. Used by callers (e.g. CA cert fetch) where the
-   * response body format is not the standard Agent Vault JSON envelope.
-   */
+  /** Perform a request and return the raw Response without parsing or throwing on non-2xx (e.g. CA cert fetch). */
   async raw(
     method: string,
     path: string,

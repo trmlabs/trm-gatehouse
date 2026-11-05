@@ -13,10 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// expectedRunFlags is the single source of truth for flags both `vault run`
-// and the top-level `run` shorthand must expose. Adding a flag to one without
-// the other is a bug. `vault` is inherited from vaultCmd's persistent flags
-// on `vault run` and registered locally on the top-level `run`.
+// expectedRunFlags lists flags both `vault run` and the top-level `run` must expose.
 var expectedRunFlags = []string{
 	"address", "ttl", "vault",
 	"isolation", "image", "mount", "keep", "no-firewall",
@@ -120,9 +117,7 @@ func TestRequireMITMEnv_TransportFailureIsFatal(t *testing.T) {
 	}
 }
 
-// fakeMITMServer returns an httptest server that mimics the real
-// /v1/mitm/ca.pem endpoint. advertisedPort, when non-zero, is written
-// into the X-MITM-Port response header.
+// fakeMITMServer mimics /v1/mitm/ca.pem; a non-zero advertisedPort is sent as X-MITM-Port.
 func fakeMITMServer(t *testing.T, pem string, advertisedPort int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -184,9 +179,7 @@ func TestAugmentEnvWithMITM_Enabled(t *testing.T) {
 		}
 	}
 
-	// HTTP_PROXY and OPENCLAW_PROXY_URL must equal HTTPS_PROXY — all
-	// point at the same MITM ingress so plain http:// upstreams and
-	// OpenClaw's Proxyline route through the broker.
+	// HTTP_PROXY and OPENCLAW_PROXY_URL must equal HTTPS_PROXY so plain http:// upstreams use the broker.
 	if vars["HTTP_PROXY"] != vars["HTTPS_PROXY"] {
 		t.Errorf("HTTP_PROXY = %q, want it to equal HTTPS_PROXY = %q", vars["HTTP_PROXY"], vars["HTTPS_PROXY"])
 	}
@@ -221,19 +214,14 @@ func TestAugmentEnvWithMITM_Enabled(t *testing.T) {
 	if pw, _ := u.User.Password(); pw != "default" {
 		t.Errorf("proxy password (vault) = %q, want default", pw)
 	}
-	// Host should use the advertised X-MITM-Port (9001), not the compile-time
-	// default — this guards the regression where --mitm-port 9000 produced
-	// a URL pointing at 14322.
+	// Host must use the advertised X-MITM-Port, not the compile-time default.
 	wantHost := "127.0.0.1:9001"
 	if u.Host != wantHost {
 		t.Errorf("proxy host = %q, want %q", u.Host, wantHost)
 	}
 }
 
-// TestAugmentEnvWithMITM_PortFallback verifies that a server which does
-// not advertise X-MITM-Port (e.g. pre-v0.8 build) is still usable — the
-// client falls back to DefaultMITMPort rather than emitting a URL with
-// port 0.
+// TestAugmentEnvWithMITM_PortFallback verifies the client falls back to DefaultMITMPort when no port is advertised.
 func TestAugmentEnvWithMITM_PortFallback(t *testing.T) {
 	const fakePEM = "-----BEGIN CERTIFICATE-----\nMIIFAKE\n-----END CERTIFICATE-----\n"
 	srv := fakeMITMServer(t, fakePEM, 0) // no port header
@@ -249,12 +237,7 @@ func TestAugmentEnvWithMITM_PortFallback(t *testing.T) {
 	}
 }
 
-// TestAugmentEnvWithMITM_DedupesParentEnv guards the corporate-proxy
-// regression: if the parent shell already has HTTPS_PROXY / SSL_CERT_FILE
-// etc. set, C tooling (curl, libcurl-backed Python, git) reads the FIRST
-// matching envp entry via getenv — so the stale parent value would win
-// over the injected MITM value and bypass credential injection entirely.
-// The fix strips the parent entries before appending the new ones.
+// TestAugmentEnvWithMITM_DedupesParentEnv guards that stale parent proxy vars are stripped, since getenv takes the first match.
 func TestAugmentEnvWithMITM_DedupesParentEnv(t *testing.T) {
 	const fakePEM = "-----BEGIN CERTIFICATE-----\nMIIFAKE\n-----END CERTIFICATE-----\n"
 	srv := fakeMITMServer(t, fakePEM, 14322)
@@ -368,12 +351,7 @@ func TestResolveVaultForAgentMode(t *testing.T) {
 	})
 }
 
-// TestStripEnvKeys_AgentVaultInjectedKeys is the AGENT_VAULT_* analogue of
-// TestAugmentEnvWithMITM_DedupesParentEnv. In agent mode the parent env is
-// guaranteed to already carry AGENT_VAULT_TOKEN/ADDR/VAULT (that's how agent
-// mode is detected), so without this strip the parent's stale value would
-// silently win in the child via POSIX getenv first-match semantics — most
-// dangerously, --vault would be overridden by a stale AGENT_VAULT_VAULT.
+// TestStripEnvKeys_AgentVaultInjectedKeys guards that a stale parent AGENT_VAULT_* value cannot win over the injected one.
 func TestStripEnvKeys_AgentVaultInjectedKeys(t *testing.T) {
 	parent := []string{
 		"AGENT_VAULT_TOKEN=stale-tok",
@@ -405,9 +383,7 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-// TestRunCmdAgentMode_RejectsTTL exercises the runCmdRunE early-exit when a
-// pre-supplied token is used together with --ttl. The token's lifetime is
-// fixed at mint time, so --ttl is meaningless in agent mode.
+// TestRunCmdAgentMode_RejectsTTL checks --ttl is rejected with a pre-supplied token, whose lifetime is fixed.
 func TestRunCmdAgentMode_RejectsTTL(t *testing.T) {
 	t.Setenv("AGENT_VAULT_TOKEN", "tok123")
 	t.Setenv("AGENT_VAULT_ADDR", "http://example.invalid")

@@ -14,9 +14,7 @@ import (
 	"time"
 )
 
-// automationCatalog is harnessCatalog with its Cursor pool deciding per
-// Automation, a second entry, and two Automations: one owned by a team named
-// by its name, one by a contact email as catalogs gave owners before.
+// automationCatalog is harnessCatalog with its Cursor pool deciding per Automation, a second entry, and two Automations.
 func automationCatalog() map[string]any {
 	c := harnessCatalog()
 	h := harnessAt(c, 0)
@@ -104,7 +102,6 @@ func TestAutomationsAreIndexedById(t *testing.T) {
 	if _, ok := pool.Automation(""); ok {
 		t.Fatal("an empty automation id was found")
 	}
-	// Only a cursor-automation pool decides per Automation.
 	if other, _ := catalog.Pool("claude-sessions"); other.Identity == IdentityCursorAutomation {
 		t.Fatal("fixture")
 	} else if _, ok := other.Automation("auto-1"); ok {
@@ -115,8 +112,6 @@ func TestAutomationsAreIndexedById(t *testing.T) {
 	}
 }
 
-// An owner names a team, by a group's name or object id, or is a contact
-// email as catalogs gave it before owners named teams.
 func TestAutomationOwnerNamesATeam(t *testing.T) {
 	for _, owner := range []string{"platform-team", "Data.Platform_2", "11111111-2222-3333-4444-555555555555", "owner@example.com"} {
 		c := automationCatalog()
@@ -158,7 +153,6 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 		if _, err := parseCatalog(t, c); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
-		// The tolerant load drops only that Automation, never the others.
 		data, _ := json.Marshal(c)
 		catalog, dropped, err := ParseTolerant(data)
 		if err != nil {
@@ -174,9 +168,7 @@ func TestAutomationsRefusedAtLoad(t *testing.T) {
 	}
 }
 
-// Only a cursor-session pool may serve an Automation's run as its person.
-// The opt-in on any other pool refuses the catalog, and a tolerant load
-// drops that pool.
+// Only a cursor-session pool may serve an Automation's run as its person; the opt-in elsewhere refuses the catalog.
 func TestAutomationRunsAsPersonIsForCursorSessionPools(t *testing.T) {
 	c := automationCatalog()
 	pool := c["pools"].([]any)[0].(map[string]any)
@@ -217,8 +209,6 @@ func TestAutomationRunsAsPersonIsForCursorSessionPools(t *testing.T) {
 	}
 }
 
-// An Automation naming an entry the tolerant load dropped goes with it: it
-// reaches nothing rather than part of what was reviewed.
 func TestAutomationNamingADroppedEntryIsDropped(t *testing.T) {
 	c := automationCatalog()
 	entries := c["entries"].([]any)
@@ -240,8 +230,6 @@ func TestAutomationNamingADroppedEntryIsDropped(t *testing.T) {
 	}
 }
 
-// scaledAutomations is the automation catalog with n Automations, each using
-// both entries.
 func scaledAutomations(n int) []byte {
 	c := automationCatalog()
 	list := make([]any, n)
@@ -253,9 +241,7 @@ func scaledAutomations(n int) []byte {
 	return data
 }
 
-// 100,000 Automations load, through the tolerant path the broker uses, in
-// seconds and well under a gigabyte, and each lookup is a map read. The race
-// detector slows the load about fiftyfold, so it checks only memory there.
+// The race detector slows the load about fiftyfold, so it checks only memory there.
 func TestOneHundredThousandAutomationsLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("scale test")
@@ -298,8 +284,6 @@ func TestOneHundredThousandAutomationsLoad(t *testing.T) {
 	runtime.KeepAlive(catalog)
 }
 
-// bucketed stores Automations in 256 buckets by the first byte of the
-// SHA-256 of their id, and sets the head's bucket digests.
 func bucketed(v *prefixVault, automations map[string]string) {
 	lists := map[string][]string{}
 	for id, a := range automations {
@@ -324,8 +308,6 @@ func automationDoc(id, entry string) string {
 	return fmt.Sprintf(`{"id":%q,"name":"a","owner":"owner@example.com","entries":[%q]}`, id, entry)
 }
 
-// 100,000 Automations in 256 buckets: the first load reads every bucket, and
-// a change to one Automation rereads only its bucket.
 func TestPrefixLoaderRereadsOnlyChangedBuckets(t *testing.T) {
 	v := newPrefixVault(2)
 	automations := make(map[string]string, 100_000)
@@ -346,13 +328,10 @@ func TestPrefixLoaderRereadsOnlyChangedBuckets(t *testing.T) {
 	if reads := v.reads.Load(); reads != 1+2+256 {
 		t.Fatalf("first load read %d secrets, want the head, 2 entries and 256 buckets", reads)
 	}
-	// An unchanged head costs one read.
 	v.reads.Store(0)
 	if _, _, err := load(ctx); err != nil || v.reads.Load() != 1 {
 		t.Fatalf("unchanged head: %d reads, %v", v.reads.Load(), err)
 	}
-	// One Automation changes: the head, the entries (reread on every change)
-	// and that one bucket.
 	automations["automation-000042"] = automationDoc("automation-000042", "e00000")
 	bucketed(v, automations)
 	v.reads.Store(0)
@@ -410,7 +389,6 @@ func TestPrefixLoaderRefusesBadBuckets(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// The bucket map may also arrive as a string holding the object.
 	v = fresh()
 	text, _ := json.Marshal(v.head["automations_buckets"])
 	v.head["automations_buckets"] = string(text)
@@ -419,9 +397,6 @@ func TestPrefixLoaderRefusesBadBuckets(t *testing.T) {
 	}
 }
 
-// With no bucketed Automation, the assembled document carries no
-// "automations", so the stored copy stays readable by a broker that predates
-// them; with one, it carries them.
 func TestPrefixLoaderLeavesOutAnEmptyAutomationsList(t *testing.T) {
 	ctx := context.Background()
 	for name, automations := range map[string]map[string]string{

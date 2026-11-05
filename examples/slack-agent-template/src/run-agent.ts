@@ -7,8 +7,6 @@ import { AGENT_SYSTEM_PROMPT } from "./personality.js";
 const allowedTools = Object.keys(mcpServers).map((name) => `mcp__${name}__*`);
 
 // TODO: customize per-tool progress labels by switching on `toolName`.
-// Example:
-//   case "mcp__agent_tools__example_api_get": return ":mag: Checking the API...";
 function toolProgressLabel(toolName: string, _input: Record<string, unknown>): string | null {
   if (toolName.endsWith("__example_api_get")) {
     return ":mag: Checking the API...";

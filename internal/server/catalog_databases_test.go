@@ -42,7 +42,6 @@ func TestCatalogDatabaseResolverFollowsTheLiveCatalog(t *testing.T) {
 	if _, err := r.ResolveDatabase(context.Background(), pgproxy.AgentScope{ActorID: "agent-uuid-1", Pool: "cursor"}, "events"); err == nil {
 		t.Fatal("unknown database resolved")
 	}
-	// A reload that adds a database makes it reachable with no restart.
 	added := strings.Replace(databaseCatalog, `]}`, `,{"name":"events","kind":"postgres","host":"p.def.db.postgresbridge.com","pools":["cursor"],
   "postgres":{"database":"events","mount":"database","role":"staging.us.example.events-readonly"}}]}`, 1)
 	if strings.Count(added, "events") < 2 {

@@ -73,7 +73,6 @@ func TestBoltListenersValidation(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// A paired relay or a shared proxy has no Bolt ports.
 	f := newRelayFixture(t)
 	paired := f.c
 	paired.BoltListeners = []BoltListenerConfig{{Listen: "127.0.0.1:17687", Upstream: f.upstream(t, "broker.internal:15443"), Routes: routesBroker, Placeholder: boltPlaceholder}}
@@ -92,22 +91,15 @@ func TestBoltListenersValidation(t *testing.T) {
 	}
 }
 
-// boltArrival is what the fake broker saw on one connection.
 type boltArrival struct {
 	session   string
 	handshake []byte
 	opening   []*bolt.Structure
 }
 
-// boltBroker is a fake broker's Bolt side: it reads the session line and the
-// handshake, answers a version, reads the opening messages and answers each,
-// then answers every RUN with one record holding the RUN's query and a
-// SUCCESS.
 type boltBroker struct {
 	address string
 	seen    chan boltArrival
-	// version, if set, is the answer to every handshake in place of the
-	// client's choice; failure, if set, refuses the login with this reason.
 	version *bolt.Version
 	failure string
 }
@@ -204,8 +196,6 @@ type boltFixture struct {
 	proof  string
 }
 
-// startBolt runs a sidecar with one Bolt port routed by the broker and one
-// with a fixed entry list, both to one fake broker set up by configure.
 func startBolt(t *testing.T, configure func(*boltBroker)) *boltFixture {
 	t.Helper()
 	f := newRelayFixture(t)
@@ -252,7 +242,6 @@ func (bf *boltFixture) dial(t *testing.T, listen string) net.Conn {
 	}
 }
 
-// proposals is a handshake proposing each version in order, no ranges.
 func proposals(versions ...bolt.Version) []byte {
 	out := append([]byte(nil), bolt.Magic[:]...)
 	for i := range 4 {
@@ -265,8 +254,6 @@ func proposals(versions ...bolt.Version) []byte {
 	return out
 }
 
-// login opens a connection the way a driver does for version: HELLO with
-// basic auth below 5.1, HELLO then LOGON from 5.1, sent together.
 func login(t *testing.T, conn net.Conn, handshake []byte, user, password string) (bolt.Version, *bufio.Reader) {
 	t.Helper()
 	if _, e := conn.Write(handshake); e != nil {
@@ -323,10 +310,6 @@ func failureCode(t *testing.T, m *bolt.Structure) string {
 	return code
 }
 
-// The relay answers the handshake, swaps the placeholder for the proof in
-// the login the client sent (HELLO below 5.1, LOGON from 5.1), forwards the
-// client's own handshake bytes after the session line, and then relays the
-// session both ways.
 func TestBoltLoginCarriesTheProofNotThePlaceholder(t *testing.T) {
 	bf := startBolt(t, nil)
 	for _, v := range []bolt.Version{{Major: 5, Minor: 2}, {Major: 4, Minor: 3}} {
@@ -384,8 +367,6 @@ func TestBoltLoginCarriesTheProofNotThePlaceholder(t *testing.T) {
 	}
 }
 
-// A login the relay cannot vouch for is refused in fixed words before the
-// broker is dialed, so the proof is never read for it.
 func TestBoltRefusesBeforeTheBroker(t *testing.T) {
 	bf := startBolt(t, nil)
 	routed, listed := bf.c.BoltListeners[0].Listen, bf.c.BoltListeners[1].Listen
@@ -408,7 +389,6 @@ func TestBoltRefusesBeforeTheBroker(t *testing.T) {
 			}
 		}
 	}
-	// From 5.1 a HELLO that carries a login is refused, not forwarded.
 	conn := bf.dial(t, routed)
 	if _, e := conn.Write(proposals(bolt.Version{Major: 5, Minor: 2})); e != nil {
 		t.Fatal(e)
@@ -423,14 +403,12 @@ func TestBoltRefusesBeforeTheBroker(t *testing.T) {
 	if code := failureCode(t, readMessage(t, r)); code != boltProtocol {
 		t.Errorf("HELLO with a login at 5.2: code %q", code)
 	}
-	// A client that speaks none of the broker's versions is told so.
 	for _, v := range []bolt.Version{{Major: 3}, {Major: 4, Minor: 1}, {Major: 5, Minor: 1}} {
 		conn = bf.dial(t, routed)
 		if got, _ := login(t, conn, proposals(v), "graph-orders", boltPlaceholder); got != (bolt.Version{}) {
 			t.Errorf("agreed %s with a client offering only %s", got, v)
 		}
 	}
-	// Not Bolt at all.
 	conn = bf.dial(t, routed)
 	_, _ = conn.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
 	if n, _ := conn.Read(make([]byte, 16)); n != 0 {
@@ -443,9 +421,6 @@ func TestBoltRefusesBeforeTheBroker(t *testing.T) {
 	}
 }
 
-// A broker refusal reaches the client as the broker worded it and is
-// journaled with its reason; a broker that answers another version than the
-// one the relay agreed ends the connection.
 func TestBoltBrokerRefusalAndVersionMismatch(t *testing.T) {
 	bf := startBolt(t, func(b *boltBroker) { b.failure = "not_entitled" })
 	conn := bf.dial(t, bf.c.BoltListeners[0].Listen)
@@ -475,7 +450,6 @@ func TestBoltBrokerRefusalAndVersionMismatch(t *testing.T) {
 	}
 }
 
-// helloAnswered reads the relay's own answer to HELLO from Bolt 5.1.
 func helloAnswered(t *testing.T, v bolt.Version, r io.Reader) {
 	t.Helper()
 	if !v.AtLeast(5, 1) {
@@ -488,8 +462,6 @@ func helloAnswered(t *testing.T, v bolt.Version, r io.Reader) {
 	}
 }
 
-// A Bolt 5.1 client may wait for HELLO's answer before it sends LOGON: the
-// relay answers HELLO itself, and the client sees one answer per message.
 func TestBoltClientThatWaitsForHello(t *testing.T) {
 	bf := startBolt(t, nil)
 	conn := bf.dial(t, bf.c.BoltListeners[0].Listen)
@@ -531,8 +503,6 @@ func readMessageErr(r io.Reader) (*bolt.Structure, error) {
 	return bolt.Decode(raw)
 }
 
-// A sidecar may serve routed PostgreSQL ports and Bolt ports together, each
-// on a loopback address of its own.
 func TestBoltAndRoutedPostgresListenersTogether(t *testing.T) {
 	together := func() FixedConfig {
 		c := selfListenerConfig()

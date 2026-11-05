@@ -65,9 +65,7 @@ type Event struct {
 	Session   string
 	Outcome   string
 	Requester string
-	// Authorization decision: who stood behind the request and why it was
-	// allowed or refused. TokenSHA256 identifies a runner session token
-	// without storing it.
+	// TokenSHA256 identifies a runner session token without storing it.
 	RequesterKind string
 	RequesterOID  string
 	TokenSHA256   string
@@ -75,18 +73,15 @@ type Event struct {
 	Decision      string
 	Groups        string
 	CacheAgeSec   int64
-	// Signing-key refusals: see Row.
-	Kid       string
-	KidSHA256 string
-	Peer      string
-	// Proxy certificate issuance: see Row.
-	Serial   string
-	NotAfter string
-	DNSNames string // comma-separated lower-case DNS names the certificate holds
-	Target   string // refusals: see Row; set it with TargetField
-	Branch   string // pushes, pull request writes and CI restarts: see Row; set it with BranchField
-	// Operation, Database and RequesterDepartment: see Row. Set Database with
-	// DatabaseField and RequesterDepartment with DepartmentField.
+	Kid           string
+	KidSHA256     string
+	Peer          string
+	Serial        string
+	NotAfter      string
+	DNSNames      string // comma-separated, lower-case
+	Target        string // set with TargetField
+	Branch        string // set with BranchField
+	// Set Database with DatabaseField and RequesterDepartment with DepartmentField.
 	Operation           string
 	Database            string
 	RequesterDepartment string
@@ -260,12 +255,10 @@ func (e Event) Validate() error {
 	return nil
 }
 
-// settingName is an environment variable name, as the catalog admits one for
-// an Automation's settings.
+// settingName is an environment variable name, as the catalog admits one for an Automation's settings.
 var settingName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
-// settingNameList admits comma-separated setting names, any number, so a row
-// names settings and never holds a value.
+// settingNameList admits comma-separated setting names, so a row names settings and never holds a value.
 func settingNameList(s string) bool {
 	if s == "" {
 		return true
@@ -278,8 +271,7 @@ func settingNameList(s string) bool {
 	return true
 }
 
-// SettingsField returns setting names for a row: comma-separated, in the
-// order given.
+// SettingsField returns setting names for a row, comma-separated in the order given.
 func SettingsField(names []string) string { return strings.Join(names, ",") }
 
 // serialHex is a certificate serial number: at most 20 octets (RFC 5280), in
@@ -313,8 +305,7 @@ var serialHex = regexp.MustCompile(`^(0|[1-9a-f][0-9a-f]{0,39})$`)
 
 var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
-// dnsNameList admits comma-separated lower-case DNS names, any number, so no
-// free text can enter the row.
+// dnsNameList admits comma-separated lower-case DNS names so no free text enters the row.
 func dnsNameList(s string) bool {
 	if s == "" {
 		return true
@@ -327,18 +318,13 @@ func dnsNameList(s string) bool {
 	return true
 }
 
-// operationName is an operation from the broker's own vocabulary: lower-case
-// words joined by dots, such as "pr.open" or "git.fetch".
+// operationName matches dotted lower-case words such as "pr.open".
 var operationName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,3}$`)
 
-// databaseName is a PostgreSQL database name an agent may ask for and a row
-// may carry: at most 63 bytes (NAMEDATALEN - 1) of letters, digits, "_", "-"
-// and ".".
+// databaseName is at most 63 bytes (NAMEDATALEN - 1) of letters, digits, "_", "-" and ".".
 var databaseName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
 
-// DatabaseField returns a requested database name for a row's database: the
-// name itself when it is a plain name, or "invalid". The client chooses it,
-// so nothing else enters the row.
+// DatabaseField returns name when it is a plain database name, else "invalid"; the client chooses it.
 func DatabaseField(name string) string {
 	if name == "" {
 		return ""
@@ -349,13 +335,10 @@ func DatabaseField(name string) string {
 	return name
 }
 
-// maxDepartmentBytes bounds a department; Entra's limit is 64 characters.
+// maxDepartmentBytes is well above Entra's 64-character limit.
 const maxDepartmentBytes = 256
 
-// DepartmentField returns a directory department for a row: trimmed, with
-// runs of white space as one space, or "invalid" when it is too long or holds
-// a control character, a quote or a backslash. Canonical input comes back
-// unchanged.
+// DepartmentField returns the department trimmed with single spaces, or "invalid" when too long or holding a control character, quote or backslash.
 func DepartmentField(department string) string {
 	department = strings.Join(strings.Fields(department), " ")
 	if department == "" {
@@ -372,13 +355,9 @@ func DepartmentField(department string) string {
 	return department
 }
 
-// maxBranchBytes bounds the branch name a row may carry.
 const maxBranchBytes = 255
 
-// BranchField returns a git branch name GitHub reported for a row's branch:
-// the name itself when it is at most 255 bytes of printable ASCII other than
-// a space, a quote or a backslash, or "invalid". GitHub chooses it from what a
-// pusher named, so nothing else enters the row.
+// BranchField returns name when it is at most 255 bytes of printable ASCII without space, quote or backslash, else "invalid".
 func BranchField(name string) string {
 	if name == "" {
 		return ""
@@ -389,19 +368,13 @@ func BranchField(name string) string {
 	return name
 }
 
-// maxGraphQLErrorEntries and maxGraphQLErrorsBytes bound the GraphQL error
-// summary a row may carry; entries past either are counted, not named.
+// maxGraphQLErrorEntries and maxGraphQLErrorsBytes bound the error summary; entries past either are counted, not named.
 const (
 	maxGraphQLErrorEntries = 8
 	maxGraphQLErrorsBytes  = 400
 )
 
-// GraphQLErrorsField summarizes GraphQL errors for a row: one TYPE@path entry
-// per error (the error's type and its path, "-" for no path), comma-separated,
-// then "+N" for the rest. GitHub chooses both strings, so a type that is not
-// 1 to 40 of A-Z, a-z, 0-9 and "_" becomes "INVALID", and a path segment that
-// is not 1 to 40 of those characters becomes "*". The message and the data
-// never enter the row.
+// GraphQLErrorsField summarizes GraphQL errors as TYPE@path entries, comma-separated, then +N for the rest; never a message or data.
 func GraphQLErrorsField(types []string, paths [][]string) string {
 	var parts []string
 	size, extra := 0, 0
@@ -442,8 +415,7 @@ func GraphQLErrorsField(types []string, paths [][]string) string {
 	return out
 }
 
-// safeSegment reports whether s is at most 40 of A-Z, a-z, 0-9 and "_" (empty
-// is allowed; callers decide what it means).
+// safeSegment reports whether s is at most 40 of A-Z, a-z, 0-9 and _ (empty is allowed).
 func safeSegment(s string) bool {
 	if len(s) > 40 {
 		return false
@@ -457,15 +429,10 @@ func safeSegment(s string) bool {
 	return true
 }
 
-// maxPathBytes bounds the request path a row may carry, longer than the
-// paths HTTP servers commonly accept, so a real path is never cut.
+// maxPathBytes exceeds the paths HTTP servers commonly accept, so a real path is never cut.
 const maxPathBytes = 8192
 
-// PathField returns a request path for a row's path: the path itself when it
-// starts with "/" and is printable ASCII other than a space, a quote or a
-// backslash (percent-encoding kept as sent), cut to maxPathBytes with "..."
-// when longer, or "invalid". The worker chooses it, so nothing else enters
-// the row. Canonical input comes back unchanged.
+// PathField returns path when it starts with "/" and is printable ASCII without space, quote or backslash, cut to maxPathBytes with "..." when longer, else "invalid".
 func PathField(path string) string {
 	if path == "" {
 		return ""
@@ -484,10 +451,7 @@ func PathField(path string) string {
 	return path
 }
 
-// TargetField returns the canonical form of a requested host or host:port
-// for a row's target: a lower-case DNS name or IP address, with the port when
-// one was given, or "invalid" when the input is anything else. Its result is
-// always a valid target, and canonical input comes back unchanged.
+// TargetField returns the canonical lower-case host or host:port, or "invalid"; canonical input is unchanged.
 func TargetField(hostport string) string {
 	if hostport == "" {
 		return ""
@@ -513,10 +477,7 @@ func TargetField(hostport string) string {
 
 var groupID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// groupList admits the comma-separated Entra object IDs of the groups a
-// decision checked. It has no length limit: an entry may require any number
-// of groups, the full list is recorded, and the row's MAC covers it. Every
-// element must still be an object ID, so no free text can enter the row.
+// groupList admits comma-separated Entra object IDs, with no length limit: the full list is recorded and MACed.
 func groupList(s string) bool {
 	if s == "" {
 		return true
@@ -546,10 +507,7 @@ func (c *Chain) Record(e Event) error {
 	return err
 }
 
-// Checkpoint signs the current head outside the lock, appends the signature
-// as a row and persists that row as the boot's newest checkpoint. A signing
-// or persistence failure is itself recorded in the chain, and the grace
-// period keeps running until both succeed.
+// Checkpoint signs the current head outside the lock and persists the signature row. A failure is recorded in the chain and the grace period keeps running.
 func (c *Chain) Checkpoint(ctx context.Context) error {
 	c.mu.Lock()
 	if c.failed {
@@ -585,8 +543,7 @@ func (c *Chain) Checkpoint(ctx context.Context) error {
 	return nil
 }
 
-// RefreshKey switches to a newer key version and records the rotation. The
-// rotation row is the first row under the new key.
+// RefreshKey switches to a newer key version; the rotation row is the first under the new key.
 func (c *Chain) RefreshKey(ctx context.Context) error {
 	key, err := c.opts.Keys.Current(ctx)
 	if err != nil {
@@ -626,8 +583,7 @@ func (c *Chain) Run(ctx context.Context, interval, refresh time.Duration) {
 	}
 }
 
-// writeMACVersion is the MAC version new rows use; tests lower it to write
-// the rows an older broker wrote.
+// writeMACVersion is the MAC version new rows use; tests lower it.
 var writeMACVersion = MACVersionCurrent
 
 func (c *Chain) appendLocked(r Row) (Row, error) {
@@ -644,8 +600,7 @@ func (c *Chain) appendLocked(r Row) (Row, error) {
 		return Row{}, ErrAuditFailed
 	}
 	if _, err := c.opts.Out.Write(append(line, '\n')); err != nil {
-		// A partial line may exist. Stop the chain rather than continue past
-		// a row whose presence is unknown.
+		// A partial line may exist: stop rather than continue past a row of unknown presence.
 		c.failLocked()
 		return Row{}, ErrAuditFailed
 	}
@@ -654,9 +609,7 @@ func (c *Chain) appendLocked(r Row) (Row, error) {
 	return r, nil
 }
 
-// Failed is closed when the chain stops for good. Admit then refuses new
-// sessions; sessions already open must end too, since nothing they do can be
-// recorded any more.
+// Failed is closed when the chain stops for good; open sessions must end too, as nothing they do can be recorded.
 func (c *Chain) Failed() <-chan struct{} { return c.done }
 
 func (c *Chain) failLocked() {

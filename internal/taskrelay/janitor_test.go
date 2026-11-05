@@ -16,22 +16,17 @@ import (
 	"time"
 )
 
-// fakeJanitorAPI serves the proxy's replica Pods and a tenant's Sandboxes in
-// pages, and records deletes.
 type fakeJanitorAPI struct {
-	srv       *httptest.Server
-	mu        sync.Mutex
-	sandboxes []map[string]any
-	replicas  []map[string]any
-	deleted   map[string]bool
-	inFlight  atomic.Int32
-	maxFlight atomic.Int32
-	// throttle answers this many deletes with 429 first; failName answers 500.
-	throttle atomic.Int32
-	failName string
-	lists    atomic.Int32
-	// scaled and progressed are the proxy autoscaler's lastScaleTime and the
-	// Deployment's Progressing lastUpdateTime; scaleStatus answers both reads.
+	srv                *httptest.Server
+	mu                 sync.Mutex
+	sandboxes          []map[string]any
+	replicas           []map[string]any
+	deleted            map[string]bool
+	inFlight           atomic.Int32
+	maxFlight          atomic.Int32
+	throttle           atomic.Int32
+	failName           string
+	lists              atomic.Int32
 	scaled, progressed time.Time
 	scaleStatus        int
 }
@@ -136,7 +131,6 @@ func replicaPod(name, ip string) map[string]any {
 	return map[string]any{"metadata": map[string]any{"name": name}, "status": map[string]any{"phase": "Running", "podIP": ip}}
 }
 
-// activityServer is one proxy replica's admin listener.
 func activityServer(t *testing.T, started time.Time, sandboxes ...SandboxActivity) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,8 +150,6 @@ type janitorFixture struct {
 	out *bytes.Buffer
 }
 
-// newJanitor runs against the fake API with a replica per activity server,
-// keyed by a fake Pod IP.
 func newJanitor(t *testing.T, replicas map[string]*httptest.Server) *janitorFixture {
 	t.Helper()
 	f := newRelayFixture(t)
@@ -199,9 +191,6 @@ func (jf *janitorFixture) events(t *testing.T, name string) []map[string]any {
 	return out
 }
 
-// 12,000 Sandboxes over 24 pages: every idle one is deleted in one pass, by
-// UID, with at most deleteConcurrency deletes in flight; used, young and
-// leaving ones are kept.
 func TestJanitorClearsTwelveThousandInOnePass(t *testing.T) {
 	t.Parallel()
 	old := time.Now().Add(-2 * time.Hour)
@@ -226,7 +215,6 @@ func TestJanitorClearsTwelveThousandInOnePass(t *testing.T) {
 		jf.api.sandboxes = append(jf.api.sandboxes, s)
 	}
 	jf.api.throttle.Store(200) // the API server throttles the first 200 deletes
-	// Caps raised to their maximum: a full-fleet pass, as after a long pause.
 	jf.j.config.MaxDeleteFraction, jf.j.config.MaxDeletesPerPass = 1, 1000000
 	if e := jf.j.pass(context.Background()); e != nil {
 		t.Fatal(e)
@@ -250,9 +238,6 @@ func TestJanitorClearsTwelveThousandInOnePass(t *testing.T) {
 	}
 }
 
-// A fault deletes nothing and fails the run: a replica that does not answer,
-// one whose retention is shorter than the idle time, no replica at all, or a
-// scale record that cannot be read.
 func TestJanitorDeletesNothingOnAFault(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	short := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,9 +274,6 @@ func TestJanitorDeletesNothingOnAFault(t *testing.T) {
 	}
 }
 
-// An expected pause deletes nothing, logs why and succeeds: a replica
-// younger than the idle time, or a proxy autoscale or Deployment change
-// within it.
 func TestJanitorHoldsAfterAProxyChange(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	for reason, setup := range map[string]func(jf *janitorFixture){
@@ -315,7 +297,6 @@ func TestJanitorHoldsAfterAProxyChange(t *testing.T) {
 			}
 		})
 	}
-	// Without the two names configured, neither record is read.
 	jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, old)})
 	jf.j.config.ProxyAutoscaler, jf.j.config.ProxyDeployment = "", ""
 	jf.api.scaleStatus = 403
@@ -325,8 +306,6 @@ func TestJanitorHoldsAfterAProxyChange(t *testing.T) {
 	}
 }
 
-// Throttled retries are spread: never before Retry-After, at most twice it,
-// and with no Retry-After anywhere from zero up to the exponential bound.
 func TestJanitorBackoffJitters(t *testing.T) {
 	seen := map[time.Duration]bool{}
 	for range 200 {
@@ -344,7 +323,6 @@ func TestJanitorBackoffJitters(t *testing.T) {
 	}
 }
 
-// Dry run logs every Sandbox it would delete and deletes none.
 func TestJanitorDryRun(t *testing.T) {
 	jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, time.Now().Add(-2*time.Hour))})
 	jf.j.config.DryRun = true
@@ -357,7 +335,6 @@ func TestJanitorDryRun(t *testing.T) {
 	}
 }
 
-// A delete the API refuses for any reason but throttling stops the pass.
 func TestJanitorStopsOnAnError(t *testing.T) {
 	jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, time.Now().Add(-2*time.Hour))})
 	jf.j.config.DeleteConcurrency = 1
@@ -400,8 +377,6 @@ func TestJanitorConfigValidation(t *testing.T) {
 	}
 }
 
-// The rendered config, with the proxy's autoscaler and Deployment named,
-// loads.
 func TestJanitorConfigLoadsTheScaleRecords(t *testing.T) {
 	jf := newJanitor(t, nil)
 	b, _ := json.Marshal(jf.j.config)
@@ -415,9 +390,6 @@ func TestJanitorConfigLoadsTheScaleRecords(t *testing.T) {
 	}
 }
 
-// When every replica's report is durable, a replica's coming or going loses
-// nothing: a young replica and a recent scale do not hold the pass, and the
-// scale records are not read.
 func TestJanitorTrustsDurableReports(t *testing.T) {
 	durable := func(started time.Time) *httptest.Server {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -434,8 +406,6 @@ func TestJanitorTrustsDurableReports(t *testing.T) {
 	if e := jf.j.pass(context.Background()); e != nil || len(jf.api.deleted) != 1 || !jf.api.deleted["sb-00001"] {
 		t.Fatalf("durable pass: deleted %v, error %v", jf.api.deleted, e)
 	}
-	// When the replica asked for the durable view cannot give it, the holds
-	// come back.
 	jf = newJanitor(t, map[string]*httptest.Server{"10.0.0.1": activityServer(t, time.Now().Add(-2*time.Hour)), "10.0.0.2": durable(time.Now().Add(-time.Minute))})
 	jf.api.sandboxes = []map[string]any{janitorSandbox(1, 3*time.Hour)}
 	if e := jf.j.pass(context.Background()); e != nil || len(jf.api.deleted) != 0 || jf.events(t, "janitor_pass")[0]["held"] != "proxy_replica_young" {
@@ -443,11 +413,6 @@ func TestJanitorTrustsDurableReports(t *testing.T) {
 	}
 }
 
-// A durable history vouches only for as long as it has existed. At first
-// switch-on, or after a recreated proxy account or a lost table, the broker's
-// history for the binding is new or absent, and every Sandbox past the idle
-// window would read as unused: the pass holds and deletes nothing until the
-// history is older than the idle window.
 func TestJanitorHoldsOnAYoungDurableHistory(t *testing.T) {
 	durable := func(history time.Time) *httptest.Server {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -459,8 +424,6 @@ func TestJanitorHoldsOnAYoungDurableHistory(t *testing.T) {
 	}
 	for name, history := range map[string]time.Time{"no history": {}, "history a minute old": time.Now().Add(-time.Minute)} {
 		t.Run(name, func(t *testing.T) {
-			// The reported reproduction: two durable replicas started a minute ago with empty
-			// reports, and two Sandboxes created three hours ago.
 			jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": durable(history), "10.0.0.2": durable(history)})
 			jf.api.sandboxes = []map[string]any{janitorSandbox(1, 3*time.Hour), janitorSandbox(2, 3*time.Hour)}
 			if e := jf.j.pass(context.Background()); e != nil || len(jf.api.deleted) != 0 {
@@ -471,7 +434,6 @@ func TestJanitorHoldsOnAYoungDurableHistory(t *testing.T) {
 			}
 		})
 	}
-	// Once the history is older than the idle window, the same reports delete.
 	jf := newJanitor(t, map[string]*httptest.Server{"10.0.0.1": durable(time.Now().Add(-2 * time.Hour))})
 	jf.api.sandboxes = []map[string]any{janitorSandbox(1, 3*time.Hour)}
 	if e := jf.j.pass(context.Background()); e != nil || len(jf.api.deleted) != 1 {
@@ -479,9 +441,6 @@ func TestJanitorHoldsOnAYoungDurableHistory(t *testing.T) {
 	}
 }
 
-// The durable view is read from one replica, the first by name; every other
-// replica is asked only for its own activity, and the replicas are read at
-// most ReplicaConcurrency at a time, all of them.
 func TestJanitorReadsTheDurableViewOnce(t *testing.T) {
 	var mu sync.Mutex
 	full, local, inFlight, maxFlight := 0, 0, 0, 0
@@ -522,12 +481,6 @@ func TestJanitorReadsTheDurableViewOnce(t *testing.T) {
 	}
 }
 
-// The durable history is trusted only as far as a live replica vouches for
-// it: a replica that saw an acknowledged write its own stream in the store
-// no longer reaches means a restore, and no replica acknowledged since before
-// the cutoff, with some replica up for less than the window, means nobody can
-// vouch (a rollout, perhaps over a restore). Each holds the pass; one replica
-// vouching is enough, and so is every replica having been up a whole window.
 func TestJanitorHoldsUntilAReplicaVouches(t *testing.T) {
 	type replica struct {
 		name    string
@@ -543,8 +496,6 @@ func TestJanitorHoldsUntilAReplicaVouches(t *testing.T) {
 	}{
 		"a replica saw writes the store lost": {map[string]int64{"aaaa0001": 5, "bbbb0002": 5},
 			[]replica{{"aaaa0001", 5, old, old}, {"bbbb0002", 9, old, old}}, "activity_history_lost"},
-		// One shared sequence would read 12 here and miss the idle replica's
-		// loss: a busy replica's reports never advance another's stream.
 		"a busy replica reported past an idle one's loss": {map[string]int64{"aaaa0001": 12, "bbbb0002": 5},
 			[]replica{{"aaaa0001", 12, old, old}, {"bbbb0002", 9, old, old}}, "activity_history_lost"},
 		"a replica's stream is gone": {map[string]int64{"aaaa0001": 5},
@@ -589,16 +540,12 @@ func TestJanitorHoldsUntilAReplicaVouches(t *testing.T) {
 	}
 }
 
-// A replica reporting during the pass does not read as a loss: the local
-// reports are read before the broker's view, so every acknowledgment they
-// carry was given before it.
 func TestJanitorReportDuringThePassIsNoLoss(t *testing.T) {
 	var stream atomic.Int64
 	stream.Store(3)
 	old := time.Now().Add(-3 * time.Hour)
 	full := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		view := map[string]int64{"aaaa0001": 5, "bbbb0002": stream.Load()}
-		// The other replica's next report lands just after the view was taken.
 		stream.Add(1)
 		json.NewEncoder(w).Encode(ActivityReport{ReplicaStarted: old, RetentionSeconds: 86400, Durable: r.URL.Path == ActivityPath,
 			HistoryStarted: time.Now().Add(-5 * time.Hour), HistoryStreams: view, Replica: "aaaa0001", AckedSeq: 5, FirstAcked: old})
@@ -617,8 +564,6 @@ func TestJanitorReportDuringThePassIsNoLoss(t *testing.T) {
 	}
 }
 
-// The delete cap: the defaults (a tenth of all Sandboxes, at most 1000) and
-// each configured bound, with the rest left for the next pass.
 func TestJanitorDeleteCap(t *testing.T) {
 	for name, tc := range map[string]struct {
 		fraction float64
@@ -640,9 +585,6 @@ func TestJanitorDeleteCap(t *testing.T) {
 	}
 }
 
-// A capped pass deletes the longest idle first: never seen through any
-// replica, then the oldest last use, then the oldest Sandbox. It logs how
-// many it left, and dry run reports the same.
 func TestJanitorCapsLongestIdleFirst(t *testing.T) {
 	for _, dryRun := range []bool{false, true} {
 		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
@@ -664,7 +606,6 @@ func TestJanitorCapsLongestIdleFirst(t *testing.T) {
 			if e := jf.j.pass(context.Background()); e != nil {
 				t.Fatal(e)
 			}
-			// sb-00010 and sb-00011 were never seen (sb-00011 is older), then sb-00000 and sb-00001.
 			want := []string{"sb-00011", "sb-00010", "sb-00000", "sb-00001"}
 			var got []string
 			if dryRun {
@@ -692,9 +633,6 @@ func TestJanitorCapsLongestIdleFirst(t *testing.T) {
 	}
 }
 
-// A replica that failed to reach the broker within the idle window holds the
-// pass; one idle window after the failure, the same reports delete, with no
-// one releasing anything. A proxy too old to send the field is no signal.
 func TestJanitorHoldsWhileTheBrokerWasRecentlyUnreachable(t *testing.T) {
 	old := time.Now().Add(-5 * time.Hour)
 	server := func(unreachable time.Time, omit bool) *httptest.Server {

@@ -39,8 +39,6 @@ func (l staticTokenListener) Accept() (net.Conn, error) {
 	return &brokercore.KindedConn{Conn: c, Kinds: []string{brokercore.KindStaticToken}}, nil
 }
 
-// countingKeys counts the key reads behind an adapter, so a test can show a
-// refusal came before any credential was read.
 type countingKeys struct {
 	*adapterKeys
 	reads atomic.Int64
@@ -51,8 +49,7 @@ func (k *countingKeys) Get(ctx context.Context, ref httpcatalog.KeyRef) (httpcat
 	return k.adapterKeys.Get(ctx, ref)
 }
 
-// staticCatalog is the catalog of an automations pool served by one harness
-// that proves identity with a static token. The agent blocks are the caller's.
+// staticCatalog is an automations pool served by one harness that proves identity with a static token; the agent blocks are the caller's.
 func staticCatalog(t *testing.T, port int, blocks string) httpcatalog.Catalog {
 	t.Helper()
 	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{
@@ -71,8 +68,7 @@ func staticCatalog(t *testing.T, port int, blocks string) httpcatalog.Catalog {
 	return c
 }
 
-// agentBlock is one token block. A token block must carry an expiry inside the
-// longest a token may live, so it gets one unless extra sets its own.
+// agentBlock is one token block; a block must carry an expiry within the longest a token may live, so it gets one unless extra sets its own.
 func agentBlock(id, entry string, hashes []string, extra string) string {
 	if !strings.Contains(extra, `"expires"`) {
 		extra += fmt.Sprintf(`,"expires":%q`, time.Now().Add(30*24*time.Hour).UTC().Format(time.RFC3339))
@@ -82,8 +78,7 @@ func agentBlock(id, entry string, hashes []string, extra string) string {
 
 type staticFixture struct {
 	*adapterFixture
-	keys *countingKeys
-	// token is agent-1's token, which may use the llm entry only.
+	keys  *countingKeys
 	token string
 	hash  string
 }
@@ -111,10 +106,7 @@ func (f *staticFixture) useToken(token string) {
 	f.client = newTrustingClient(f.proxyURL, url.User(token), f.roots)
 }
 
-// A token agent is an Automation of the automations pool: its block's entry is
-// served with the key added at the broker, and every row names the pool, the
-// agent, how it was admitted and the team that owns it. An entry its block
-// does not list is refused.
+// A token agent is an Automation of the automations pool: its block's entry is served with the key added at the broker, every row names the pool, agent, admission and owning team, and an unlisted entry is refused.
 func TestStaticTokenAgentIsServedItsOwnEntries(t *testing.T) {
 	f := newStaticFixture(t, "")
 	code, body, err := f.do(t, "POST", "/v1/chat/completions", `{}`, nil)
@@ -149,9 +141,7 @@ func TestStaticTokenAgentIsServedItsOwnEntries(t *testing.T) {
 	}
 }
 
-// Wrong token, unknown agent, expired token and a token for a removed block
-// are each refused at the CONNECT, before any credential is read, and each
-// leaves a row that names the reason and the agent id the token claimed.
+// Wrong token, unknown agent, expired token and a removed block are each refused at CONNECT before any credential is read, with a row naming the reason and the claimed agent id.
 func TestStaticTokenRefusalsAreAuditedBeforeAnyCredential(t *testing.T) {
 	f := newStaticFixture(t, "")
 	_, hash2, _ := agenttoken.Mint("agent-2")
@@ -194,8 +184,7 @@ func TestStaticTokenRefusalsAreAuditedBeforeAnyCredential(t *testing.T) {
 	}
 }
 
-// Removing a block ends access on the tunnel's next request: the block was
-// there when the tunnel opened, so the refusal is agent_removed, not unknown.
+// Removing a block ends access on the tunnel's next request, as agent_removed, not unknown.
 func TestStaticTokenRemovedBlockEndsAnOpenTunnel(t *testing.T) {
 	f := newStaticFixture(t, "")
 	if code, _, err := f.do(t, "POST", "/v1/chat/completions", `{}`, nil); err != nil || code != 200 {
@@ -218,8 +207,6 @@ func TestStaticTokenRemovedBlockEndsAnOpenTunnel(t *testing.T) {
 	}
 }
 
-// resolveAgentToken on its own: the scope it makes, and its refusals, with
-// the peer the TLS front named.
 func TestResolveAgentToken(t *testing.T) {
 	token, hash, _ := agenttoken.Mint("agent-1")
 	catalog := staticCatalog(t, 443, agentBlock("agent-1", "llm", []string{hash}, ""))
@@ -231,26 +218,21 @@ func TestResolveAgentToken(t *testing.T) {
 		scope.WorkloadID != "" || scope.UserID != "" || scope.NotAfter.IsZero() {
 		t.Fatalf("%+v %v", scope, err)
 	}
-	// A vault hint is not part of the token's form.
 	if _, err := p.resolveScope(ctx, token, "vault", peer, nil, false); brokercore.DenialReason(err) != agenttoken.ReasonMalformed {
 		t.Errorf("hint: %v", err)
 	}
-	// The refusal names the peer, with the claimed id.
 	_, err = p.resolveScope(ctx, "agent-1."+strings.Repeat("A", 43), "", peer, nil, false)
 	if k := brokercore.DenialKey(err); k == nil || k.Peer != "192.0.2.7" || k.Kid != "agent-1" {
 		t.Errorf("refusal %+v %v", k, err)
 	}
-	// With no verifier the listener refuses everyone.
 	bare := &Proxy{}
 	if _, err := bare.resolveScope(ctx, token, "", peer, nil, false); brokercore.DenialReason(err) != reasonNoVerifier {
 		t.Errorf("no verifier: %v", err)
 	}
-	// A verifier's own, uncoded error still refuses with a code.
 	broken := &Proxy{agentTokens: failingVerifier{}}
 	if _, err := broken.resolveScope(ctx, token, "", peer, nil, false); brokercore.DenialReason(err) != reasonNoVerifier {
 		t.Errorf("uncoded error: %v", err)
 	}
-	// A verifier's session that has already ended is refused, whatever it says.
 	if _, err := (&Proxy{agentTokens: expiredVerifier{}}).resolveScope(ctx, token, "", peer, nil, false); brokercore.DenialReason(err) != agenttoken.ReasonExpired {
 		t.Errorf("expired session: %v", err)
 	}
@@ -268,10 +250,7 @@ func (expiredVerifier) Verify(context.Context, string) (agenttoken.Session, erro
 	return agenttoken.Session{Automation: "agent-1", Pool: "automations", Expires: parseTime("2000-01-01T00:00:00Z")}, nil
 }
 
-// Each listener admits only the kinds it was opened for. A scope of the
-// static-token kind is admitted by the static-token listener alone, and the
-// static-token listener reads tokens with the agent verifier only: a Pod's or a
-// shared proxy's token is never handed to the Attestor there.
+// A scope of the static-token kind is admitted by the static-token listener alone, which reads tokens with the agent verifier only: a Pod's or shared proxy's token is never handed to the Attestor there.
 func TestStaticTokenKindIsAdmittedOnItsOwnListenerOnly(t *testing.T) {
 	peer := netip.MustParseAddr("192.0.2.7")
 	resolve := func(p *Proxy, kinds []string) error {
@@ -284,8 +263,6 @@ func TestStaticTokenKindIsAdmittedOnItsOwnListenerOnly(t *testing.T) {
 		_, err := p.resolveScope(withPeerConn(context.Background(), &peerConn{Conn: conn}), "token", "", peer, nil, false)
 		return err
 	}
-	// A scope of the static kind, however it got there, is refused on any
-	// other listener.
 	for name, kinds := range map[string][]string{
 		"a pool listener":               nil,
 		"the cross-cluster listener":    {brokercore.KindProxyAttested},
@@ -295,8 +272,6 @@ func TestStaticTokenKindIsAdmittedOnItsOwnListenerOnly(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// The static-token listener admits its own kind from the agent verifier,
-	// and never asks the Attestor, whatever kind that would have returned.
 	p := &Proxy{attestor: kindAttestor{brokercore.KindPodToken}, agentTokens: scopeVerifier{}}
 	if err := resolve(p, []string{brokercore.KindStaticToken}); err != nil {
 		t.Errorf("the static-token listener refused an agent token: %v", err)
@@ -312,7 +287,6 @@ func (scopeVerifier) Verify(context.Context, string) (agenttoken.Session, error)
 	return agenttoken.Session{Automation: "agent-1", Pool: "automations"}, nil
 }
 
-// addrConn is a connection whose remote address is the peer the TLS front named.
 type addrConn struct {
 	net.Conn
 	addr net.Addr
@@ -320,9 +294,7 @@ type addrConn struct {
 
 func (c addrConn) RemoteAddr() net.Addr { return c.addr }
 
-// The failure budget on the static-token listener is keyed on the peer the TLS
-// front named, never on the agent id the caller wrote, and a token that
-// verifies is never held back by it.
+// The failure budget on the static-token listener is keyed on the peer the TLS front named, never on the agent id the caller wrote, and a verifying token is never held back by it.
 func TestStaticTokenFailureBudgetIsPerPeer(t *testing.T) {
 	secret := strings.Repeat("A", 43)
 	a, b := net.Pipe()
@@ -340,7 +312,6 @@ func TestStaticTokenFailureBudgetIsPerPeer(t *testing.T) {
 	if one != "mitm:static-token/peer:192.0.2.7" || two != "mitm:static-token/peer:192.0.2.8" {
 		t.Fatalf("keys %q %q", one, two)
 	}
-	// Ids the caller rotates share the peer's one budget.
 	if mitmIPKey(request("192.0.2.7", "agent-2."+secret)) != one || mitmIPKey(request("192.0.2.7", "junk")) != one {
 		t.Fatal("the key follows the claimed id")
 	}
@@ -349,10 +320,7 @@ func TestStaticTokenFailureBudgetIsPerPeer(t *testing.T) {
 	}
 }
 
-// Failed tokens are slowed per peer, whatever ids they name, and a correct
-// token always passes: three bad tokens naming one agent, or three different
-// agents, do not lock the real agent out. The limited attempt's row names the
-// agent id it claimed.
+// Failed tokens are slowed per peer whatever ids they name, and a correct token always passes.
 func TestStaticTokenFailuresNeverBlockACorrectToken(t *testing.T) {
 	f := newStaticFixture(t, "")
 	cfg := ratelimit.DefaultsFor(ratelimit.ProfileDefault)
@@ -363,8 +331,6 @@ func TestStaticTokenFailuresNeverBlockACorrectToken(t *testing.T) {
 		f.useToken(fmt.Sprintf("agent-%d.%s", i+1, secret))
 		f.do(t, "POST", "/v1/chat/completions", `{}`, nil)
 	}
-	// The peer is over its failure budget: a further bad token is limited, by
-	// the id it names or any other.
 	f.useToken("agent-1." + secret)
 	code, _, err := f.do(t, "POST", "/v1/chat/completions", `{}`, nil)
 	if err == nil && code == 200 {
@@ -378,7 +344,6 @@ func TestStaticTokenFailuresNeverBlockACorrectToken(t *testing.T) {
 	if e := f.audit.last(); e.Decision != "identity_rate_limited" || e.Kid != "agent-77" {
 		t.Fatalf("row %+v", e)
 	}
-	// The correct token is served, and keeps being served.
 	for i := 0; i < 3; i++ {
 		f.useToken(f.token)
 		if code, body, err := f.do(t, "POST", "/v1/chat/completions", `{}`, nil); err != nil || code != 200 {
@@ -387,9 +352,7 @@ func TestStaticTokenFailuresNeverBlockACorrectToken(t *testing.T) {
 	}
 }
 
-// A connection on the static-token listener takes CONNECT only: a refused
-// CONNECT does not leave it open for another kind of request, which is refused
-// and ends the connection.
+// A connection on the static-token listener takes CONNECT only: any other request is refused and ends the connection.
 func TestStaticTokenListenerRefusesLaterNonConnect(t *testing.T) {
 	f := newStaticFixture(t, "")
 	conn, err := net.Dial("tcp", f.proxyURL.Host)
@@ -409,8 +372,7 @@ func TestStaticTokenListenerRefusesLaterNonConnect(t *testing.T) {
 	reads, calls := f.keys.reads.Load(), f.calls.Load()
 	_, _ = fmt.Fprintf(conn, "GET http://example.com:%d/v1/chat/completions HTTP/1.1\r\nHost: example.com:%d\r\nProxy-Authorization: Basic %s\r\n\r\n", f.port, f.port,
 		base64.StdEncoding.EncodeToString([]byte(f.token)))
-	// Either the connection is already closed, or the request is refused with
-	// a close; what it must never be is served.
+	// Either the connection is already closed or the request is refused with a close; it must never be served.
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if resp, err = http.ReadResponse(br, nil); err == nil {
 		if resp.StatusCode != http.StatusBadRequest || !resp.Close {

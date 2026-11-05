@@ -108,8 +108,6 @@ func TestGCPEntryRejects(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// An audience that is not an https URL, such as an OAuth client ID, is the
-	// service's own business, and so is a path or a different case on its host.
 	for _, aud := range []string{"123456789012-example.apps.googleusercontent.com", "https://SVC.example.com/api"} {
 		if _, err := Parse([]byte(`{` + gcpPools + `,"entries":[` + sub(idEntry, `"audience":"https://svc.example.com"`, `"audience":"`+aud+`"`) + `]}`)); err != nil {
 			t.Errorf("audience %s: %v", aud, err)
@@ -195,8 +193,6 @@ func TestGCPTokensDownscopeAndImpersonate(t *testing.T) {
 	}
 }
 
-// syntheticJWT is shaped like a Google ID token: three base64url parts, the
-// payload carrying aud, email and (when exp is set) exp. Nothing signs it.
 func syntheticJWT(audience, email string, exp int64, n int32) string {
 	claims := map[string]any{"aud": audience, "email": email}
 	if exp > 0 {
@@ -208,11 +204,6 @@ func syntheticJWT(audience, email string, exp int64, n int32) string {
 		base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("synthetic-id-%d", n)))
 }
 
-// An identity entry asks IAM Credentials for an ID token with its audience
-// and the account's email, through the same call and identity as
-// impersonation. The token is used until a quarter of its own exp is left,
-// for at most the entry's lifetime when exp cannot be read, and dropped
-// after Google refuses.
 func TestGCPTokensIdentity(t *testing.T) {
 	var iam atomic.Int32
 	var asked atomic.Value
@@ -264,8 +255,6 @@ func TestGCPTokensIdentity(t *testing.T) {
 	}
 }
 
-// exp is read from the payload alone: a token that is not a JWT, or whose
-// payload has no exp, falls back to the entry's lifetime.
 func TestJWTExpiryReadsOnlyAWellFormedExp(t *testing.T) {
 	exp := time.Now().Add(time.Hour).Truncate(time.Second)
 	if got := jwtExpiry(syntheticJWT("a", "b", exp.Unix(), 1)); !got.Equal(exp) {
@@ -286,7 +275,6 @@ func TestJWTExpiryReadsOnlyAWellFormedExp(t *testing.T) {
 	}
 }
 
-// The billing header bills another project, so it passes only on opt-in.
 func TestGCPUserProjectHeaderIsOptIn(t *testing.T) {
 	c, err := Parse([]byte(`{` + gcpPools + `,"entries":[` + bqEntry + `]}`))
 	if err != nil {
@@ -305,7 +293,6 @@ func TestGCPUserProjectHeaderIsOptIn(t *testing.T) {
 	}
 }
 
-// An entry may require any number of groups; the audit row records them all.
 func TestEntryMayRequireManyGroups(t *testing.T) {
 	var groups []string
 	for i := range 1000 {

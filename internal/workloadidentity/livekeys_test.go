@@ -25,9 +25,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// liveIssuer is another cluster's issuer whose published key set the test
-// changes, as a cluster's credential rotation does, while the broker's
-// configuration stays the same.
+// liveIssuer is another cluster's issuer whose published key set the test changes while the broker's configuration stays the same.
 type liveIssuer struct {
 	srv   *httptest.Server
 	ca    string
@@ -63,7 +61,6 @@ func newLiveIssuer(t *testing.T) *liveIssuer {
 	return li
 }
 
-// publish replaces the cluster's published key set.
 func (li *liveIssuer) publish(keys ...*signer) {
 	set := []map[string]any{}
 	for _, k := range keys {
@@ -72,8 +69,6 @@ func (li *liveIssuer) publish(keys ...*signer) {
 	li.set.Store(&set)
 }
 
-// domain is the remote trust domain for this issuer, with an optional
-// fallback set.
 func (li *liveIssuer) domain(fallback ...*signer) TrustDomain {
 	td := TrustDomain{Name: "agent-sandbox", Issuer: remoteIssuer, Audience: "example-edge", Keys: "remote", JWKSURL: li.srv.URL + "/jwks", CAFile: li.ca}
 	if len(fallback) != 0 {
@@ -100,8 +95,7 @@ func newSigner(t *testing.T, kid string) *signer {
 	return &signer{key: key, kid: kid}
 }
 
-// token signs claims with this key; extra header members (such as jku) are
-// added as given.
+// token signs claims with this key; extra header members (such as jku) are added as given.
 func (s *signer) token(c claims, extra map[string]any) string {
 	h := map[string]any{"alg": "RS256", "kid": s.kid, "typ": "JWT"}
 	for k, v := range extra {
@@ -115,7 +109,6 @@ func (s *signer) token(c claims, extra map[string]any) string {
 	return input + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-// clock is the resolver's time, moved by the test.
 type clock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -128,7 +121,6 @@ func (c *clock) Add(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// edgeClaims is a token the remote cluster issued to its proxy at time now.
 func edgeClaims(now time.Time) claims {
 	var c claims
 	c.Issuer, c.Subject, c.Audience = remoteIssuer, "system:serviceaccount:example-edge:example-edge", []string{"example-edge"}
@@ -140,8 +132,6 @@ func edgeClaims(now time.Time) claims {
 	return c
 }
 
-// liveResolver builds a resolver with the given trust domain on a test clock,
-// logging into logs.
 func liveResolver(t *testing.T, td TrustDomain) (*Resolver, *clock, *lockedWriter) {
 	t.Helper()
 	f := setupPool(t)
@@ -153,7 +143,6 @@ func liveResolver(t *testing.T, td TrustDomain) (*Resolver, *clock, *lockedWrite
 	return r, clk, logs
 }
 
-// lockedWriter holds log output that background key fetches write.
 type lockedWriter struct {
 	mu sync.Mutex
 	w  bytes.Buffer
@@ -171,7 +160,6 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
-// waitIdle waits until no key fetch is in flight.
 func waitIdle(t *testing.T, keys *signingKeys) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -194,10 +182,7 @@ func verifyEdge(r *Resolver, clk *clock, s *signer) error {
 	return err
 }
 
-// A cluster key rotation needs no configuration change: a new key is picked
-// up on its first token, and a key the cluster removed stops verifying once
-// the cached set is refreshed. A stale fallback set in the configuration
-// neither blocks the new key nor revives the removed one.
+// A cluster key rotation needs no configuration change; a stale fallback set neither blocks the new key nor revives the removed one.
 func TestRemoteKeysFollowRotationWithNoConfigChange(t *testing.T) {
 	for name, withFallback := range map[string]bool{"no fallback": false, "stale fallback pins the old key": true} {
 		t.Run(name, func(t *testing.T) {
@@ -213,11 +198,9 @@ func TestRemoteKeysFollowRotationWithNoConfigChange(t *testing.T) {
 			if err := verifyEdge(r, clk, oldKey); err != nil {
 				t.Fatalf("old key before rotation: %v", err)
 			}
-			// With a fallback the first token does not wait for the first
-			// fetch; let it land.
+			// With a fallback the first token does not wait for the first fetch; let it land.
 			waitIdle(t, r.domains[1].keys)
-			// Rotation starts: the cluster publishes the new key beside the
-			// old one and signs with it.
+			// Rotation starts: the cluster publishes the new key beside the old one.
 			li.publish(oldKey, newKey)
 			clk.Add(jwksRefetchBackoff)
 			if err := verifyEdge(r, clk, newKey); err != nil {
@@ -226,8 +209,7 @@ func TestRemoteKeysFollowRotationWithNoConfigChange(t *testing.T) {
 			if err := verifyEdge(r, clk, oldKey); err != nil {
 				t.Fatalf("old key during rotation: %v", err)
 			}
-			// Rotation completes: the old key is removed. Once the cached
-			// set is refreshed, the old key refuses.
+			// Rotation completes: the old key is removed and refuses once the cached set refreshes.
 			li.publish(newKey)
 			clk.Add(jwksMaxAge)
 			if err := verifyEdge(r, clk, newKey); err != nil {
@@ -250,10 +232,7 @@ func TestRemoteKeysFollowRotationWithNoConfigChange(t *testing.T) {
 	}
 }
 
-// An issuer outage keeps the last good set, and a known key never waits on
-// the failing refetch. Past jwksMaxStale the last good set stops verifying,
-// and a configured fallback takes over. When the issuer recovers, its live
-// set decides again.
+// An issuer outage keeps the last good set; past jwksMaxStale a configured fallback takes over, and a recovered issuer's live set decides again.
 func TestRemoteKeysSurviveIssuerOutage(t *testing.T) {
 	li := newLiveIssuer(t)
 	live, pinnedOnly := newSigner(t, "live-key"), newSigner(t, "pinned-only")
@@ -298,8 +277,7 @@ func TestRemoteKeysSurviveIssuerOutage(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitIdle(t, r.domains[1].keys)
-		// The live set decides while usable: a key only the fallback holds
-		// refuses.
+		// The live set decides while usable: a key only the fallback holds refuses.
 		clk.Add(jwksRefetchBackoff)
 		if err := verifyEdge(r, clk, pinnedOnly); brokercore.DenialReason(err) != "token_keys_unavailable" {
 			t.Fatalf("fallback-only key with a usable live set: %v", err)
@@ -325,8 +303,7 @@ func TestRemoteKeysSurviveIssuerOutage(t *testing.T) {
 			t.Fatalf("fallback-only key after recovery: %v", err)
 		}
 
-		// A broker that starts while the issuer hangs verifies with the
-		// fallback at once, and refuses with none.
+		// A broker starting while the issuer hangs verifies with the fallback at once, and refuses with none.
 		gate := make(chan struct{})
 		var release sync.Once
 		open := func() { release.Do(func() { close(gate) }) }
@@ -370,10 +347,7 @@ func TestRemoteKeysSurviveIssuerOutage(t *testing.T) {
 	})
 }
 
-// A token cannot choose where its keys come from. An issuer outside the
-// allowlist refuses without any fetch, a jku or x5u header is never followed,
-// a forged token naming a trusted issuer fails its signature, and a near-miss
-// issuer string is a different issuer.
+// A token cannot choose where its keys come from: an issuer outside the allowlist refuses without a fetch, jku and x5u are never followed, and a near-miss issuer string is a different issuer.
 func TestSpoofedIssuerRefused(t *testing.T) {
 	li := newLiveIssuer(t)
 	real := newSigner(t, "real-key")
@@ -428,8 +402,7 @@ func TestSpoofedIssuerRefused(t *testing.T) {
 	}
 }
 
-// jwksDialAddress fixes the address the fetch connects to, while TLS still
-// verifies the URL's host: a certificate for another name refuses.
+// jwksDialAddress fixes the connection address while TLS still verifies the URL's host.
 func TestRemoteKeysDialAddress(t *testing.T) {
 	li := newLiveIssuer(t)
 	k := newSigner(t, "dial-key")
@@ -437,8 +410,7 @@ func TestRemoteKeysDialAddress(t *testing.T) {
 	addr := li.srv.Listener.Addr().String()
 	_, port, _ := strings.Cut(addr, ":")
 
-	// httptest's certificate names example.com, which this test never
-	// resolves: the connection goes to the dial address.
+	// httptest's certificate names example.com, which is never resolved: the connection goes to the dial address.
 	td := li.domain()
 	td.JWKSURL, td.JWKSDialAddress = "https://example.com:"+port+"/jwks", addr
 	r, clk, _ := liveResolver(t, td)
@@ -468,8 +440,7 @@ func TestRemoteKeysDialAddress(t *testing.T) {
 	}
 }
 
-// Tokens signed with a just-rotated key that arrive while its fetch runs
-// wait for that fetch and verify; none is refused for arriving second.
+// Tokens signed with a just-rotated key that arrive during its fetch wait for it and verify.
 func TestRotationBurstJoinsTheRunningFetch(t *testing.T) {
 	li := newLiveIssuer(t)
 	oldKey, newKey := newSigner(t, "key-old"), newSigner(t, "key-new")

@@ -23,9 +23,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// apiFixture fronts a fake api.github.com: it mints tokens and accepts a pull
-// request or comment only with a token minted for that repository with
-// contents read and pull_requests write, as GitHub needs to open one.
+// apiFixture fronts a fake api.github.com that accepts a pull request or comment only with a token minted for that repository with contents read and pull_requests write.
 type apiFixture struct {
 	client  *http.Client
 	host    string // the API host; example.com when unset
@@ -45,8 +43,6 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	return newAPIFixtureFor(t, `["pool-agent"]`, `"refPrefixes":["refs/heads/cursor/pool-agent/"]`)
 }
 
-// newAPIFixtureFor serves the broker's pool, pool-agent, from github-api and
-// git entries granting pools, the git entry's repository carrying push.
 func newAPIFixtureFor(t *testing.T, pools, push string) *apiFixture {
 	t.Helper()
 	f := &apiFixture{audit: &adapterAudit{}, minted: map[string]string{}, decoys: decoy.NewSource(nil)}
@@ -90,8 +86,7 @@ func newAPIFixtureFor(t *testing.T, pools, push string) *apiFixture {
 			f.mu.Lock()
 			f.reads++
 			f.mu.Unlock()
-			// 12 is the pool's own pull request; 13 comes from another pool's branch,
-			// 14 from a fork; 20 is an issue, not a pull request.
+			// 12 is the pool's own pull request; 13 is from another pool's branch, 14 from a fork, 20 an issue.
 			switch r.URL.Path {
 			case "/repos/example-org/example-app/pulls/12":
 				fmt.Fprintf(w, `{"number":12,"state":"open","received":%d,"head":{"ref":"cursor/pool-agent/x","repo":{"full_name":"example-org/example-app"}}}`, len(body))
@@ -114,7 +109,6 @@ func newAPIFixtureFor(t *testing.T, pools, push string) *apiFixture {
 	t.Cleanup(github.Close)
 	_, portText, _ := net.SplitHostPort(strings.TrimPrefix(github.URL, "https://"))
 	f.port, _ = strconv.Atoi(portText)
-	// The pool pushes only under cursor/pool-agent/, so it opens pull requests only from there.
 	catalog, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
 		"pools":%[2]s,"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-app","access":"write"}]}},
 		{"name":"github","host":"git.example.com","kind":"git","pools":%[2]s,"git":{"appID":7,"installationID":42,
@@ -198,7 +192,6 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 	if last != `{"base":"main","body":"b","draft":true,"head":"cursor/pool-agent/y","title":"t"}` {
 		t.Fatalf("GitHub received %s", last)
 	}
-	// Reading one pull request, for its state, is a GET with no body.
 	f.mu.Lock()
 	before := f.reads
 	f.mu.Unlock()
@@ -217,8 +210,6 @@ func TestGitHubAPIOpensPullRequestsAndComments(t *testing.T) {
 	}
 }
 
-// A comment goes only to the pool's own pull request: never to another pool's,
-// a fork's, or an issue (people's work).
 func TestGitHubAPICommentsOnlyOnThePoolsPullRequests(t *testing.T) {
 	f := newAPIFixture(t)
 	for _, path := range []string{
@@ -242,9 +233,7 @@ func TestGitHubAPICommentsOnlyOnThePoolsPullRequests(t *testing.T) {
 	}
 }
 
-// With one entry serving two pools, each on its own prefixes, the broker's
-// pool opens and comments only from and on its own branches: another pool's
-// pull request (13, from cursor/other-pool/) is out of reach.
+// With one entry serving two pools on their own prefixes, a pool opens and comments only on its own branches.
 func TestGitHubAPIStaysOnThePoolsOwnPrefixes(t *testing.T) {
 	f := newAPIFixtureFor(t, `["pool-agent","other-pool"]`,
 		`"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/"],"other-pool":["refs/heads/cursor/other-pool/"]}`)
@@ -309,8 +298,7 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 			if code, _ := f.post(t, tc.method, tc.path, tc.auth, tc.body); code < 400 || f.audit.last().Outcome != tc.outcome {
 				t.Fatalf("code=%d outcome=%q", code, f.audit.last().Outcome)
 			}
-			// A refusal past route matching names its operation; an unlisted
-			// path has none, and the row never carries the path.
+			// A refusal past route matching names its operation; an unlisted path has none, and the row never carries the path.
 			want := ""
 			switch tc.outcome {
 			case "unlisted", "method":
@@ -338,10 +326,7 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	}
 }
 
-// A GitHub GraphQL request no route admits is refused before GitHub sees it,
-// and a refusal that names an operation names "graphql", so those refusals can
-// be counted apart from other unlisted paths. Which handler refuses it, and so
-// whether the row carries the operation, is left to the GraphQL handler.
+// A GraphQL request no route admits is refused before GitHub sees it, and the refusal names "graphql" so it can be counted apart from other unlisted paths.
 func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
 	f := newAPIFixture(t)
 	if code, _ := f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code < 400 {
@@ -358,8 +343,6 @@ func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
 	}
 }
 
-// An unmatched GitHub GraphQL path is named "graphql"; a matched route keeps
-// its own operation, and any other unmatched path names none.
 func TestGitHubAPIOperationNamesGraphQL(t *testing.T) {
 	for path, want := range map[string]string{"/graphql": "graphql", "/api/graphql": "graphql", "/repos/o/r/pulls": ""} {
 		if got := githubAPIOperation(httpcatalog.GitRequest{}, path); got != want {

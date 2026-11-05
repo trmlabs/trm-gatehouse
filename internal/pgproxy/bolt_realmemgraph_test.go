@@ -2,17 +2,8 @@
 
 package pgproxy
 
-// The Bolt path against a real Memgraph. Requires a disposable Memgraph
-// serving Bolt over TLS, with a login the broker uses and a small graph:
-//
-//	AV_TEST_MEMGRAPH_ADDR         host:port
-//	AV_TEST_MEMGRAPH_SERVER_NAME  the name on its certificate
-//	AV_TEST_MEMGRAPH_CA_FILE      its self-signed certificate (PEM), pinned
-//	AV_TEST_MEMGRAPH_USER, AV_TEST_MEMGRAPH_PASSWORD
-//
-// AV_TEST_BOLT_DRIVER_CHECK, when set, is a command run with the broker's
-// address as its last argument, such as a stock driver's check script; it
-// must exit 0.
+// The Bolt path against a real Memgraph over TLS; needs AV_TEST_MEMGRAPH_ADDR, _SERVER_NAME, _CA_FILE, _USER and _PASSWORD.
+// AV_TEST_BOLT_DRIVER_CHECK optionally names a driver check command that must exit 0.
 
 import (
 	"context"
@@ -32,9 +23,8 @@ import (
 	"github.com/Infisical/agent-vault/internal/taskrelay"
 )
 
-// realMemgraph starts a broker in front of the real Memgraph the environment
-// names, for an entry with write access or not, and returns its address and
-// a count of the graph's nodes read directly with the broker's login.
+// realMemgraph starts a broker in front of the real Memgraph the environment names, for an entry with write
+// access or not.
 func realMemgraph(t *testing.T, write bool) (broker string, nodes func() int64, auth *fakeAuth, audit *recordingAudit) {
 	t.Helper()
 	addr := os.Getenv("AV_TEST_MEMGRAPH_ADDR")
@@ -192,11 +182,8 @@ func TestRealMemgraph_ReadOnlyThroughTheBroker(t *testing.T) {
 			t.Fatalf("the graph changed through the stock driver: %d nodes before, %d after", before, after)
 		}
 
-		// The whole path a worker uses: the stock driver signs in to its
-		// sidecar as the catalog entry with the placeholder, the sidecar's
-		// routed port reaches the broker over
-		// TLS (here a terminator standing in for the broker Pod's) with the
-		// worker's proof, and the broker reaches Memgraph with its login.
+		// The whole path a worker uses: the stock driver signs in to its sidecar as the catalog entry with the
+		// placeholder.
 		relay := startBoltSidecar(t, broker)
 		out, err = exec.Command(args[0], append(args[1:], "app-graph", "gatehouse-relay-placeholder", relay)...).CombinedOutput() // #nosec G204 -- test-only command from the test's own environment
 		t.Logf("driver check through the sidecar:\n%s", out)
@@ -265,9 +252,7 @@ func startBoltSidecar(t *testing.T, broker string) string {
 	if err := c.Validate(time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	// The sidecar takes over the socket held above, so no other process can
-	// bind the address in between. A dial succeeds against the held socket at
-	// once, so wait for the handover instead.
+	// The sidecar takes over the socket held above, so no other process can bind the address in between.
 	taken, stopped := make(chan struct{}), make(chan error, 1)
 	go func() {
 		stopped <- taskrelay.RunWithListen(t.Context(), c, func(network, address string) (net.Listener, error) {

@@ -54,10 +54,7 @@ import (
 
 const maxPasswordAttempts = 3
 
-// resolveLogLevel turns the --log-level flag (or AGENT_VAULT_LOG_LEVEL env
-// fallback) into a slog.Level. Flag wins if explicitly set. Accepts "info"
-// and "debug" only — anything else is rejected with a clear error.
-// flagChanged indicates whether the user passed --log-level explicitly.
+// resolveLogLevel turns the flag or env fallback into a slog.Level; only "info" and "debug" are accepted.
 func resolveLogLevel(flagValue string, flagChanged bool) (slog.Level, error) {
 	value := flagValue
 	if !flagChanged {
@@ -147,13 +144,13 @@ var serverCmd = &cobra.Command{
 			_ = pidfile.Remove()
 		}
 
-		dbURL, err := databaseURL()
+		dbURL, changed, err := databaseURLWithChange()
 		if err != nil {
 			return err
 		}
 		reload := databaseURLReload()
 		if flagURL, _ := cmd.Flags().GetString("database-url"); flagURL != "" {
-			dbURL, reload = flagURL, nil
+			dbURL, reload, changed = flagURL, nil, nil
 		}
 		dbPath, err := store.DefaultDBPath()
 		if err != nil && dbURL == "" {
@@ -161,9 +158,10 @@ var serverCmd = &cobra.Command{
 		}
 
 		db, err := store.OpenStore(store.StoreConfig{
-			DatabaseURL:       dbURL,
-			SQLitePath:        dbPath,
-			ReloadDatabaseURL: reload,
+			DatabaseURL:        dbURL,
+			SQLitePath:         dbPath,
+			ReloadDatabaseURL:  reload,
+			DatabaseURLChanged: changed,
 		})
 		if err != nil {
 			return fmt.Errorf("opening store: %w", err)
@@ -235,14 +233,7 @@ var serverCmd = &cobra.Command{
 	},
 }
 
-// attachMITMIfEnabled initializes the CA and attaches a transparent MITM
-// proxy to srv when mitmPort > 0. The CA is loaded or created under the
-// standard ~/.agent-vault/ca/ directory, encrypted with the master key.
-//
-// CA init failures are non-fatal, matching the behavior for bind failures
-// in server.Start: since the MITM proxy is default-on, environments that
-// cannot create ~/.agent-vault/ca/ (read-only FS, containers without HOME,
-// corrupted state) must still be able to run the core HTTP server.
+// attachMITMIfEnabled attaches the MITM proxy; CA init failures are non-fatal so the core HTTP server still runs.
 func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKey []byte, db store.Store, maxRespBytes, maxReqBytes int64, adapter *mitm.HeaderAdapter, resolver ...brokercore.SessionResolver) error {
 	if mitmPort <= 0 {
 		return nil
@@ -251,8 +242,7 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 	if len(resolver) > 0 {
 		sessions = resolver[0]
 	}
-	// Pool workers are admitted by Attest by default. The fallback keeps every
-	// caller on online TokenReview; hiding Attest makes pool bindings refuse.
+	// The fallback keeps every caller on online TokenReview; hiding Attest makes pool bindings refuse.
 	switch mode := os.Getenv("AGENT_VAULT_WORKLOAD_ATTESTATION"); mode {
 	case "":
 	case "tokenreview":
@@ -275,8 +265,7 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 		attestor, _ = sessions.(brokercore.Attestor)
 		peerReader = func(c net.Conn) (netip.Addr, error) { return brokercore.ReadProxyV1(c, c.RemoteAddr()) }
 	}
-	// Agent tokens are checked against the live catalog, so the static-token
-	// listener needs one; without it that listener would refuse everyone.
+	// Agent tokens are checked against the live catalog; without one the static-token listener would refuse everyone.
 	var agentTokens agenttoken.Verifier
 	oidc, err := gumloopVerifier(os.Getenv)
 	if err != nil {
@@ -309,8 +298,7 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 		fmt.Fprintf(os.Stderr, "warning: transparent proxy disabled (CA init failed: %v); pass --mitm-port 0 to suppress\n", err)
 		return nil
 	}
-	// A fleet replica drains its tunnels on SIGTERM; unset keeps the 5s stop
-	// and leaves open tunnels to end with the process.
+	// A fleet replica drains its tunnels on SIGTERM; unset keeps the 5s stop.
 	drainSeconds := min(intEnvValue("AGENT_VAULT_SHUTDOWN_SECONDS"), maxShutdownSeconds)
 	if drainSeconds > 0 {
 		srv.SetShutdownTimeout(time.Duration(drainSeconds) * time.Second)
@@ -339,15 +327,14 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 			MaxIdleUpstreamConns:      intEnvValue("AGENT_VAULT_MITM_MAX_IDLE_UPSTREAM_CONNS"),
 			// Concurrent requests on one HTTP/2 tunnel (gRPC destinations).
 			HTTP2MaxStreams: intEnvValue("AGENT_VAULT_MITM_HTTP2_MAX_STREAMS"),
+			// Retry-After when an identity check could not complete.
+			IdentityRetrySeconds: intEnvValue("AGENT_VAULT_MITM_IDENTITY_RETRY_SECONDS"),
 		},
 	))
 	return nil
 }
 
-// newInterceptionCA loads or creates the interception CA. In credential-proxy
-// mode it logs the public root once, so the certificate workers must trust can
-// be recorded from the broker's own logs. The root is stored with the broker,
-// so the line repeats the same certificate on every restart.
+// newInterceptionCA loads or creates the interception CA; in credential-proxy mode it logs the public root once so the trust certificate can be recorded.
 func newInterceptionCA(masterKey []byte, opts ca.Options, logger *slog.Logger, credentialProxy bool) (*ca.SoftCA, error) {
 	caProv, err := ca.New(masterKey, opts)
 	if err != nil {
@@ -360,9 +347,7 @@ func newInterceptionCA(masterKey []byte, opts ca.Options, logger *slog.Logger, c
 	return caProv, nil
 }
 
-// logBrowserCA logs the browser CA's public key hash, the value a browser
-// pins with --ignore-certificate-errors-spki-list, and its PEM. The hash is
-// the same on every replica sharing the root; the PEM's signature differs.
+// logBrowserCA logs the browser CA's public key hash (for --ignore-certificate-errors-spki-list) and its PEM.
 func logBrowserCA(logger *slog.Logger, browserPEM []byte) {
 	block, rest := pem.Decode(browserPEM)
 	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
@@ -378,9 +363,7 @@ func logBrowserCA(logger *slog.Logger, browserPEM []byte) {
 	logger.Info("browser CA", "event", "mitm-browser-ca", "spki_sha256", base64.StdEncoding.EncodeToString(spki[:]), "pem", string(browserPEM))
 }
 
-// logInterceptionCA logs the root certificate's SHA-256 (over its DER) and the
-// exact PEM the broker serves. It logs only a single CERTIFICATE block, never
-// anything else, so no key can reach the log.
+// logInterceptionCA logs the root's SHA-256 and exact PEM, only a single CERTIFICATE block so no key can reach the log.
 func logInterceptionCA(logger *slog.Logger, rootPEM []byte) {
 	block, rest := pem.Decode(rootPEM)
 	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
@@ -391,11 +374,8 @@ func logInterceptionCA(logger *slog.Logger, rootPEM []byte) {
 	logger.Info("interception CA", "event", "mitm-ca", "sha256", hex.EncodeToString(sum[:]), "pem", string(rootPEM))
 }
 
-// attachProxyCertificates lets shared proxies in another cluster ask for
-// their serving certificate on the cross-cluster listener, signed by a Vault
-// PKI role limited to their names. Set all of AGENT_VAULT_PROXY_PKI_MOUNT,
-// AGENT_VAULT_PROXY_PKI_ROLE and AGENT_VAULT_PROXY_CERT_NAMES, or none;
-// AGENT_VAULT_PROXY_CERT_TTL defaults to 24h.
+// attachProxyCertificates lets shared proxies in another cluster request serving certificates on the cross-cluster listener, signed by a Vault PKI role limited to their names.
+// Set all of AGENT_VAULT_PROXY_PKI_MOUNT, _PKI_ROLE and _CERT_NAMES, or none; _CERT_TTL defaults to 24h.
 func attachProxyCertificates(srv *server.Server, resolver *workloadidentity.Resolver, logger *slog.Logger, getenv func(string) string) error {
 	mount, role, names := getenv("AGENT_VAULT_PROXY_PKI_MOUNT"), getenv("AGENT_VAULT_PROXY_PKI_ROLE"), getenv("AGENT_VAULT_PROXY_CERT_NAMES")
 	if mount == "" && role == "" && names == "" && getenv("AGENT_VAULT_PROXY_CERT_TTL") == "" {
@@ -421,8 +401,7 @@ func attachProxyCertificates(srv *server.Server, resolver *workloadidentity.Reso
 			list = append(list, name)
 		}
 	}
-	// Every certificate issued is a row in the signed audit trail, so there is
-	// no issuing without it.
+	// Every certificate issued is a row in the signed audit trail, so none issues without it.
 	chain, err := sharedAuditChain(context.Background(), srv.HashicorpClient(), srv.CleanupStore(), getenv, logger)
 	if err != nil {
 		return err
@@ -430,21 +409,14 @@ func attachProxyCertificates(srv *server.Server, resolver *workloadidentity.Reso
 	if chain == nil {
 		return fmt.Errorf("proxy certificates need the signed audit trail (AGENT_VAULT_AUDIT_CHAIN)")
 	}
-	// Issuance per proxy binding: AGENT_VAULT_PROXY_CERT_PER_HOUR and
-	// AGENT_VAULT_PROXY_CERT_BURST (default 1,000 each).
+	// Issuance per proxy binding: AGENT_VAULT_PROXY_CERT_PER_HOUR and _CERT_BURST (default 1,000 each).
 	return srv.EnableProxyCertificates(&proxycert.Issuer{Mount: mount, Role: role, Names: list, TTL: ttl,
 		Signer: srv.HashicorpClient(), Verifier: resolver, Audit: chain, Logger: logger,
 		PerHour: intEnvValue("AGENT_VAULT_PROXY_CERT_PER_HOUR"), Burst: intEnvValue("AGENT_VAULT_PROXY_CERT_BURST")})
 }
 
-// attachProxyActivity keeps shared proxies' Sandbox activity in the shared
-// store whenever the cross-cluster listener and workload identity are on, so
-// the idle janitor's view outlives any proxy replica.
-// AGENT_VAULT_PROXY_ACTIVITY_RETENTION (default 24h) is how long a row is kept;
-// AGENT_VAULT_PROXY_ACTIVITY_MAX_ROWS (default proxyactivity.DefaultMaxRows) is
-// the most rows one proxy binding may hold, and
-// AGENT_VAULT_PROXY_ACTIVITY_MAX_STREAMS (default
-// proxyactivity.DefaultMaxStreams) the most replica streams.
+// attachProxyActivity keeps shared proxies' Sandbox activity in the shared store so the idle janitor's view outlives any proxy replica.
+// Tuned by AGENT_VAULT_PROXY_ACTIVITY_RETENTION (default 24h), _MAX_ROWS and _MAX_STREAMS.
 func attachProxyActivity(srv *server.Server, resolver *workloadidentity.Resolver, db store.Store, logger *slog.Logger, getenv func(string) string) error {
 	raw := getenv("AGENT_VAULT_PROXY_ACTIVITY_RETENTION")
 	if getenv("AGENT_VAULT_CROSS_CLUSTER_PORT") == "" || resolver == nil {
@@ -485,7 +457,6 @@ func attachProxyActivity(srv *server.Server, resolver *workloadidentity.Resolver
 		MaxRows: maxRows, MaxStreams: maxStreams, Logger: logger})
 }
 
-// proxyIdentifier adapts workload identity to proxy activity.
 type proxyIdentifier struct{ r *workloadidentity.Resolver }
 
 func (p proxyIdentifier) IdentifyProxy(ctx context.Context, token string, peer netip.Addr) (proxyactivity.Identity, error) {
@@ -496,6 +467,10 @@ func (p proxyIdentifier) IdentifyProxy(ctx context.Context, token string, peer n
 // attachServerExtensions wires optional subsystems (MITM, Infisical) onto srv.
 // Both bootstrap paths (foreground and detached child) call this.
 func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresPort int, masterKey []byte, db store.Store, logger *slog.Logger, maxRespBytes, maxReqBytes int64) error {
+	// Checkpoints stop once the sessions drain; the Cloud Logging copy closes after Vault logout so the last rows reach it.
+	srv.AttachShutdown(stopAuditCheckpoints)
+	srv.AttachFinalShutdown(closeAuditCloudLog)
+	auditHealth(srv.AttachReadiness, srv.AttachLiveness)
 	strictMode := false
 	if raw := os.Getenv("AGENT_VAULT_CREDENTIAL_PROXY"); raw != "" {
 		var err error
@@ -533,9 +508,7 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 		srv.EnableCredentialProxy()
 	}
 	if port := os.Getenv("AGENT_VAULT_CROSS_CLUSTER_PORT"); port != "" {
-		// Agents in another cluster arrive through their shared proxy and a
-		// private link, behind a TLS front that names the source in a PROXY
-		// header. Both protocol listeners must trust that header.
+		// Agents in another cluster arrive behind a TLS front that names the source in a PROXY header; both protocol listeners must trust it.
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 || !srv.CredentialProxyEnabled() || !boolEnvValue("AGENT_VAULT_MITM_PROXY_PROTOCOL") ||
 			(postgresPort > 0 && !boolEnvValue("AGENT_VAULT_DB_PROXY_PROTOCOL")) {
@@ -553,9 +526,7 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 		}
 	}
 	if port := os.Getenv("AGENT_VAULT_STATIC_TOKEN_PORT"); port != "" {
-		// Agents with no Kubernetes identity arrive over a private link, behind
-		// a TLS front that names the source in a PROXY header, and prove who
-		// they are with a per-agent token listed in the catalog.
+		// Agents with no Kubernetes identity arrive behind a TLS front that names the source in a PROXY header and prove themselves with a per-agent catalog token.
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 || !srv.CredentialProxyEnabled() || !boolEnvValue("AGENT_VAULT_MITM_PROXY_PROTOCOL") {
 			return fmt.Errorf("AGENT_VAULT_STATIC_TOKEN_PORT needs a port, the credential proxy and a PROXY header on the HTTP listener")
@@ -572,8 +543,7 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 		if err != nil {
 			return err
 		}
-		// Pool bindings without IDs get their pool's agent and vault here, so
-		// a deployment with no signed-in owner can still run its pools.
+		// Pool bindings without IDs get their pool's agent and vault here, so a deployment with no signed-in owner can run its pools.
 		config, err = workloadidentity.ProvisionPools(context.Background(), config, db, logger)
 		if err != nil {
 			return err
@@ -592,8 +562,7 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 	if srv.CredentialProxyEnabled() && srv.HashicorpClient() == nil {
 		return fmt.Errorf("credential proxy requires a working HashiCorp Vault client")
 	}
-	// The HTTP header adapter reads keys through the HashiCorp client, so the
-	// MITM proxy is attached after it.
+	// The HTTP header adapter reads keys through the HashiCorp client, so attach the MITM proxy after it.
 	adapter, err := httpHeaderAdapter(context.Background(), srv, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("http header adapter: %w", err)
@@ -611,8 +580,7 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 	if err := attachMITMIfEnabled(srv, host, mitmPort, masterKey, db, maxRespBytes, maxReqBytes, adapter, sessions); err != nil {
 		return err
 	}
-	// The postgres broker depends on the HashiCorp client, so attach it after
-	// attachHashicorpIfConfigured has run.
+	// The postgres broker needs the HashiCorp client, so attach it after attachHashicorpIfConfigured.
 	if err := attachPostgresBrokerIfEnabled(srv, host, postgresPort, logger, sessions); err != nil {
 		return err
 	}
@@ -643,17 +611,7 @@ func attachServerExtensions(srv *server.Server, host string, mitmPort, postgresP
 	return nil
 }
 
-// attachPostgresBrokerIfEnabled wires the PostgreSQL credential-brokering TCP
-// listener when --postgres-port > 0, a HashiCorp Vault client is available
-// (VAULT_ADDR set), and the broker is enabled — either explicitly via
-// AGENT_VAULT_DB_BROKER, or implicitly because bootstrap database services are
-// configured via AGENT_VAULT_DB_SERVICES(_FILE). Database services are resolved
-// live from the store, so they can be added or removed at runtime through the
-// management API; configured services seed an empty store on startup without
-// clobbering runtime edits. It disables quietly otherwise so deployments that
-// do not use it are unaffected. The upstream dial goes through netguard for
-// SSRF parity with the HTTP proxy; database upstreams on private networks
-// require AGENT_VAULT_ALLOW_PRIVATE_RANGES or an allowlist.
+// attachPostgresBrokerIfEnabled wires the PostgreSQL broker listener when enabled; upstream dials go through netguard.
 func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort int, logger *slog.Logger, resolver ...brokercore.SessionResolver) error {
 	if postgresPort <= 0 {
 		return nil
@@ -662,15 +620,12 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 	if err != nil {
 		return fmt.Errorf("postgres broker: %w", err)
 	}
-	// Managed mode: the broker runs whenever explicitly enabled or when bootstrap
-	// services are configured (which implies intent). Explicit enablement lets an
-	// operator start with an empty store and add the first database at runtime.
+	// Explicit enablement lets an operator start with an empty store and add the first database at runtime.
 	if !boolEnvValue("AGENT_VAULT_DB_BROKER") && len(services) == 0 {
 		logger.Debug("postgres broker disabled: set AGENT_VAULT_DB_BROKER=1 or configure AGENT_VAULT_DB_SERVICES")
 		return nil
 	}
-	// A broker that was asked for but has no Vault login fails startup, rather
-	// than starting without it and reporting ready with no way to mint.
+	// A broker that was asked for but has no Vault login fails startup instead of reporting ready with no way to mint.
 	client := srv.HashicorpClient()
 	if client == nil {
 		return fmt.Errorf("postgres broker requires a working HashiCorp Vault client (set VAULT_ADDR)")
@@ -690,8 +645,7 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 	if len(resolver) > 0 {
 		sessions = resolver[0]
 	}
-	// Pool workers are admitted by Attest by default. The fallback keeps every
-	// caller on online TokenReview; hiding Attest makes pool bindings refuse.
+	// The fallback keeps every caller on online TokenReview; hiding Attest makes pool bindings refuse.
 	switch mode := os.Getenv("AGENT_VAULT_WORKLOAD_ATTESTATION"); mode {
 	case "":
 	case "tokenreview":
@@ -706,7 +660,6 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		Dialer:    netguard.SafeDialContext(netguard.AllowPrivateFromEnv()),
 		Logger:    logger,
 	}
-	// With a broker catalog, databases come from it and reload without a restart.
 	if catalog, err := brokerCatalog(context.Background(), client, srv.CleanupStore(), srv.AttachReadiness, os.Getenv, logger); err != nil {
 		return fmt.Errorf("postgres broker catalog: %w", err)
 	} else if catalog != nil {
@@ -742,9 +695,7 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 		// Per-Pod caps hold across every replica sharing this store.
 		opts.Sessions = server.NewSessionLedger(srv.CleanupStore(), minter)
 	}
-	// Each database's ceiling is its catalog entry's maxConns; MaxConns only
-	// bounds the broker across all of them. A database whose entry sets none
-	// gets AGENT_VAULT_DB_DEFAULT_DATABASE_CONNS (default 50).
+	// Each database's ceiling is its catalog entry's maxConns (default AGENT_VAULT_DB_DEFAULT_DATABASE_CONNS, 50); MaxConns only bounds the broker across all of them.
 	if v := intEnvValue("AGENT_VAULT_DB_MAX_CONNS"); v > 0 {
 		opts.MaxConns = v
 	}
@@ -757,17 +708,14 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 	if v := intEnvValue("AGENT_VAULT_DB_MAX_LEASES_PER_AGENT"); v > 0 {
 		opts.MaxLeasesPerAgent = v
 	}
-	// MaxPendingConns bounds accepted-but-not-yet-serving connections. At the
-	// bound the broker stops accepting, so further connections wait in the
-	// listen backlog until stalled sockets are reclaimed at StartupTimeout.
+	// MaxPendingConns bounds accepted-but-not-serving connections; at the bound, further connections wait in the listen backlog until stalled sockets are reclaimed at StartupTimeout.
 	if v := intEnvValue("AGENT_VAULT_DB_MAX_PENDING_CONNS"); v > 0 {
 		opts.MaxPendingConns = v
 	}
 	if err := applyAdmissionSettings(&opts, os.Getenv); err != nil {
 		return err
 	}
-	// The PROXY header names the worker's address for pool admission. Only the
-	// in-Pod TLS terminator may send it, so it is refused off loopback.
+	// The PROXY header names the worker's address for pool admission; only the in-Pod TLS terminator may send it, so it is refused off loopback.
 	if boolEnvValue("AGENT_VAULT_DB_PROXY_PROTOCOL") {
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 			return fmt.Errorf("AGENT_VAULT_DB_PROXY_PROTOCOL requires a loopback PostgreSQL listener")
@@ -778,13 +726,10 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 	if err != nil {
 		return err
 	}
-	// Transaction-mode multiplexing: client sessions share server connections
-	// and one rotating credential per pool and database. MaxConns then caps
-	// client sessions; each database's server budget comes from the catalog.
+	// Transaction-mode multiplexing: sessions share server connections and one rotating credential per pool and database; MaxConns caps client sessions.
 	if boolEnvValue("AGENT_VAULT_DB_POOLING") {
 		opts.Pool = &pgproxy.PoolOptions{Replicas: intEnvValue("AGENT_VAULT_DB_POOL_REPLICAS"), DefaultBudget: firstPositive(intEnvValue("AGENT_VAULT_DB_POOL_BUDGET"), intEnvValue("AGENT_VAULT_DB_DEFAULT_DATABASE_CONNS")),
 			QueueFactor: intEnvValue("AGENT_VAULT_DB_POOL_QUEUE_FACTOR"), QueueWait: time.Duration(intEnvValue("AGENT_VAULT_DB_POOL_QUEUE_WAIT_MS")) * time.Millisecond,
-			// A graceful stop ends each session between transactions.
 			DrainSessions: intEnvValue("AGENT_VAULT_SHUTDOWN_SECONDS") > 0}
 	}
 	srv.AttachPostgresBroker(pgproxy.New(net.JoinHostPort(host, strconv.Itoa(postgresPort)), opts))
@@ -794,11 +739,8 @@ func attachPostgresBrokerIfEnabled(srv *server.Server, host string, postgresPort
 	return nil
 }
 
-// postgresTLSSettings reads the broker's own PostgreSQL TLS listener, which
-// replaces an in-Pod TLS front: AGENT_VAULT_DB_TLS_PORT, served on every
-// interface, with AGENT_VAULT_DB_TLS_CERT_FILE and AGENT_VAULT_DB_TLS_KEY_FILE.
-// Unset leaves it off. The plain listener stays on loopback, and the client's
-// own address replaces the PROXY header, so the two cannot be combined.
+// postgresTLSSettings reads the broker's own TLS listener (AGENT_VAULT_DB_TLS_PORT, _TLS_CERT_FILE, _TLS_KEY_FILE), which replaces an in-Pod TLS front
+// and cannot be combined with the PROXY header.
 func postgresTLSSettings(getenv func(string) string, host string) (addr, certFile, keyFile string, err error) {
 	port, certFile, keyFile := getenv("AGENT_VAULT_DB_TLS_PORT"), getenv("AGENT_VAULT_DB_TLS_CERT_FILE"), getenv("AGENT_VAULT_DB_TLS_KEY_FILE")
 	if port == "" {
@@ -823,7 +765,6 @@ func postgresTLSSettings(getenv func(string) string, host string) (addr, certFil
 	return net.JoinHostPort("0.0.0.0", port), certFile, keyFile, nil
 }
 
-// firstPositive returns the first value above zero, or 0.
 func firstPositive(values ...int) int {
 	for _, v := range values {
 		if v > 0 {
@@ -833,9 +774,7 @@ func firstPositive(values ...int) int {
 	return 0
 }
 
-// applyAdmissionSettings reads how many connections run admission's store
-// calls at once (the rest queue), its wait for capacity, and each
-// session-ledger call's deadline. A malformed value fails startup.
+// applyAdmissionSettings reads admission's concurrency, capacity wait and session-ledger deadline; a malformed value fails startup.
 func applyAdmissionSettings(opts *pgproxy.Options, getenv func(string) string) error {
 	if raw := getenv("AGENT_VAULT_DB_ADMISSION_CONCURRENCY"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -862,8 +801,6 @@ func applyAdmissionSettings(opts *pgproxy.Options, getenv func(string) string) e
 // tokenReviewOnly exposes only ResolveForProxy, hiding a resolver's Attest.
 type tokenReviewOnly struct{ brokercore.SessionResolver }
 
-// boolEnvValue reports whether the named environment variable is set to a
-// truthy value (per strconv.ParseBool). Unset or unparseable is false.
 func boolEnvValue(key string) bool {
 	if raw := os.Getenv(key); raw != "" {
 		if b, err := strconv.ParseBool(raw); err == nil {
@@ -873,16 +810,10 @@ func boolEnvValue(key string) bool {
 	return false
 }
 
-// intEnvValue reads a positive integer from the named environment variable,
-// returning 0 when unset or invalid.
-// maxShutdownSeconds keeps a drain, the 5 s database cleanup and the 5 s
-// Vault login revoke inside a 75 s termination grace. It is a ceiling only: a
-// preStop pause spends the same grace before SIGTERM, so a render with one
-// must set a shorter drain.
+// maxShutdownSeconds keeps a drain, the 5 s database cleanup and the 5 s Vault revoke inside a 75 s grace; a preStop pause spends the same grace, so set a shorter drain.
 const maxShutdownSeconds = 65
 
-// checkShutdownSeconds refuses a drain the Pod's grace cannot hold: past it,
-// the kubelet kills the broker before the Vault logins are revoked.
+// checkShutdownSeconds refuses a drain the Pod's grace cannot hold, or the kubelet kills the broker before the Vault logins are revoked.
 func checkShutdownSeconds(getenv func(string) string) error {
 	raw := getenv("AGENT_VAULT_SHUTDOWN_SECONDS")
 	if raw == "" {
@@ -922,10 +853,7 @@ func intEnvValue(key string) int {
 	return 0
 }
 
-// attachInfisicalIfConfigured wires the Infisical client when INFISICAL_URL
-// is set. The 10s deadline uses time.After because the SDK login is
-// synchronous and ignores ctx; on timeout we proceed without a client so
-// external vaults serve-stale until next restart.
+// attachInfisicalIfConfigured wires the Infisical client; the SDK login ignores ctx, so the 10s deadline uses time.After.
 func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
 	if os.Getenv("INFISICAL_URL") == "" {
 		return
@@ -952,12 +880,8 @@ func attachInfisicalIfConfigured(srv *server.Server, logger *slog.Logger) {
 	}
 }
 
-// attachHashicorpIfConfigured wires the HashiCorp Vault client when VAULT_ADDR
-// is set. Each login attempt has 10 s; a failed one is retried with backoff
-// for AGENT_VAULT_STARTUP_RETRY_SECONDS (default 120), so a Vault blip delays
-// the start instead of crash-looping the Pod. A missing or invalid auth
-// setting is not retried. With no client, external vaults serve stale until
-// the next restart, and the credential proxy refuses to start.
+// attachHashicorpIfConfigured wires the Vault client when VAULT_ADDR is set. A failed login retries with backoff for AGENT_VAULT_STARTUP_RETRY_SECONDS (default 120);
+// a missing or invalid auth setting is not retried. With no client, external vaults serve stale and the credential proxy refuses to start.
 func attachHashicorpIfConfigured(srv *server.Server, logger *slog.Logger) {
 	if os.Getenv("VAULT_ADDR") == "" {
 		return
@@ -993,16 +917,12 @@ func attachHashicorpIfConfigured(srv *server.Server, logger *slog.Logger) {
 // newHashicorpClient is hashicorp.NewClient, replaced in tests.
 var newHashicorpClient = hashicorp.NewClient
 
-// retryableVaultLogin is true for a login Vault did not complete, false for a
-// missing or invalid auth setting, which no retry fixes.
+// retryableVaultLogin is false for a missing or invalid auth setting, which no retry fixes.
 func retryableVaultLogin(err error) bool {
 	return !errors.Is(err, hashicorp.ErrNotConfigured) && !errors.Is(err, hashicorp.ErrNoAuthMethod) && !errors.Is(err, hashicorp.ErrInvalidAuthConfig)
 }
 
-// attachLogSink wires the request-log pipeline: a BatchSink with async
-// batching feeds persistent storage, and a retention goroutine trims old
-// rows. Returns a shutdown function the caller runs after Start()
-// returns to flush pending records and stop retention.
+// attachLogSink wires batched request logging and retention; the returned func flushes on shutdown.
 func attachLogSink(srv *server.Server, db store.Store, logger *slog.Logger) func() {
 	sink := requestlog.NewBatchSink(db, logger, requestlog.BatchSinkConfig{})
 	srv.AttachLogSink(sink)
@@ -1063,9 +983,7 @@ func promptOwnerSetup(cmd *cobra.Command, db store.Store, masterPassword []byte)
 	return nil
 }
 
-// unlockOrSetup resolves the master password and returns the DEK.
-// Priority: AGENT_VAULT_MASTER_PASSWORD envvar > --password-stdin > interactive prompt.
-// When no password is provided (envvar empty, no --password-stdin), sets up in passwordless mode.
+// unlockOrSetup resolves the master password (env, then stdin, then prompt) and returns the DEK; no password means passwordless.
 func unlockOrSetup(cmd *cobra.Command, db store.Store, passwordStdin bool) (*auth.MasterKey, error) {
 	// 0. AGENT_VAULT_MASTER_KEY_KMS: KMS first, the password only as switch-over input or break-glass
 	if w, err := kmsWrapperFromEnv(context.Background()); err != nil {
@@ -1209,13 +1127,7 @@ func unlockOrSetupWithPassword(db store.Store, password []byte) (*auth.MasterKey
 	return mk, nil
 }
 
-// setupMasterKey runs first-time DEK generation and KEK wrapping.
-// If password is empty, sets up in passwordless mode.
-//
-// In HA (Postgres), another pod may have already created the master key
-// record. SetMasterKeyRecord uses ON CONFLICT DO NOTHING, so if the
-// record already exists, we re-read it and unlock using the existing
-// record instead of the locally-generated one.
+// setupMasterKey generates the DEK; in HA another pod may win the race, so re-read and use the stored record.
 func setupMasterKey(db store.Store, password []byte) (*auth.MasterKey, error) {
 	var mk *auth.MasterKey
 	var rec *auth.VerificationRecord
@@ -1243,9 +1155,7 @@ func setupMasterKey(db store.Store, password []byte) (*auth.MasterKey, error) {
 		return nil, fmt.Errorf("persisting master key record: %w", err)
 	}
 
-	// Re-read the record: if another pod won the race (ON CONFLICT DO
-	// NOTHING), the DB has THEIR record, not ours. We need to unlock
-	// using whatever is actually stored.
+	// If another pod won the race the DB holds its record, so unlock with that one.
 	existing, err := db.GetMasterKeyRecord(ctx)
 	if err != nil {
 		mk.Wipe()
@@ -1274,9 +1184,7 @@ func setupMasterKey(db store.Store, password []byte) (*auth.MasterKey, error) {
 		return unlocked, nil
 	}
 
-	// If we reach here, len(password) == 0 and existing.DEKPlaintext
-	// was handled above (passwordless unlock). The only remaining case
-	// is a password-protected DB record with no local password.
+	// Only a password-protected record with no local password reaches here.
 	mk.Wipe()
 	return nil, fmt.Errorf("master key in database is password-protected but AGENT_VAULT_MASTER_PASSWORD is not set; all pods must use the same master password")
 }
@@ -1363,7 +1271,7 @@ func runDetachedChild(host, addr string, mitmPort, postgresPort int, logger *slo
 	key := buf[:32]
 	initialized := buf[32] == 1
 
-	dbURL, err := databaseURL()
+	dbURL, changed, err := databaseURLWithChange()
 	if err != nil {
 		return err
 	}
@@ -1373,9 +1281,10 @@ func runDetachedChild(host, addr string, mitmPort, postgresPort int, logger *slo
 	}
 
 	db, err := store.OpenStore(store.StoreConfig{
-		DatabaseURL:       dbURL,
-		SQLitePath:        dbPath,
-		ReloadDatabaseURL: databaseURLReload(),
+		DatabaseURL:        dbURL,
+		SQLitePath:         dbPath,
+		ReloadDatabaseURL:  databaseURLReload(),
+		DatabaseURLChanged: changed,
 	})
 	if err != nil {
 		return fmt.Errorf("opening store: %w", err)
@@ -1398,9 +1307,7 @@ func runDetachedChild(host, addr string, mitmPort, postgresPort int, logger *slo
 	return srv.Start()
 }
 
-// spawnDetached re-execs the server as a background process, passing the master key + initialized flag via a pipe.
-// explicitLogLevel, when non-nil, forwards the parent's --log-level flag to the child so a flag-only
-// invocation (no env var) still takes effect after re-exec.
+// spawnDetached re-execs the server in the background, passing the master key via a pipe.
 func spawnDetached(cmd *cobra.Command, masterKey *auth.MasterKey, initialized bool, host string, port, mitmPort, postgresPort int, addr string, explicitLogLevel *string, maxRespBytes, maxReqBytes int64) error {
 	defer masterKey.Wipe()
 

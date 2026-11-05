@@ -69,9 +69,7 @@ func TestDetectAuthMethod_Kubernetes(t *testing.T) {
 }
 
 func TestDetectAuthMethod_GCPIAMRequiresKeyFile(t *testing.T) {
-	// Identity ID alone matches GCP ID Token (the same env var the SDK reads
-	// for both GCP methods). Adding the IAM-only key-file path tips the
-	// selection to GCP IAM.
+	// Identity ID alone matches GCP ID Token; adding the IAM key-file path selects GCP IAM.
 	got, _ := DetectAuthMethod(envFunc(map[string]string{
 		"INFISICAL_GCP_AUTH_IDENTITY_ID": "id",
 	}), newDiscardLogger())

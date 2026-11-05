@@ -216,9 +216,8 @@ type authorityMinter struct {
 
 func (m *authorityMinter) AuthorityDone() <-chan struct{} { return m.done }
 
-// Losing cleanup authority during a drain ends the busy sessions at once: the
-// drain would otherwise keep them on credentials other replicas may already
-// have claimed and revoked.
+// Losing cleanup authority during a drain ends the busy sessions at once: the drain would otherwise keep them
+// on credentials other replicas may already have claimed and revoked.
 func TestPooledDrainStopsWhenCleanupAuthorityIsLost(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, lease.Password)

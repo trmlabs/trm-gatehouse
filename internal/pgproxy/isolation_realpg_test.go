@@ -15,8 +15,6 @@ import (
 )
 
 // The fixture allows the broker route and rejects the agent route with pg_hba.
-// See examples/postgres-broker/README.md. This test explicitly proves that the
-// network policy, not SQL filtering, closes the self-password-change escape.
 func TestRealPostgres_NetworkIsolationBlocksChosenPassword(t *testing.T) {
 	allowed, denied := os.Getenv("AV_TEST_PG_UPSTREAM"), os.Getenv("AV_TEST_PG_DENIED_UPSTREAM")
 	if allowed == "" || denied == "" {

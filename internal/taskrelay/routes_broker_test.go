@@ -12,10 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// With routes "broker", CONNECT forwards any well-formed host:443 to the
-// broker and the broker's refusal reaches the client as a refusal. A
-// malformed target, an IP literal or another port is refused before the
-// broker hears of it.
 func TestConnectRoutesBroker(t *testing.T) {
 	t.Parallel()
 	sf := startSharedWith(t, false, true, func(c *FixedConfig) {
@@ -60,8 +56,6 @@ func TestConnectRoutesBroker(t *testing.T) {
 	}
 }
 
-// The broker's 403 for a target outside the catalog reaches the client as a
-// 403, not as an outage.
 func TestConnectBrokerRefusalIsARefusal(t *testing.T) {
 	broker := newActivityBroker(t)
 	sf := startSharedWith(t, false, true, func(c *FixedConfig) {
@@ -82,10 +76,6 @@ func TestConnectBrokerRefusalIsARefusal(t *testing.T) {
 	}
 }
 
-// With routes "broker", the single PostgreSQL port forwards any well-formed
-// database name; the broker refuses one not in the pool's catalog, and the
-// client gets the same 3D000 words a local refusal gives. A missing or
-// malformed name is refused before the broker is dialed.
 func TestPostgresRoutesBroker(t *testing.T) {
 	backend := newCatalogBackend(t)
 	sf := startSharedWith(t, false, true, func(c *FixedConfig) {
@@ -138,10 +128,6 @@ func TestPostgresRoutesBroker(t *testing.T) {
 	}
 }
 
-// Routes "broker" is explicit and exclusive: with a list it is refused, an
-// unknown value is refused, and with neither a list nor the flag the config is
-// refused, so dropping a list never opens a listener. Outside shared mode it
-// does not exist.
 func TestRoutesBrokerValidation(t *testing.T) {
 	f := newRelayFixture(t)
 	base := func() FixedConfig {

@@ -15,10 +15,7 @@ import (
 	"time"
 )
 
-// Scope is what the catalog lets one installation's tokens reach: its
-// repositories ("owner/name") and whether any entry opens pull requests,
-// reads Actions, reads deployments, reads check runs, reads commit statuses or
-// runs a workflow run again (ActionsWrite).
+// Scope is what the catalog lets one installation's tokens reach: its repositories ("owner/name") and the permissions its entries use.
 type Scope struct {
 	Repos        []string
 	PullRequests bool
@@ -29,14 +26,7 @@ type Scope struct {
 	ActionsWrite bool
 }
 
-// ScopeMode is what the broker does about an installation's reach.
-// ScopeRefuse (the default) mints only for repositories the catalog lists
-// and stops every token while the installation's repositories cannot be
-// read; ScopeWarn reports and keeps serving. An installation that also
-// reaches repositories the catalog does not list (or all of them) is
-// reported in either mode and never stops the listed repositories' tokens:
-// each token is still minted for one listed repository and the minimum
-// permissions, and a wider token is revoked.
+// ScopeMode sets what the broker does about installation reach: ScopeRefuse (default) stops tokens when the repository list is unreadable; ScopeWarn only reports.
 type ScopeMode string
 
 const (
@@ -44,8 +34,7 @@ const (
 	ScopeWarn   ScopeMode = "warn"
 )
 
-// ParseScopeMode reads AGENT_VAULT_GITHUB_APP_SCOPE; empty is ScopeRefuse,
-// so a deployment gets warn only by asking for it.
+// ParseScopeMode reads AGENT_VAULT_GITHUB_APP_SCOPE; empty is ScopeRefuse.
 func ParseScopeMode(s string) (ScopeMode, error) {
 	switch ScopeMode(s) {
 	case "", ScopeRefuse:
@@ -56,17 +45,7 @@ func ParseScopeMode(s string) (ScopeMode, error) {
 	return "", fmt.Errorf("AGENT_VAULT_GITHUB_APP_SCOPE must be refuse or warn")
 }
 
-// The installation's repositories on GitHub should stay inside the catalog,
-// so an App widened in GitHub's settings is caught instead of quietly
-// reaching more than Gatehouse grants. Reach (all repositories, an unlisted
-// repository, or a list that cannot be read) is reported; only a list that
-// cannot be read stops tokens, in refuse mode, since then no repository's
-// place in the installation is known. Other
-// settings (permissions, suspension, another App) are only reported: the
-// broker requests only what each token needs. Checked before tokens are
-// handed out, at most every scopeTTL per installation, and again after a
-// catalog change. Every check that finds anything logs one
-// "github app installation scope" event, which monitors count.
+// Installation scope is checked before minting, at most every scopeTTL; each finding logs one "github app installation scope" event.
 const (
 	scopeTTL   = 5 * time.Minute
 	scopeRetry = 30 * time.Second
@@ -79,8 +58,7 @@ type scopeVerdict struct {
 
 var errScope = errors.New("github app installation is wider than the catalog")
 
-// findings are what one check found: an unreadable repository list decides
-// the verdict in refuse mode; other reach and settings are only reported.
+// findings are what one check found; only an unreadable list decides the verdict in refuse mode.
 type findings struct {
 	unreadable      bool // the repository list could not be read
 	reach, settings []string
@@ -95,10 +73,7 @@ func sortedKeys(m map[string]string) []string {
 	return keys
 }
 
-// repoListed reports whether the catalog lists repo for the installation, so
-// refuse mode mints only for listed repositories. Without a Scope function,
-// or in warn mode, every repository passes; the catalog match already limits
-// what is asked for.
+// repoListed reports whether the catalog lists repo; without a Scope function, or in warn mode, every repository passes.
 func (m *Minter) repoListed(app App, repo string) bool {
 	if m.Scope == nil || m.ScopeMode == ScopeWarn {
 		return true
@@ -115,20 +90,16 @@ func (m *Minter) repoListed(app App, repo string) bool {
 func (m *Minter) ForgetScope() {
 	m.scopeMu.Lock()
 	m.scopes = nil
-	m.scopeGen++ // a check already running answers its caller but is not kept
+	m.scopeGen++ // a running check answers its caller but is not kept
 	m.scopeMu.Unlock()
 }
 
-// checkScope reports whether tokens may be minted for the installation, from
-// a recent verdict when there is one. Without a Scope function it passes; the
-// broker always sets one.
+// checkScope reports whether tokens may be minted for the installation, from a recent verdict when there is one.
 func (m *Minter) checkScope(ctx context.Context, app App) error {
 	if m.Scope == nil {
 		return nil
 	}
-	// The lock guards the verdicts only. One check per installation runs at
-	// a time, outside it, and its callers wait for that check alone, so a
-	// slow installation never holds up another's tokens.
+	// One check per installation runs outside the lock, so a slow installation never holds up another's tokens.
 	m.scopeMu.Lock()
 	for {
 		if v, ok := m.scopes[app.InstallationID]; ok {
@@ -160,9 +131,7 @@ func (m *Minter) checkScope(ctx context.Context, app App) error {
 	m.scopeChecking[app.InstallationID] = done
 	gen := m.scopeGen
 	m.scopeMu.Unlock()
-	// The check is shared, so it runs on its own deadline: a caller that
-	// goes away must not cancel it and cache a refusal for everyone. Its
-	// waiters are released even if it panics, with a refusal recorded.
+	// The check is shared and runs on its own deadline so a departing caller cannot cache a refusal for everyone; waiters are released on panic with a refusal.
 	var err error
 	finished := false
 	defer func() {
@@ -201,15 +170,7 @@ func (m *Minter) checkScope(ctx context.Context, app App) error {
 	return err
 }
 
-// verifyScope finds reach beyond the catalog (an installation on all
-// repositories, any repository the catalog does not list, or a repository list
-// that cannot be read) and settings wider than the catalog needs (a
-// permission other than metadata read, contents, and only where a github-api
-// entry needs them, pull requests write, actions, deployments, checks and
-// statuses read, and actions write where a repository opts into a rerun; a
-// suspension; another App's installation). A
-// catalog repository the installation lacks needs no check here: its mint
-// already fails.
+// verifyScope reports reach or settings wider than the catalog needs; a catalog repository the installation lacks fails at mint.
 func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings {
 	var f findings
 	if m.Signer == nil || app.AppID <= 0 || app.InstallationID <= 0 {
@@ -266,12 +227,10 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 	}
 
 	if settings.RepositorySelection == "all" {
-		// Already wider than any catalog: listing every repository would add
-		// nothing.
+		// Already wider than any catalog.
 		return f
 	}
-	// A metadata-only token for the whole installation lists its repositories,
-	// and is revoked straight after.
+	// A metadata-only token lists the repositories and is revoked straight after.
 	var listing struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
@@ -287,8 +246,7 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 	for _, r := range want.Repos {
 		allowed[strings.ToLower(r)] = true
 	}
-	// Every page, however many repositories the installation holds; only the
-	// names outside the catalog are kept, and only a few of those are named.
+	// Every page is read; only names outside the catalog are kept, and only a few are named.
 	const named = 5
 	var extra []string
 	extraCount := 0
@@ -326,8 +284,7 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 	return f
 }
 
-// githubJSON makes one GitHub API call and decodes the reply. Any other status
-// or an unreadable body is ErrUnavailable; the bearer never reaches an error.
+// githubJSON makes one GitHub API call and decodes the reply; any other status or unreadable body is ErrUnavailable, and the bearer never reaches an error.
 func (m *Minter) githubJSON(ctx context.Context, client *http.Client, method, url, bearer string, body []byte, status int, into any) error {
 	var reader io.Reader
 	if body != nil {

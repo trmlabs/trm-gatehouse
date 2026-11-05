@@ -1,7 +1,6 @@
 package taskrelay
 
-// validRouteNames reports whether a routed listener names exactly one
-// routing: routes "broker", or a list of distinct, well-formed names.
+// validRouteNames reports whether a routed listener names exactly one routing: routes "broker", or distinct well-formed names.
 func validRouteNames(routes string, names []string) bool {
 	if (routes != "" && routes != routesBroker) || (routes == routesBroker) == (len(names) != 0) {
 		return false
@@ -16,8 +15,6 @@ func validRouteNames(routes string, names []string) bool {
 	return true
 }
 
-// routeNames is a routed listener's route check: under broker routing any
-// name of the given shape, otherwise only the listed names.
 func routeNames(routes string, names []string, shape func(string) bool) func(string) bool {
 	if routes == routesBroker {
 		return shape

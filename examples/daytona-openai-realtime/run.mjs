@@ -27,8 +27,10 @@ printf '<!doctype html><html><body>agent-vault-daytona-example</body></html>\n' 
 docker run --rm -v /tmp/agent-vault:/src -w /src golang:1.25-alpine \
   sh -c 'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /src/agent-vault .' >/tmp/build-agent-vault.log
 
+docker build -t gatehouse:local . >/tmp/build-agent-vault.log
+
 cat > Dockerfile.example <<'DOCKER'
-FROM infisical/agent-vault
+FROM gatehouse:local
 USER root
 COPY agent-vault /usr/local/bin/agent-vault
 RUN chmod +x /usr/local/bin/agent-vault
@@ -242,7 +244,7 @@ try {
     undefined,
     {
       AGENT_VAULT_REF: process.env.AGENT_VAULT_REF ?? "main",
-      AGENT_VAULT_REPO: process.env.AGENT_VAULT_REPO ?? "https://github.com/Infisical/agent-vault.git",
+      AGENT_VAULT_REPO: process.env.AGENT_VAULT_REPO ?? "https://github.com/trmlabs/trm-gatehouse.git",
       OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     },
     1800,

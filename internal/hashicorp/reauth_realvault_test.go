@@ -22,10 +22,7 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// TestRealVault_JWTLoginRefresh runs against a disposable dev Vault (root
-// VAULT_TOKEN). It checks the token-tree behavior the fake assumes: a session
-// is capped by its parent login's fixed maximum, survives a refresh, and the
-// older login is revoked when that session ends.
+// TestRealVault_JWTLoginRefresh runs against a disposable dev Vault (root VAULT_TOKEN) to check the token-tree behavior fakeVault assumes.
 func TestRealVault_JWTLoginRefresh(t *testing.T) {
 	if os.Getenv("VAULT_ADDR") == "" || os.Getenv("VAULT_TOKEN") == "" {
 		t.Skip("requires a disposable dev Vault")
@@ -127,8 +124,7 @@ path "auth/token/lookup-accessor" { capabilities = ["update"] }`))
 	if !alive(s2.Accessor) {
 		t.Fatal("revoking the older login ended a session under the new one")
 	}
-	// Without further refresh, the current login reaches its fixed maximum
-	// and Vault ends the session with it, at the ceiling the broker reported.
+	// Without further refresh the current login reaches its maximum and Vault ends the session at the reported ceiling.
 	time.Sleep(time.Until(s2.ExpiresAt) + 2*time.Second)
 	if alive(s2.Accessor) {
 		t.Fatal("session outlived its parent login's fixed maximum")

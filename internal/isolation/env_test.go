@@ -108,9 +108,7 @@ func TestBuildProxyEnv_IPv6HostIsBracketed(t *testing.T) {
 	}
 }
 
-// HTTP_PROXY mirrors HTTPS_PROXY: both point at the same MITM ingress
-// so plain http:// upstreams route through the broker via absolute-form
-// forward-proxy requests.
+// HTTP_PROXY mirrors HTTPS_PROXY so plain http:// upstreams route through the broker.
 func TestBuildContainerEnv_HTTPProxyMatchesHTTPS(t *testing.T) {
 	env := BuildContainerEnv("tok", "v", 14321, 14322)
 	vars := envMap(env)

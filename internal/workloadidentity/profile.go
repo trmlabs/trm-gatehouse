@@ -6,17 +6,13 @@ import (
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
-// Identity kinds a harness profile names.
 const (
 	IdentityPodToken      = "pod-token"
 	IdentitySessionJWT    = "session-jwt"
 	IdentityProxyAttested = "proxy-attested"
 )
 
-// Profile is the identity half of a pool's declared harness profile: the
-// trust domain, identity kind, namespaces, controller kind and images its
-// agents must match. The broker catalog holds it, so it can change at a
-// catalog reload without a restart.
+// Profile is the identity half of a pool's declared harness profile, held by the broker catalog so it can change at a reload.
 type Profile struct {
 	Name         string
 	Issuer       string
@@ -29,9 +25,7 @@ type Profile struct {
 	ImagePrefix  string // proxy-attested only: images pulled from under this path
 }
 
-// ProfileSource returns the declared profile for a pool, or false when the
-// catalog declares none (its profile is then derived, and checks nothing
-// beyond the binding).
+// ProfileSource returns the declared profile for a pool, or false when none is declared (the profile is then derived and checks nothing beyond the binding).
 type ProfileSource func(pool string) (Profile, bool)
 
 type profileSource struct{ fn ProfileSource }
@@ -41,9 +35,7 @@ func (r *Resolver) SetProfiles(fn ProfileSource) {
 	r.profiles.Store(&profileSource{fn: fn})
 }
 
-// profileAdmits reports whether an admission matches the pool's declared
-// profile. A pool Pod (kind pod-token) may serve a pod-token or session-jwt
-// profile: both are the Pod's own token, and the session is checked later.
+// profileAdmits reports whether an admission matches the pool's declared profile; a pod-token Pod may serve a pod-token or session-jwt profile, since the session is checked later.
 func (r *Resolver) profileAdmits(pool string, d *domain, kind, namespace, ownerKind string, images []string) bool {
 	src := r.profiles.Load()
 	if src == nil || src.fn == nil {
@@ -77,10 +69,7 @@ func (r *Resolver) profileAdmits(pool string, d *domain, kind, namespace, ownerK
 	return true
 }
 
-// proxyProfileAdmits requires a declared catalog profile for a proxy
-// admission: the one the binding maps the namespace to, from the trust
-// domain that verified the proxy's token. With no catalog profile, the proxy
-// admits nothing.
+// proxyProfileAdmits requires the catalog profile the binding maps the namespace to, from the trust domain that verified the token; with none, the proxy admits nothing.
 func (r *Resolver) proxyProfileAdmits(pp ProxyProfile, d *domain, a Attestation) bool {
 	src := r.profiles.Load()
 	if src == nil || src.fn == nil {

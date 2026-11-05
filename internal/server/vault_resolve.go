@@ -7,10 +7,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// resolveVaultForSession resolves the vault and vault role for the current
-// session. User-scoped sessions carry the vault directly; instance-level
-// agent tokens select a vault via the X-Vault request header and the
-// agent's vault membership.
+// resolveVaultForSession resolves the vault and role; agent tokens select the vault via the X-Vault header.
 func (s *Server) resolveVaultForSession(w http.ResponseWriter, r *http.Request, sess *store.Session) (*store.Vault, string, error) {
 	ctx := r.Context()
 

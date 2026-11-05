@@ -1,9 +1,5 @@
 package hashicorp
 
-// This Syncer is a deliberate near-copy of internal/infisical/sync.go. Before
-// cloning it for a third credential store, read the design note at the top of
-// auth.go — prefer extracting a shared engine over a third copy.
-
 import (
 	"context"
 	"database/sql"
@@ -18,7 +14,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// SyncerStore is the narrow store surface the syncer needs.
 type SyncerStore interface {
 	ListVaultCredentialStores(ctx context.Context) ([]store.VaultCredentialStore, error)
 	ReplaceVaultCredentialsForSync(ctx context.Context, vaultID, configJSON string, items []store.EncryptedKV) (applied bool, err error)
@@ -28,8 +23,7 @@ type SyncerStore interface {
 // tickInterval scans for due vaults; per-vault cadence is `poll_interval_seconds`.
 const tickInterval = 10 * time.Second
 
-// syncFailedPublicMessage is persisted to last_sync_error; the real error
-// (which can embed VAULT_ADDR + upstream rejection bodies) goes to logs.
+// syncFailedPublicMessage is persisted to last_sync_error; the real error can embed VAULT_ADDR and rejection bodies, so it goes to logs.
 const syncFailedPublicMessage = "HashiCorp Vault sync failed. See server logs for details."
 
 var (
@@ -57,8 +51,7 @@ type Syncer struct {
 	wg       sync.WaitGroup
 }
 
-// NewSyncer constructs a syncer. A nil fetcher disables the run loop so the
-// rest of the server stays up when HashiCorp Vault isn't configured.
+// NewSyncer returns a syncer; a nil fetcher disables the run loop so the server stays up without HashiCorp Vault.
 func NewSyncer(s SyncerStore, fetcher SecretsFetcher, dek []byte, logger *slog.Logger) *Syncer {
 	return &Syncer{
 		store:    s,
@@ -70,9 +63,7 @@ func NewSyncer(s SyncerStore, fetcher SecretsFetcher, dek []byte, logger *slog.L
 	}
 }
 
-// Run loops until ctx is cancelled, then waits for in-flight refreshes to
-// finish. Return implies no goroutine is still reading s.dek, so the server
-// can safely wipe it on shutdown.
+// Run loops until ctx is cancelled, then waits for in-flight refreshes, so the server can wipe s.dek on return.
 func (s *Syncer) Run(ctx context.Context) {
 	if s.fetcher == nil {
 		s.logger.Info("hashicorp syncer disabled (no client)")
@@ -119,9 +110,7 @@ func (s *Syncer) tick(ctx context.Context) {
 	}
 }
 
-// RefreshOnce runs a single synchronous refresh, reusing the periodic syncer's
-// in-flight guard. On failure refresh updates the row's health and returns the
-// error so the caller can map it to an HTTP status.
+// RefreshOnce runs one synchronous refresh under the in-flight guard and returns the error for the caller to map to an HTTP status.
 func (s *Syncer) RefreshOnce(ctx context.Context, cs store.VaultCredentialStore) error {
 	if s.fetcher == nil {
 		return ErrSyncerDisabled
@@ -138,8 +127,7 @@ func (s *Syncer) RefreshOnce(ctx context.Context, cs store.VaultCredentialStore)
 	return s.refresh(ctx, cs)
 }
 
-// dueAt reports whether the vault is past its poll interval. Nil
-// last_synced_at is always due. The floor guards against manual DB edits.
+// dueAt reports whether the vault is past its poll interval; nil last_synced_at is always due, and the floor guards against manual DB edits.
 func (s *Syncer) dueAt(cs store.VaultCredentialStore, now time.Time) bool {
 	if cs.LastSyncedAt == nil {
 		return true
@@ -194,16 +182,13 @@ func (s *Syncer) refresh(ctx context.Context, cs store.VaultCredentialStore) err
 		return err
 	}
 	if !applied {
-		// Disconnected or reconfigured mid-sync: drop this snapshot so it can't
-		// clobber the current credentials. Not a failure.
+		// Disconnected or reconfigured mid-sync: drop the snapshot so it can't clobber current credentials; not a failure.
 		s.logger.Info("hashicorp sync skipped: vault changed mid-sync",
 			slog.String("vault_id", cs.VaultID))
 		return nil
 	}
 
-	// Replace + UpdateHealth are intentionally not in one transaction: a rare
-	// failure here leaves fresh credentials with stale last_synced_at, which
-	// the next tick reconciles. Credentials are authoritative.
+	// Replace and UpdateHealth are not one transaction: a failure leaves fresh credentials with a stale last_synced_at that the next tick reconciles.
 	if err := s.store.UpdateVaultCredentialStoreHealth(ctx, cs.VaultID, store.SyncStatusOK, "", s.clock()); err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, context.Canceled) {
 		s.logger.Warn("updating health=ok failed",
 			slog.String("vault_id", cs.VaultID),
@@ -215,8 +200,7 @@ func (s *Syncer) refresh(ctx context.Context, cs store.VaultCredentialStore) err
 	return nil
 }
 
-// EncryptSecrets encrypts plaintext HashiCorp Vault secrets for
-// store.ReplaceVaultCredentials. Reused by the vault-create handler.
+// EncryptSecrets encrypts secrets for store.ReplaceVaultCredentials; the vault-create handler reuses it.
 func EncryptSecrets(secs []Secret, dek []byte) ([]store.EncryptedKV, error) {
 	out := make([]store.EncryptedKV, 0, len(secs))
 	for _, sec := range secs {

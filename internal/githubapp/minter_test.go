@@ -34,8 +34,8 @@ type fakeGitHub struct {
 	expires   time.Time
 	lastBody  map[string]any
 	seq       atomic.Int32
-	token     func(seq int32) string // the minted token; a classic 40-character style by default
-	repoID    int64                  // the id the answer gives the repository; none when 0
+	token     func(seq int32) string // classic 40-character style by default
+	repoID    int64                  // none when 0
 }
 
 func newFakeGitHub(t *testing.T) (*fakeGitHub, *httptest.Server) {
@@ -120,9 +120,7 @@ func newMinter(g *fakeGitHub, srv *httptest.Server, now *time.Time) *Minter {
 
 var app = App{AppID: 7, InstallationID: 42}
 
-// statelessToken is a synthetic token in GitHub's stateless installation
-// format, ghs_<app id>_<JWT>: tag, then three URL-safe base64 segments joined
-// by dots, n characters in all.
+// statelessToken is a synthetic ghs_<app id>_<JWT> token of n characters.
 func statelessToken(tag string, n int) string {
 	raw := make([]byte, n)
 	for i := range raw {
@@ -326,9 +324,7 @@ func TestMinterRefusesUnsupportedPermissions(t *testing.T) {
 	}
 }
 
-// Installation tokens live up to an hour at GitHub, so the broker revokes one
-// when GitHub rejects it, when the catalog stops granting it, and when the
-// broker stops.
+// The broker revokes a token when GitHub rejects it, the catalog stops granting it, or the broker stops.
 func TestMinterRevokesTokensItNoLongerUses(t *testing.T) {
 	g, srv := newFakeGitHub(t)
 	m := newMinter(g, srv, nil)
@@ -368,9 +364,7 @@ func TestMinterRevokesTokensItNoLongerUses(t *testing.T) {
 	}
 }
 
-// The token carries GitHub's id for its one repository, which is what tells the
-// broker whose pagination links a request's answer may follow. An answer that
-// names none, or a nonsense one, leaves it 0 (unknown).
+// The token carries GitHub's id for its repository; an answer naming none, or nonsense, leaves it 0.
 func TestMinterReportsTheRepositoryID(t *testing.T) {
 	for name, tc := range map[string]struct{ given, want int64 }{
 		"an id":      {4001, 4001},

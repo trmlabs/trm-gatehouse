@@ -1,17 +1,6 @@
 //go:build realpg
 
-// A real PostgreSQL serving TLS with a certificate no public root signs, the
-// way Citus and AlloyDB do. Run against one started with ssl=on:
-//
-//	AV_TEST_PG_TLS_UPSTREAM=127.0.0.1:5434 \
-//	AV_TEST_PG_TLS_ADMIN='postgres://postgres:test-only-pw@127.0.0.1:5434/postgres?sslmode=require' \
-//	AV_TEST_PG_TLS_CA=/path/to/pinned.pem \
-//	AV_TEST_PG_TLS_SERVER_NAME=db.pinned.test \
-//	go test -tags realpg ./internal/pgproxy/ -run RealPostgresPinnedCA -v
-//
-// AV_TEST_PG_TLS_CA is the CA that signed the server's certificate, or the
-// server's self-signed certificate itself; AV_TEST_PG_TLS_SERVER_NAME is the
-// name the certificate carries, empty for a self-signed one with none.
+// Needs a real PostgreSQL serving TLS with a private CA; set AV_TEST_PG_TLS_UPSTREAM, _ADMIN, _CA and _SERVER_NAME and run with -tags realpg.
 package pgproxy
 
 import (

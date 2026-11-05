@@ -26,9 +26,7 @@ type scopedSessionResponse struct {
 	AVAddr    string `json:"av_addr,omitempty"`
 }
 
-// scopedSessionView is the JSON projection returned by GET /v1/sessions.
-// The raw token is intentionally absent — it is shown only at creation
-// time and never re-readable. Rows are referenced by `id` (the public_id).
+// scopedSessionView is the JSON projection for GET /v1/sessions; the raw token is never re-readable.
 type scopedSessionView struct {
 	ID        string                  `json:"id"`
 	Label     string                  `json:"label,omitempty"`
@@ -44,15 +42,10 @@ type scopedSessionActorView struct {
 	DisplayName string `json:"display_name"`
 }
 
-// maxScopedSessionLabel caps the label length stored on a scoped session.
-// Labels are user-supplied free-form text shown in the Tokens UI, so we
-// keep them short to avoid table layout issues.
+// maxScopedSessionLabel caps the user-supplied label length to protect the Tokens UI layout.
 const maxScopedSessionLabel = 100
 
-// sanitizeScopedSessionLabel trims surrounding whitespace and strips
-// ASCII control characters. Mirrors truncateDeviceLabel's policy for
-// user-session device labels, except it does not silently truncate —
-// the caller checks rune count and rejects with 400.
+// sanitizeScopedSessionLabel trims whitespace and strips ASCII control characters; the caller rejects over-long labels.
 func sanitizeScopedSessionLabel(label string) string {
 	label = strings.TrimSpace(label)
 	if label == "" {
@@ -75,10 +68,7 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tokens are minted with role `proxy` only; minting at member/admin
-	// is intentionally not exposed via this endpoint right now. The
-	// member+ floor on the caller is enforced by requireVaultMember
-	// below for users/agents and scoped sessions alike.
+	// Tokens are minted with role `proxy` only; requireVaultMember below enforces the member+ caller floor.
 	if req.VaultRole != "" && req.VaultRole != "proxy" {
 		jsonError(w, http.StatusBadRequest, "vault_role must be 'proxy'")
 		return
@@ -96,11 +86,7 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Trim and strip control chars before length-checking. Control chars
-	// (\n, \t, etc.) would break the Tokens table layout — the same
-	// concern truncateDeviceLabel addresses for user-session device
-	// labels. Length is measured in runes, not bytes, so a CJK or emoji
-	// label that fits the frontend's maxLength={100} also passes here.
+	// Control chars would break the Tokens table; length is counted in runes to match the frontend maxLength.
 	req.Label = sanitizeScopedSessionLabel(req.Label)
 	if utf8.RuneCountInString(req.Label) > maxScopedSessionLabel {
 		jsonError(w, http.StatusBadRequest, fmt.Sprintf(
@@ -117,18 +103,13 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Caller must be at least a vault `member`. A `proxy`-role caller
-	// (user, agent, or scoped session) can ONLY proxy requests through
-	// Agent Vault — they cannot mint new tokens, even at proxy role.
+	// Caller must be at least a vault `member`; proxy-role callers can only proxy requests.
 	if _, err := s.requireVaultMember(w, r, ns.ID); err != nil {
 		return
 	}
 	parentSess := sessionFromContext(ctx)
 
-	// vault_role is locked to "proxy" by the validator above, and any
-	// member+ caller trivially satisfies that, so no role-cap check is
-	// needed here. If non-proxy minting is ever re-enabled, restore
-	// capRequestedRole (or equivalent) to gate role escalation.
+	// vault_role is locked to "proxy", so no role-cap check is needed; restore one if other roles are enabled.
 	cappedRole := "proxy"
 
 	// Compute expiry: use ttl_seconds if provided, otherwise default 24h.
@@ -141,10 +122,7 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	// Resolve the calling actor so the Tokens UI can show "minted by X".
-	// A nil actor here means the caller is itself a vault-scoped session
-	// (e.g. an agent token or a previously-minted scoped token); we leave
-	// the created_by fields blank in that case rather than failing the mint.
+	// A nil actor means the caller is itself a scoped session; leave created_by blank rather than fail.
 	var createdByID, createdByType string
 	if actor, err := s.actorFromSession(ctx, parentSess); err == nil && actor != nil {
 		createdByID = actor.ID
@@ -171,12 +149,7 @@ func (s *Server) handleScopedSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleListScopedSessions returns the active vault-scoped tokens for a
-// vault, sorted most recent first. Requires vault `member` or higher: the
-// list view exposes the email/name of whoever minted each token via
-// created_by.display_name, which is more identifying than what a
-// proxy-only caller should see.
-// The raw token is never returned — rows are referenced by public_id.
+// handleListScopedSessions lists a vault's active scoped tokens, newest first; vault `member`+ only since created_by identifies minters.
 func (s *Server) handleListScopedSessions(w http.ResponseWriter, r *http.Request) {
 	vaultName := r.URL.Query().Get("vault")
 	if vaultName == "" {
@@ -233,10 +206,7 @@ func (s *Server) handleListScopedSessions(w http.ResponseWriter, r *http.Request
 	jsonOK(w, map[string]interface{}{"sessions": out})
 }
 
-// handleRevokeScopedSession deletes one vault-scoped token by its
-// public_id. The caller must be at least a vault `member` of the row's
-// vault — proxy-only sessions cannot revoke. Cross-vault revocation is
-// blocked at the store level via the vault_id filter.
+// handleRevokeScopedSession deletes a scoped token by public_id; vault `member`+ only, and the store filters by vault_id.
 func (s *Server) handleRevokeScopedSession(w http.ResponseWriter, r *http.Request) {
 	publicID := r.PathValue("id")
 	if publicID == "" {

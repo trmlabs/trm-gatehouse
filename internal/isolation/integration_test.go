@@ -1,8 +1,6 @@
 //go:build docker_integration
 
-// To run: go test -tags docker_integration ./internal/isolation/ -run Integration -v
-// Requires: docker daemon, network access to node:22-bookworm-slim +
-// debian apt mirrors on first run (for the image build).
+// Run: go test -tags docker_integration ./internal/isolation/ -run Integration -v (needs docker and network on first run).
 package isolation
 
 import (
@@ -140,9 +138,7 @@ func TestIntegration_ImageBuildCaches(t *testing.T) {
 	}
 }
 
-// runInFirewalledContainer runs a one-off bash command inside the isolation
-// image on a per-invocation network with init-firewall.sh already applied.
-// The network is cleaned up on test exit.
+// runInFirewalledContainer runs a bash command in the isolation image on a per-invocation network with the firewall applied.
 func runInFirewalledContainer(t *testing.T, ctx context.Context, shellCmd string) ([]byte, error) {
 	t.Helper()
 	imageRef, err := EnsureImage(ctx, "", io.Discard)
@@ -169,10 +165,7 @@ func runInFirewalledContainer(t *testing.T, ctx context.Context, shellCmd string
 	).CombinedOutput()
 }
 
-// TestIntegration_EgressBlockedEndToEnd is the big-hammer test: it also
-// proves init-firewall.sh is actually executed (as opposed to
-// runInFirewalledContainer's asserted-on-exit behavior) — curl to a
-// routable IPv4 literal must fail because iptables DROPs the SYN.
+// TestIntegration_EgressBlockedEndToEnd proves init-firewall.sh actually runs: curl to a routable IPv4 literal must fail.
 func TestIntegration_EgressBlockedEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip in -short mode; builds the isolation image")
@@ -194,22 +187,14 @@ func TestIntegration_EgressBlockedEndToEnd(t *testing.T) {
 	}
 }
 
-// TestIntegration_EgressBlocked_Bypasses is the "bypasses the threat
-// model actually cares about" suite. A non-cooperative isolation has to
-// block malicious escape attempts, not just well-behaved clients — each
-// case probes a different channel a compromised agent might try.
-//
-// Each probe prints either REACHED (bypass worked; test fails) or
-// BLOCKED (firewall held; test passes).
+// TestIntegration_EgressBlocked_Bypasses probes each channel a compromised agent might use; REACHED fails the test, BLOCKED passes.
 func TestIntegration_EgressBlocked_Bypasses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip in -short mode; builds the isolation image")
 	}
 	requireDocker(t)
 
-	// Python-based UDP probe: sendto may succeed locally (iptables drops
-	// silently), but recvfrom must time out. A functioning bypass would
-	// receive the DNS reply and print REACHED.
+	// UDP probe: sendto may succeed locally (iptables drops silently) but recvfrom must time out.
 	const udpProbe = `python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); ` +
 		`s.settimeout(2); ` +
 		`s.sendto(b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01",("8.8.8.8",53)); ` +
@@ -249,10 +234,7 @@ func TestIntegration_EgressBlocked_Bypasses(t *testing.T) {
 	}
 }
 
-// TestIntegration_EntrypointDropsToClaudeUser proves that gosu actually
-// drops privileges under --security-opt=no-new-privileges. If this
-// breaks, every "container runs as claude, not root" claim in the
-// threat model is wrong.
+// TestIntegration_EntrypointDropsToClaudeUser proves gosu drops privileges under no-new-privileges.
 func TestIntegration_EntrypointDropsToClaudeUser(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip in -short mode; builds the isolation image")

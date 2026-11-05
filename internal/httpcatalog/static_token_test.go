@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// soonText is an expiry a token block may carry: inside the longest a token
-// may live.
 func soonText() string {
 	return time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
 }
@@ -20,9 +18,6 @@ func hashOf(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// staticTokenCatalog is automationCatalog with a second harness on the same
-// pool, which proves a client with a token instead of a Pod, and one
-// Automation block that carries a token hash.
 func staticTokenCatalog() map[string]any {
 	c := automationCatalog()
 	c["harnesses"] = append(c["harnesses"].([]any), map[string]any{
@@ -43,9 +38,6 @@ func tokenHarness(c map[string]any) map[string]any {
 	return harnessAt(c, len(c["harnesses"].([]any))-1)
 }
 
-// The automations pool is the same pool for a Cursor run and for a token
-// agent: the harness carries how the agent proves itself, so a second platform
-// is catalog data, not a second pool.
 func TestStaticTokenHarnessSharesTheAutomationPool(t *testing.T) {
 	catalog, err := parseCatalog(t, staticTokenCatalog())
 	if err != nil {
@@ -55,7 +47,6 @@ func TestStaticTokenHarnessSharesTheAutomationPool(t *testing.T) {
 		t.Fatalf("pools %d", n)
 	}
 	pool, _ := catalog.Pool("example-workers")
-	// The Kubernetes profile is still the pool's, so a Pod is admitted by it.
 	if p := pool.Profile(); p.Identity.Kind != IdentitySessionJWT || p.RequesterKind() != RequesterCursorOIDC || p.Authorization.Mode != AuthorizeAutomation {
 		t.Fatalf("pool profile %+v", p)
 	}
@@ -70,14 +61,12 @@ func TestStaticTokenHarnessSharesTheAutomationPool(t *testing.T) {
 	if !ok || poolName != "example-workers" || !a.Uses("tracker") || a.Uses("vendor") {
 		t.Fatalf("static agent %+v %q %v", a, poolName, ok)
 	}
-	// A block with no token hash is a Cursor Automation: no token reaches it.
 	if _, _, ok := catalog.StaticAgent("auto-1"); ok {
 		t.Error("an Automation with no tokenSHA256 is reachable by token")
 	}
 	if _, _, ok := catalog.StaticAgent("nobody"); ok {
 		t.Error("an unlisted id is reachable by token")
 	}
-	// The pool still decides per Automation for both kinds of agent.
 	if got, ok := pool.Automation("agent-1"); !ok || got.ID != "agent-1" {
 		t.Error("the pool does not list the token agent's block")
 	}
@@ -92,9 +81,6 @@ func mustPool(t *testing.T, c Catalog, name string) Pool {
 	return p
 }
 
-// A pool with only a static-token harness has no Kubernetes profile to admit
-// a Pod by: Profile is the static one, whose empty trust domain matches no
-// issuer, so a Pod is never admitted into it.
 func TestStaticTokenOnlyPoolAdmitsNoPod(t *testing.T) {
 	catalog, err := parseCatalog(t, withoutHarness(staticTokenCatalog(), "cursor"))
 	if err != nil {
@@ -179,7 +165,6 @@ func TestAutomationTokenFields(t *testing.T) {
 	good := hashOf("agent-1.secret-b")
 	other := hashOf("agent-1.secret-c")
 	now := time.Now().UTC()
-	// expires "" is the default, a time inside the cap; "none" leaves the key out.
 	for name, tc := range map[string]struct {
 		token   []any
 		expires string
@@ -246,8 +231,6 @@ func TestAutomationMatchTokenAndExpiry(t *testing.T) {
 	}
 }
 
-// A tolerant load drops a bad token harness or block by itself, and never
-// leaves a token agent reachable without its harness.
 func TestTolerantStaticTokenParts(t *testing.T) {
 	c := staticTokenCatalog()
 	tokenHarness(c)["identity"].(map[string]any)["namespaces"] = []any{"cursor"}
@@ -277,7 +260,6 @@ func TestTolerantStaticTokenParts(t *testing.T) {
 		t.Error("a dropped block is reachable")
 	}
 
-	// Two harnesses of one kind on a pool are both dropped, as any conflict is.
 	c = staticTokenCatalog()
 	second := map[string]any{}
 	b, _ := json.Marshal(tokenHarness(c))
@@ -290,8 +272,6 @@ func TestTolerantStaticTokenParts(t *testing.T) {
 	}
 }
 
-// Only a static-token harness may share a pool with a Kubernetes harness, so
-// two Kubernetes harnesses never share one, whatever modes a later kind has.
 func TestSharePoolNeedsExactlyOneStaticToken(t *testing.T) {
 	h := func(kind string) Harness {
 		return Harness{Identity: HarnessIdentity{Kind: kind}, Authorization: HarnessAuthorization{Mode: AuthorizeAutomation}}
@@ -317,8 +297,6 @@ func TestSharePoolNeedsExactlyOneStaticToken(t *testing.T) {
 	}
 }
 
-// The cap is measured from the time the catalog loads: an expiry exactly the
-// cap away loads, a second further refuses, and the refusal says why.
 func TestTokenExpiryCapBoundary(t *testing.T) {
 	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	tokenClock = func() time.Time { return now }

@@ -8,40 +8,24 @@ import (
 	"strings"
 )
 
-// MemgraphBinding is a graph database reached over Bolt, such as Memgraph.
-// The broker signs in with one login it reads from Vault (fields username and
-// password at Login), which never reaches a worker, and holds every session
-// to the entry's access itself: Memgraph's Community edition has no roles. See
-// docs/gatehouse/graph-databases.md.
+// MemgraphBinding is a graph database reached over Bolt. The broker signs in with one Vault login (username and password at Login) that never reaches a worker, and enforces the entry's access itself since Community edition has no roles. See docs/gatehouse/graph-databases.md.
 type MemgraphBinding struct {
 	Login KVRef `json:"login"`
-	// Access is "read" (the default): queries that only read, in transactions
-	// the broker rolls back. "write" also lets graph writes run and commit;
-	// file loads, commits of their own, unlisted procedures and functions and
-	// system queries stay refused.
+	// Access is "read" (default: read-only queries in rolled-back transactions) or "write" (graph writes commit). File loads, own commits, unlisted procedures and functions, and system queries stay refused.
 	Access string `json:"access,omitempty"`
-	// SSLMode is verify-full, the default and the only mode outside a test
-	// deployment, which may use disable for a cluster-local host.
+	// SSLMode is verify-full, the only mode outside a test deployment, which may use disable for a cluster-local host.
 	SSLMode string `json:"sslmode,omitempty"`
-	// CA and ServerName are as for a postgres entry: the only trust for the
-	// server's certificate, and the name it must carry when that is not the
-	// host (a Service name in front of a certificate for a public name).
+	// CA and ServerName are as for a postgres entry.
 	CA         string `json:"ca,omitempty"`
 	ServerName string `json:"serverName,omitempty"`
 	MaxConns   int    `json:"maxConns,omitempty"` // 0: the broker's default budget
-	// Procedures and Functions name the procedures (CALL name) and module
-	// functions (name(...)) a query may use. Every other one is refused:
-	// they can write, read server files or reach the network.
+	// Procedures and Functions name the procedures and module functions a query may use; every other one is refused since it can write, read server files or reach the network.
 	Procedures []string `json:"procedures,omitempty"`
 	Functions  []string `json:"functions,omitempty"`
 }
 
-// moduleName is a procedure or function name: module.name, possibly with
-// more dotted parts.
 var moduleName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`)
 
-// databaseKind reports whether entries of kind are databases, which no HTTP
-// tunnel may reach.
 func databaseKind(kind string) bool { return kind == "postgres" || kind == "memgraph" }
 
 func (e *Entry) normalizeMemgraph() error {
@@ -105,8 +89,6 @@ func (e *Entry) normalizeMemgraph() error {
 	return nil
 }
 
-// Graph returns the memgraph entry a pool asks for by name. An unknown name
-// is ErrUnlisted; a pool without the grant is ErrPool.
 func (c Catalog) Graph(name, pool string) (*Entry, error) {
 	for i := range c.entries {
 		e := &c.entries[i]

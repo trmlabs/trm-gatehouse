@@ -7,22 +7,14 @@ import (
 	"strings"
 )
 
-// A browser-session entry signs its test user in to the whole API it names,
-// and the test user is often an admin of its organization. The path guard
-// keeps a worker from using that session to mint a credential of its own or
-// to change the account: such a credential would outlive the session and
-// would not look like the token the response screen catches.
-//
-// deniedSegments are refused anywhere in an API path, in any case and with
-// "-" and "_" ignored, so /organizations/1/apiKey, /v1/API_KEYS and
-// /users/change-password all match.
+// The path guard keeps a worker from using a browser session to mint a credential or change the account.
+// deniedSegments are refused anywhere in an API path, in any case and ignoring "-" and "_".
 var deniedSegments = segmentSet("apikey", "apikeys", "password", "changepassword", "resetpassword", "mfa", "otp", "totp",
 	"invitations", "invites", "oauth", "tokens", "token", "sso", "saml", "scim", "connections", "roles", "ipallowlist",
 	"authentication", "admin", "usermanagement", "bulkoperations", "rotatesecret", "webhooks", "credentials", "secrets",
 	"keys", "clientsecret", "permissions", "impersonate", "sessions")
 
-// readOnlySegments pass only GET, HEAD and OPTIONS wherever they appear: the
-// app reads them at start-up, and the same routes invite and create users.
+// readOnlySegments pass only GET, HEAD and OPTIONS wherever they appear: the same routes invite and create users.
 var readOnlySegments = segmentSet("usersorganizations")
 
 func segmentSet(names ...string) map[string]bool {
@@ -33,7 +25,6 @@ func segmentSet(names ...string) map[string]bool {
 	return set
 }
 
-// foldSegment is a path segment as the segment sets hold it.
 func foldSegment(s string) string {
 	return strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(s))
 }
@@ -43,8 +34,6 @@ var (
 	ErrReadOnlyPath = errors.New("path is read-only for browser sessions")
 )
 
-// templateSegment is one segment of a deniedPaths or readOnlyPaths template:
-// a name, or * for any one segment.
 var templateSegment = regexp.MustCompile(`^(\*|[A-Za-z0-9][A-Za-z0-9._~-]{0,127})$`)
 
 func pathSegments(path string) []string {
@@ -57,9 +46,7 @@ func pathSegments(path string) []string {
 	return out
 }
 
-// templateCovers reports whether a path lies at or below a template, with *
-// matching any one segment. Names compare without case: the guard fails
-// closed on an API that routes case-insensitively.
+// templateCovers reports whether a path lies at or below a template, with * matching one segment; names compare without case so the guard fails closed.
 func templateCovers(template, path []string) bool {
 	if len(path) < len(template) {
 		return false
@@ -73,7 +60,6 @@ func templateCovers(template, path []string) bool {
 }
 
 func (e *Entry) normalizeBrowserPaths() error {
-	// No default: an entry names the parts of the API its workers need.
 	if len(e.PathPrefixes) == 0 {
 		return errors.New("browser-session entries list their pathPrefixes")
 	}
@@ -104,9 +90,7 @@ func (e *Entry) normalizeBrowserPaths() error {
 				return fmt.Errorf("path prefix %q contains a denied segment", p)
 			}
 		}
-		// A prefix at or below a denied template grants nothing; one above
-		// it grants the rest of its branch, and the template is refused at
-		// run time.
+		// A prefix at or below a denied template grants nothing; one above it is refused at run time.
 		for _, t := range templates["deniedPaths"] {
 			if templateCovers(t, segments) {
 				return fmt.Errorf("path prefix %q lies within deniedPaths template /%s", p, strings.Join(t, "/"))
@@ -116,7 +100,6 @@ func (e *Entry) normalizeBrowserPaths() error {
 	return nil
 }
 
-// guardBrowserPath applies the path guard to a request for the API host.
 func (e *Entry) guardBrowserPath(method, path string) error {
 	segments := pathSegments(path)
 	readOnly := false

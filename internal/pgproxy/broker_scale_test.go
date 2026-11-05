@@ -9,12 +9,8 @@ import (
 	"time"
 )
 
-// vaultLikeMinter models HashiCorp Vault's lease renewal semantics: a lease
-// expires at a moving `expiry` capped by `maxExpiry`; a renew grants
-// min(now+increment, maxExpiry); renewing a lease that has already expired
-// fails ("lease not found"), because Vault garbage-collects expired leases.
-// This is what makes the renewal-increment decay bug observable in a fast unit
-// test without waiting real Vault TTLs.
+// vaultLikeMinter models HashiCorp Vault's lease renewal semantics: a lease expires at a moving `expiry`
+// capped by `maxExpiry`; a renew grants min(now+increment, maxExpiry).
 type vaultLikeMinter struct {
 	initTTL time.Duration
 	maxTTL  time.Duration
@@ -73,18 +69,8 @@ func (m *vaultLikeMinter) requestedIncrements() []time.Duration {
 	return append([]time.Duration(nil), m.increments...)
 }
 
-// TestBroker_RenewalRequestsConstantGenerousIncrement guards the renewal
-// increment contract: each renew must request a stable, generous increment (the
-// credential's initial TTL), not the shrinking remaining time. Requesting
-// `remaining + floor` makes each grant hug the current expiry, so the session
-// survives only by a millisecond-thin, ever-tightening margin — one slow Vault
-// round-trip or scheduler pause near expiry then kills a healthy long-lived
-// session, and the loop makes many small renew calls instead of few large ones.
-// The constant-increment path jumps straight to max TTL each cycle: a wide
-// margin and a bounded number of Vault calls. This asserts the requested
-// increment directly, so it fails on the shrinking-increment behavior
-// regardless of whether that behavior happens to reach a stable fixed point at
-// any particular set of timings.
+// TestBroker_RenewalRequestsConstantGenerousIncrement guards the renewal increment contract: each renew must
+// request a stable, generous increment (the credential's initial TTL).
 func TestBroker_RenewalRequestsConstantGenerousIncrement(t *testing.T) {
 	t.Parallel()
 	const initTTL = 1 * time.Second
@@ -106,9 +92,7 @@ func TestBroker_RenewalRequestsConstantGenerousIncrement(t *testing.T) {
 		t.Fatalf("session died before max TTL: %v", err)
 	}
 
-	// Every requested increment must be generous (~the initial TTL). The
-	// shrinking `remaining + floor` path requests increments far below this —
-	// hugging expiry — so it fails here even where it happens to survive.
+	// Every requested increment must be generous (~the initial TTL).
 	increments := minter.requestedIncrements()
 	if len(increments) < 2 {
 		t.Fatalf("expected multiple renewals, got %d", len(increments))
@@ -127,9 +111,8 @@ func TestBroker_RenewalRequestsConstantGenerousIncrement(t *testing.T) {
 	}, "session was not terminated at max TTL")
 }
 
-// TestBroker_HalfOpenDoesNotStarveServing proves that connections stalled before
-// authentication do not consume the serving cap, so real agents are still served
-// during a half-open flood.
+// TestBroker_HalfOpenDoesNotStarveServing proves that connections stalled before authentication do not
+// consume the serving cap, so real agents are still served during a half-open flood.
 func TestBroker_HalfOpenDoesNotStarveServing(t *testing.T) {
 	lease := newLease()
 	upstream := startFakeUpstream(t, authTrust, "")
@@ -216,9 +199,8 @@ func (tokenActorAuth) Authenticate(_ context.Context, token, _ string) (*AgentSc
 	return &AgentScope{VaultID: "v1", VaultName: "demo", ActorID: token}, nil
 }
 
-// TestBroker_PerActorCapDoesNotStarveOtherActors proves the per-actor cap keeps
-// one noisy agent from monopolizing the serving cap: actor A is bounded at its
-// per-actor limit while a different actor B still gets served.
+// TestBroker_PerActorCapDoesNotStarveOtherActors proves the per-actor cap keeps one noisy agent from
+// monopolizing the serving cap: actor A is bounded at its per-actor limit.
 func TestBroker_PerActorCapDoesNotStarveOtherActors(t *testing.T) {
 	t.Parallel()
 	upstream := startFakeUpstream(t, authTrust, "")
@@ -254,9 +236,8 @@ func TestBroker_PerActorCapDoesNotStarveOtherActors(t *testing.T) {
 	}
 }
 
-// TestBroker_ServingCapRejectsOverLimit proves the serving cap bounds upstream
-// connections: when MaxConns sessions are live, the next is rejected (not
-// dangling), protecting the database from saturation.
+// TestBroker_ServingCapRejectsOverLimit proves the serving cap bounds upstream connections: when MaxConns
+// sessions are live, the next is rejected (not dangling), protecting the database from saturation.
 func TestBroker_ServingCapRejectsOverLimit(t *testing.T) {
 	upstream := startFakeUpstream(t, authTrust, "")
 	minter := &fakeMinter{lease: newLease()}

@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// An unset limit takes the github-api default; any value written in the
-// catalog is kept as written, including one equal to the git default.
 func TestGitHubAPILimitsKeepExplicitValues(t *testing.T) {
 	for _, tc := range []struct {
 		name, limits      string
@@ -29,7 +27,6 @@ func TestGitHubAPILimitsKeepExplicitValues(t *testing.T) {
 		}
 	}
 	for name, limits := range map[string]string{
-		// Refused like any request above 16 MiB, not quietly lowered to 1 MiB.
 		"request at the git default": `"maxRequestBytes":1073741824,`,
 		"response above 8 GiB":       `"maxResponseBytes":8589934593,`,
 		"negative response":          `"maxResponseBytes":-1,`,

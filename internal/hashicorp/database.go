@@ -14,10 +14,8 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// DatabaseCredential is a dynamic database login minted by Vault's database
-// secrets engine (GET <mount>/creds/<role>). Each read returns a distinct,
-// short-lived Username/Password bound to its own LeaseID. The credential is
-// SECRET: never log the password. The broker may log LeaseID as an audit join key.
+// DatabaseCredential is a dynamic login from Vault's database engine, bound to its own LeaseID.
+// Password is SECRET: never log it; LeaseID may be logged as an audit join key.
 type DatabaseCredential struct {
 	LeaseID       string
 	Username      string
@@ -26,17 +24,14 @@ type DatabaseCredential struct {
 	Renewable     bool
 }
 
-// ExpiresAt returns the credential's wall-clock expiry given when it was issued.
-// The database engine returns a relative TTL, not an absolute time, so the
-// caller anchors it conservatively to the start of the read request.
+// ExpiresAt anchors the engine's relative TTL conservatively to the start of the read request.
 func (d DatabaseCredential) ExpiresAt(issuedAt time.Time) time.Time {
 	return issuedAt.Add(d.LeaseDuration)
 }
 
 var databasePathSegment = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9_.-]*$`)
 
-// ValidateDatabaseReference prevents path traversal and URL metacharacters from
-// turning a database-role lookup into a different Vault API operation.
+// ValidateDatabaseReference rejects path traversal and URL metacharacters so a lookup cannot become another Vault operation.
 func ValidateDatabaseReference(mount, role string) error {
 	mount = strings.Trim(strings.TrimSpace(mount), "/")
 	role = strings.TrimSpace(role)
@@ -51,11 +46,7 @@ func ValidateDatabaseReference(mount, role string) error {
 	return nil
 }
 
-// ReadDatabaseCredential mints a fresh dynamic credential for a database role.
-// mount is the database secrets-engine mount (e.g. "database"); role is a Vault
-// role that maps to a set of SQL privileges. Every call yields a distinct
-// username/password on its own lease, so one agent connection never reuses
-// another's credential. The call is context-aware; cancellation propagates.
+// ReadDatabaseCredential mints a fresh credential on its own lease for a database role.
 func (c *Client) ReadDatabaseCredential(ctx context.Context, mount, role string) (*DatabaseCredential, error) {
 	mount = strings.Trim(strings.TrimSpace(mount), "/")
 	role = strings.TrimSpace(role)
@@ -63,9 +54,8 @@ func (c *Client) ReadDatabaseCredential(ctx context.Context, mount, role string)
 		return nil, err
 	}
 	path := fmt.Sprintf("%s/creds/%s", mount, role)
-	// GET on this endpoint creates a role. Retrying an ambiguous response can
-	// create extra credentials whose lease IDs we never receive. Clone per call
-	// so concurrent KV reads retain their retry policy and token rotation is seen.
+	// A GET here creates a role, and retrying an ambiguous response can mint credentials whose lease IDs are lost.
+	// Clone per call so concurrent KV reads keep their retry policy.
 	mintAPI, err := c.api.CloneWithHeaders()
 	if err != nil {
 		return nil, fmt.Errorf("prepare credential request: %w", err)
@@ -102,19 +92,11 @@ func (c *Client) ReadDatabaseCredential(ctx context.Context, mount, role string)
 	}, nil
 }
 
-// ErrCredentialNotIssued marks a credential read that Vault refused before any
-// database user existed. Vault registers a lease only for a secret its database
-// engine returned, and every failure after registration (audit, response
-// handling) answers 5xx. So a 400, 403 or 404 is Vault's own evidence that the
-// request created no user and no lease, while a 5xx, a timeout or a lost
-// connection proves nothing either way.
+// ErrCredentialNotIssued: Vault refused before any user existed.
+// A 400, 403 or 404 proves no user or lease was created; a 5xx, timeout or lost connection proves nothing.
 var ErrCredentialNotIssued = errors.New("vault issued no database credential")
 
-// CredentialReadError is a failed credential read as an operator's log shows
-// it: Vault's HTTP status and its own error messages, or only the failure
-// class when Vault did not answer. Vault never returned a credential, so none
-// can be in it, and vaultMessages masks what a database error or a proxy could
-// echo: a statement's literals, a connection string's password, a token.
+// CredentialReadError is a failed read as logged: Vault's status and messages, or the failure class. No credential can be in it; vaultMessages masks echoed secrets.
 type CredentialReadError struct {
 	Status int    // Vault's HTTP status; 0 when Vault did not answer
 	Detail string // Vault's messages, or the failure class
@@ -136,9 +118,8 @@ func credentialReadFailure(err error) *CredentialReadError {
 	var answered *vaultapi.ResponseError
 	switch {
 	case errors.As(err, &answered) && answered.RawError:
-		// The body is not Vault's error JSON, so something in between answered
-		// (a proxy or load balancer page), and such a body can echo the
-		// request's headers, the Vault token among them. Only its size is told.
+		// The body is not Vault's JSON, so a proxy or load balancer page answered and can echo request headers,
+		// the Vault token included. Only its size is reported.
 		size := 0
 		for _, body := range answered.Errors {
 			size += len(body)
@@ -165,12 +146,7 @@ var (
 	bearerToken   = regexp.MustCompile(`(?i)\b(bearer\s+)[^\s"',;)}\]]+`)
 )
 
-// vaultMessages renders at most four of Vault's error messages, each on one
-// line and cut to 300 characters. String literals, the token a syntax error
-// points at, URL user info, the value after a password key or IDENTIFIED BY,
-// Vault tokens and bearer tokens are masked, so a database error that echoes
-// a CREATE ROLE statement, a connection string or a request cannot carry a
-// password or a token.
+// vaultMessages renders at most four messages, one line each, cut to 300 characters, with literals, URL user info, password values and tokens masked.
 func vaultMessages(messages []string) string {
 	const maxMessages, maxLen = 4, 300
 	var out []string
@@ -199,14 +175,8 @@ func vaultMessages(messages []string) string {
 	return strings.Join(out, "; ")
 }
 
-// maskSecretValues masks the value after each password key (password,
-// password_hash, PWD) and after IDENTIFIED BY. A quoted value, in JSON
-// ("password":"x", or escaped inside another string as \"password\":\"x\"),
-// SQL ('x' or "x") or dollar quoting ($$x$$ or $tag$x$tag$), is masked to its
-// closing quote, or to the end of the message when it has none. After = or :
-// a bare value is masked up to the next space or delimiter. A key followed by
-// neither keeps the words after it, so "password authentication failed for
-// user" still reads.
+// maskSecretValues masks the value after password keys and IDENTIFIED BY (JSON, SQL or dollar quoted) to its closing quote or the end of the message;
+// a bare value after = or : ends at the next delimiter. A key followed by neither keeps the words after it.
 func maskSecretValues(message string) string {
 	var out strings.Builder
 	for {
@@ -249,11 +219,8 @@ func maskSecretValues(message string) string {
 	}
 }
 
-// quotedValue reports the quoted string s starts with: the length of its
-// opening quote (0 when s starts with none), where its content ends, and the
-// length of its closing quote (0 when it runs to the end of s). Inside a
-// string escaped within another (\"x\"), a quote after three backslashes is
-// part of the value, not its end.
+// quotedValue returns the opening quote length, where the content ends and the closing quote length (0 if unterminated).
+// In a string escaped within another, a quote after three backslashes belongs to the value.
 func quotedValue(s string) (open, end, closing int) {
 	switch {
 	case strings.HasPrefix(s, `\"`):
@@ -295,10 +262,7 @@ func quotedValue(s string) (open, end, closing int) {
 	return 0, 0, 0
 }
 
-// RenewLease extends a lease by increment (a hint Vault may clamp to the role's
-// max TTL) and returns the granted duration. Renewal keeps the same
-// username/password valid, so a database session that outlives its original TTL
-// is not interrupted. A non-renewable or already-expired lease returns an error.
+// RenewLease extends a lease by increment (Vault may clamp it to the role's max TTL) and returns the granted duration; the same credential stays valid.
 func (c *Client) RenewLease(ctx context.Context, leaseID string, increment time.Duration) (time.Duration, error) {
 	if leaseID == "" {
 		return 0, fmt.Errorf("lease_id is required")
@@ -316,16 +280,8 @@ func (c *Client) RenewLease(ctx context.Context, leaseID string, increment time.
 	return time.Duration(secret.LeaseDuration) * time.Second, nil
 }
 
-// RevokeLease revokes a lease, immediately invalidating its credential: the
-// database engine drops the generated user. This is the kill switch: a
-// disconnected or compromised session's credential stops working at once rather
-// than lingering until its TTL. An empty leaseID is a no-op (nothing was
-// minted). A revoke that Vault rejects returns an error; callers on the
-// shutdown/cleanup path must retain failed cleanup for retry. Production's
-// durable minter also confirms lease absence before clearing its journal.
-//
-// The lease ID goes in the path, as RevokeDatabaseLeaseConfirmed does, so the
-// broker's policy can grant revoke only under its own credential paths.
+// RevokeLease drops the generated user at once; an empty leaseID is a no-op. Cleanup paths must retain failed revokes for retry.
+// The lease ID goes in the path so broker policy can grant revoke only under its own credential paths.
 func (c *Client) RevokeLease(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return nil

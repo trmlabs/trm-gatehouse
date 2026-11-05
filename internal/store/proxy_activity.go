@@ -9,40 +9,21 @@ import (
 	"time"
 )
 
-// ProxyActivity is one Sandbox's latest use through a proxy binding.
 type ProxyActivity struct {
 	Namespace string
 	OwnerUID  string
 	LastSeen  time.Time
 }
 
-// proxyActivityChunk keeps one statement's parameters well under SQLite's
-// limit.
+// proxyActivityChunk keeps one statement's parameters under SQLite's limit.
 const proxyActivityChunk = 500
 
-// ErrProxyActivityFull refuses a report that would take a scope past its row
-// ceiling.
 var ErrProxyActivityFull = errors.New("proxy activity: the scope is at its row ceiling")
 
-// ErrProxyActivityStreams refuses a report that would start a stream past the
-// scope's stream ceiling.
 var ErrProxyActivityStreams = errors.New("proxy activity: the scope is at its stream ceiling")
 
-// RecordProxyActivity keeps, per Sandbox, the latest of the stored and the
-// reported times, in one transaction with the reporting replica's stream. A
-// row repeated within rows keeps its latest time.
-//
-// replica names the reporting proxy replica's stream within the binding, and
-// acked is the sequence last acknowledged on it (0 for none). If the stream's
-// stored sequence is lower, or the stream is gone while acked is not 0, the
-// store lost writes the replica saw accepted (a restore to an earlier point):
-// lost is true and the binding's history starts again now. Only this replica
-// advances its stream, so other replicas' reports cannot hide the loss. The
-// accepted report gets the stream's next sequence, returned as seq. A report
-// that would take the binding past maxRows rows is refused whole with
-// ErrProxyActivityFull and changes nothing; rows already held may still be
-// updated by a report that adds none. A report that would start the binding's
-// stream past maxStreams is refused whole with ErrProxyActivityStreams.
+// RecordProxyActivity keeps the latest time per Sandbox; a lower stored sequence, or a gone stream with acked not 0, means lost writes and history restarts.
+// A report past maxRows or maxStreams is refused whole (ErrProxyActivityFull, ErrProxyActivityStreams).
 func (s *SQLStore) RecordProxyActivity(ctx context.Context, scope, replica string, rows []ProxyActivity, maxRows, maxStreams int, acked int64) (seq int64, lost bool, err error) {
 	if scope == "" || replica == "" {
 		return 0, false, fmt.Errorf("proxy activity needs a scope and a replica")
@@ -70,15 +51,13 @@ func (s *SQLStore) RecordProxyActivity(ctx context.Context, scope, replica strin
 		ON CONFLICT (scope) DO NOTHING`), scope); err != nil { // #nosec G202 -- constant clock expression
 		return 0, false, err
 	}
-	// The stream's row exists before it is locked, so two reports racing on
-	// it serialize. A new stream is at 0: any acknowledgment the replica
-	// holds for it is then a loss.
+	// The row exists before it is locked, so racing reports serialize; a new stream is at 0.
 	created, err := tx.ExecContext(ctx, s.dialect.Rebind(`INSERT INTO proxy_activity_stream (scope, replica, seq, used_ms) VALUES (?, ?, 0, `+now+`)
 		ON CONFLICT (scope, replica) DO NOTHING`), scope, replica) // #nosec G202 -- constant clock expression
 	if err != nil {
 		return 0, false, err
 	}
-	// Counted only when a stream starts: a replica's start, not every report.
+	// Counted only when a stream starts.
 	if fresh, _ := created.RowsAffected(); fresh > 0 {
 		var streams int
 		if err = tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT COUNT(*) FROM proxy_activity_stream WHERE scope = ?`), scope).Scan(&streams); err != nil {
@@ -125,8 +104,6 @@ func (s *SQLStore) RecordProxyActivity(ctx context.Context, scope, replica strin
 	return seq, lost, tx.Commit()
 }
 
-// ReadProxyActivity returns up to limit of a scope's rows seen at or after
-// since, in Sandbox UID order after the cursor after.
 func (s *SQLStore) ReadProxyActivity(ctx context.Context, scope, after string, since time.Time, limit int) ([]ProxyActivity, error) {
 	rows, err := s.db.QueryContext(ctx, s.dialect.Rebind(`SELECT owner_uid, namespace, last_seen_ms FROM proxy_activity
 		WHERE scope = ? AND owner_uid > ? AND last_seen_ms >= ? ORDER BY owner_uid LIMIT ?`), scope, after, since.UnixMilli(), limit)
@@ -147,8 +124,6 @@ func (s *SQLStore) ReadProxyActivity(ctx context.Context, scope, after string, s
 	return out, rows.Err()
 }
 
-// PruneProxyActivity drops rows last seen before rows and replica streams
-// last used before streams.
 func (s *SQLStore) PruneProxyActivity(ctx context.Context, rows, streams time.Time) error {
 	if _, err := s.db.ExecContext(ctx, s.dialect.Rebind(`DELETE FROM proxy_activity WHERE last_seen_ms < ?`), rows.UnixMilli()); err != nil {
 		return err
@@ -157,8 +132,7 @@ func (s *SQLStore) PruneProxyActivity(ctx context.Context, rows, streams time.Ti
 	return err
 }
 
-// proxyActivityRoom refuses rows that would take scope past maxRows. It counts
-// the rows already held only when the report could cross the ceiling.
+// proxyActivityRoom counts held rows only when the report could cross the ceiling.
 func (s *SQLStore) proxyActivityRoom(ctx context.Context, tx *sql.Tx, scope string, rows []ProxyActivity, maxRows int) error {
 	var held int
 	if err := tx.QueryRowContext(ctx, s.dialect.Rebind(`SELECT COUNT(*) FROM proxy_activity WHERE scope = ?`), scope).Scan(&held); err != nil {
@@ -189,8 +163,6 @@ func (s *SQLStore) proxyActivityRoom(ctx context.Context, tx *sql.Tx, scope stri
 	return nil
 }
 
-// ProxyActivityHistory returns when scope's history began and every
-// replica stream's current sequence, and false if it has no history.
 func (s *SQLStore) ProxyActivityHistory(ctx context.Context, scope string) (time.Time, map[string]int64, bool, error) {
 	var ms int64
 	err := s.db.QueryRowContext(ctx, s.dialect.Rebind(`SELECT history_started_ms FROM proxy_activity_scope WHERE scope = ?`), scope).Scan(&ms)

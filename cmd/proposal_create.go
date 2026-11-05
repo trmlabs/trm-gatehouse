@@ -57,10 +57,7 @@ JSON mode (complex/multi-service proposals):
 			return err
 		}
 
-		// Resolve the target vault. In agent mode, require an explicit
-		// --vault or AGENT_VAULT_VAULT — falling through to "default"
-		// would silently route the proposal at the wrong vault. Mirrors
-		// the agent-mode contract `vault run` already enforces.
+		// Agent mode requires an explicit --vault or AGENT_VAULT_VAULT; falling back to "default" would target the wrong vault.
 		vault, err := resolveVaultForCommand(cmd, tokenSource)
 		if err != nil {
 			return err
@@ -91,9 +88,7 @@ JSON mode (complex/multi-service proposals):
 			return err
 		}
 
-		// Pass the resolved vault as X-Vault so instance-level agent tokens
-		// (which carry no baked-in vault) can create proposals here too — the
-		// broker rejects agent-token POST /v1/proposals calls without it.
+		// Send X-Vault so instance-level agent tokens, which carry no vault, can create proposals.
 		url := fmt.Sprintf("%s/v1/proposals", sess.Address)
 		respBody, err := doVaultScopedRequestWithBody("POST", url, sess.Token, vault, reqBody)
 		if err != nil {

@@ -15,8 +15,6 @@ import (
 	"time"
 )
 
-// A failed Pod cache request names its class: DNS, timeout, connect, TLS or
-// the HTTP status, and stays errDenied to every caller.
 func TestSyncFailuresAreClassified(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err   error
@@ -40,9 +38,6 @@ func TestSyncFailuresAreClassified(t *testing.T) {
 	}
 }
 
-// A namespace that keeps failing the same way logs once, then once per
-// interval with the count it held back; a change of class logs at once; and
-// a sync that succeeds again logs once.
 func TestSyncFailuresAreRateLimited(t *testing.T) {
 	sink := captureLog(t)
 	log := newRelayLog()
@@ -70,9 +65,6 @@ func TestSyncFailuresAreRateLimited(t *testing.T) {
 	}
 }
 
-// End to end through the cache's own client: a refused API call, an
-// unverifiable certificate and an unresolvable name each log their class,
-// and the API token appears in no log line.
 func TestSyncFailureLogsNeverCarryTheToken(t *testing.T) {
 	const token = "synthetic-api-token-c0ffee-must-never-be-logged"
 	tokenFile := filepath.Join(t.TempDir(), "token")

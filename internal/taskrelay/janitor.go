@@ -21,45 +21,26 @@ import (
 	"time"
 )
 
-// JanitorConfig is the idle janitor's operator-owned configuration. The
-// janitor retires agent Sandboxes no proxy replica has seen in use for
-// IdleSeconds. It holds no broker token and no credential: an API-server token
-// to list the proxy's Pods and to list and delete Sandboxes in Namespaces.
+// JanitorConfig is operator-owned; the janitor holds no broker token, only an API-server token to list proxy Pods and list and delete Sandboxes in Namespaces.
 type JanitorConfig struct {
 	// Namespaces are the opted-in tenant namespaces whose Sandboxes may be retired.
-	Namespaces  []string `json:"namespaces"`
-	IdleSeconds int64    `json:"idleSeconds"`
-	// DryRun logs what would be deleted and deletes nothing.
-	DryRun bool `json:"dryRun"`
-	// DeleteConcurrency is how many deletes are in flight at once.
-	DeleteConcurrency int `json:"deleteConcurrency"`
-	// MaxDeleteFraction and MaxDeletesPerPass cap one pass: it deletes at
-	// most the smaller of MaxDeleteFraction of all Sandboxes in Namespaces
-	// (rounded up) and MaxDeletesPerPass, longest idle first, and leaves the
-	// rest for the next pass. Zero means the default (0.1 and 1000). The cap
-	// is not a capacity limit: a backlog clears over a few one-minute passes.
-	// It bounds the damage of activity lost in a way no hold detected, since
-	// a Sandbox still in use shows activity again within minutes and is kept.
-	MaxDeleteFraction float64 `json:"maxDeleteFraction,omitempty"`
-	MaxDeletesPerPass int     `json:"maxDeletesPerPass,omitempty"`
-	// ListPageSize is the page size for every list (the API's continue tokens).
-	ListPageSize int `json:"listPageSize"`
-	// ReplicaConcurrency is how many proxy replicas are read at once (default
-	// 32), so a large fleet is read well inside the Job's deadline.
-	ReplicaConcurrency int `json:"replicaConcurrency,omitempty"`
-	// ProxyNamespace and ProxyLabels find every proxy replica; AdminPort is
-	// each replica's activity listener.
-	ProxyNamespace    string            `json:"proxyNamespace"`
-	ProxyLabels       map[string]string `json:"proxyLabels"`
-	AdminPort         int               `json:"adminPort"`
-	SandboxAPIVersion string            `json:"sandboxAPIVersion"`
-	Kubernetes        KubernetesConfig  `json:"kubernetes"`
-	// ProxyAutoscaler and ProxyDeployment, in ProxyNamespace, name the
-	// proxy's HorizontalPodAutoscaler and Deployment. A replica removed by a
-	// scale-down takes its history with it, so a pass holds while either
-	// changed the replica set within IdleSeconds: the autoscaler's
-	// status.lastScaleTime, or the Deployment's Progressing condition's
-	// lastUpdateTime (a direct edit of its replicas). Either may be empty.
+	Namespaces        []string `json:"namespaces"`
+	IdleSeconds       int64    `json:"idleSeconds"`
+	DryRun            bool     `json:"dryRun"`
+	DeleteConcurrency int      `json:"deleteConcurrency"`
+	// MaxDeleteFraction and MaxDeletesPerPass cap one pass, longest idle first (zero means 0.1 and 1000).
+	// The cap bounds the damage of activity lost undetected: a Sandbox still in use shows activity again within minutes.
+	MaxDeleteFraction  float64           `json:"maxDeleteFraction,omitempty"`
+	MaxDeletesPerPass  int               `json:"maxDeletesPerPass,omitempty"`
+	ListPageSize       int               `json:"listPageSize"`
+	ReplicaConcurrency int               `json:"replicaConcurrency,omitempty"`
+	ProxyNamespace     string            `json:"proxyNamespace"`
+	ProxyLabels        map[string]string `json:"proxyLabels"`
+	AdminPort          int               `json:"adminPort"`
+	SandboxAPIVersion  string            `json:"sandboxAPIVersion"`
+	Kubernetes         KubernetesConfig  `json:"kubernetes"`
+	// ProxyAutoscaler and ProxyDeployment: a pass holds while either changed the replica set within IdleSeconds,
+	// since a removed replica takes its history. Either may be empty.
 	ProxyAutoscaler string `json:"proxyAutoscaler,omitempty"`
 	ProxyDeployment string `json:"proxyDeployment,omitempty"`
 }
@@ -68,7 +49,6 @@ var dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
 var labelValue = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?)?$`)
 var labelKey = regexp.MustCompile(`^([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?/)?[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
 
-// LoadJanitorConfig reads and validates a janitor configuration file.
 func LoadJanitorConfig(path string) (JanitorConfig, error) {
 	var c JanitorConfig
 	b, err := readBoundedFile(path, 1<<20)
@@ -84,8 +64,7 @@ func LoadJanitorConfig(path string) (JanitorConfig, error) {
 }
 
 func (c JanitorConfig) validate() error {
-	// Bounds are sanity checks, not capacity limits: concurrency up to the API
-	// server's own scale, and pages up to what one response should carry.
+	// Bounds are sanity checks, not capacity limits.
 	if len(c.Namespaces) == 0 || c.IdleSeconds < 60 || c.DeleteConcurrency < 1 || c.DeleteConcurrency > 10000 ||
 		c.ReplicaConcurrency < 0 || c.ReplicaConcurrency > 10000 ||
 		c.ListPageSize < 1 || c.ListPageSize > 10000 ||
@@ -119,13 +98,11 @@ func (c JanitorConfig) validate() error {
 	return nil
 }
 
-// Defaults for the per-pass delete cap.
 const (
 	defaultMaxDeleteFraction = 0.1
 	defaultMaxDeletesPerPass = 1000
 )
 
-// deleteCap is how many Sandboxes one pass may delete out of total.
 func (c JanitorConfig) deleteCap(total int) int {
 	fraction, count := c.MaxDeleteFraction, c.MaxDeletesPerPass
 	if fraction == 0 {
@@ -144,31 +121,25 @@ func (j *janitor) replicaConcurrency() int {
 	return j.config.ReplicaConcurrency
 }
 
-// errJanitorDoubt means the pass deleted nothing because a proxy replica did
-// not answer: a fault, so the run fails.
+// errJanitorDoubt: a proxy replica did not answer, so nothing was deleted and the run fails.
 var errJanitorDoubt = errors.New("janitor: a proxy replica did not report its activity; nothing deleted")
 
-// janitorHold is an expected pause: the pass deletes nothing, logs why and
-// succeeds, so a failed run always means a fault.
+// janitorHold is an expected pause: nothing deleted, the reason logged, the run succeeds.
 type janitorHold struct{ reason string }
 
 func (h janitorHold) Error() string { return "janitor: holding: " + h.reason }
 
 type janitor struct {
-	config JanitorConfig
-	client *http.Client
-	admin  *http.Client
-	out    io.Writer
-	now    func() time.Time
-	// replicaURL builds a replica's URL for an activity path; tests point it
-	// at fakes.
+	config     JanitorConfig
+	client     *http.Client
+	admin      *http.Client
+	out        io.Writer
+	now        func() time.Time
 	replicaURL func(podIP, path string) string
-	// backoff is the wait before retrying a throttled request.
-	backoff func(attempt int, retryAfter string) time.Duration
+	backoff    func(attempt int, retryAfter string) time.Duration
 }
 
-// RunJanitor makes one pass: read every proxy replica's activity, then delete
-// every Sandbox in the tenant namespaces that none has seen for IdleSeconds.
+// RunJanitor makes one pass: delete every tenant Sandbox no replica has seen for IdleSeconds.
 func RunJanitor(ctx context.Context, c JanitorConfig, out io.Writer) error {
 	if e := c.validate(); e != nil {
 		return e
@@ -189,9 +160,7 @@ func RunJanitor(ctx context.Context, c JanitorConfig, out io.Writer) error {
 	return j.pass(ctx)
 }
 
-// defaultBackoff waits at least the server's Retry-After plus up to as much
-// again, or else a full-jitter exponential delay, so many throttled workers
-// do not retry in step.
+// defaultBackoff uses Retry-After plus jitter, else full-jitter exponential, so throttled workers do not retry in step.
 func defaultBackoff(attempt int, retryAfter string) time.Duration {
 	if s, e := strconv.Atoi(retryAfter); e == nil && s > 0 && s <= 60 {
 		d := time.Duration(s) * time.Second
@@ -207,12 +176,10 @@ func (j *janitor) log(event string, fields map[string]any) {
 	_, _ = j.out.Write(append(b, '\n'))
 }
 
-// pass returns nil when it held on purpose; the held reason is logged.
 func (j *janitor) pass(ctx context.Context) error {
 	now := j.now()
 	cutoff := now.Add(-time.Duration(j.config.IdleSeconds) * time.Second)
-	// With every replica's report durable, a replica's coming or going loses
-	// nothing, so the scale holds apply only to replica-local reports.
+	// With every report durable a replica's coming or going loses nothing, so the scale holds apply only to local reports.
 	lastSeen, durable, young, e := j.activity(ctx, cutoff)
 	if e == nil && !durable {
 		if e = j.scaledSince(ctx, cutoff); e == nil && young {
@@ -237,15 +204,13 @@ func (j *janitor) pass(ctx context.Context) error {
 		}
 		total += len(boxes)
 		for _, s := range boxes {
-			// Too young, already leaving, or used through any replica since the cutoff: kept.
 			if s.DeletionTimestamp != "" || s.Created.IsZero() || s.Created.After(cutoff) || lastSeen[s.UID].After(cutoff) {
 				continue
 			}
 			idle = append(idle, s)
 		}
 	}
-	// Longest idle first: the oldest last use (none seen sorts first), then
-	// the oldest Sandbox, then by UID so a pass is repeatable.
+	// Longest idle first (never seen sorts first), then oldest Sandbox, then UID so a pass is repeatable.
 	sort.Slice(idle, func(a, b int) bool {
 		la, lb := lastSeen[idle[a].UID], lastSeen[idle[b].UID]
 		if !la.Equal(lb) {
@@ -270,8 +235,7 @@ func (j *janitor) pass(ctx context.Context) error {
 	return e
 }
 
-// scaledSince holds the pass while the proxy's replica set changed after the
-// cutoff: a removed replica's history is gone. A failed read is a fault.
+// scaledSince holds the pass while the replica set changed after the cutoff: a removed replica's history is gone.
 func (j *janitor) scaledSince(ctx context.Context, cutoff time.Time) error {
 	ns := "/namespaces/" + url.PathEscape(j.config.ProxyNamespace)
 	if name := j.config.ProxyAutoscaler; name != "" {
@@ -308,7 +272,6 @@ func (j *janitor) scaledSince(ctx context.Context, cutoff time.Time) error {
 	return nil
 }
 
-// get reads one object; anything but 200 is an error.
 func (j *janitor) get(ctx context.Context, path string, into any) error {
 	status, body, e := j.request(ctx, http.MethodGet, path, nil)
 	if e != nil {
@@ -320,12 +283,7 @@ func (j *janitor) get(ctx context.Context, path string, into any) error {
 	return json.Unmarshal(body, into)
 }
 
-// activity reads every proxy replica's report and returns, per Sandbox UID,
-// the latest use any replica saw; whether every report was durable; and
-// whether any replica started after the cutoff (on its own it cannot vouch
-// for the whole idle window). It is all or nothing: a replica that does not
-// answer, or reports a retention shorter than the idle time, is a fault, and
-// nothing is deleted.
+// activity is all or nothing: a replica that does not answer, or reports a retention shorter than the idle time, is a fault and nothing is deleted.
 func (j *janitor) activity(ctx context.Context, cutoff time.Time) (map[string]time.Time, bool, bool, error) {
 	selector := make([]string, 0, len(j.config.ProxyLabels))
 	for k, v := range j.config.ProxyLabels {
@@ -361,13 +319,8 @@ func (j *janitor) activity(ctx context.Context, cutoff time.Time) (map[string]ti
 	if len(live) == 0 {
 		return nil, false, false, errJanitorDoubt
 	}
-	// One replica, the first by name, answers with the broker's durable view
-	// merged in; the rest answer with their own activity only, which the
-	// durable view does not yet hold. Reads run ReplicaConcurrency at a time;
-	// any failure is doubt and stops the rest. The full report is read last:
-	// every acknowledgment a local report carries was then given before the
-	// broker's view was taken, so a report landing during the pass never
-	// reads as a loss.
+	// The first replica by name answers with the broker's durable view; the rest answer locally.
+	// The full report is read last so a report landing during the pass never reads as a loss.
 	sort.Slice(live, func(a, b int) bool { return live[a].Metadata.Name < live[b].Metadata.Name })
 	reports := make([]ActivityReport, len(live))
 	ips := make([]string, len(live))
@@ -411,30 +364,23 @@ func (j *janitor) activity(ctx context.Context, cutoff time.Time) (map[string]ti
 	young := false
 	full := reports[0]
 	durable := full.Durable
-	// A durable report vouches only for as long as the broker's history for
-	// its binding: a new, recreated or emptied history is young.
+	// A durable report vouches only as far back as the broker's history for its binding; a new or emptied history is young.
 	historyYoung := durable && (full.HistoryStarted.IsZero() || full.HistoryStarted.After(cutoff))
-	// The broker's history is whole only as far back as some live replica
-	// can vouch: one whose reports have been acknowledged since before the
-	// cutoff, and none of whose acknowledged writes the store has lost.
+	// The broker's history is whole only as far back as some live replica can vouch.
 	var vouched time.Time
 	lost := false
 	var unaware []string
 	unreachable := false
 	for i, report := range reports {
-		// A replica whose report to the broker failed within the idle
-		// window may have had a sibling die holding activity the broker
-		// never took, so nothing in the window can be trusted as idle. The
-		// hold lifts on its own one idle window after the last failure. A
-		// proxy too old to send the field reports zero: no signal, no hold.
+		// A replica whose report to the broker failed within the idle window may have had a sibling die holding untaken activity, so nothing in the window can be trusted as idle.
+		// The hold lifts one idle window after the last failure; a proxy too old to send the field reports zero.
 		if report.BrokerUnreachableAt.After(cutoff) {
 			unreachable = true
 		}
 		if report.ReplicaStarted.After(cutoff) {
 			young = true
 		}
-		// Each replica's own stream: another replica's reports never
-		// advance it, so a loss stays visible until this replica reports.
+		// Each replica's own stream: another replica's reports never advance it, so a loss stays visible until this replica reports.
 		if report.AckedSeq > 0 && report.AckedSeq > full.HistoryStreams[report.Replica] {
 			lost = true
 			if i > 0 {
@@ -456,20 +402,12 @@ func (j *janitor) activity(ctx context.Context, cutoff time.Time) (map[string]ti
 	case historyYoung:
 		return nil, false, false, janitorHold{"activity_history_young"}
 	case durable && lost:
-		// A replica saw writes acknowledged that the store no longer holds
-		// (a restore): its next report restarts the history. A replica
-		// asked only for its own activity has not read the broker's view,
-		// and an idle one may never report: asking it for the full report
-		// shows it the loss, and it reports once, holding rows or not.
+		// A replica saw acknowledged writes the store no longer holds: asking for the full report shows it the loss, so it reports once.
 		j.tellLost(ctx, unaware)
 		return nil, false, false, janitorHold{"activity_history_lost"}
 	case durable && (vouched.IsZero() || vouched.After(cutoff)) && young:
-		// Every live replica started without an acknowledgment, or got its
-		// first one within the idle window (a rollout, perhaps over a
-		// restore), and some replica has not been up for the whole window:
-		// nothing vouches for the window yet. Once every live replica has
-		// been up a full window, their own memory covers it, so an idle
-		// fleet that never reports is not held for ever.
+		// No replica has vouched for the whole idle window yet (a rollout, perhaps over a restore).
+		// Once every live replica has been up a full window their own memory covers it, so an idle fleet is not held for ever.
 		return nil, false, false, janitorHold{"activity_history_unverified"}
 	}
 	return seen, durable, young, nil
@@ -483,9 +421,7 @@ func netipString(s string) (string, error) {
 	return ip.String(), nil
 }
 
-// tellLost asks each replica at ips for the full report, which reads the
-// broker's view and so shows the replica its loss. Best effort: a replica
-// not reached is asked again on the next pass, which holds meanwhile.
+// tellLost asks each replica for the full report so it sees its loss; best effort, retried next pass.
 func (j *janitor) tellLost(ctx context.Context, ips []string) {
 	limit := make(chan struct{}, j.replicaConcurrency())
 	var wg sync.WaitGroup
@@ -551,7 +487,6 @@ func (j *janitor) sandboxes(ctx context.Context, ns string) ([]sandbox, error) {
 	return out, e
 }
 
-// list pages through a collection, handing each page's items to add.
 func (j *janitor) list(ctx context.Context, path, selector string, add func(json.RawMessage) error) error {
 	next := ""
 	for {
@@ -586,8 +521,7 @@ func (j *janitor) list(ctx context.Context, path, selector string, add func(json
 	}
 }
 
-// request sends one API request, retrying with backoff while the API server
-// throttles (429, including priority and fairness). Any other failure returns.
+// request retries with backoff while the API server throttles (429); any other failure returns.
 func (j *janitor) request(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	token, e := readBoundedFile(j.config.Kubernetes.ReviewerTokenFile, 32<<10)
 	if e != nil || strings.TrimSpace(string(token)) == "" {
@@ -624,10 +558,7 @@ func (j *janitor) request(ctx context.Context, method, path string, body []byte)
 	}
 }
 
-// delete removes the idle Sandboxes, DeleteConcurrency at a time, each by UID
-// precondition so a Sandbox recreated under the same name is never touched. A
-// Sandbox already gone or changed (404, 409) is skipped; any other failure
-// stops the pass.
+// delete uses a UID precondition so a Sandbox recreated under the same name is never touched; 404 and 409 are skipped, other failures stop the pass.
 func (j *janitor) delete(ctx context.Context, idle []sandbox, lastSeen map[string]time.Time) (int, error) {
 	if j.config.DryRun {
 		for _, s := range idle {

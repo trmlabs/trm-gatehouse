@@ -238,8 +238,7 @@ func TestStrictCredentialProxyBlocksResponseExposureAndRedirects(t *testing.T) {
 	}
 }
 
-// The strict relay passes a destination's 503 and Retry-After on but never
-// its copy of the broker's refusal header, as the catalog relay does.
+// The strict relay passes a destination's 503 and Retry-After on but never its copy of the broker's refusal header.
 func TestStrictRelayDropsADestinationsRefusalHeader(t *testing.T) {
 	f := newStrictFixture(t)
 	before := f.calls.Load()
@@ -295,8 +294,7 @@ func TestStrictCredentialProxyPlaintextDenied(t *testing.T) {
 func TestStrictCredentialProxyUnmatchedAndPassthroughDenied(t *testing.T) {
 	f := newStrictFixture(t)
 	f.positive(t)
-	// Request handlers invoke credentials before opening any upstream connection.
-	// Change the provider between requests, with each prior request fully finished.
+	// Handlers invoke credentials before opening any upstream connection; change the provider between fully finished requests.
 	f.proxy.creds = &fakeCredProvider{byHost: map[string]fakeInjectResult{}}
 	before := f.calls.Load()
 	resp, _ := f.send(t, "/ok", nil)

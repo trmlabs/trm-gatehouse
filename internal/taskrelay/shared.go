@@ -21,48 +21,30 @@ import (
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
-// SharedConfig runs the relay as one shared proxy for many agent Pods, for a
-// runtime whose Pods can hold no token of their own (agent-sandbox). The
-// proxy matches each connection's source address to one live agent Pod in
-// its own cluster, checks that Pod, and presents its own projected token to
-// the broker with an attestation of the Pod. The broker trusts this proxy's
-// service account alone, and only from the private link it is reached over.
+// SharedConfig runs one shared proxy for many agent Pods: it matches each connection's source address to one live Pod in its own cluster, checks it, and presents its own projected token with an attestation of the Pod.
+// The broker trusts this proxy's service account alone, only from the private link.
 type SharedConfig struct {
-	// Profiles maps each namespace the agent Pods run in to its harness
-	// profile, which the attestation names; the broker refuses a profile its
-	// own map does not give that namespace. The proxy lists and watches Pods
-	// in each namespace, so its Role needs get, list and watch on pods there.
+	// Profiles maps each agent namespace to its harness profile; the broker refuses a profile its own map does not give that namespace.
+	// The proxy's Role needs get, list and watch on pods there.
 	Profiles map[string]string `json:"profiles"`
-	// OwnerKind and OwnerAPIVersion name the controller that must own each
-	// agent Pod, such as Sandbox and agents.x-k8s.io/v1beta1.
+	// OwnerKind and OwnerAPIVersion name the controller that must own each agent Pod.
 	OwnerKind       string `json:"ownerKind"`
 	OwnerAPIVersion string `json:"ownerAPIVersion"`
-	// ImagePrefixes maps a namespace to the agent image registry path its
-	// agents' images are pulled from (see imagerule.ValidPrefix). ImageDigests
-	// are exact digests allowed in every namespace, for containers the
-	// platform injects. Each container must match one or the other, judged on
-	// the image the node pulled, never the Pod spec.
+	// ImagePrefixes maps a namespace to its agent image registry path; ImageDigests are allowed in every namespace.
+	// Each container must match one, judged on the image the node pulled, never the Pod spec.
 	ImagePrefixes map[string]string `json:"imagePrefixes,omitempty"`
 	ImageDigests  []string          `json:"imageDigests,omitempty"`
-	// MaxPodSeconds bounds an agent Pod's admission from its start (60 s up to
-	// the broker's default session ceiling, a day).
+	// MaxPodSeconds bounds an agent Pod's admission from its start (60 s up to a day).
 	MaxPodSeconds int64 `json:"maxPodSeconds"`
-	// RequesterNamespaces are the namespaces whose attestations carry the
-	// requester: the Pod's gatehouse.trmlabs.com/requester annotation, which
-	// admission policy there fixes to the creator's login. A Pod in one of
-	// them without a valid requester is not admitted.
+	// RequesterNamespaces carry the requester annotation, fixed by admission policy to the creator's login; a Pod there without a valid requester is not admitted.
 	RequesterNamespaces []string `json:"requesterNamespaces,omitempty"`
-	// MaxConnections bounds the open connections of one replica (default
-	// 4096). Scale out with replicas, not by raising it.
+	// MaxConnections bounds one replica's open connections (default 4096); scale out with replicas.
 	MaxConnections int `json:"maxConnections,omitempty"`
 }
 
 const (
 	defaultSharedConnections = 4096
-	// watchSeconds is how long one watch request runs before it is renewed;
-	// outOfSync how long a namespace's watch may be down before its Pods stop
-	// being admitted; watchIdle how long a silent stream is trusted before it
-	// is treated as dead.
+	// watchSeconds is how long one watch runs before renewal; outOfSync how long a watch may be down before Pods stop being admitted; watchIdle how long a silent stream is trusted.
 	watchSeconds = 60
 	outOfSync    = 10 * time.Second
 	watchIdle    = 75 * time.Second
@@ -75,7 +57,6 @@ var (
 	profileName       = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,126}[a-z0-9])?$`)
 )
 
-// namespaces are the watched namespaces, in a fixed order.
 func (s *SharedConfig) namespaces() []string {
 	out := make([]string, 0, len(s.Profiles))
 	for ns := range s.Profiles {
@@ -85,13 +66,9 @@ func (s *SharedConfig) namespaces() []string {
 	return out
 }
 
-// maxSharedProfiles matches the broker's proxy binding bound.
 const maxSharedProfiles = 10000
 
 func (s *SharedConfig) validate() error {
-	// No small caps: a shared proxy serves up to as many namespaces as the
-	// broker's proxy binding allows, and the config file's size bounds the
-	// lists.
 	if len(s.Profiles) == 0 || len(s.Profiles) > maxSharedProfiles || !kindPattern.MatchString(s.OwnerKind) || !apiVersionPattern.MatchString(s.OwnerAPIVersion) ||
 		s.MaxPodSeconds < 60 || s.MaxPodSeconds > int64(workloadidentity.DefaultSessionCeiling/time.Second) || s.MaxConnections < 0 || s.MaxConnections > 65536 {
 		return errConfig
@@ -114,8 +91,6 @@ func (s *SharedConfig) validate() error {
 		if s.Profiles[ns] == "" {
 			return errConfig
 		}
-		// The registry setting is the one a deployment most often misses,
-		// so this refusal names it.
 		if !imagerule.ValidPrefix(prefix) {
 			return fmt.Errorf("%w: imagePrefixes[%q] must be a repository or tenant path under %s", errConfig, ns, imagerule.RegistryEnv)
 		}
@@ -140,8 +115,7 @@ func (s *SharedConfig) connections() int {
 	return s.MaxConnections
 }
 
-// validateShared allows TLS listeners on any address, Kubernetes access for
-// the Pod cache, no pairing, no browser and no session files.
+// validateShared allows TLS listeners on any address and Kubernetes access for the Pod cache; no pairing, browser or session files.
 func (c FixedConfig) validateShared(now time.Time) error {
 	if c.Self || c.Browser != nil || c.Sandbox != (SandboxConfig{}) {
 		return errConfig
@@ -149,9 +123,7 @@ func (c FixedConfig) validateShared(now time.Time) error {
 	if e := c.Shared.validate(); e != nil {
 		return e
 	}
-	// Plaintext listeners are allowed (no certificate and no key) on the Pod
-	// network; the HTTP listener takes CONNECT only, so HTTPS stays end to
-	// end, and every upstream to the broker is TLS.
+	// Plaintext listeners are allowed on the Pod network; the HTTP listener takes CONNECT only, so HTTPS stays end to end.
 	if !safeName.MatchString(c.TaskID) || !c.Deadline.After(now) || c.AuditFile == "" || (c.TLSCertFile == "") != (c.TLSKeyFile == "") ||
 		c.Kubernetes.CAFile == "" || c.Kubernetes.ReviewerTokenFile == "" {
 		return errConfig
@@ -169,8 +141,7 @@ func (c FixedConfig) validateShared(now time.Time) error {
 		return nil
 	}
 	if c.Connect != nil {
-		// Exactly one of a target list and broker routing; with neither the
-		// config is refused, so a dropped list never opens the listener.
+		// Exactly one of a target list and broker routing, so a dropped list never opens the listener.
 		targets := len(c.Connect.AllowedTargets)
 		if check(c.Connect.Listen, c.Connect.Upstream) != nil || (c.Connect.Routes != "" && c.Connect.Routes != routesBroker) ||
 			(c.Connect.Routes == routesBroker) == (targets != 0) {
@@ -190,8 +161,6 @@ func (c FixedConfig) validateShared(now time.Time) error {
 			return errConfig
 		}
 	}
-	// A broker-issued certificate replaces the files, and is requested over
-	// the CONNECT listener's upstream: the broker's cross-cluster listener.
 	if c.TLS != nil && (c.TLS.validate() != nil || c.TLSCertFile != "" || c.Connect == nil) {
 		return errConfig
 	}
@@ -209,7 +178,6 @@ func (c FixedConfig) validateShared(now time.Time) error {
 	return nil
 }
 
-// agentPod is the part of a Pod the shared proxy checks.
 type agentPod struct {
 	Metadata struct {
 		Name              string  `json:"name"`
@@ -259,8 +227,6 @@ func (p *agentPod) addresses() []netip.Addr {
 	return out
 }
 
-// controller is the UID of the Pod's controller when it is of the agent
-// kind, or "".
 func (p *agentPod) controller(s *SharedConfig) string {
 	for _, o := range p.Metadata.OwnerReferences {
 		if o.Controller != nil && *o.Controller && o.Kind == s.OwnerKind && o.APIVersion == s.OwnerAPIVersion {
@@ -270,7 +236,6 @@ func (p *agentPod) controller(s *SharedConfig) string {
 	return ""
 }
 
-// attest returns the Pod's attestation if it is an admissible agent right now.
 func (p *agentPod) attest(s *SharedConfig, now time.Time) (workloadidentity.Attestation, bool) {
 	var a workloadidentity.Attestation
 	m := p.Metadata
@@ -278,14 +243,8 @@ func (p *agentPod) attest(s *SharedConfig, now time.Time) (workloadidentity.Atte
 		len(p.Spec.EphemeralContainers) != 0 || len(p.Status.ContainerStatuses) == 0 || s.Profiles[m.Namespace] == "" {
 		return a, false
 	}
-	// The controller reference names the agent's own controller object, which
-	// is never looked up, and the requester is read from the Pod. Both are
-	// written by whoever creates or updates the Pod, so the boundary is that
-	// only the controller may create Pods in an agent namespace and no one may
-	// change their owner references or requester afterwards. A deployment
-	// must enforce that with admission policy, as for pool Pods; Gatehouse
-	// does not ship that policy, and RBAC alone does not hold it, since a
-	// cluster-wide grant includes Pod creation.
+	// The controller reference is never looked up and the requester is read from the Pod, so only the controller may create Pods in an agent namespace
+	// and no one may change their owner references or requester: a deployment must enforce that with admission policy, which Gatehouse does not ship.
 	owner := ""
 	for _, o := range m.OwnerReferences {
 		if o.Controller != nil && *o.Controller {
@@ -326,25 +285,20 @@ func (p *agentPod) attest(s *SharedConfig, now time.Time) (workloadidentity.Atte
 		Images: images, NotAfter: end.Unix(), Profile: s.Profiles[m.Namespace], Requester: requester}, true
 }
 
-// podCache holds the agent Pods of every watched namespace, kept current by
-// one list and watch per namespace: no API call per connection. A namespace
-// whose watch has been down for more than outOfSync admits nothing.
+// podCache holds the agent Pods of every watched namespace from one list and watch each, so there is no API call per connection; a namespace down past outOfSync admits nothing.
 type podCache struct {
-	config *SharedConfig
-	k8s    KubernetesConfig
-	client *http.Client
-	now    func() time.Time
-	mu     sync.RWMutex
-	pods   map[string]*agentPod               // namespace/name
-	byIP   map[netip.Addr]map[string]struct{} // address to namespace/name
-	inSync map[string]bool                    // namespace to whether its watch is open
-	lostAt map[string]time.Time               // namespace to when its watch last went down
-	// activity is each agent Sandbox's last use through this replica; a
-	// Pod's start counts as use.
+	config   *SharedConfig
+	k8s      KubernetesConfig
+	client   *http.Client
+	now      func() time.Time
+	mu       sync.RWMutex
+	pods     map[string]*agentPod               // namespace/name
+	byIP     map[netip.Addr]map[string]struct{} // address to namespace/name
+	inSync   map[string]bool                    // namespace to whether its watch is open
+	lostAt   map[string]time.Time               // namespace to when its watch last went down
 	activity *activity
-	// log and syncs name why a namespace's sync fails, by class only.
-	log   *slog.Logger
-	syncs syncWatch
+	log      *slog.Logger
+	syncs    syncWatch
 }
 
 func newPodCache(c FixedConfig) (*podCache, error) {
@@ -352,8 +306,7 @@ func newPodCache(c FixedConfig) (*podCache, error) {
 	if e != nil {
 		return nil, e
 	}
-	// No overall timeout: a watch is a long response. Each request carries a
-	// context deadline instead.
+	// No overall timeout: a watch is a long response; each request carries a context deadline.
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: t, Proxy: nil, MaxResponseHeaderBytes: 8192},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errDenied }}
 	return &podCache{config: c.Shared, k8s: c.Kubernetes, client: client, now: time.Now,
@@ -361,7 +314,6 @@ func newPodCache(c FixedConfig) (*podCache, error) {
 		activity: newActivity(time.Now(), c.activityRetention()), log: newRelayLog()}, nil
 }
 
-// lookup returns the attestation of the one admissible agent Pod at peer.
 func (c *podCache) lookup(peer netip.Addr) (workloadidentity.Attestation, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -385,8 +337,7 @@ func (c *podCache) lookup(peer netip.Addr) (workloadidentity.Attestation, bool) 
 func (c *podCache) put(key string, p *agentPod) {
 	c.remove(key)
 	c.pods[key] = p
-	// A Pod's start is use of its Sandbox, so a replaced or fresh Pod that
-	// has made no request yet is not idle.
+	// A Pod's start is use of its Sandbox, so a fresh or replaced Pod is not idle.
 	if owner := p.controller(c.config); owner != "" && p.Status.StartTime != nil {
 		c.activity.record(p.Metadata.Namespace, owner, *p.Status.StartTime)
 	}
@@ -412,7 +363,6 @@ func (c *podCache) remove(key string) {
 	delete(c.pods, key)
 }
 
-// replace swaps one namespace's Pods for a fresh list.
 func (c *podCache) replace(namespace string, pods []*agentPod) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -429,9 +379,7 @@ func (c *podCache) replace(namespace string, pods []*agentPod) {
 	c.inSync[namespace] = true
 }
 
-// synced reports whether a namespace's Pods are current enough to admit:
-// its watch is open, or went down no more than outOfSync ago. A namespace
-// never listed is not.
+// synced: the watch is open or went down no more than outOfSync ago; a namespace never listed is not.
 func (c *podCache) synced(namespace string, now time.Time) bool {
 	if c.inSync[namespace] {
 		return true
@@ -440,14 +388,12 @@ func (c *podCache) synced(namespace string, now time.Time) bool {
 	return ok && now.Sub(lost) <= outOfSync
 }
 
-// heard marks a namespace's watch open.
 func (c *podCache) heard(namespace string) {
 	c.mu.Lock()
 	c.inSync[namespace] = true
 	c.mu.Unlock()
 }
 
-// lost marks a namespace's watch down from now.
 func (c *podCache) lost(namespace string) {
 	c.mu.Lock()
 	if c.inSync[namespace] {
@@ -456,7 +402,6 @@ func (c *podCache) lost(namespace string) {
 	c.mu.Unlock()
 }
 
-// run keeps every namespace current until ctx ends.
 func (c *podCache) run(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, ns := range c.config.namespaces() {
@@ -479,7 +424,6 @@ func (c *podCache) run(ctx context.Context) {
 	wg.Wait()
 }
 
-// waitSynced reports whether every namespace has been listed once.
 func (c *podCache) waitSynced(ctx context.Context) error {
 	for {
 		c.mu.RLock()
@@ -499,8 +443,6 @@ func (c *podCache) waitSynced(ctx context.Context) error {
 	}
 }
 
-// sync lists one namespace, then watches it from that version until the
-// watch ends or fails; the caller lists again.
 func (c *podCache) sync(ctx context.Context, ns string) error {
 	defer c.lost(ns)
 	var list struct {
@@ -578,7 +520,6 @@ func (c *podCache) sync(ctx context.Context, ns string) error {
 				}
 			}
 		})
-		// The watch ended; until the next one opens, the namespace counts as down.
 		c.lost(ns)
 		if e != nil {
 			return e
@@ -587,9 +528,7 @@ func (c *podCache) sync(ctx context.Context, ns string) error {
 	return ctx.Err()
 }
 
-// get makes one API request for a namespace's Pods. A response that goes
-// quiet for watchIdle is abandoned, so a silently dead watch cannot keep
-// stale Pods admitted.
+// A response quiet for watchIdle is abandoned so a silently dead watch cannot keep stale Pods admitted.
 func (c *podCache) get(ctx context.Context, ns string, query url.Values, limit time.Duration, read func(io.Reader) error) error {
 	token, e := readBoundedFile(c.k8s.ReviewerTokenFile, 32<<10)
 	if e != nil || strings.TrimSpace(string(token)) == "" {
@@ -617,7 +556,6 @@ func (c *podCache) get(ctx context.Context, ns string, query url.Values, limit t
 	return read(&idleReader{r: resp.Body, timer: idle})
 }
 
-// idleReader pushes back the idle timer on every read that returns data.
 type idleReader struct {
 	r     io.Reader
 	timer *time.Timer
@@ -631,7 +569,6 @@ func (r *idleReader) Read(b []byte) (int, error) {
 	return n, e
 }
 
-// sharedPeer resolves a connection's source to its agent Pod.
 func sharedPeer(peer string) (netip.Addr, bool) {
 	host, _, e := net.SplitHostPort(peer)
 	if e != nil {

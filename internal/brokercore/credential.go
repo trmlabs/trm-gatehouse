@@ -16,9 +16,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// UnmatchedHostPolicy controls what happens when a request's target host
-// does not match any configured broker service. PolicyPassthrough is the
-// system-wide default; PolicyDeny is the opt-in strict mode.
+// UnmatchedHostPolicy controls requests whose host matches no broker service; PolicyPassthrough is the default.
 type UnmatchedHostPolicy string
 
 const (
@@ -33,9 +31,7 @@ func IsValidUnmatchedHostPolicy(p UnmatchedHostPolicy) bool {
 // InjectResult is the outcome of matching (host, path) and resolving
 // credentials to ready-to-attach HTTP headers.
 type InjectResult struct {
-	// Headers carries SECRET values — never log. Caller must Set (not
-	// Add) so injected values win over client-supplied duplicates.
-	// Nil for passthrough services.
+	// Headers carries SECRET values, never log; callers must Set (not Add) so injected values win. Nil for passthrough.
 	Headers map[string]string
 
 	// MatchedName/Host/Path/Port describe the matched service. Safe to log.
@@ -48,9 +44,7 @@ type InjectResult struct {
 	// FixedQuery contains operator-owned literal parameters, never credential values.
 	FixedQuery map[string]string
 
-	// CredentialKeys are the key names referenced by the matched
-	// service. Populated before resolution so credential-missing
-	// errors still carry diagnostic context. Safe to log.
+	// CredentialKeys are populated before resolution so missing-credential errors keep context; safe to log.
 	CredentialKeys []string
 
 	// Substitutions are resolved placeholder rewrites; each entry
@@ -62,9 +56,7 @@ type InjectResult struct {
 	Passthrough bool
 }
 
-// CredentialProvider resolves a service for (targetHost, targetPath) in
-// vaultID and returns the headers to attach. targetPath must be the URL
-// path only — no query, no fragment.
+// CredentialProvider resolves the service for (targetHost, targetPath) in vaultID; targetPath is the path only.
 type CredentialProvider interface {
 	Inject(ctx context.Context, vaultID, targetHost string, targetPort int, targetPath string) (*InjectResult, error)
 }
@@ -84,11 +76,7 @@ type OAuthStore interface {
 	UpdateCredentialOAuthError(ctx context.Context, vaultID, key string, errMsg string) error
 }
 
-// DynamicCredentialResolver resolves credential keys that are not stored
-// statically — e.g. Infisical dynamic-secret leases minted on demand. ok=false
-// means "not a dynamic credential" (the caller keeps its not-found error); a
-// non-nil error is a real failure. Implemented outside brokercore (infisical)
-// and injected, so brokercore takes no dependency on it.
+// DynamicCredentialResolver resolves keys not stored statically; ok=false means not dynamic, a non-nil error is a real failure.
 type DynamicCredentialResolver interface {
 	Resolve(ctx context.Context, vaultID, key string) (value string, ok bool, err error)
 }
@@ -115,14 +103,9 @@ func NewStoreCredentialProvider(s CredentialStore, encKey []byte) *StoreCredenti
 	return &StoreCredentialProvider{Store: s, EncKey: encKey}
 }
 
-// Inject matches (targetHost, targetPath) and resolves the matched
-// service's auth into HTTP headers. targetHost may include a port —
-// stripped before matching. Pass "/" for targetPath when no path is
-// meaningful.
+// Inject matches (targetHost, targetPath) and resolves the service's auth into headers; targetHost may include a port.
 func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHost string, targetPort int, targetPath string) (*InjectResult, error) {
-	// A missing row is equivalent to an empty services list — fall
-	// through to the unmatched-host policy. Any other error fails closed
-	// so a transient store failure can't silently strip enforcement.
+	// A missing row means no services; any other error fails closed so a transient store failure cannot strip enforcement.
 	cfg, err := p.Store.GetBrokerConfig(ctx, vaultID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrServiceNotFound
@@ -139,10 +122,7 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 	for i := range services {
 		services[i].Host, services[i].Path, services[i].Port = broker.SplitInlineHost(services[i].Host, services[i].Path)
 	}
-	// Heal legacy unnamed entries so MatchedName (which lands in the
-	// request log and the X-Vault-Service header) is never blank for a
-	// matched service — the documented `?service=<name>` log filter
-	// depends on it.
+	// Heal legacy unnamed entries so MatchedName (used by the log filter) is never blank.
 	broker.AssignSlugNames(services)
 
 	matchHost := targetHost
@@ -252,10 +232,7 @@ func (p *StoreCredentialProvider) Inject(ctx context.Context, vaultID, targetHos
 		return s, nil
 	}
 
-	// Resolve substitutions before auth so passthrough services (which
-	// skip the auth branch) still surface ErrCredentialMissing here.
-	// Hold locally and attach only on success — error returns must not
-	// expose resolved secret values via result.
+	// Resolve substitutions before auth and attach only on success so error returns never expose secrets.
 	var resolvedSubs []ResolvedSubstitution
 	if len(matched.Substitutions) > 0 {
 		resolvedSubs = make([]ResolvedSubstitution, 0, len(matched.Substitutions))

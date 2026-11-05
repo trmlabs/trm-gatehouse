@@ -16,9 +16,7 @@ type cancelRequestError struct{ request *pgproto3.CancelRequest }
 func (*cancelRequestError) Error() string { return errCancelRequest.Error() }
 func (*cancelRequestError) Unwrap() error { return errCancelRequest }
 
-// The client receives a fresh opaque capability, never the upstream cancel
-// secret. Entries exist only while their session is alive. Per-target locking
-// bounds cancel connections and keeps teardown from racing an in-flight cancel.
+// The client receives a fresh opaque capability, never the upstream cancel secret.
 type cancelTarget struct {
 	mu     sync.Mutex
 	active bool
@@ -77,9 +75,7 @@ func (b *Broker) cancelQuery(ctx context.Context, request *pgproto3.CancelReques
 	b.cancelUpstream(ctx, target.addr, &target.svc, &target.key)
 }
 
-// cancelUpstream sends a cancel request for one server backend. It dials the
-// established backend's peer address: resolving a load-balanced hostname
-// again could cancel a different server's coincidentally matching PID.
+// cancelUpstream sends a cancel request for one server backend.
 func (b *Broker) cancelUpstream(ctx context.Context, addr string, svc *DatabaseService, key *pgproto3.CancelRequest) {
 	conn, err := b.opts.Dialer(ctx, "tcp", addr)
 	if err != nil {

@@ -36,8 +36,7 @@ func TestDecide(t *testing.T) {
 	t1 := Entry{Tier: "T1", Requires: []string{g1}}
 	claude := Pool{Identity: "claude-session", Ceiling: "T1"}
 	alice := Requester{Kind: "person", Subject: "sso|alice"}
-	// The department rides along with the lookup for the audit trail; it
-	// never changes a decision.
+	// The department rides along for the audit trail and never changes a decision.
 	if d := Decide(context.Background(), &Cache{Source: member}, claude, t1, alice); !d.Allowed || d.Department != "Engineering" {
 		t.Fatalf("member decision %+v; want allowed with the directory department", d)
 	}
@@ -70,8 +69,7 @@ func TestDecide(t *testing.T) {
 		{"workload entitled", nil, Pool{Identity: "workload", Ceiling: "T1", Entitlements: []string{g1}}, t1, Requester{Kind: "workload"}, true, "workload_entitled"},
 		{"workload missing group", nil, Pool{Identity: "workload", Ceiling: "T1"}, t1, Requester{Kind: "workload"}, false, "workload_not_entitled"},
 		{"workload T2", nil, Pool{Identity: "workload", Ceiling: "T2", Entitlements: []string{g1}}, Entry{Tier: "T2", Requires: []string{g1}}, Requester{Kind: "workload"}, false, "workload_not_entitled"},
-		// An Automation is served only an entry the catalog lists for it, at
-		// every tier, and never asks the directory: a failing one is not read.
+		// An Automation is served only an entry the catalog lists for it, at every tier, without asking the directory.
 		{"Automation granted T0", errSource, automations, Entry{}, granted, true, "t0"},
 		{"Automation granted T2", errSource, automations, t2, granted, true, "automation_granted"},
 		{"Automation not granted T0", errSource, automations, Entry{}, Requester{Kind: "automation", Subject: "auto-1"}, false, "automation_not_granted"},
@@ -92,8 +90,7 @@ func TestDecide(t *testing.T) {
 	if errSource.calls != 0 {
 		t.Errorf("an Automation's decision asked the directory %d times", errSource.calls)
 	}
-	// A broker started without a directory refuses as a configuration fault,
-	// which waiting never clears, not as a directory outage.
+	// A broker without a directory refuses as a configuration fault, not a directory outage.
 	if d := Decide(context.Background(), nil, claude, t1, alice); d.Allowed || d.Outcome != "entitlement_config" {
 		t.Errorf("no cache: got %v %q", d.Allowed, d.Outcome)
 	}
@@ -189,8 +186,7 @@ func TestGraphSource(t *testing.T) {
 	if err != nil || p.ObjectID != user || len(p.MemberOf) != 1 || p.Department != "Security" {
 		t.Fatalf("%+v %v", p, err)
 	}
-	// The directory's own answer that it has no such account lasts; a
-	// directory that did not answer does not.
+	// The directory's own answer that it has no such account lasts; a non-answer does not.
 	if _, err := g.Lookup(context.Background(), "bob@example.test", []string{g1}); !errors.Is(err, ErrNotInDirectory) {
 		t.Fatalf("missing user: %v, want ErrNotInDirectory", err)
 	}

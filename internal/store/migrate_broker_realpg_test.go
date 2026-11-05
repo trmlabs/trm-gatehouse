@@ -12,9 +12,7 @@ import (
 	"time"
 )
 
-// migrate-db carries the broker's tables to PostgreSQL. A pending cleanup
-// record arrives without an owner, so the first live broker claims it, and the
-// audit boot counter continues instead of restarting at 1.
+// A pending cleanup record arrives without an owner, so the first live broker claims it; the audit boot counter continues instead of restarting at 1.
 func TestRealPostgres_MigrateCarriesBrokerTables(t *testing.T) {
 	dsn := os.Getenv("AV_TEST_STORE_PG_URL")
 	if dsn == "" {
@@ -86,9 +84,7 @@ func TestRealPostgres_MigrateCarriesBrokerTables(t *testing.T) {
 	}
 }
 
-// A CA on disk that cannot be read leaves the destination untouched, so the
-// rerun after fixing it starts clean instead of refusing a half-filled
-// database; the rerun moves the data and the CA together.
+// An unreadable CA on disk leaves the destination untouched, so the rerun starts clean.
 func TestRealPostgres_MigrateWithCAIsAllOrNothing(t *testing.T) {
 	dsn := os.Getenv("AV_TEST_STORE_PG_URL")
 	if dsn == "" {

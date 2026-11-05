@@ -25,10 +25,7 @@ interface CreatedBy {
   display_name: string;
 }
 
-// Mirrors GET /v1/sessions's row shape (handle_sessions.go scopedSessionView).
-// `created_by` is populated server-side but not currently rendered in the
-// table; kept on the type so the API contract is faithful and a future
-// column or tooltip can read it without a schema change.
+// Mirrors GET /v1/sessions's row shape; `created_by` is kept on the type though not yet rendered.
 interface VaultToken {
   id: string;
   label?: string;
@@ -239,10 +236,7 @@ function MintTokenButton({
   const [mintedToken, setMintedToken] = useState<string | null>(null);
 
   function close() {
-    // Block all close paths (ESC, backdrop, X, Cancel) while a mint is
-    // in flight. Otherwise the post-await setMintedToken would write into
-    // a hidden modal and the freshly-minted token would only surface on
-    // the next "Mint token" click — looking like an orphan to the user.
+    // Block all close paths while a mint is in flight, or the minted token would be written into a hidden modal.
     if (submitting) return;
     setOpen(false);
     setLabel("");

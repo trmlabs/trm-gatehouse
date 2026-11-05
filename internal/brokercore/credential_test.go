@@ -193,11 +193,7 @@ func TestInject_StripsPortForMatching(t *testing.T) {
 	}
 }
 
-// TestInject_HealsLegacyUnnamedServiceMatchedName pins that the proxy
-// hot path auto-slugs missing Names before matching, so MatchedName
-// (which lands in the request log and the X-Vault-Service header)
-// never persists as "" for a matched service. The documented
-// `?service=<name>` log filter depends on this.
+// TestInject_HealsLegacyUnnamedServiceMatchedName pins that missing service Names are auto-slugged so MatchedName is never empty.
 func TestInject_HealsLegacyUnnamedServiceMatchedName(t *testing.T) {
 	key32 := make32(0x77)
 	f := newFakeCredStore()
@@ -237,13 +233,7 @@ func TestInject_WildcardMatch(t *testing.T) {
 	}
 }
 
-// TestInject_PathBasedDisambiguation pins that two services on the same
-// host with different path globs both work end-to-end through the
-// Inject path: the more specific path wins, the right credential is
-// injected, and MatchedName/Host/Path on the result reflect the
-// matched service. The motivating case is the Slack split where /api/*
-// uses a Bot token and /api/apps.connections.* uses a Socket Mode
-// token.
+// TestInject_PathBasedDisambiguation pins that the more specific path glob wins for two services on one host.
 func TestInject_PathBasedDisambiguation(t *testing.T) {
 	key32 := make32(0x88)
 	f := newFakeCredStore()
@@ -365,10 +355,7 @@ func TestInject_UnmatchedHost_HostMissDeny(t *testing.T) {
 	}
 }
 
-// Regression: a non-ErrNoRows GetBrokerConfig error must fail closed
-// (ErrServiceNotFound), not fall through to passthrough. Otherwise a
-// transient store failure silently strips credential injection from a
-// vault that has services configured.
+// Regression: a non-ErrNoRows GetBrokerConfig error must fail closed, not fall through to passthrough.
 func TestInject_GetBrokerConfigError_FailsClosed(t *testing.T) {
 	f := newFakeCredStore()
 	f.brokerCfgErr = errors.New("transient sqlite I/O error")
@@ -596,10 +583,7 @@ func TestInject_SubstitutionMissingCredentialErrorsLikeAuth(t *testing.T) {
 }
 
 func TestInject_AuthFailureLeavesSubstitutionsNil(t *testing.T) {
-	// Substitution resolves successfully, then auth resolution fails.
-	// The error path must NOT leak the resolved (secret) substitution
-	// values via result.Substitutions — callers that log result on
-	// errors would otherwise expose plaintext credential values.
+	// The error path must not leak resolved substitution values via result.Substitutions.
 	key32 := make32(0x77)
 	f := newFakeCredStore()
 	f.setServices(t, "v1", []broker.Service{{

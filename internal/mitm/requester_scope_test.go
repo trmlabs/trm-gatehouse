@@ -31,21 +31,15 @@ import (
 	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
-// requesterRunner verifies the runner sessions of two people on one pool.
 var requesterRunner = fakeRunner{
 	"alice": {Kind: runnerid.KindPerson, Subject: "alice@example.com", Pools: []string{"ccpool_abc"}, TokenSHA256: "aa"},
 	"bob":   {Kind: runnerid.KindPerson, Subject: "bob@example.com", Pools: []string{"ccpool_abc"}, TokenSHA256: "bb"},
 	"agent": {Kind: runnerid.KindAgent, Subject: "agent:helper", Pools: []string{"ccpool_abc"}, TokenSHA256: "cc"},
 }
 
-// requesterPool is pool-agent as a person pool: a runner session names who
-// stands behind each request.
 const requesterPool = `"pools":[{"name":"pool-agent","namespace":"n","serviceAccount":"agent","identity":"claude-session","ccpoolID":"ccpool_abc"}],`
 
-// sessionShim stands in for the in-Pod sidecar: a proxy in front of the
-// broker that adds a runner session to each CONNECT, so stock git, which
-// cannot set CONNECT headers itself, runs as that person. It returns the
-// proxy URL git uses, with the broker's own proxy credential.
+// sessionShim stands in for the in-Pod sidecar: a proxy that adds a runner session to each CONNECT so stock git, which cannot set CONNECT headers, runs as that person.
 func sessionShim(t *testing.T, broker, session string) string {
 	t.Helper()
 	upstream, err := url.Parse(broker)
@@ -101,7 +95,6 @@ func sessionShim(t *testing.T, broker, session string) string {
 	return shim.String()
 }
 
-// as runs git through the broker as the person whose session it carries.
 func (f *gitFixture) as(t *testing.T, session, dir string, args ...string) (string, error) {
 	t.Helper()
 	full := append([]string{"-c", "http.proxy=" + sessionShim(t, f.proxyURL, session), "-c", "http.proxyAuthMethod=basic", "-c", "http.sslCAInfo=" + f.caFile,
@@ -121,11 +114,7 @@ func newRequesterGitFixture(t *testing.T, prefixes string) *gitFixture {
 	})
 }
 
-// Two people share one pool whose push prefix is cursor/pool-agent/{requester}/.
-// Each pushes only under their own segment: a push, force push or delete of
-// the other's branch is refused before GitHub receives it, with git's own
-// report naming where to push, and the audit row names the requester and the
-// ref. A run that names no person may clone but never push.
+// Two people share one pool whose push prefix is cursor/pool-agent/{requester}/; each pushes only under their own segment, and a run that names no person may clone but never push.
 func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 	f := newRequesterGitFixture(t, `"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/{requester}/"]}`)
 	const alices, bobs = "refs/heads/cursor/pool-agent/alice@example.com/", "refs/heads/cursor/pool-agent/bob@example.com/"
@@ -162,12 +151,10 @@ func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 		if err == nil || row.Outcome != "ref_outside_binding" || row.Status != http.StatusOK || row.Requester != "bob@example.com" || row.Branch == "" || !strings.Contains(refspec, row.Branch) {
 			t.Fatalf("%s: %s %+v", name, out, row)
 		}
-		// git's own report says why, and where bob may push instead.
 		if !strings.Contains(out, "[remote rejected]") || !strings.Contains(out, "cursor/pool-agent/bob@example.com/") {
 			t.Errorf("%s: git showed no reason or prefix:\n%s", name, out)
 		}
 	}
-	// A push that asks for no report gets the plain refusal.
 	ca, err := os.ReadFile(f.caFile)
 	if err != nil {
 		t.Fatal(err)
@@ -194,8 +181,6 @@ func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 	if reached != 0 || f.bareRef(t, "example-org/example-app", alices+"fix") != pushed || f.bareRef(t, "example-org/example-app", alices+"other") != "" {
 		t.Fatalf("bob's pushes reached GitHub %d times, or alice's branch changed", reached)
 	}
-	// Following the report: a local branch named under his prefix, pushed
-	// with -u, after which plain git push works.
 	own := strings.TrimPrefix(bobs, "refs/heads/") + "topic"
 	for _, args := range [][]string{{"switch", "-c", own}, {"push", "-u", "origin", "HEAD"}, {"commit", "--allow-empty", "-m", "more"}, {"push"}} {
 		if out, err := f.as(t, "bob", bob, args...); err != nil {
@@ -205,8 +190,6 @@ func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 	if row := f.audit.last(); row.Branch != bobs+"topic" || row.Requester != "bob@example.com" {
 		t.Fatalf("bob's plain push row: %+v", row)
 	}
-	// Bob's own branch, and its delete, go through; so does a push of several
-	// refs that are all his, whose row names each one.
 	for _, refspec := range []string{"HEAD:" + bobs + "fix", ":" + bobs + "fix"} {
 		if out, err := f.as(t, "bob", bob, "push", "origin", refspec); err != nil {
 			t.Fatalf("bob's own %s: %s", refspec, out)
@@ -218,7 +201,6 @@ func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 	if row := f.audit.last(); row.Branch != bobs+"a,"+bobs+"b" && row.Branch != bobs+"b,"+bobs+"a" {
 		t.Fatalf("two-ref push row: %+v", row)
 	}
-	// A run with no person behind it has no branch of its own here.
 	for _, session := range []string{"", "agent"} {
 		dir := filepath.Join(f.work, "none-"+session)
 		if out, err := f.as(t, session, f.work, "clone", f.remote("example-org/example-app"), dir); err != nil {
@@ -230,8 +212,7 @@ func TestGitPushesStayOnTheRequestersOwnBranches(t *testing.T) {
 	}
 }
 
-// A prefix without {requester} is shared on purpose: every person on the pool
-// pushes there, beside their own branches.
+// A prefix without {requester} is shared on purpose: every person pushes there, beside their own branches.
 func TestGitSharedPrefixStaysShared(t *testing.T) {
 	f := newRequesterGitFixture(t, `"poolRefPrefixes":{"pool-agent":["refs/heads/cursor/pool-agent/{requester}/","refs/heads/factory/"]}`)
 	for _, session := range []string{"alice", "bob"} {
@@ -267,8 +248,6 @@ func TestRefsField(t *testing.T) {
 	}
 }
 
-// The refusal is git's own report on the side band git asked for, or bare
-// when it asked for none.
 func TestReceivePackRefusalFormat(t *testing.T) {
 	refs := []string{"refs/heads/main", "refs/heads/cursor/p/alice@example.com/x"}
 	prefixes := []string{"refs/heads/cursor/p/alice@example.com/", "refs/tags/x/"}
@@ -284,7 +263,6 @@ func TestReceivePackRefusalFormat(t *testing.T) {
 	if banded != pktLine("\x02"+message)+pktLine("\x01"+want)+"0000" {
 		t.Fatalf("side-band report:\n%q", banded)
 	}
-	// A report longer than one side-band packet is split across several.
 	many := make([]string, 50)
 	for i := range many {
 		many[i] = "refs/heads/" + strings.Repeat("x", 30) + strconv.Itoa(i)
@@ -299,10 +277,7 @@ func TestReceivePackRefusalFormat(t *testing.T) {
 	}
 }
 
-// requesterAPI fronts a fake GitHub for pull request writes on one pool that
-// two people share. Pull requests: 12 from alice's branch, 13 from bob's, 14
-// from the repository's shared pull request prefix. Workflow run 21 is a push
-// to alice's branch.
+// requesterAPI fronts a fake GitHub on one pool two people share. Pull requests: 12 from alice's branch, 13 from bob's, 14 from the shared prefix; workflow run 21 is a push to alice's branch.
 type requesterAPI struct {
 	audit    *adapterAudit
 	port     int
@@ -390,7 +365,6 @@ func newRequesterAPI(t *testing.T) *requesterAPI {
 	return f
 }
 
-// send makes one request as the person whose session it carries.
 func (f *requesterAPI) send(t *testing.T, session, method, path, body string) int {
 	t.Helper()
 	client := newTrustingClient(f.proxyURL, url.User("workload-token"), f.roots)
@@ -407,11 +381,7 @@ func (f *requesterAPI) send(t *testing.T, session, method, path, body string) in
 	return resp.StatusCode
 }
 
-// Every github-api write on a pull request holds to the requester's own
-// branches: bob can open a pull request only from his branch, and can
-// comment on, edit, label, mark ready, update or rerun only his own, never
-// alice's. A pull request under the repository's shared pull request prefix
-// stays open to both. Refused rows name the requester and the branch.
+// Every github-api write on a pull request holds to the requester's own branches; a pull request under the shared prefix stays open to both.
 func TestGitHubAPIWritesStayOnTheRequestersOwnPullRequests(t *testing.T) {
 	f := newRequesterAPI(t)
 	open := func(head string) string { return `{"title":"t","head":"` + head + `","base":"main"}` }
@@ -460,9 +430,7 @@ func TestGitHubAPIWritesStayOnTheRequestersOwnPullRequests(t *testing.T) {
 	}
 }
 
-// A GraphQL write holds to the requester's own pull requests exactly as REST
-// does: gh pr comment, edit, label, ready, ready --undo and create as bob
-// reach only his.
+// A GraphQL write holds to the requester's own pull requests exactly as REST does.
 func TestGitHubGraphQLWritesStayOnTheRequestersOwnPullRequests(t *testing.T) {
 	f := newGraphQLFixtureFor(t, true)
 	f.useRaw(t, `{`+requesterPool+`"entries":[{"name":"github-api","host":"example.com","port":%[1]d,"kind":"github-api","pools":["pool-agent"],

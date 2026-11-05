@@ -29,8 +29,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// poolFixture serves the cluster's signing keys and one live Pod. Tokens are
-// really signed, so the local verification path is exercised end to end.
+// poolFixture serves the cluster's signing keys and one live Pod, with really signed tokens.
 type poolFixture struct {
 	r          *Resolver
 	key        *rsa.PrivateKey
@@ -126,7 +125,6 @@ func (f *poolFixture) tokenWithKid(c claims, kid string) string {
 	return input + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-// The worker and its native sidecar run approved images.
 const (
 	workerDigest  = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	sidecarDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -155,8 +153,7 @@ func TestAttestAdmitsPoolPodWithItsDeadline(t *testing.T) {
 	}
 }
 
-// The run Cursor's spawn hook recorded on the live Pod rides on the scope, read
-// fresh at each admission; a Pod without one carries none.
+// The run Cursor's spawn hook recorded on the live Pod rides on the scope, read fresh at each admission.
 func TestAttestCarriesTheClaimedRun(t *testing.T) {
 	f := setupPool(t)
 	scope, err := f.r.Attest(context.Background(), f.token(f.c), workerIP)
@@ -324,8 +321,7 @@ func TestPoolBindingValidation(t *testing.T) {
 	}
 }
 
-// A failed key fetch keeps the last good keys: an API outage or a refetch for
-// an unknown kid does not fail admissions the cached keys verify.
+// A failed key fetch keeps the last good keys.
 func TestSigningKeysSurviveAFailedFetch(t *testing.T) {
 	f := setupPool(t)
 	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err != nil {
@@ -340,8 +336,7 @@ func TestSigningKeysSurviveAFailedFetch(t *testing.T) {
 	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err != nil {
 		t.Fatalf("known key lost after a failed fetch: %v", err)
 	}
-	// The set is old: refetch, fail, keep it. (Moving the clock an hour on
-	// would expire the token first.)
+	// The set is old: refetch, fail, keep it (moving the clock would expire the token first).
 	f.r.jwks.mu.Lock()
 	f.r.jwks.fetched, f.r.jwks.attempted = later.Add(-jwksMaxAge), later.Add(-jwksRefetchBackoff)
 	f.r.jwks.mu.Unlock()
@@ -355,7 +350,6 @@ func TestSigningKeysSurviveAFailedFetch(t *testing.T) {
 	}
 }
 
-// waitForFetches waits until n key fetches have run and none is in flight.
 func waitForFetches(t *testing.T, calls *atomic.Int64, n int64, keys *signingKeys) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -376,9 +370,7 @@ func waitForFetches(t *testing.T, calls *atomic.Int64, n int64, keys *signingKey
 	}
 }
 
-// A slow refetch for an unknown kid runs outside the lock: admissions with a
-// cached key go on, concurrent misses share the one fetch, and a caller that
-// gives up does not end it for the others.
+// A slow refetch for an unknown kid runs outside the lock: cached-key admissions go on and concurrent misses share one fetch.
 func TestSigningKeyFetchIsSingleFlightOutsideTheLock(t *testing.T) {
 	f := setupPool(t)
 	if _, err := f.r.Attest(context.Background(), f.token(f.c), workerIP); err != nil {
@@ -424,8 +416,7 @@ func TestSigningKeyFetchIsSingleFlightOutsideTheLock(t *testing.T) {
 	}
 }
 
-// A Pod refused for an unlisted image is logged with the reason and the
-// container, so operators see why; the worker still sees a generic refusal.
+// A Pod refused for an unlisted image is logged with the reason and container; the worker sees a generic refusal.
 func TestAttestLogsTheRefusedImage(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {

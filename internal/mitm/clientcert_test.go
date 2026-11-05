@@ -34,14 +34,11 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog/clientcerttest"
 )
 
-// workflowService is the Temporal frontend service a read-only entry lists
-// methods of; the tests need no Temporal code, since gRPC routes by path.
+// workflowService is the Temporal frontend service a read-only entry lists; gRPC routes by path, so no Temporal code is needed.
 const workflowService = "/temporal.api.workflowservice.v1.WorkflowService/"
 
-// temporalReads are the reads the test entry lists.
 var temporalReads = []string{"GetSystemInfo", "ListWorkflowExecutions", "CountWorkflowExecutions", "DescribeWorkflowExecution", "GetWorkflowExecutionHistory"}
 
-// certVault answers like a KV version 2 mount holding client certificates.
 type certVault struct {
 	mu      sync.Mutex
 	secrets map[string]map[string]interface{} // by "<mount>/data/<path>"
@@ -50,8 +47,6 @@ type certVault struct {
 	reads   map[string]int
 }
 
-// at stores a new version at path, taking a certificate and key as
-// clientcerttest issues them: f.vault.at(path)(ca.ValidClient(t, name)).
 func (v *certVault) at(path string) func(certPEM, keyPEM string) {
 	return func(certPEM, keyPEM string) {
 		v.mu.Lock()
@@ -88,14 +83,8 @@ func (v *certVault) ReadWithDataWithContext(_ context.Context, path string, _ ma
 		"metadata": map[string]interface{}{"version": json.Number(strconv.Itoa(v.version[path]))}}}, nil
 }
 
-// mtlsCall is one call an upstream that requires client certificates took:
-// the gRPC method or HTTP path, the client certificate's common name, any
-// Authorization the broker sent with it, and (HTTP/1.1 side) the serials of
-// the intermediates presented after the leaf.
 type mtlsCall struct{ method, client, auth, chain string }
 
-// intermediates lists the serials of the certificates presented after the
-// leaf.
 func intermediates(presented []*x509.Certificate) string {
 	var serials []string
 	for _, c := range presented[1:] {
@@ -134,12 +123,7 @@ const (
 	restPath     = "gatehouse/data/vendors/rest-read"
 )
 
-// clientCertFixture is a broker in front of three upstreams that each require
-// a client certificate from clientCA: a gRPC server playing a Temporal
-// frontend (temporal.example.com:7233, entry temporal-read, certificate-only),
-// an HTTP/1.1 server (rest.example.com, entry rest-read, its own certificate
-// besides a header key), and the same HTTP/1.1 server under another name
-// (nocert.example.com, entry nocert, a header key and no certificate).
+// clientCertFixture is a broker in front of three upstreams that require a client certificate: gRPC (temporal-read), HTTP/1.1 (rest-read), and the same HTTP/1.1 server under another name with no certificate (nocert).
 type clientCertFixture struct {
 	serverCA *clientcerttest.CA // signs the upstreams' server certificates
 	clientCA *clientcerttest.CA // the only CA the upstreams take client certificates from
@@ -167,11 +151,7 @@ func newClientCertFixture(t *testing.T, options ...func(*HeaderAdapter)) *client
 		return &tls.Config{Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientCA.Pool(), MinVersion: tls.VersionTLS12}
 	}
 
-	// TLS 1.2 on the gRPC side, so a refused certificate fails the handshake
-	// itself. Under TLS 1.3 the refusal arrives just after the handshake, and
-	// on loopback the broker's first write can meet the closed connection
-	// before it reads the alert, which the refusal tests would lose at random.
-	// The HTTP/1.1 upstreams and the Temporal clients test use TLS 1.3.
+	// TLS 1.2 on the gRPC side, so a refused certificate fails the handshake itself; under 1.3 the refusal can lose a race with the broker's first write.
 	grpcTLS := requireClientCert(serverCA.Server(t, "temporal.example.com"))
 	grpcTLS.MaxVersion = tls.VersionTLS12
 	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(grpcTLS)), grpc.ForceServerCodec(rawCodec{}),
@@ -252,9 +232,7 @@ func quotedReads() string {
 	return strings.Join(quoted, ",")
 }
 
-// temporal is a stock grpc-go client for the Temporal host through the
-// broker. Like a Temporal SDK pointed at the broker, it trusts only the
-// broker's CA and holds no client certificate or key of its own.
+// temporal is a stock grpc-go client trusting only the broker's CA, with no client certificate.
 func (f *clientCertFixture) temporal(t *testing.T) *grpc.ClientConn {
 	t.Helper()
 	cc, err := grpc.NewClient("passthrough:///temporal.example.com:7233", grpc.WithNoProxy(), grpc.WithContextDialer(f.grpc.connect),
@@ -294,10 +272,7 @@ func (f *clientCertFixture) get(t *testing.T, host string) (int, string) {
 	return resp.StatusCode, resp.Header.Get(RefusalHeader) + string(body)
 }
 
-// Each listed read reaches an upstream that accepts only client certificates,
-// presenting the entry's certificate; the worker holds none and sends no
-// credential, and nothing from the certificate or key reaches it or the
-// audit trail.
+// Each listed read presents the entry's certificate; nothing from the certificate or key reaches the worker or audit trail.
 func TestClientCertificateReadsReachAnMTLSUpstream(t *testing.T) {
 	f := newClientCertFixture(t)
 	cc := f.temporal(t)
@@ -330,9 +305,7 @@ func TestClientCertificateReadsReachAnMTLSUpstream(t *testing.T) {
 	}
 }
 
-// Read-only is enforced by the broker: a method the entry does not list,
-// such as starting, signalling or terminating a workflow, is refused with
-// PERMISSION_DENIED and never reaches the upstream.
+// Read-only is enforced by the broker: an unlisted method is refused with PERMISSION_DENIED and never reaches the upstream.
 func TestClientCertificateEntryRefusesUnlistedMethods(t *testing.T) {
 	f := newClientCertFixture(t)
 	cc := f.temporal(t)
@@ -349,7 +322,6 @@ func TestClientCertificateEntryRefusesUnlistedMethods(t *testing.T) {
 	if calls := f.grpcSide.all(); len(calls) != 0 {
 		t.Fatalf("refused methods reached the upstream: %+v", calls)
 	}
-	// Another service on the same host is refused the same way.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	in, out := []byte("x"), []byte(nil)
@@ -358,9 +330,7 @@ func TestClientCertificateEntryRefusesUnlistedMethods(t *testing.T) {
 	}
 }
 
-// A new certificate in Vault is presented once the cache's minute passes,
-// with no restart, on a new connection; the upstream refusing a certificate
-// drops it at once.
+// A new certificate in Vault is presented after the cache's minute with no restart; an upstream refusal drops it at once.
 func TestClientCertificateRotatesWithoutRestart(t *testing.T) {
 	f := newClientCertFixture(t)
 	cc := f.temporal(t)
@@ -375,15 +345,12 @@ func TestClientCertificateRotatesWithoutRestart(t *testing.T) {
 	if _, err := f.call(t, cc, "ListWorkflowExecutions"); err != nil || f.grpcSide.last().client != "factory-reader-rotated" {
 		t.Fatalf("after the minute: %v %+v", err, f.grpcSide.last())
 	}
-	// The worker's own tunnel never closed: one connection carried all three.
 	if out, err := f.call(t, cc, "CountWorkflowExecutions"); err != nil || out == "" {
 		t.Fatalf("after rotation: %v", err)
 	}
 }
 
-// A renewed intermediate under the same leaf and key is a rotation too: the
-// next connection after the cache's minute presents the new chain, with no
-// restart. Reading the same chain again keeps its transport.
+// A renewed intermediate under the same leaf is a rotation too; the same chain keeps its transport.
 func TestClientCertificateChainRotatesUnderTheSameLeaf(t *testing.T) {
 	f := newClientCertFixture(t)
 	issuing := f.clientCA.Intermediate(t, "client-issuing-ca")
@@ -416,8 +383,6 @@ func TestClientCertificateChainRotatesUnderTheSameLeaf(t *testing.T) {
 	presents("after the intermediate's renewal", renewed.Cert.SerialNumber.String())
 }
 
-// Certificates that cannot be presented are refused before the upstream is
-// contacted, each with a status a gRPC client acts on.
 func TestClientCertificateRefusals(t *testing.T) {
 	other := clientcerttest.NewCA(t, "some-other-ca")
 	now := time.Now()
@@ -440,8 +405,6 @@ func TestClientCertificateRefusals(t *testing.T) {
 			f.vault.err = errors.New("connection refused")
 			f.vault.mu.Unlock()
 		}, codes.Unavailable, "client_cert_unavailable", false},
-		// Signed by a CA the upstream does not trust: the upstream refuses
-		// it in the handshake.
 		{"refused by the upstream", func(f *clientCertFixture) {
 			f.vault.at(temporalPath)(other.ValidClient(t, "stranger"))
 		}, codes.FailedPrecondition, "client_cert_rejected", false},
@@ -461,8 +424,7 @@ func TestClientCertificateRefusals(t *testing.T) {
 			}
 		})
 	}
-	// A refused certificate is dropped from the cache, so a rotated one is
-	// read on the next call, not a minute later.
+	// A refused certificate is dropped from the cache, so a rotated one is read on the next call.
 	f := newClientCertFixture(t)
 	f.vault.at(temporalPath)(other.ValidClient(t, "stranger"))
 	cc := f.temporal(t)
@@ -473,7 +435,6 @@ func TestClientCertificateRefusals(t *testing.T) {
 	if _, err := f.call(t, cc, "GetSystemInfo"); err != nil || f.grpcSide.last().client != "fixed" {
 		t.Fatalf("after the fix: %v %+v", err, f.grpcSide.last())
 	}
-	// A broker without a certificate reader refuses certificate entries.
 	f = newClientCertFixture(t, func(a *HeaderAdapter) { a.ClientCertificates = nil })
 	if _, err := f.call(t, f.temporal(t), "GetSystemInfo"); status.Code(err) != codes.FailedPrecondition ||
 		!strings.Contains(status.Convert(err).Message(), "broker_misconfigured") {
@@ -481,9 +442,7 @@ func TestClientCertificateRefusals(t *testing.T) {
 	}
 }
 
-// Over HTTP/1.1 too, and per entry: each host gets its own entry's
-// certificate, and a host whose entry names none gets none, even beside
-// entries that do.
+// Per entry: each host gets its own entry's certificate, and a host whose entry names none gets none.
 func TestClientCertificatePerEntryOverHTTP1(t *testing.T) {
 	f := newClientCertFixture(t)
 	if code, body := f.get(t, "rest.example.com"); code != http.StatusOK || body != "hello" {
@@ -495,7 +454,6 @@ func TestClientCertificatePerEntryOverHTTP1(t *testing.T) {
 	if _, err := f.call(t, f.temporal(t), "GetSystemInfo"); err != nil || f.grpcSide.last().client != "factory-reader" {
 		t.Fatalf("temporal: %v", err)
 	}
-	// The upstream requires a certificate and the entry has none to give.
 	if code, _ := f.get(t, "nocert.example.com"); code != http.StatusBadGateway {
 		t.Fatalf("nocert: %d", code)
 	}
@@ -507,7 +465,6 @@ func TestClientCertificatePerEntryOverHTTP1(t *testing.T) {
 			t.Fatalf("rest upstream saw %q", c.client)
 		}
 	}
-	// HTTP/1.1 reads Vault once a minute too, not once per request.
 	reads := f.vault.readsOf(restPath)
 	for range 3 {
 		if code, _ := f.get(t, "rest.example.com"); code != http.StatusOK {
@@ -519,10 +476,7 @@ func TestClientCertificatePerEntryOverHTTP1(t *testing.T) {
 	}
 }
 
-// An entry may hold a Basic pair whose user name the client also sends in a
-// header of its own, and present a client certificate as well. A client
-// holding the stored user name is served with both; another user name is
-// refused before the certificate is read or the vendor is called.
+// A client holding the stored Basic user name is served with both; another user name is refused before the certificate is read.
 func TestClientCertificateWithABasicPairClient(t *testing.T) {
 	const publicKey = "pk-synthetic-mtls"
 	pair := publicKey + ":" + grpcKey

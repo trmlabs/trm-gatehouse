@@ -18,8 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// testDeflate is a compressor gRPC does not name, which the broker cannot
-// read and refuses.
+// testDeflate is a compressor gRPC does not name; the broker refuses it.
 type testDeflate struct{}
 
 func (testDeflate) Compress(w io.Writer) (io.WriteCloser, error) {
@@ -30,9 +29,7 @@ func (testDeflate) Name() string                              { return "x-test-d
 
 func init() { encoding.RegisterCompressor(testDeflate{}) }
 
-// A gzip-compressed call, as Temporal's Rust-based SDKs send every call, is
-// checked and forwarded as uncompressed messages: the vendor reads the
-// message, and a placeholder or decoy inside it is still found.
+// A gzip-compressed call is forwarded as uncompressed messages, and a placeholder or decoy inside it is still found.
 func TestGRPCGzipRequestsAreCheckedUncompressed(t *testing.T) {
 	f := newGRPCFixture(t)
 	cc := f.client(t, "rpc.example.com")
@@ -90,8 +87,7 @@ func TestGRPCPlainMessages(t *testing.T) {
 	}
 }
 
-// A gRPC client that sets a TLS server name sends it, without the port, as
-// the call's authority; over HTTP/2 that names the tunnel's host.
+// A client that sets a TLS server name sends it without the port as the authority; over HTTP/2 that names the tunnel's host.
 func TestGRPCAuthorityWithoutPort(t *testing.T) {
 	f := newClientCertFixture(t)
 	cc, err := grpc.NewClient("passthrough:///temporal.example.com:7233", grpc.WithNoProxy(), grpc.WithContextDialer(f.grpc.connect),

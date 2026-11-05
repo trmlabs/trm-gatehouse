@@ -2,9 +2,7 @@ package catalog
 
 import "github.com/Infisical/agent-vault/internal/broker"
 
-// Template represents a preconfigured service template in the catalog.
-// Header and Prefix seed api-key auth, Headers seeds custom auth, and
-// Substitutions seed the substitution editor independent of AuthType.
+// Template is a preconfigured service template in the catalog.
 type Template struct {
 	ID                     string                `json:"id"`
 	Name                   string                `json:"name"`

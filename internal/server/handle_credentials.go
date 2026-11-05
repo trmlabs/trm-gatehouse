@@ -199,10 +199,7 @@ func (s *Server) handleCredentialsList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fold leased dynamic-secret fields into the same list, tagged type="dynamic".
-	// Gated to member+: enumeration MINTS leases (provisions upstream resources),
-	// so a proxy-role agent must not be able to trigger it by listing. Proxy
-	// agents still lease on actual proxied use of a wired service.
+	// Gated to member+ because enumeration MINTS leases; proxy-role agents lease only on actual proxied use.
 	if isMember {
 		for _, d := range s.enumerateDynamicCredentials(ctx, ns.ID) {
 			keys = append(keys, d.Key)
@@ -225,9 +222,7 @@ func (s *Server) handleCredentialsList(w http.ResponseWriter, r *http.Request) {
 // lease rather than the local credentials table.
 const credentialTypeDynamic = "dynamic"
 
-// enumerateDynamicCredentials returns the vault's leased dynamic-secret fields
-// as credential entries. Best-effort: a nil resolver or an upstream error
-// yields none rather than failing the credential listing.
+// enumerateDynamicCredentials returns leased fields as credential entries; a nil resolver or upstream error yields none.
 func (s *Server) enumerateDynamicCredentials(ctx context.Context, vaultID string) []infisical.EnumeratedCredential {
 	if s.infisicalDynamic == nil {
 		return nil
@@ -241,9 +236,7 @@ func (s *Server) enumerateDynamicCredentials(ctx context.Context, vaultID string
 	return creds
 }
 
-// revealDynamicCredential resolves a single dynamic-secret field key to a
-// credential entry with its leased value. ok=false when the key is not a
-// dynamic credential (callers then return the normal not-found error).
+// revealDynamicCredential resolves a dynamic-secret field key; ok=false when the key is not a dynamic credential.
 func (s *Server) revealDynamicCredential(ctx context.Context, vaultID, key string) (credentialEntry, bool) {
 	if s.infisicalDynamic == nil {
 		return credentialEntry{}, false

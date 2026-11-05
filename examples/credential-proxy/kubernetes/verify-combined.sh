@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Actual pod proof with live services and verified loopback TLS transport.
 set -euo pipefail
 docker_host=${1:?Usage: verify-combined.sh unix:///path/to/disposable/docker.sock}
 case "$docker_host" in unix://*) ;; *) echo 'Use an explicit disposable local Docker socket.' >&2; exit 1 ;; esac
@@ -103,8 +102,7 @@ if (p/'observer-account.json').exists():
     observer={**config,'audience':'cleanup-observer','bindings':[{'namespace':'combined','serviceAccount':'observer','serviceAccountUID':json.loads((p/'observer-account.json').read_text())['metadata']['uid']}]}
     (p/'proof/observer.json').write_text(json.dumps(observer))
 PY
-# Shares only the disposable Linux VM network so its loopback kind API is reachable.
-# No host directories are mounted and no service ports are published.
+# Host network only so the loopback kind API is reachable; no host mounts or published ports.
 docker create --name "$container" --network host --cpus 2 --memory 2g --entrypoint sleep credential-proxy-combined:local infinity >/dev/null
 docker start "$container" >/dev/null
 docker cp "$scratch/proof" "$container:/tmp/combined-proof"

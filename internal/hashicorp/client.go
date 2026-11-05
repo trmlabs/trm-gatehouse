@@ -16,30 +16,26 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// SecretsFetcher is the slice of the API the syncer actually uses; tests
-// substitute their own implementation without standing up a real Vault.
+// SecretsFetcher is the fetch surface the syncer uses.
 type SecretsFetcher interface {
 	FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, error)
 	AuthMethod() AuthMethod
 }
 
-// Client wraps the HashiCorp Vault API and provides a narrow fetch surface.
 type Client struct {
 	api    *vaultapi.Client
 	method AuthMethod
 	logger *slog.Logger
 	now    func() time.Time
 
-	// Token and AppRole modes: when their single login lapses, or zero when it
-	// does not expire. Neither renews it.
+	// Token and AppRole: when the single, never renewed login lapses; zero if it never expires.
 	loginExpiry time.Time
 
 	// JWT mode only: held logins and their refresh loop.
 	jwt     jwtConfig
 	logins  *loginSet
 	loginMu sync.Mutex // one new login at a time: scheduled or after a denied mint
-	// missingPolicies are child policies a fresh login also lacked, cleared
-	// at each scheduled login. Its own lock: loginMu is held across logins.
+	// missingPolicies are child policies a fresh login also lacked; own lock because loginMu is held across logins.
 	missingMu       sync.Mutex
 	missingPolicies map[string]bool
 	stopReauth      context.CancelFunc
@@ -51,11 +47,7 @@ type Client struct {
 	refusal atomic.Pointer[func(kind string)]
 }
 
-// NewClient returns ErrNotConfigured when VAULT_ADDR is unset (callers keep
-// the server alive) or ErrNoAuthMethod when set but no auth env vars are
-// present. Address, TLS (VAULT_CACERT, VAULT_SKIP_VERIFY), and namespace
-// (VAULT_NAMESPACE) are read from the standard Vault environment variables by
-// vaultapi.DefaultConfig.
+// NewClient returns ErrNotConfigured when VAULT_ADDR is unset and ErrNoAuthMethod when no auth env vars are set.
 func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 	addr := os.Getenv("VAULT_ADDR")
 	if addr == "" {
@@ -81,9 +73,7 @@ func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 	if ns := os.Getenv("VAULT_NAMESPACE"); ns != "" {
 		api.SetNamespace(ns)
 	}
-	// vaultapi.DefaultConfig honors VAULT_SKIP_VERIFY silently. The broker pulls
-	// live secrets over this channel, so surface the downgrade as an auditable
-	// warning rather than letting a leftover dev setting go unnoticed in prod.
+	// DefaultConfig honors VAULT_SKIP_VERIFY silently; warn, since live secrets travel over this channel.
 	if skip, _ := strconv.ParseBool(os.Getenv("VAULT_SKIP_VERIFY")); skip {
 		logger.Warn("hashicorp vault TLS verification disabled (VAULT_SKIP_VERIFY=true); the broker↔Vault channel is unauthenticated")
 	}
@@ -113,8 +103,7 @@ func NewClient(ctx context.Context, logger *slog.Logger) (*Client, error) {
 	return c, nil
 }
 
-// newJWTClient performs the first login and starts the refresh loop, which
-// outlives ctx and stops on Close.
+// newJWTClient logs in and starts the refresh loop, which outlives ctx and stops on Close.
 func newJWTClient(ctx context.Context, api *vaultapi.Client, logger *slog.Logger, getenv func(string) string, opts reauthOptions, now func() time.Time) (*Client, error) {
 	cfg, err := jwtConfigFromEnv(getenv)
 	if err != nil {
@@ -137,12 +126,9 @@ func newJWTClient(ctx context.Context, api *vaultapi.Client, logger *slog.Logger
 	return c, nil
 }
 
-// AuthMethod returns the auth flow this client used.
 func (c *Client) AuthMethod() AuthMethod { return c.method }
 
-// FetchSecrets reads the single KV item at cfg.Mount/cfg.SecretPath and flattens
-// its key/value pairs into broker-facing Secrets. The API call is
-// context-aware, so cancellation propagates directly.
+// FetchSecrets reads the KV item at cfg.Mount/cfg.SecretPath into broker-facing Secrets.
 func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, error) {
 	var data map[string]interface{}
 	switch cfg.KVVersion {
@@ -182,9 +168,7 @@ func (c *Client) FetchSecrets(ctx context.Context, cfg VaultConfig) ([]Secret, e
 	return out, nil
 }
 
-// stringValue coerces a KV value to a string. KV values are usually strings;
-// scalars are stringified and structured values are JSON-encoded so the broker
-// always receives a usable credential rather than a Go-syntax dump.
+// stringValue coerces a KV value to a string; structured values are JSON-encoded, not Go-syntax dumped.
 func stringValue(v interface{}) string {
 	switch t := v.(type) {
 	case nil:
@@ -196,9 +180,7 @@ func stringValue(v interface{}) string {
 	case bool:
 		return fmt.Sprintf("%t", t)
 	case float64:
-		// Avoid exponent notation / lossy %v formatting so an injected
-		// credential matches the upstream value exactly. (The vault/api client
-		// decodes JSON numbers as json.Number above; this is the defensive path.)
+		// Avoid exponent notation so the injected credential matches upstream exactly.
 		return strconv.FormatFloat(t, 'f', -1, 64)
 	case int, int64:
 		return fmt.Sprintf("%v", t)
@@ -210,19 +192,12 @@ func stringValue(v interface{}) string {
 	}
 }
 
-// login authenticates the API client per the detected method. Token sets the
-// token and probes it; AppRole writes the login endpoint and adopts the
-// returned client token. Both leave api ready for KV reads. It returns the
-// login's remaining lifetime, or 0 for one that does not expire. Neither mode
-// renews its login, so readiness ends when it lapses.
+// login authenticates per the detected method and returns the login's remaining lifetime (0 if it never expires); neither mode renews it.
 func login(ctx context.Context, api *vaultapi.Client, method AuthMethod) (time.Duration, error) {
 	switch method {
 	case AuthToken:
 		api.SetToken(os.Getenv("VAULT_TOKEN"))
-		// Token auth has no login round-trip, so an expired or malformed token
-		// would otherwise stay silent until the first sync tick. Probe
-		// lookup-self once to fail fast at startup (AppRole already fails fast
-		// via its login call).
+		// Token auth has no login round-trip, so probe lookup-self to fail at startup.
 		secret, err := api.Auth().Token().LookupSelfWithContext(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("token lookup-self: %w", err)
@@ -236,8 +211,7 @@ func login(ctx context.Context, api *vaultapi.Client, method AuthMethod) (time.D
 		}
 		return ttl, nil
 	case AuthAppRole:
-		// AppRole is commonly mounted at a non-default path on Enterprise/HCP
-		// (e.g. auth/example-approle). VAULT_APPROLE_MOUNT overrides the default.
+		// AppRole may be mounted at a non-default path; VAULT_APPROLE_MOUNT overrides it.
 		mount := strings.Trim(strings.TrimSpace(os.Getenv("VAULT_APPROLE_MOUNT")), "/")
 		if mount == "" {
 			mount = "approle"

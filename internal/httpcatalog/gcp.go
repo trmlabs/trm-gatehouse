@@ -10,23 +10,8 @@ import (
 	"strings"
 )
 
-// GCPBinding mints a short-lived Google token per entry, in one of three
-// ways, and the broker adds it as Authorization on the entry's host and paths.
-//
-// Downscope (Bucket set): an access token under a Credential Access Boundary
-// on the broker's own identity, limited to one bucket, one object prefix and
-// one storage role. Google supports these for Cloud Storage only.
-//
-// Impersonate (ServiceAccount set): an access token for a dedicated service
-// account that holds only this entry's role, such as one BigQuery dataset.
-// The broker may mint tokens for exactly the service accounts the catalog
-// names: its TokenCreator grant is on each of them, never on a project.
-//
-// Identity (ServiceAccount and Audience set): an ID token for a dedicated
-// service account, bound to one audience, for a service that verifies
-// Google-signed ID tokens and allows that account's email. The token carries
-// no scopes and is good only where its audience is checked. The same
-// TokenCreator grant covers it.
+// GCPBinding mints a short-lived Google token per entry in one of three modes: Downscope (Bucket set),
+// Impersonate (ServiceAccount set), or Identity (ServiceAccount and Audience set, ID token).
 type GCPBinding struct {
 	Bucket string `json:"bucket,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
@@ -35,13 +20,10 @@ type GCPBinding struct {
 	ServiceAccount string   `json:"serviceAccount,omitempty"`
 	Scopes         []string `json:"scopes,omitempty"`
 
-	// Audience selects an ID token instead of an access token: the aud claim
-	// the entry's host verifies. It excludes scopes, bucket, prefix and role.
+	// Audience selects an ID token: the aud claim the entry's host verifies. It excludes scopes, bucket, prefix and role.
 	Audience string `json:"audience,omitempty"`
 
-	// LifetimeSeconds bounds how long a minted token is used. Default 900,
-	// at most 3600. A downscoped token also ends with the broker's own token,
-	// and an ID token with its own exp, which Google fixes at about an hour.
+	// LifetimeSeconds bounds how long a minted token is used (default 900, at most 3600); a downscoped token also ends with the broker's own token, an ID token with its own exp.
 	LifetimeSeconds int `json:"lifetimeSeconds,omitempty"`
 }
 
@@ -50,27 +32,17 @@ var (
 	gcsPrefix      = regexp.MustCompile(`^([A-Za-z0-9_-]+/)+$`)
 	serviceAccount = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`)
 	googleScope    = regexp.MustCompile(`^https://www\.googleapis\.com/auth/[a-z0-9._-]+$`)
-	// An audience is whatever the verifying service pins, usually its own
-	// URL: printable, with no spaces, and short enough for a claim.
+	// An audience is whatever the verifying service pins: printable, no spaces, short enough for a claim.
 	idTokenAudience = regexp.MustCompile(`^[\x21-\x7e]{1,512}$`)
 	// Storage roles a boundary may carry: object data only, never bucket or IAM administration.
 	storageRoles = map[string]bool{"roles/storage.objectViewer": true, "roles/storage.objectCreator": true, "roles/storage.objectUser": true}
-	// Data-plane hosts an entry may reach. A minted token, cloud-platform
-	// scope included, never goes to a host that mints credentials or changes
-	// IAM; reaching another service is a code change, not a catalog line.
+	// Data-plane hosts an entry may reach; a minted token never goes to a host that mints credentials or changes IAM.
 	dataPlaneHosts = map[string]bool{"storage.googleapis.com": true, "bigquery.googleapis.com": true, "bigquerystorage.googleapis.com": true}
-	// Domains an ID token never goes to. An identity entry's host is the
-	// service that verifies the token, not a Google API: Google's own APIs
-	// take access tokens, and its credential and metadata endpoints take
-	// nothing the broker should send them.
+	// Domains an ID token never goes to: Google's own APIs take access tokens, and its credential and metadata endpoints take nothing the broker should send.
 	googleDomains = []string{"googleapis.com", "google.com", "google.internal"}
 )
 
-// gcpForwardHeaders are the request headers Google clients need, besides an
-// entry's ForwardHeaders. X-Goog-Request-Params routes a gRPC call to the
-// resource it names, such as a BigQuery read stream. X-Goog-User-Project,
-// which bills another project, passes only when the entry names it in
-// forwardHeaders.
+// gcpForwardHeaders are the headers Google clients need besides ForwardHeaders; X-Goog-User-Project bills another project, so it passes only when the entry names it.
 var gcpForwardHeaders = []string{"Accept", "Content-Type", "User-Agent", "X-Goog-Api-Client", "X-Goog-Request-Params",
 	"X-Upload-Content-Type", "X-Upload-Content-Length", "Content-Range", "Range", "If-Match", "If-None-Match"}
 
@@ -88,7 +60,6 @@ func (e *Entry) normalizeGCP() error {
 	if g.Audience != "" && underGoogleDomain(e.Host) {
 		return errors.New("an identity entry reaches the service that verifies its ID token, never a Google host")
 	}
-	// Cloud data: never T0, so never granted to a pool without a person behind it.
 	if e.Tier != "T1" && e.Tier != "T2" {
 		return errors.New("gcp entries are tier T1 or T2")
 	}
@@ -100,8 +71,7 @@ func (e *Entry) normalizeGCP() error {
 		if !idTokenAudience.MatchString(g.Audience) || len(e.PathPrefixes) == 0 {
 			return errors.New("an identity entry needs a printable audience without spaces and explicit path prefixes")
 		}
-		// A URL audience names the service that verifies it; a token for one
-		// service must not be handed to another that could replay it there.
+		// A token for one service must not be handed to another that could replay it there.
 		if u, err := url.Parse(g.Audience); err == nil && u.Scheme == "https" && !strings.EqualFold(u.Hostname(), e.Host) {
 			return errors.New("an identity entry's https audience names the entry's own host")
 		}
@@ -178,8 +148,6 @@ func (e *Entry) normalizeGCP() error {
 	return nil
 }
 
-// underGoogleDomain reports whether host is a Google API, credential or
-// metadata host, where an ID token has no business.
 func underGoogleDomain(host string) bool {
 	for _, d := range googleDomains {
 		if host == d || strings.HasSuffix(host, "."+d) {
@@ -189,8 +157,6 @@ func underGoogleDomain(host string) bool {
 	return false
 }
 
-// GCPMatch routes a request to a gcp entry by the longest path prefix. ok is
-// false when no gcp entry names the host.
 func (c Catalog) GCPMatch(host string, port int, method, path, pool string) (*Entry, bool, error) {
 	host = strings.ToLower(host)
 	var best *Entry
@@ -220,7 +186,6 @@ func (c Catalog) GCPMatch(host string, port int, method, path, pool string) (*En
 	return best, true, nil
 }
 
-// GCPForwardsHeader reports whether a caller header passes to Google.
 func (e *Entry) GCPForwardsHeader(name string) bool {
 	name = http.CanonicalHeaderKey(name)
 	return contains(gcpForwardHeaders, name) || e.forwardsGRPCHeader(name) || contains(e.ForwardHeaders, name)

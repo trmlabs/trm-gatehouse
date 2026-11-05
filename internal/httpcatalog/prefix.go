@@ -16,48 +16,15 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// ListLogical reads and lists KV version 2 secrets.
 type ListLogical interface {
 	Logical
 	ListWithContext(ctx context.Context, path string) (*vaultapi.Secret, error)
 }
 
-// prefixReadConcurrency is how many entry secrets a reload reads at once.
-// It sets reload speed, not how many entries the catalog may hold.
 const prefixReadConcurrency = 64
 
-// VaultPrefixLoader reads a catalog stored one secret per entry, so it is not
-// bounded by Vault's size limit for one secret. Under mount/prefix:
-//
-//   - head: field "catalog" is the catalog document without "entries"; field
-//     "entries_sha256" is the SHA-256, in lowercase hex, of each entry name in
-//     byte order followed by a newline, its stored JSON and a newline.
-//   - entries/<name>: field "entry" is that entry's JSON.
-//   - head, optionally: field "entries_names" lists the entry names, as a
-//     JSON array or a string holding one. When it is there, only those
-//     entries are read and digested, so a stray document under entries/ (one
-//     left by a cancelled apply) is ignored instead of failing every reload.
-//   - head, optionally: field "automations_buckets" maps each bucket name to
-//     the SHA-256, in lowercase hex, of that bucket's stored field, as a JSON
-//     object or a string holding one. Automations are then stored in buckets
-//     and the head's document carries no "automations"; without the field,
-//     the document may carry its own (bounded by Vault's size limit).
-//   - automations/<bucket>: field "automations" is a string holding a JSON
-//     array of Automations (Terraform's jsonencode of the list); the head's
-//     digest is over that string. Which bucket holds an Automation is the
-//     writer's choice (by a hash of its id, so one change rewrites one
-//     bucket); an id in two buckets is refused at load like any repeated id.
-//
-// Buckets are read incrementally: a reload reads only the buckets whose
-// digest in the head differs from the last good catalog's. Every new head
-// still rereads every entry, so changing one Automation costs the head, the
-// entries and one bucket, however many buckets there are.
-//
-// Terraform writes the entries, then the head. The head's KV version is the
-// catalog version, so a poll costs one read until the head changes. A reload
-// whose entries do not match the head's digest, such as one read while an
-// apply is under way, returns an error: the last good catalog stays in force
-// and the next poll tries again.
+// VaultPrefixLoader reads a catalog stored one secret per entry under mount/prefix: head (fields "catalog", "entries_sha256", optional "entries_names" and "automations_buckets") and entries/<name> ("entry"), plus automations/<bucket> ("automations", a JSON array string) when bucketed.
+// Terraform writes the entries, then the head, whose KV version is the catalog version; a reload whose entries do not match the head's digest returns an error and the last good catalog stays in force. Buckets are reread only when their digest changed.
 func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 	var mu sync.Mutex
 	var lastVersion int
@@ -91,8 +58,6 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 		}
 		var buckets map[string]automationBucket
 		if listed, ok := head["automations_buckets"]; ok {
-			// Bucketed, so neither the head nor any one secret bounds how
-			// many Automations there are.
 			if buckets, err = readBuckets(ctx, vault, mount+"/data/"+prefix+"/automations/", listed, lastBuckets); err != nil {
 				return nil, version, err
 			}
@@ -111,10 +76,7 @@ func VaultPrefixLoader(vault ListLogical, mount, prefix string) Loader {
 	}
 }
 
-// readFolder reads every secret under prefix/folder, in name order, and
-// returns the names and each one's field. When the head lists the names
-// (listed), only those are read; otherwise the folder is listed. A deleted
-// secret is left out: it is no longer in the catalog.
+// readFolder reads every secret under prefix/folder in name order, only those the head lists when it does; a deleted secret is left out.
 func readFolder(ctx context.Context, vault ListLogical, mount, prefix, folder, field string, listed interface{}) ([]string, []string, error) {
 	names, named, err := headNames(listed)
 	if err != nil {
@@ -125,9 +87,7 @@ func readFolder(ctx context.Context, vault ListLogical, mount, prefix, folder, f
 		if err != nil {
 			return nil, nil, fmt.Errorf("catalog %s listing failed", folder)
 		}
-		// Vault answers LIST on an empty folder with 404, which the client
-		// returns as no secret: none stored. The head's digest still decides,
-		// so this loads only a head that itself says there are none.
+		// Vault answers LIST on an empty folder with 404 (no secret); the head's digest still decides.
 		var keys []interface{}
 		if listing != nil && listing.Data != nil {
 			keys, _ = listing.Data["keys"].([]interface{})
@@ -154,9 +114,6 @@ func readFolder(ctx context.Context, vault ListLogical, mount, prefix, folder, f
 	return kept, docs, nil
 }
 
-// folderDigest is the head's digest of a folder: the SHA-256, in lowercase
-// hex, of each name in byte order followed by a newline, its stored JSON and
-// a newline.
 func folderDigest(names, docs []string) string {
 	digest := sha256.New()
 	for i, name := range names {
@@ -165,17 +122,12 @@ func folderDigest(names, docs []string) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
-// automationBucket is one stored bucket of Automations: its digest and its
-// items, kept so an unchanged bucket is never read again.
 type automationBucket struct {
 	digest string
 	items  []json.RawMessage
 }
 
-// readBuckets reads the buckets the head lists whose digest differs from the
-// last good catalog's, concurrently, and reuses the rest. A bucket whose
-// stored field does not hash to the head's digest (an apply under way) fails
-// the reload; the last good catalog stays in force.
+// readBuckets reads the buckets whose digest differs from the last good catalog's and reuses the rest; a bucket that does not hash to the head's digest fails the reload.
 func readBuckets(ctx context.Context, vault Logical, base string, listed interface{}, last map[string]automationBucket) (map[string]automationBucket, error) {
 	digests, err := bucketDigests(listed)
 	if err != nil {
@@ -209,7 +161,6 @@ func readBuckets(ctx context.Context, vault Logical, base string, listed interfa
 	return out, nil
 }
 
-// bucketDigests reads the head's bucket map: bucket names to SHA-256 hex.
 func bucketDigests(field interface{}) (map[string]string, error) {
 	raw, ok := field.(map[string]interface{})
 	if text, isText := field.(string); isText {
@@ -229,8 +180,6 @@ func bucketDigests(field interface{}) (map[string]string, error) {
 	return out, nil
 }
 
-// headNames reads the head's optional entry name list. listed is false when
-// the head has none, and the loader lists entries/ instead.
 func headNames(field interface{}) (names []string, listed bool, err error) {
 	if field == nil {
 		return nil, false, nil
@@ -259,14 +208,9 @@ func headNames(field interface{}) (names []string, listed bool, err error) {
 	return names, true, nil
 }
 
-// errDeleted is a KV secret whose current version is deleted or destroyed.
-// Vault still lists its key until its metadata is removed.
 var errDeleted = errors.New("catalog secret deleted")
 
-// entryChanges names what differs from the last good catalog, so an operator
-// can find a stray or half-written document from the log: every count in
-// full and up to shownNames names of each kind. Names are catalog
-// identifiers, so they are safe to log; entry contents never are.
+// entryChanges names what differs from the last good catalog so a stray document can be found from the log; names are safe to log, contents never are.
 func entryChanges(last map[string]string, names, entries []string) string {
 	const shownNames = 20
 	var added, changed, removed []string
@@ -318,8 +262,6 @@ func readKV(ctx context.Context, vault Logical, path string) (map[string]interfa
 	return data, version, nil
 }
 
-// readEntries reads every entry's stored JSON, concurrently, in names order.
-// A deleted entry reads as "": it is no longer in the catalog.
 func readEntries(ctx context.Context, vault Logical, base, field string, names []string) ([]string, error) {
 	out := make([]string, len(names))
 	ctx, cancel := context.WithCancel(ctx)
@@ -363,10 +305,7 @@ func readEntries(ctx context.Context, vault Logical, base, field string, names [
 	return out, nil
 }
 
-// assemble rebuilds the one-document form Parse validates. Each entry's name
-// must be the key it is stored under. Bucketed Automations join in bucket
-// name order. With none, the document carries no "automations", so a broker
-// that predates them still reads the stored copy.
+// assemble rebuilds the one-document form Parse validates; with no Automations the document carries no "automations", so an older broker still reads the stored copy.
 func assemble(document string, names, entries []string, buckets map[string]automationBucket) ([]byte, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(document), &top); err != nil {
@@ -402,8 +341,6 @@ func assemble(document string, names, entries []string, buckets map[string]autom
 	return json.Marshal(top)
 }
 
-// keyedList joins stored JSON objects into an array, checking that each
-// one's key field is the name it is stored under.
 func keyedList(kind, key string, names, docs []string) (json.RawMessage, error) {
 	var list bytes.Buffer
 	list.WriteByte('[')

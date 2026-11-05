@@ -11,38 +11,15 @@ import (
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
 
-// Dropped names one part of a catalog version that a tolerant load left out,
-// and why. Names are catalog identifiers, so they are safe to log; reasons
-// never carry entry contents beyond what Parse's own errors name.
+// Dropped names one part a tolerant load left out, and why; names are safe to log, reasons carry no entry contents.
 type Dropped struct {
 	Kind   string // "entry", "pool", "harness" or "automation"
 	Name   string
 	Reason string
 }
 
-// ParseTolerant loads a catalog version one part at a time, so one bad part
-// takes only itself, never the whole version, out of force. Every part it
-// leaves out fails closed: a dropped entry is unreachable, and a dropped pool
-// or harness takes the entries that grant it with it.
-//
-//   - An entry, pool or harness that fails its own validation (an unknown
-//     field from a newer format, a bad grant or tier) is dropped.
-//   - Parts that conflict (a duplicate name, a shared route, host, test user
-//     or repository, entries on one host that disagree on http2, overlapping
-//     harness images, a github-api entry's pull request prefix reaching
-//     another pool's push prefix in a git entry) are all dropped: the loader
-//     never picks a winner.
-//   - When the version defines pools, an entry granting a dropped or unknown
-//     pool is dropped. When it defines harnesses, a pool left with no harness
-//     is dropped, so dropping a harness never removes the harness check.
-//   - An Automation that fails its own validation, repeats another's id, or
-//     names a dropped or unknown entry is dropped: it reaches nothing.
-//
-// The kept parts are then checked again by Parse, the strict validator, so
-// the catalog returned is always one Parse accepts. A document that cannot be
-// decoded at all, or that Parse still refuses, returns an error and the caller
-// keeps its last good catalog. A version whose every entry is dropped loads as
-// an empty catalog: nothing is reachable.
+// ParseTolerant loads a catalog version one part at a time, so one bad part takes only itself out of force. Every dropped part fails closed: a dropped entry is unreachable, and a dropped pool or harness takes the entries granting it.
+// Parts failing their own validation are dropped; parts that conflict (duplicate name, shared route, host, test user or repository, http2 disagreement, overlapping harness images, a pull request prefix reaching another pool's push prefix) are all dropped, never picking a winner. The kept parts are re-checked by Parse; an undecodable document or one Parse still refuses returns an error, and a version with every entry dropped loads empty.
 func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	var file struct {
 		Harnesses   []json.RawMessage `json:"harnesses,omitempty"`
@@ -66,7 +43,6 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		dropped = append(dropped, Dropped{Kind: kind, Name: name, Reason: err.Error()})
 	}
 
-	// Pools, each on its own.
 	type keptPool struct {
 		raw  json.RawMessage
 		pool Pool
@@ -95,7 +71,6 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		poolByName[p.pool.Name] = p.pool
 	}
 
-	// Harnesses: each checked against its own pool, then against each other.
 	type keptHarness struct {
 		raw     json.RawMessage
 		harness Harness
@@ -121,9 +96,7 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	harnesses = dropDuplicates(harnesses, func(h keptHarness) string { return h.harness.Name }, func(h keptHarness) {
 		drop("harness", h.harness.Name, errors.New("duplicate harness"))
 	})
-	// A pool that decides per Automation may have one harness per identity
-	// kind (sharePool); any other pool belongs to one. At most one harness
-	// uses a static-token identity.
+	// A pool deciding per Automation may have one harness per identity kind (sharePool), at most one static-token; any other pool has one.
 	harnesses = dropConflicting(harnesses, func(a, b keptHarness) bool {
 		if a.harness.Authorization.PoolName == b.harness.Authorization.PoolName && !sharePool(a.harness, b.harness) {
 			return true
@@ -143,8 +116,7 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		drop("harness", h.harness.Name, errors.New("claims an image prefix or namespace another harness claims"))
 	})
 	if len(file.Harnesses) > 0 {
-		// Harnesses gate admission once any are listed: a pool whose harness
-		// was dropped goes too, rather than being admitted with none.
+		// Harnesses gate admission once any are listed, so a pool whose harness was dropped goes too.
 		served := make(map[string]bool, len(harnesses))
 		for _, h := range harnesses {
 			served[h.harness.Authorization.PoolName] = true
@@ -161,7 +133,6 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		pools = kept
 	}
 
-	// Entries, each on its own against the kept pools.
 	type keptEntry struct {
 		raw   json.RawMessage
 		entry Entry
@@ -206,8 +177,6 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		drop("entry", e.entry.Name, err)
 	})
 
-	// Automations, each on its own against the kept entries. One naming a
-	// dropped entry goes too, as an entry granting a dropped pool does.
 	kept := make(map[string]bool, len(entries))
 	keptKind := make(map[string]string, len(entries))
 	for _, e := range entries {
@@ -296,8 +265,6 @@ func strictDecode(raw json.RawMessage, v any) error {
 	return nil
 }
 
-// partName is a part's name for a log line, or its position when it has no
-// usable one.
 func partName(raw json.RawMessage, i int) string {
 	var named struct {
 		Name string `json:"name"`
@@ -308,7 +275,6 @@ func partName(raw json.RawMessage, i int) string {
 	return fmt.Sprintf("#%d", i)
 }
 
-// dropDuplicates drops every part whose key another part shares.
 func dropDuplicates[T any](parts []T, key func(T) string, dropped func(T)) []T {
 	count := map[string]int{}
 	for _, p := range parts {
@@ -325,7 +291,6 @@ func dropDuplicates[T any](parts []T, key func(T) string, dropped func(T)) []T {
 	return kept
 }
 
-// dropConflicting drops both parts of every conflicting pair.
 func dropConflicting[T any](parts []T, conflict func(a, b T) bool, dropped func(T)) []T {
 	bad := make([]bool, len(parts))
 	for i := range parts {
@@ -346,10 +311,7 @@ func dropConflicting[T any](parts []T, conflict func(a, b T) bool, dropped func(
 	return kept
 }
 
-// claim is one key an entry occupies. Entries may share a key only when every
-// claim on it is shareable and of the same kind, as plain HTTP or git entries
-// on one host are. A setting every entry on a host must agree on is a
-// shareable claim whose kind is the setting's value.
+// claim is one key an entry occupies; entries may share a key only when every claim on it is shareable and of the same kind. A setting every entry on a host must agree on is a shareable claim whose kind is its value.
 type claim struct {
 	key, kind string
 	shareable bool
@@ -363,9 +325,7 @@ func (c claim) conflict() string {
 	return "shares a host, route, test user or repository with another entry"
 }
 
-// entryClaims mirrors Parse's cross-entry checks: hosts, http2 per host,
-// browser app hosts, test users, git repository routes, repositories with
-// {requester} push prefixes (errRequesterRepo) and path prefix routes.
+// entryClaims mirrors Parse's cross-entry checks (hosts, http2 per host, app hosts, test users, git repository routes, {requester} repositories, path prefix routes).
 func entryClaims(e Entry) []claim {
 	hostKey := fmt.Sprintf("%s:%d", e.Host, e.Port)
 	claims := []claim{
@@ -391,9 +351,7 @@ func entryClaims(e Entry) []claim {
 	return claims
 }
 
-// dropClaims drops every part holding a claim that conflicts with another
-// claim on the same key, whichever part holds it, itself included. dropped
-// gets the part's first conflicting claim, in claimsOf's order.
+// dropClaims drops every part holding a claim that conflicts with another claim on the same key, itself included.
 func dropClaims[T any](parts []T, claimsOf func(T) []claim, dropped func(T, claim)) []T {
 	type holder struct {
 		part int
@@ -432,10 +390,7 @@ next:
 	return kept
 }
 
-// dropPullRequestCrossings drops every github-api entry whose pull request
-// prefixes reach push prefixes a pool they reach cannot push to
-// (pullRequestCrossings), and each git entry it reaches into: as for any
-// other conflict, both go.
+// dropPullRequestCrossings drops each github-api entry whose pull request prefixes reach push prefixes a pool it reaches cannot push to, and each git entry it reaches into.
 func dropPullRequestCrossings[T any](parts []T, entryOf func(T) Entry, dropped func(T, error)) []T {
 	all := make([]Entry, len(parts))
 	for i, p := range parts {

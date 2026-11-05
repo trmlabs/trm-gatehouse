@@ -139,8 +139,7 @@ func runMigrateDB(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 8. Copy data and move the CA from disk in one transaction: a failure
-	// anywhere leaves the destination empty, so a rerun starts clean.
+	// 8. Copy data and move the CA in one transaction: a failure leaves the destination empty, so a rerun starts clean.
 	fmt.Fprintln(cmd.OutOrStdout())
 	caDir := filepath.Join(filepath.Dir(fromPath), "ca")
 	caMigrated, err := store.MigrateDataWithCA(ctx, srcStore, dstStore, caDir, func(table string, rows int) {

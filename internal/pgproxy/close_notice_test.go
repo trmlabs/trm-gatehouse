@@ -159,9 +159,8 @@ func TestPooledCloseNotices(t *testing.T) {
 	})
 }
 
-// A pooled session ended by the broker cancels its running statement before
-// writing the notice, so a client slow to read it cannot keep the statement
-// running: while the cancel is held up, no notice reaches the client.
+// A pooled session ended by the broker cancels its running statement before writing the notice, so a client
+// slow to read it cannot keep the statement running: while the cancel is held up.
 func TestPooledCloseCancelsBeforeTheNotice(t *testing.T) {
 	up := noticeUpstreamWithTransactions(t)
 	var revoked atomic.Bool
@@ -252,9 +251,7 @@ func TestBrokerEndedSessionsAreLogged(t *testing.T) {
 	}
 }
 
-// An unpooled session the broker ends mid-statement shows the client the
-// broker's notice, not the server's own error from the cancel that stops the
-// statement: the database stream is closed before the cancel is sent.
+// An unpooled session the broker ends mid-statement shows the client the broker's notice.
 func TestUnpooledEndShowsTheNoticeBeforeTheCancelError(t *testing.T) {
 	for _, pooled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "unpooled", true: "pooled"}[pooled], func(t *testing.T) { endShowsTheNotice(t, pooled) })

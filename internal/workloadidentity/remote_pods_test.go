@@ -27,14 +27,10 @@ import (
 
 const workersIssuer = "https://container.googleapis.com/v1/projects/workers/locations/l/clusters/workers"
 
-// loadBalancer is the peer a remote sidecar's connection arrives from: not
-// its Pod's address.
+// loadBalancer is the peer a remote sidecar's connection arrives from, not its Pod's address.
 var loadBalancer = netip.MustParseAddr("198.51.100.40")
 
-// remotePods is another cluster with sidecar workers: its signing keys and
-// its API server, which serves one worker Pod to a bearer token. The API
-// server is reached by name (example.com, in the test certificate), never by
-// address.
+// remotePods is another cluster with sidecar workers: its signing keys and an API server serving one worker Pod to a bearer token, reached by name (example.com), never by address.
 type remotePods struct {
 	key        *rsa.PrivateKey
 	kid        string
@@ -109,7 +105,6 @@ func newRemotePods(t *testing.T) *remotePods {
 	return rp
 }
 
-// claims is the token the remote cluster projects into its worker's sidecar.
 func (rp *remotePods) claims() claims {
 	var c claims
 	c.Issuer, c.Subject, c.Audience = workersIssuer, "system:serviceaccount:pool:worker", []string{"gatehouse"}
@@ -131,8 +126,6 @@ func (rp *remotePods) binding() Binding {
 		ImageDigests: []string{workerDigest, sidecarDigest}, TrustDomain: "workers"}
 }
 
-// withRemotePods is the broker's resolver with the remote domain and its
-// pool binding beside the broker's own cluster's.
 func withRemotePods(t *testing.T, f *poolFixture, rp *remotePods) *Resolver {
 	t.Helper()
 	c := f.r.config
@@ -145,11 +138,7 @@ func withRemotePods(t *testing.T, f *poolFixture, rp *remotePods) *Resolver {
 	return r
 }
 
-// A sidecar in another cluster is admitted as a pool worker: its token is
-// verified by its cluster's keys and its live Pod read from its cluster's API
-// server, with the bearer the broker was given. The connection arrives from a
-// load balancer, not the Pod's address, and is still admitted; the Pod's
-// deadline and claimed run ride on the scope as for the broker's own cluster.
+// A remote cluster's sidecar is admitted as a pool worker: token verified by its cluster's keys, live Pod read from its API server, admitted despite the load balancer peer; the Pod's deadline and claimed run ride on the scope.
 func TestRemoteSidecarAdmittedByItsLivePod(t *testing.T) {
 	f := setupPool(t)
 	rp := newRemotePods(t)
@@ -180,8 +169,7 @@ func TestRemoteSidecarAdmittedByItsLivePod(t *testing.T) {
 	}
 }
 
-// Every live-Pod check but the address still refuses a remote sidecar, and so
-// does a Pod the broker cannot read.
+// Every live-Pod check but the address still refuses a remote sidecar, as does a Pod the broker cannot read.
 func TestRemoteSidecarRefusals(t *testing.T) {
 	cases := map[string]func(rp *remotePods) string{
 		"deleted Pod": func(rp *remotePods) string { rp.podStatus.Store(404); return rp.token(rp.claims()) },
@@ -240,9 +228,7 @@ func TestRemoteSidecarRefusals(t *testing.T) {
 	}
 }
 
-// A remote domain admits sidecars only where the broker reads its Pods, and
-// only through a pool binding; the Pod reader names its API server by host,
-// over HTTPS, with one known credential.
+// A remote domain admits sidecars only where the broker reads its Pods and only through a pool binding; the Pod reader names its API server by host, over HTTPS, with one known credential.
 func TestRemotePodsValidation(t *testing.T) {
 	f := setupPool(t)
 	rp := newRemotePods(t)
@@ -287,8 +273,27 @@ func (s staticToken) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: string(s)}, nil
 }
 
-// With the google credential, the broker reads Pods with its own Google
-// identity's access token; a broker with no Google identity fails at start.
+type failingToken struct{}
+
+func (failingToken) Token() (*oauth2.Token, error) {
+	return nil, errors.New("metadata server timed out")
+}
+
+// A Google access token the broker could not get is a Pod lookup it could not make, so retryable.
+func TestRemotePodsGoogleTokenOutageIsRetryable(t *testing.T) {
+	f := setupPool(t)
+	rp := newRemotePods(t)
+	saved := googleTokenSource
+	t.Cleanup(func() { googleTokenSource = saved })
+	googleTokenSource = func(context.Context) (oauth2.TokenSource, error) { return failingToken{}, nil }
+	rp.td.Pods = &RemotePods{APIServer: rp.td.Pods.APIServer, CAFile: rp.td.Pods.CAFile, Credential: "google"}
+	r := withRemotePods(t, f, rp)
+	if _, err := r.Attest(context.Background(), rp.token(rp.claims()), loadBalancer); brokercore.DenialReason(err) != "pod_lookup_unavailable" || !brokercore.DenialUnavailable(err) {
+		t.Fatalf("google token outage: %v", err)
+	}
+}
+
+// With the google credential the broker reads Pods with its own Google access token; a broker with no Google identity fails at start.
 func TestRemotePodsGoogleCredential(t *testing.T) {
 	f := setupPool(t)
 	rp := newRemotePods(t)

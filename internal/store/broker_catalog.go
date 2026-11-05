@@ -7,13 +7,10 @@ import (
 	"fmt"
 )
 
-// ErrNoBrokerCatalog means no catalog was stored for the location.
 var ErrNoBrokerCatalog = errors.New("no stored broker catalog")
 
-// SaveBrokerCatalog keeps the newest accepted catalog document for a catalog
-// location. The document holds hosts, pools and key locations, never a key.
-// A version below the stored one is ignored, so replicas racing on a reload
-// never move the copy backwards.
+// SaveBrokerCatalog ignores a version below the stored one, so racing replica reloads never move the copy backwards.
+// The document holds hosts, pools and key locations, never a key.
 func (s *SQLStore) SaveBrokerCatalog(ctx context.Context, location string, version int, document []byte) error {
 	if location == "" || version < 1 || len(document) == 0 {
 		return fmt.Errorf("incomplete broker catalog")
@@ -24,7 +21,6 @@ func (s *SQLStore) SaveBrokerCatalog(ctx context.Context, location string, versi
 	return err
 }
 
-// LoadBrokerCatalog returns the stored catalog document for a location.
 func (s *SQLStore) LoadBrokerCatalog(ctx context.Context, location string) ([]byte, int, error) {
 	var version int
 	var document string

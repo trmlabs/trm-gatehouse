@@ -12,9 +12,7 @@ import (
 
 const tokenAgentHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-// tokenCatalog serves one automations pool by two harnesses: a Cursor run's
-// session token and a static token. agent-1 holds a token and the tracker
-// entry; auto-1 is a Cursor Automation, with the tracker and ledger entries.
+// tokenCatalog serves one automations pool by a Cursor session token and a static token: agent-1 holds a token; auto-1 is a Cursor Automation.
 func tokenCatalog(t *testing.T, withStaticHarness bool, agentBlock string) httpcatalog.Catalog {
 	t.Helper()
 	harnesses := `{"name":"cursor","trustDomain":{"issuer":"https://issuer.example","keys":"in-cluster","audience":"gatehouse"},
@@ -38,8 +36,7 @@ func tokenCatalog(t *testing.T, withStaticHarness bool, agentBlock string) httpc
 	return c
 }
 
-// tokenAgentExpires is inside the longest a token may live, and still ahead
-// when the tests run.
+// tokenAgentExpires is inside the longest token lifetime.
 var tokenAgentExpires = time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
 
 var tokenAgent = `{"id":"agent-1","name":"agent-one","owner":"platform-team","entries":["tracker"],"tokenSHA256":["` + tokenAgentHash + `"],"expires":"` + tokenAgentExpires + `"}`
@@ -61,8 +58,7 @@ func TestTokenAgentIsDecidedForItsBlock(t *testing.T) {
 			t.Errorf("%s: %+v", entry, d)
 		}
 	}
-	// A block with no write key keeps the pool's write grant, as a Cursor
-	// Automation's does; the write key limits it the same way.
+	// No write key keeps the pool's write grant, as for a Cursor Automation.
 	if !who.MayWrite("tracker") {
 		t.Error("a block with no write key lost the pool's grant")
 	}
@@ -89,9 +85,7 @@ func TestTokenAgentRefusals(t *testing.T) {
 	}
 }
 
-// A Cursor run token that names a token agent's id is refused: the vendor's
-// ids and the catalog's agent ids never alias, so a run cannot borrow a
-// token agent's entries, and a token cannot borrow a run's.
+// A Cursor run token naming a token agent's id is refused, so vendor and agent ids never alias.
 func TestCursorRunCannotUseATokenAgentsBlock(t *testing.T) {
 	catalog := tokenCatalog(t, true, tokenAgent)
 	pool, _ := catalog.Pool("automations")

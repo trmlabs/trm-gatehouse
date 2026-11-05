@@ -12,13 +12,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// fetchMITMCA requests the transparent-proxy root CA from the local server.
-// Returns (pem, port, true, nil) on 200 where port is the MITM listener
-// port advertised by the server (0 if the server omitted the header, e.g.
-// an older build — callers should fall back to DefaultMITMPort in that
-// case). Returns (nil, 0, false, nil) on 404 (MITM disabled), or an error
-// for any other failure. Body is always drained before returning so the
-// underlying connection can be pooled.
+// fetchMITMCA requests the root CA; returns (pem, port, true, nil) on 200 (port 0 if the header is absent), (nil, 0, false, nil) on 404.
 func fetchMITMCA(addr string) (pem []byte, port int, enabled bool, err error) {
 	resp, err := httpClient.Get(addr + "/v1/mitm/ca.pem")
 	if err != nil {

@@ -7,15 +7,9 @@ import InstallCommand from "/snippets/install-command.mdx";
 
 ## Install
 
-Auto-detects your OS and architecture, downloads the latest release, and installs. Works for both fresh installs and upgrades.
+Gatehouse has no release binaries. Build it from source; this needs Go and Node.js.
 
 <InstallCommand />
-
-Supports macOS (Intel + Apple Silicon) and Linux (x86\_64 + ARM64).
-
-<Note>
-  The install script sends an anonymous beacon (OS, architecture, version). Set `AGENT_VAULT_NO_TELEMETRY=1` in front of `sh` to opt out.
-</Note>
 
 Verify the installation:
 
@@ -28,8 +22,8 @@ agent-vault --help
 **Prerequisites**: [Go 1.25+](https://go.dev/dl/), [Node.js 22+](https://nodejs.org/)
 
 ```bash
-git clone https://github.com/Infisical/agent-vault.git
-cd agent-vault
+git clone https://github.com/trmlabs/trm-gatehouse.git
+cd trm-gatehouse
 make build
 sudo mv agent-vault /usr/local/bin/
 ```

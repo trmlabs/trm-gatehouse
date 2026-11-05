@@ -5,22 +5,13 @@ import (
 	"strings"
 )
 
-// StartupParameters are the PostgreSQL startup parameters a client may send
-// through Gatehouse, besides user and database. They are what drivers send by
-// default (libpq from PGTZ, PGDATESTYLE and the locale; JDBC always sends
-// client_encoding, DateStyle, TimeZone and extra_float_digits) and what the
-// pooled broker re-applies per connection. Everything else fails closed, in
-// particular "options" (backend command-line arguments, which set arbitrary
-// settings) and "replication".
+// StartupParameters are the startup parameters a client may send besides user and database: what drivers
+// send by default and the pooled broker re-applies. Everything else fails closed, notably "options" and "replication".
 var StartupParameters = []string{"application_name", "client_encoding", "DateStyle", "extra_float_digits",
 	"search_path", "standard_conforming_strings", "statement_timeout", "TimeZone"}
 
-// StartupParameter reports whether a client may send key with value at
-// startup, and returns the canonical key and value to forward. Keys match
-// case-insensitively, as PostgreSQL's settings do: libpq sends PGTZ and
-// PGDATESTYLE as "timezone" and "datestyle", JDBC as "TimeZone" and
-// "DateStyle". The relay and the broker share it, so the two can never
-// disagree.
+// StartupParameter reports whether a client may send key with value and returns the canonical pair to forward.
+// Keys match case-insensitively; the relay and the broker share it so they cannot disagree.
 func StartupParameter(key, value string) (string, string, bool) {
 	name, ok := canonicalKeys[strings.ToLower(key)]
 	if !ok {
@@ -41,27 +32,7 @@ var canonicalKeys = func() map[string]string {
 	return m
 }()
 
-// StartupValue checks one value for a canonical key; see StartupParameter.
-//
-// A startup parameter overrides a role-level ALTER ROLE ... SET, so values
-// are bounded, not only keys:
-//   - statement_timeout: 1 to 10 ASCII digits parsing to 1..2147483647,
-//     refusing 0 (no timeout), units and embedded options.
-//   - application_name: at most 63 bytes of printable ASCII.
-//   - client_encoding: a name from PostgreSQL's fixed list of server
-//     encodings, matched as the server does (case and punctuation ignored,
-//     with its aliases), forwarded in canonical form. No free text. The
-//     client-only encodings (SJIS, BIG5, GBK, UHC, GB18030, JOHAB,
-//     SHIFT_JIS_2004) are refused: their multibyte characters can end in a
-//     backslash, so the broker's SQL lexer and the server could split a
-//     string literal differently. PostgreSQL refuses them as server encodings
-//     for the same reason.
-//   - standard_conforming_strings: "on" only, forwarded lowercase. Off, the
-//     server reads backslash escapes inside string literals and the broker's
-//     SQL lexer does not, so a statement hidden in a literal would pass the
-//     classifier and run.
-//   - the rest: at most 256 bytes of printable ASCII. These settings are
-//     bounded in effect; the server parses them and rejects invalid values.
+// StartupValue checks one value for a canonical key; startup parameters override role settings, so each is bounded and client-only multibyte encodings and off standard_conforming_strings are refused.
 func StartupValue(key, value string) (string, bool) {
 	switch key {
 	case "statement_timeout":
@@ -109,8 +80,7 @@ func printable(s string) bool {
 	return true
 }
 
-// cleanEncoding lowercases and drops everything but letters and digits, as
-// PostgreSQL's clean_encoding_name does, so "UTF-8", "utf8" and "UTF_8" match.
+// cleanEncoding lowercases and keeps only letters and digits, as PostgreSQL does.
 func cleanEncoding(s string) string {
 	if len(s) > 32 {
 		return ""
@@ -128,9 +98,7 @@ func cleanEncoding(s string) string {
 	return b.String()
 }
 
-// encodings maps cleaned names to PostgreSQL's canonical names for its server
-// encodings (pg_enc2name_tbl, PostgreSQL 16) plus the common aliases its
-// pg_encname_tbl accepts for them. Every one keeps ASCII bytes as ASCII.
+// encodings maps cleaned names and aliases to PostgreSQL 16's canonical server encodings, all ASCII-preserving.
 var encodings = func() map[string]string {
 	canonical := []string{"SQL_ASCII", "EUC_JP", "EUC_CN", "EUC_KR", "EUC_TW", "EUC_JIS_2004", "UTF8", "MULE_INTERNAL",
 		"LATIN1", "LATIN2", "LATIN3", "LATIN4", "LATIN5", "LATIN6", "LATIN7", "LATIN8", "LATIN9", "LATIN10",

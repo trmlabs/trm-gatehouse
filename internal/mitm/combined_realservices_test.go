@@ -66,7 +66,6 @@ func (m *combinedMinter) Mint(ctx context.Context, scope pgproxy.AgentScope, svc
 	return m.DurableLeaseMinter.Mint(ctx, scope, svc)
 }
 
-// The TLS tunnel is a disposable transport fixture, not deployment configuration.
 // Pod mode exposes only the TLS listener; the broker target stays on loopback.
 func combinedTunnel(t *testing.T, target string, cert tls.Certificate, publicPort ...string) string {
 	t.Helper()
@@ -143,7 +142,7 @@ func runCombinedServices(t *testing.T, parentExpiry bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	readProof := func(name string) string {
-		// Paths come from the disposable fixture runner, never an HTTP request.
+		// Paths come from the fixture runner, never an HTTP request.
 		// #nosec G703
 		data, err := os.ReadFile(os.Getenv(name))
 		if err != nil {
@@ -412,7 +411,7 @@ func runCombinedServices(t *testing.T, parentExpiry bool) {
 		})
 		return
 	}
-	// A real broker grant change must withdraw the same runtime proof on both paths.
+	// A real broker grant change must withdraw the runtime proof on both paths.
 	if err := st.RevokeAgent(ctx, agent.ID); err != nil {
 		t.Fatal(err)
 	}

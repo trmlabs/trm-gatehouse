@@ -13,8 +13,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// The broker's own documents default to the gatehouse KV mount;
-// AGENT_VAULT_KV_MOUNT moves them, and the GitHub App key fallback follows.
 func TestKVMountSetting(t *testing.T) {
 	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"data":{"id":"synthetic","ttl":0}}`))
@@ -47,8 +45,6 @@ func TestKVMountSetting(t *testing.T) {
 	}
 }
 
-// broker-catalog validate applies the same naming settings as the broker,
-// from its flags.
 func TestBrokerCatalogValidateNamingFlags(t *testing.T) {
 	t.Cleanup(func() {
 		httpcatalog.Environment.Store("")

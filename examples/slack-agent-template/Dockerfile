@@ -7,7 +7,8 @@ COPY src ./src
 RUN npm run build
 
 FROM --platform=linux/amd64 node:22-slim
-COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+# Build gatehouse:local first with `make docker` in this repository.
+COPY --from=gatehouse:local /usr/local/bin/agent-vault /usr/local/bin/agent-vault
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm install --omit=dev

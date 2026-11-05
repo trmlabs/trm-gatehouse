@@ -7,13 +7,7 @@ import (
 	"strconv"
 )
 
-// HandlerFunc returns a per-route wrapper that applies tier to each
-// request. Empty-key requests pass through (fail-open). On denial:
-// 429 with Retry-After + X-RateLimit-* headers; logs WARN with the
-// already-scoped key.
-//
-// For the proxy path, handlers call Registry.EnforceProxy directly —
-// the scope and target host aren't known until after vault resolution.
+// HandlerFunc returns a per-route wrapper applying tier; empty-key requests fail open, and the proxy path calls Registry.EnforceProxy directly.
 func (r *Registry) HandlerFunc(tier Tier, keyer Keyer, logger *slog.Logger) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, req *http.Request) {
@@ -50,9 +44,7 @@ func (r *Registry) HandlerFunc(tier Tier, keyer Keyer, logger *slog.Logger) func
 	}
 }
 
-// GlobalMiddleware is the outermost wrapper: server-wide RPS ceiling
-// + in-flight semaphore. Off short-circuits immediately so operators
-// fronting with their own edge limiter pay no overhead.
+// GlobalMiddleware is the outermost wrapper (server-wide RPS ceiling and in-flight semaphore); Off short-circuits.
 func (r *Registry) GlobalMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -81,9 +73,7 @@ func (r *Registry) GlobalMiddleware(logger *slog.Logger) func(http.Handler) http
 	}
 }
 
-// WriteDenial emits a 429 with standard rate-limit headers. Exported
-// so handlers that do in-handler limit checks (e.g. login's email
-// bucket) share the same response shape as the middleware.
+// WriteDenial emits a 429 with rate-limit headers, shared with in-handler limit checks.
 func WriteDenial(w http.ResponseWriter, d Decision, message string) {
 	writeRateLimitHeaders(w, d)
 	if d.RetryAfter > 0 {

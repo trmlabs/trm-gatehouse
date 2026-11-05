@@ -242,7 +242,6 @@ func TestBrowserRelayRejectsUnsafeResponsesAndDoesNotRetryUnknownCreate(t *testi
 			if len(f.paths) != 1 {
 				t.Fatal("unknown handle must not cause blind retries")
 			}
-
 		})
 	}
 }

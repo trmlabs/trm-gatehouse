@@ -32,9 +32,8 @@ func (l *fakeLedger) count(key string) int {
 	return n
 }
 
-// With a shared ledger a database's maxConns is the whole fleet's: replicas
-// together open no more upstream connections than it, any replica may take a
-// free one however the load is spread, and a closed session frees its place.
+// With a shared ledger a database's maxConns is the whole fleet's: replicas together open no more upstream
+// connections than it, any replica may take a free one however the load is spread.
 func TestDatabaseBudgetHoldsAcrossReplicas(t *testing.T) {
 	upstream := startFakeUpstream(t, authTrust, newLease().Password)
 	svc := &DatabaseService{Name: "analytics", Addr: upstream.addr(), Mount: "database", Role: "readonly", SSLMode: "disable", MaxConns: 4}

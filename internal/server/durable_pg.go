@@ -14,10 +14,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// NewDurableVaultLeaseMinter requires the SQL cleanup journal. Call Close after
-// the PostgreSQL broker has stopped; a failed cleanup remains pending on disk.
-// Owner IDs carry the replica name the audit chain uses, so operators can tell
-// which broker holds a record.
+// NewDurableVaultLeaseMinter requires the SQL cleanup journal. Call Close after the PostgreSQL broker has stopped; a failed cleanup stays pending on disk.
 func NewDurableVaultLeaseMinter(ctx context.Context, client *hashicorp.Client, st any) (*pgproxy.DurableLeaseMinter, error) {
 	journal, ok := st.(pgproxy.CleanupJournal)
 	if !ok {
@@ -57,16 +54,12 @@ type brokerSessionStore interface {
 	RemoveBrokerSession(ctx context.Context, id string) error
 }
 
-// sessionLedger records live sessions under this replica's cleanup owner, so
-// a dead replica's sessions stop counting when its owner row expires.
 type sessionLedger struct {
 	store brokerSessionStore
 	owner func() string
 }
 
-// NewSessionLedger returns the fleet-wide per-Pod session ledger, or nil when
-// the store cannot hold broker sessions (single-replica stores keep the
-// in-memory cap only).
+// NewSessionLedger returns the fleet-wide session ledger, or nil when the store cannot hold broker sessions.
 func NewSessionLedger(st any, minter *pgproxy.DurableLeaseMinter) pgproxy.SessionLedger {
 	store, ok := st.(brokerSessionStore)
 	if !ok || minter == nil {

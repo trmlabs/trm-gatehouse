@@ -11,21 +11,13 @@ import (
 	"github.com/Infisical/agent-vault/internal/workloadidentity"
 )
 
-// activity records, for the idle janitor, when each agent Sandbox (the
-// Pods' controller) was last in use through this replica: when one of its
-// Pods started, when one was admitted, and every second while one of its
-// connections stays open, so a long-lived tunnel or database session counts
-// as use. It is keyed by the controller, so a replaced Pod keeps its
-// Sandbox's history, and an entry is kept for the retention time after its
-// last use whether or not the Pod is still running. It holds last-seen times
-// only: no target, no bytes, no profile.
+// activity holds last-seen times per agent Sandbox (no target, bytes or profile), keyed by controller so a replaced Pod keeps its history.
 type activity struct {
 	mu        sync.Mutex
 	started   time.Time
 	retention time.Duration
 	owners    map[string]activityEntry // by controller UID
-	// durable, when set, adds the broker's view of every replica.
-	durable *durable
+	durable   *durable
 }
 
 type activityEntry struct {
@@ -34,15 +26,12 @@ type activityEntry struct {
 	pushed    time.Time // the last time the broker accepted for it
 }
 
-// defaultActivityRetention keeps a day of history, well past any idle time.
 const defaultActivityRetention = 24 * time.Hour
 
 func newActivity(now time.Time, retention time.Duration) *activity {
 	return &activity{started: now, retention: retention, owners: map[string]activityEntry{}}
 }
 
-// seen records use by the agent att names at when; an earlier time than the
-// one held changes nothing.
 func (a *activity) seen(att workloadidentity.Attestation, when time.Time) {
 	a.record(att.Namespace, att.OwnerUID, when)
 }
@@ -58,7 +47,6 @@ func (a *activity) record(namespace, owner string, when time.Time) {
 	a.mu.Unlock()
 }
 
-// pending is every Sandbox whose last use is newer than the broker holds.
 func (a *activity) pending() []SandboxActivity {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -71,10 +59,7 @@ func (a *activity) pending() []SandboxActivity {
 	return out
 }
 
-// repushMissing marks pending again every entry the broker once took but no
-// longer holds at that time (a restored or emptied table), so the next report
-// puts it back. A janitor pass merges every replica's own entries anyway; this
-// keeps the durable view whole for when this replica is gone.
+// repushMissing re-marks entries the broker no longer holds (a restored or emptied table).
 func (a *activity) repushMissing(view []SandboxActivity) {
 	held := make(map[string]time.Time, len(view))
 	for _, r := range view {
@@ -91,8 +76,6 @@ func (a *activity) repushMissing(view []SandboxActivity) {
 	}
 }
 
-// repushAll marks every entry pending, after the broker lost writes it had
-// acknowledged.
 func (a *activity) repushAll() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -102,7 +85,6 @@ func (a *activity) repushAll() {
 	}
 }
 
-// accepted marks rows the broker took.
 func (a *activity) accepted(rows []SandboxActivity) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -114,50 +96,31 @@ func (a *activity) accepted(rows []SandboxActivity) {
 	}
 }
 
-// ActivityReport is the admin listener's one response.
 type ActivityReport struct {
-	// ReplicaStarted is when this replica began recording. A Sandbox absent
-	// from Sandboxes has not been used through this replica since then, or
-	// not within RetentionSeconds.
+	// ReplicaStarted: a Sandbox absent from Sandboxes was unused since then or beyond RetentionSeconds.
 	ReplicaStarted   time.Time         `json:"replicaStarted"`
 	RetentionSeconds int64             `json:"retentionSeconds"`
 	Sandboxes        []SandboxActivity `json:"sandboxes"`
-	// Durable says Sandboxes include the broker's view of every replica,
-	// read in full for this report, so no replica's going or coming loses
-	// history beyond its last report to the broker.
-	Durable bool `json:"durable"`
-	// HistoryStreams, on a durable report, is each replica stream's current
-	// sequence in the broker.
+	// Durable: Sandboxes include the broker's view of every replica.
+	Durable        bool             `json:"durable"`
 	HistoryStreams map[string]int64 `json:"historyStreams,omitempty"`
-	// Replica names this replica's report stream; AckedSeq is the sequence
-	// the broker last acknowledged on it,
-	// and FirstAcked when it first acknowledged one; zero for a replica that
-	// has had no report accepted since it started. A replica's AckedSeq above
-	// its own stream's sequence, or a missing stream, means the broker lost
-	// writes; no replica with a
-	// FirstAcked older than the janitor's idle window means none can vouch
-	// the history is whole.
+	// AckedSeq above its stream's sequence, or a missing stream, means the broker lost writes.
+	// FirstAcked is zero until a report is accepted.
 	Replica    string    `json:"replica,omitempty"`
 	AckedSeq   int64     `json:"ackedSeq,omitempty"`
 	FirstAcked time.Time `json:"firstAcked,omitzero"`
-	// HistoryStarted, on a durable report, is when the broker's history for
-	// this proxy's binding began. Zero means none yet: a new, recreated or
-	// emptied history, which vouches for nothing.
+	// HistoryStarted is zero for a new or emptied history, which vouches for nothing.
 	HistoryStarted time.Time `json:"historyStarted,omitzero"`
-	// BrokerUnreachableAt is when this replica last failed to report to, or
-	// read from, the broker's store; zero if never since it started. The
-	// janitor holds while any live replica's is within its idle window.
+	// BrokerUnreachableAt is the last failed report or read; the janitor holds while any live replica's is within its idle window.
 	BrokerUnreachableAt time.Time `json:"brokerUnreachableAt,omitzero"`
 }
 
-// SandboxActivity is one Sandbox's last use through this replica.
 type SandboxActivity struct {
 	Namespace string    `json:"namespace"`
 	OwnerUID  string    `json:"ownerUID"`
 	LastSeen  time.Time `json:"lastSeen"`
 }
 
-// report drops entries past the retention time and returns the rest.
 func (a *activity) report(now time.Time) ActivityReport {
 	a.mu.Lock()
 	out := ActivityReport{ReplicaStarted: a.started.UTC(), RetentionSeconds: int64(a.retention / time.Second), Sandboxes: make([]SandboxActivity, 0, len(a.owners))}
@@ -173,18 +136,12 @@ func (a *activity) report(now time.Time) ActivityReport {
 	return out
 }
 
-// ActivityPath is the admin listener's full report: this replica's
-// activity merged with the broker's durable view. ActivityLocalPath is this
-// replica's own activity alone, so a janitor reads the durable view from one
-// replica and not from every one.
 const (
 	ActivityPath      = "/v1/activity"
 	ActivityLocalPath = "/v1/activity/local"
 )
 
-// handler serves GET on the two activity paths and nothing else: every other
-// path and method is 404, so the admin port exposes last-seen times and no
-// more.
+// handler serves GET on the two activity paths only; everything else is 404.
 func (a *activity) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet || (req.URL.Path != ActivityPath && req.URL.Path != ActivityLocalPath) || req.URL.RawQuery != "" {
@@ -206,12 +163,8 @@ func (a *activity) handler() http.Handler {
 	})
 }
 
-// withDurable merges the broker's view into a report, keeping the later time
-// per Sandbox and the shorter retention. If the view cannot be read in full,
-// the report is this replica's alone and not durable.
 func (a *activity) withDurable(ctx context.Context, report ActivityReport) ActivityReport {
-	// The acknowledgment is read before the view: one given while the view
-	// is read is then not mistaken for a loss.
+	// Read the acknowledgment before the view so one given during the read is not mistaken for a loss.
 	acked, _ := a.durable.verification()
 	view, e := a.durable.read(ctx)
 	if e != nil {
@@ -223,9 +176,7 @@ func (a *activity) withDurable(ctx context.Context, report ActivityReport) Activ
 	}
 	a.repushMissing(view.sandboxes)
 	if acked > view.streams[a.durable.replica] {
-		// The store lost writes it acknowledged to this replica: report
-		// everything again, and that report, sent even if this replica
-		// holds nothing, restarts the history.
+		// The store lost acknowledged writes: report everything again, even if empty, to restart the history.
 		a.repushAll()
 		a.durable.oweLoss()
 	}

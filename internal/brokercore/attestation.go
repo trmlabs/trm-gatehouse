@@ -7,30 +7,23 @@ import (
 	"regexp"
 )
 
-// AttestationHeader carries a shared proxy's attestation of the agent Pod
-// behind a CONNECT request. Only a proxy-attested binding accepts it; any
-// other identity presenting one is refused.
+// AttestationHeader carries a shared proxy's attestation of the agent Pod; any identity but a proxy-attested one presenting it is refused.
 const AttestationHeader = "Gatehouse-Attestation"
 
 type attestationKey struct{}
 
-// WithAttestation carries the attestation a connection presented (encoded as
-// the proxy sent it) to the Attestor, for admission and every recheck.
+// WithAttestation carries the connection's attestation, as the proxy sent it, to the Attestor.
 func WithAttestation(ctx context.Context, attestation string) context.Context {
 	return context.WithValue(ctx, attestationKey{}, attestation)
 }
 
-// maxAttestationHeader bounds what AttestedSandbox decodes; the verifier
-// applies the same bound.
+// maxAttestationHeader bounds what AttestedSandbox decodes; the verifier uses the same bound.
 const maxAttestationHeader = 4096
 
 var sandboxUID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`)
 
-// AttestedSandbox returns the controller UID (the Sandbox) an attestation
-// names, without verifying it, or "" when it names none. It only keys
-// pre-authentication rate limits on the cross-cluster listener, where every
-// sandbox behind one shared proxy arrives from the proxy's address; the
-// attestation itself is verified at admission.
+// AttestedSandbox returns the Sandbox UID an attestation names, unverified, or "".
+// It only keys pre-authentication rate limits, since every sandbox behind a shared proxy shares its address.
 func AttestedSandbox(attestation string) string {
 	if attestation == "" || len(attestation) > maxAttestationHeader {
 		return ""

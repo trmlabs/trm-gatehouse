@@ -17,10 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// upstreamSession is the result of authenticating to the upstream database: the
-// live connection plus the post-authentication startup messages the proxy
-// replays to the agent (parameter statuses, backend key data, initial tx
-// status).
+// upstreamSession is the live upstream connection plus the post-authentication startup messages replayed to the agent.
 type upstreamSession struct {
 	conn       net.Conn
 	parameters []pgproto3.ParameterStatus
@@ -28,11 +25,8 @@ type upstreamSession struct {
 	txStatus   byte
 }
 
-// connectUpstream dials the upstream database and completes its authentication
-// handshake with the Vault-issued username/password. clientParams are the
-// agent's startup runtime parameters; a safe subset is forwarded so the
-// upstream session mirrors what the agent asked for. On any failure the dialed
-// connection is closed.
+// connectUpstream dials the upstream database and completes its authentication handshake with the
+// Vault-issued username/password. clientParams are the agent's startup runtime parameters.
 func connectUpstream(ctx context.Context, dial DialFunc, svc *DatabaseService, lease *Lease, clientParams map[string]string) (*upstreamSession, error) {
 	return connectUpstreamWith(ctx, dial, svc, lease, clientParams, nil)
 }
@@ -56,9 +50,7 @@ func connectUpstreamWith(ctx context.Context, dial DialFunc, svc *DatabaseServic
 		_ = rawConn.SetDeadline(deadline)
 	}
 
-	// Negotiate upstream TLS per the service's sslmode. conn is the raw or the
-	// TLS-wrapped connection; closing it closes the underlying socket. secure is
-	// true only when the broker->database channel is encrypted.
+	// Negotiate upstream TLS per the service's sslmode. conn is the raw or the TLS-wrapped connection.
 	conn, secure, err := negotiateUpstreamTLS(ctx, rawConn, svc)
 	if err != nil {
 		return nil, err
@@ -75,10 +67,8 @@ func connectUpstreamWith(ctx context.Context, dial DialFunc, svc *DatabaseServic
 	if database != "" {
 		params["database"] = database
 	}
-	// user and database come from the service and the credential. Other
-	// startup parameters pass only as brokercore.StartupValue allows, the
-	// relay's rule too: a startup parameter overrides ALTER ROLE ... SET, so
-	// values are bounded as well as keys. Anything else is dropped.
+	// user and database come from the service and the credential.
+	// Other startup parameters pass only as brokercore.StartupValue allows.
 	for key, value := range clientParams {
 		if name, v, ok := brokercore.StartupParameter(key, value); ok {
 			params[name] = v
@@ -87,9 +77,8 @@ func connectUpstreamWith(ctx context.Context, dial DialFunc, svc *DatabaseServic
 	for key, value := range serverParams {
 		params[key] = value
 	}
-	// A read-only login also runs every transaction read-only, a database-side
-	// backstop behind the broker's statement allowlist. The allowlist refuses
-	// turning it off.
+	// A read-only login also runs every transaction read-only, a database-side backstop behind the broker's
+	// statement allowlist.
 	if svc.ReadOnly {
 		params["default_transaction_read_only"] = "on"
 	}
@@ -113,11 +102,7 @@ func connectUpstreamWith(ctx context.Context, dial DialFunc, svc *DatabaseServic
 	return sess, nil
 }
 
-// authenticateUpstream drives the upstream authentication request/response loop
-// until AuthenticationOk. It supports the mechanisms a Vault-managed PostgreSQL
-// role uses in practice: SCRAM-SHA-256 (the modern default) and cleartext
-// password. Legacy md5 and GSSAPI are rejected with a clear error rather than
-// silently downgrading.
+// authenticateUpstream drives the upstream authentication request/response loop until AuthenticationOk.
 func authenticateUpstream(frontend *pgproto3.Frontend, lease *Lease, verifiedTLS bool) error {
 	for {
 		msg, err := frontend.Receive()
@@ -128,9 +113,8 @@ func authenticateUpstream(frontend *pgproto3.Frontend, lease *Lease, verifiedTLS
 		case *pgproto3.AuthenticationOk:
 			return nil
 		case *pgproto3.AuthenticationCleartextPassword:
-			// Encryption alone does not authenticate the recipient. A MITM
-			// with an arbitrary certificate must not obtain the Vault password.
-			// SCRAM remains available for the explicitly weaker TLS modes.
+			// Encryption alone does not authenticate the recipient.
+			// A MITM with an arbitrary certificate must not obtain the Vault password.
 			if !verifiedTLS {
 				return fmt.Errorf("upstream requested cleartext password without verified TLS; use sslmode=verify-full")
 			}
@@ -206,9 +190,8 @@ func unexpectedSASL(want string, got pgproto3.BackendMessage) error {
 	return fmt.Errorf("expected %s during upstream SASL, got %T", want, got)
 }
 
-// collectUpstreamReady reads the messages the upstream emits after
-// authentication (ParameterStatus, BackendKeyData) up to ReadyForQuery, so the
-// proxy can replay them to the agent and present an identical ready state.
+// collectUpstreamReady reads the messages the upstream emits after authentication (ParameterStatus,
+// BackendKeyData) up to ReadyForQuery.
 func collectUpstreamReady(frontend *pgproto3.Frontend, sess *upstreamSession) error {
 	for {
 		msg, err := frontend.Receive()
@@ -247,10 +230,8 @@ func sslMode(mode string) string {
 	}
 }
 
-// privatePeer reports whether the connection's remote end is a loopback or
-// private (RFC 1918, IPv6 unique local) address, or not an IP address at all
-// (a local socket). Plaintext never goes to a public address, whatever the
-// sslmode says.
+// privatePeer reports whether the connection's remote end is a loopback or private (RFC 1918, IPv6 unique
+// local) address, or not an IP address at all (a local socket).
 func privatePeer(conn net.Conn) bool {
 	tcp, ok := conn.RemoteAddr().(*net.TCPAddr)
 	if !ok {
@@ -264,15 +245,8 @@ func privatePeer(conn net.Conn) bool {
 	return addr.IsLoopback() || addr.IsPrivate()
 }
 
-// negotiateUpstreamTLS performs the PostgreSQL SSL negotiation according to the
-// service's sslmode and returns the connection to use (raw or TLS-wrapped) and
-// whether the channel is encrypted:
-//   - disable: no negotiation; plaintext.
-//   - prefer (default): request TLS, use it if offered, else plaintext.
-//   - require: request TLS, fail if the server declines; encrypt without
-//     verifying the certificate (matching libpq).
-//   - verify-full: as require, but verify the certificate chain and hostname,
-//     against the service's pinned CA alone when it has one.
+// negotiateUpstreamTLS does the PostgreSQL SSL negotiation for the service's sslmode and returns the conn and whether it is encrypted.
+// require encrypts without verifying (matching libpq); verify-full verifies against the pinned CA alone when set.
 func negotiateUpstreamTLS(ctx context.Context, conn net.Conn, svc *DatabaseService) (net.Conn, bool, error) {
 	switch svc.SSLMode {
 	case "", "disable", "prefer", "require", "verify-full":
@@ -337,9 +311,7 @@ func negotiateUpstreamTLS(ctx context.Context, conn net.Conn, svc *DatabaseServi
 	return tlsConn, true, nil
 }
 
-// parsePinnedCA reads the PEM certificates of a database's pinned CA. The
-// catalog has already held them to CERTIFICATE blocks that are CAs or
-// self-signed.
+// parsePinnedCA reads the PEM certificates of a database's pinned CA.
 func parsePinnedCA(text string) ([]*x509.Certificate, error) {
 	var pins []*x509.Certificate
 	rest := []byte(text)
@@ -364,11 +336,8 @@ func parsePinnedCA(text string) ([]*x509.Certificate, error) {
 	return pins, nil
 }
 
-// verifyPinned trusts a server certificate that chains to one of pins and
-// names serverName, or that is itself one of pins. The second covers a
-// self-signed certificate such as the one Citus generates, which has no
-// names and a zero validity period: the handshake proved the server holds
-// its key, which is all a pin of the certificate itself can ask.
+// verifyPinned trusts a server certificate that chains to one of pins and names serverName, or that is itself
+// one of pins.
 func verifyPinned(pins []*x509.Certificate, serverName string) func(tls.ConnectionState) error {
 	roots := x509.NewCertPool()
 	for _, pin := range pins {

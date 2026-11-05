@@ -145,11 +145,7 @@ func fetchServices(client *session.ClientSession, nsName string) ([]broker.Servi
 	if err := json.Unmarshal(resp.Services, &services); err != nil {
 		return nil, nil
 	}
-	// The wire shape carries Host in joined inline form (e.g.
-	// `slack.com/api/*`); split it back into bare Host + Path so the
-	// matcher invariant — Host has no '/' — holds before any downstream
-	// broker.Validate (e.g. when the user appends in the interactive
-	// builder).
+	// Split the inline Host form (`slack.com/api/*`) into bare Host + Path so Host never contains '/'.
 	for i := range services {
 		if err := broker.NormalizePort(&services[i]); err != nil {
 			return nil, fmt.Errorf("service %d: %w", i, err)
@@ -288,9 +284,7 @@ func buildService(client *session.ClientSession, nsName string, cmd *cobra.Comma
 	}, nil
 }
 
-// promptServiceName collects a slug-shaped service name and validates it
-// against ValidateSlug so the user sees the constraint at prompt time
-// rather than via a server-side 400.
+// promptServiceName collects a slug-shaped name validated by ValidateSlug.
 func promptServiceName() (string, error) {
 	var name string
 	err := huh.NewInput().

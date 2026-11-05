@@ -21,10 +21,7 @@ import (
 	"time"
 )
 
-// ServingTLSConfig, in shared mode only, encrypts the hop from each agent Pod
-// to this proxy with a certificate the broker issues. Mode "broker-issued" is
-// the only mode. Names are the proxy Service's DNS names; the broker signs
-// only names it was configured with.
+// ServingTLSConfig, shared mode only, encrypts the hop from each agent Pod to this proxy with a broker-issued certificate; the broker signs only names it was configured with.
 type ServingTLSConfig struct {
 	Mode  string   `json:"mode"`
 	Names []string `json:"names"`
@@ -32,11 +29,8 @@ type ServingTLSConfig struct {
 
 const brokerIssued = "broker-issued"
 
-// waitingLogInterval spaces the "still no certificate" rows at startup.
 var waitingLogInterval = time.Minute
 
-// ProxyCertificatePath is the broker's issuing route on its cross-cluster
-// listener.
 const ProxyCertificatePath = "/v1/proxy/certificate"
 
 var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
@@ -55,18 +49,13 @@ func (s *ServingTLSConfig) validate() error {
 
 var errNoServingCertificate = errors.New("no current serving certificate")
 
-// servingCert holds the proxy's serving certificate. Its key is generated in
-// memory for each certificate and never written anywhere; only a certificate
-// request leaves the process. A certificate is renewed at two thirds of its
-// lifetime, the old one serves until the new one arrives, and once it expires
-// with no replacement every handshake is refused.
+// servingCert keeps its key in memory, never written. It renews at two thirds of lifetime, the old certificate serves meanwhile,
+// and once expired with no replacement every handshake is refused.
 type servingCert struct {
 	names    []string
 	upstream UpstreamConfig
 	issued   func(issued, notAfter time.Time) // for the audit; may be nil
-	// waiting is called once a minute while the first certificate has not
-	// arrived: with no readiness probe the proxy looks ready meanwhile, so
-	// the log must say it is serving nothing. May be nil.
+	// waiting is called once a minute while the first certificate is missing: the proxy looks ready (no readiness probe), so the log must say it serves nothing.
 	waiting func()
 
 	mu        sync.RWMutex
@@ -79,7 +68,6 @@ func newServingCert(s *ServingTLSConfig, upstream UpstreamConfig) *servingCert {
 	return &servingCert{names: slices.Clone(s.Names), upstream: upstream}
 }
 
-// get is tls.Config.GetCertificate.
 func (s *servingCert) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -93,7 +81,6 @@ func (s *servingCert) serverTLS(protocols ...string) *tls.Config {
 	return &tls.Config{GetCertificate: s.get, MinVersion: tls.VersionTLS12, NextProtos: protocols}
 }
 
-// renewAt is two thirds of the way through the current certificate's life.
 func (s *servingCert) renewAt() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -106,8 +93,7 @@ func (s *servingCert) expiry() time.Time {
 	return s.notAfter
 }
 
-// obtain retries the first issuance with backoff until it succeeds or ctx
-// ends: the proxy serves nothing without a certificate.
+// obtain retries the first issuance with backoff: the proxy serves nothing without a certificate.
 func (s *servingCert) obtain(ctx context.Context) error {
 	wait := time.Second
 	logged := time.Now()
@@ -128,8 +114,7 @@ func (s *servingCert) obtain(ctx context.Context) error {
 	}
 }
 
-// run renews until ctx ends. A failed renewal is retried, sooner as expiry
-// nears, and the current certificate keeps serving meanwhile.
+// run retries a failed renewal, sooner as expiry nears, while the current certificate keeps serving.
 func (s *servingCert) run(ctx context.Context) {
 	next := s.renewAt()
 	for {
@@ -146,7 +131,6 @@ func (s *servingCert) run(ctx context.Context) {
 	}
 }
 
-// renew asks the broker for a certificate on a new key and installs it.
 func (s *servingCert) renew(ctx context.Context) error {
 	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if e != nil {
@@ -189,8 +173,7 @@ func (s *servingCert) renew(ctx context.Context) error {
 	return nil
 }
 
-// check accepts only a current leaf for this key that names nothing beyond
-// the configured names and is for server authentication.
+// check accepts only a current server-auth leaf for this key naming nothing beyond the configured names.
 func (s *servingCert) check(key *ecdsa.PrivateKey, certificate, chain string, now time.Time) (*tls.Certificate, *x509.Certificate, error) {
 	var ders [][]byte
 	for _, text := range []string{certificate, chain} {
@@ -230,8 +213,7 @@ func (s *servingCert) check(key *ecdsa.PrivateKey, certificate, chain string, no
 	if len(leaf.ExtKeyUsage) != 0 && !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
 		return nil, nil, errDenied
 	}
-	// Vault returns the issuing chain beside the leaf; a repeat of the leaf
-	// in it is dropped.
+	// Vault returns the chain beside the leaf; a repeat of the leaf is dropped.
 	chainDERs := [][]byte{ders[0]}
 	for _, der := range ders[1:] {
 		if !bytes.Equal(der, ders[0]) {
@@ -241,10 +223,7 @@ func (s *servingCert) check(key *ecdsa.PrivateKey, certificate, chain string, no
 	return &tls.Certificate{Certificate: chainDERs, PrivateKey: key, Leaf: leaf}, leaf, nil
 }
 
-// brokerPost sends one JSON request to the broker's proxy routes over a fresh
-// TLS connection to upstream, as the proxy itself (its projected token), and
-// returns the status and up to limit bytes of the body. It is written by hand
-// as HTTP/1.1 so the broker's cross-cluster router sees "POST /v1" first.
+// brokerPost is hand-written HTTP/1.1 so the broker's cross-cluster router sees "POST /v1" first.
 func brokerPost(ctx context.Context, upstream UpstreamConfig, path string, body []byte, limit int64) (int, []byte, error) {
 	token, _, e := readProjectedProof(upstream)
 	if e != nil {
@@ -278,5 +257,4 @@ func brokerPost(ctx context.Context, upstream UpstreamConfig, path string, body 
 	return resp.StatusCode, b, e
 }
 
-// brokerRequestTimeout bounds one request to the broker's proxy routes.
 const brokerRequestTimeout = 30 * time.Second

@@ -82,10 +82,7 @@ func Validate(services []Service, credentials []CredentialSlot) error {
 				}
 			}
 			if len(s.Substitutions) > 0 {
-				// Coupled to Auth here (not in broker.Validate) because
-				// broker.Service.Auth is non-pointer — the direct write
-				// path can't express "substitutions without auth", but
-				// proposals can via Auth==nil enable-only updates.
+				// Coupled to Auth here because broker.Service.Auth is non-pointer; proposals can enable-only via Auth==nil.
 				if s.Auth == nil {
 					return fmt.Errorf("service %d: substitutions require auth — to change substitutions on an existing service, re-supply the auth config", i)
 				}
@@ -189,9 +186,7 @@ func Validate(services []Service, credentials []CredentialSlot) error {
 	return nil
 }
 
-// ValidateCredentialRefs checks that every credential key referenced in set-action
-// service auth configs resolves to either a credential slot in the proposal or an
-// existing credential key in the vault.
+// ValidateCredentialRefs checks set-action auth credential keys resolve to a proposal slot or an existing vault key.
 func ValidateCredentialRefs(services []Service, slots []CredentialSlot, existingKeys []string) error {
 	// Build set of available keys: set-action proposal slots + existing store keys.
 	available := make(map[string]bool, len(slots)+len(existingKeys))

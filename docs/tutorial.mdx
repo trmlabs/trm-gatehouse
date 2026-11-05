@@ -100,7 +100,8 @@ Everything else happens on the **agent host** (the machine where Claude Code run
     Add the Agent Vault binary to your agent's image and make sure `gh` is also installed (see [GitHub CLI install](https://github.com/cli/cli#installation) for your base image), then set the entrypoint:
 
     ```dockerfile
-    COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault
+    # Build gatehouse:local first with `make docker` in this repository.
+    COPY --from=gatehouse:local /usr/local/bin/agent-vault /usr/local/bin/agent-vault
 
     ENTRYPOINT ["agent-vault", "run", "--", "claude"]
     ```

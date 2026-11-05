@@ -38,8 +38,7 @@ func checkDatabaseSeedHistory(t *testing.T, s *SQLStore) {
 		t.Fatalf("explicit re-add changed by seed: %v %v", added, err)
 	}
 
-	// Entries created through the API must also stay removed if a later
-	// startup configuration happens to contain the same name.
+	// API-created entries stay removed if a later startup configuration has the same name.
 	api := sampleService(v.ID, "api-created")
 	if _, err := s.UpsertDatabaseService(ctx, api); err != nil {
 		t.Fatal(err)
@@ -51,8 +50,7 @@ func checkDatabaseSeedHistory(t *testing.T, s *SQLStore) {
 		t.Fatalf("API removal lost: %v %v", added, err)
 	}
 
-	// A failed initial seed must roll back its marker so a corrected entry
-	// can be bootstrapped normally, without a manual database repair.
+	// A failed initial seed rolls back its marker so a corrected entry can be bootstrapped.
 	invalid := sampleService(v.ID, "retry")
 	invalid.SSLMode = "invalid-mode"
 	if _, err := s.SeedDatabaseService(ctx, invalid); err == nil {
@@ -78,8 +76,7 @@ func checkDatabaseSeedHistory(t *testing.T, s *SQLStore) {
 		t.Fatalf("live edit overwritten: %+v %v", got, err)
 	}
 
-	// Whichever transaction wins, an explicit removal must prevent a
-	// concurrent bootstrap from leaving a live binding behind.
+	// Whichever transaction wins, an explicit removal prevents a concurrent bootstrap leaving a live binding.
 	for i := range 10 {
 		concurrent := sampleService(v.ID, fmt.Sprintf("concurrent-%d", i))
 		start := make(chan struct{})

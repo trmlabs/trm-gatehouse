@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// A pool at the external ceiling may exist, but no entry may grant it.
 func TestExternalPoolHoldsNoEntries(t *testing.T) {
 	pools := `{"name":"p","namespace":"n","serviceAccount":"s"},{"name":"team-a","namespace":"o","serviceAccount":"s","ceiling":"external"}`
 	if _, err := Parse([]byte(`{"pools":[` + pools + `],"entries":[{` + entryBase + `}]}`)); err != nil {

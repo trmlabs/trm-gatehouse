@@ -9,8 +9,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// RequestResolver deliberately has no cache or persistence writer. Values live
-// only in the calling request and are never taken from the local secret store.
+// RequestResolver has no cache or persistence writer: values live only in the calling request and never come from the local secret store.
 type RequestResolver struct {
 	Store interface {
 		GetVaultCredentialStore(context.Context, string) (*store.VaultCredentialStore, error)

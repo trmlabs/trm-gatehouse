@@ -1,9 +1,4 @@
-// Package brokercore is the runtime glue powering Agent Vault's transparent
-// MITM proxy ingress: credential resolution behind a CredentialProvider
-// interface and session+vault resolution behind a SessionResolver interface.
-//
-// brokercore depends on broker, store, and crypto. broker stays a pure
-// config library with no runtime coupling.
+// Package brokercore is the runtime glue for the MITM proxy ingress: credential and session+vault resolution behind interfaces.
 package brokercore
 
 import (
@@ -16,20 +11,13 @@ import (
 	"github.com/Infisical/agent-vault/internal/broker"
 )
 
-// DefaultMaxResponseBytes is the default cap for response bodies on the
-// MITM proxy ingress. 0 means unlimited — response bodies are streamed
-// with a small buffer so there is no OOM risk. Operators can set a cap
-// via --max-response-bytes / AGENT_VAULT_MAX_RESPONSE_BYTES.
+// DefaultMaxResponseBytes is the default response body cap on the MITM ingress; 0 means unlimited (streamed, no OOM risk).
 const DefaultMaxResponseBytes int64 = 0
 
-// ProxyErrorHeader is the response header Agent Vault sets on broker-layer
-// error responses so SDK clients can distinguish them from upstream
-// responses that happen to share the same status code.
+// ProxyErrorHeader marks broker-layer error responses so SDK clients can tell them from upstream ones.
 const ProxyErrorHeader = "X-Agent-Vault-Proxy-Error"
 
-// HopByHopHeaders are HTTP/1.1 hop-by-hop headers that must not be
-// forwarded by a proxy. Includes Proxy-Connection — non-RFC but emitted
-// by some HTTP/1.0 clients and conventionally treated as hop-by-hop.
+// HopByHopHeaders must not be forwarded by a proxy; includes the non-RFC Proxy-Connection.
 var HopByHopHeaders = map[string]bool{
 	"Connection":          true,
 	"Keep-Alive":          true,
@@ -47,11 +35,7 @@ func IsHopByHop(name string) bool {
 	return HopByHopHeaders[http.CanonicalHeaderKey(name)]
 }
 
-// IsValidHost reports whether h is a safe hostname for use in an outbound
-// URL or CONNECT target. Rejects characters that could cause URL parsing
-// issues (userinfo injection, path separators, whitespace, control chars)
-// and enforces DNS length + no leading/trailing dot. h must NOT include a
-// port — strip it first with net.SplitHostPort if applicable.
+// IsValidHost reports whether h is a safe hostname for an outbound URL or CONNECT target; h must not include a port.
 func IsValidHost(h string) bool {
 	if h == "" || len(h) > 253 {
 		return false
@@ -64,32 +48,18 @@ func IsValidHost(h string) bool {
 	return !strings.HasPrefix(h, ".") && !strings.HasSuffix(h, ".")
 }
 
-// brokerScopedRequestHeaders are headers that authenticate the client to
-// Agent Vault itself (Proxy-Authorization on the MITM proxy ingress —
-// reaching it via either HTTPS_PROXY/CONNECT or HTTP_PROXY/absolute-form;
-// X-Vault on the control-plane endpoints used by instance-level agent
-// tokens, e.g. /discover and /v1/proposals). They must never traverse
-// the broker → target hop.
+// brokerScopedRequestHeaders authenticate the client to Agent Vault itself and must never reach the target.
 var brokerScopedRequestHeaders = map[string]bool{
 	"X-Vault":             true,
 	"Proxy-Authorization": true,
 }
 
-// IsBrokerScopedRequestHeader reports whether a request header
-// authenticates the client to Agent Vault itself and must be stripped
-// before forwarding to the target service.
+// IsBrokerScopedRequestHeader reports whether a header must be stripped before forwarding to the target.
 func IsBrokerScopedRequestHeader(name string) bool {
 	return brokerScopedRequestHeaders[http.CanonicalHeaderKey(name)]
 }
 
-// ApplyInjection writes outbound headers for a resolved InjectResult.
-// Client headers pass through except hop-by-hop, broker-scoped
-// (Proxy-Authorization, X-Vault), the keys of inject.Headers, and any names in
-// extraStrip (additional caller-specified headers). Pre-stripping
-// inject.Headers keys is what preserves the "injected always wins"
-// security invariant; it is not a perf shortcut. Per RFC 7230 §6.1,
-// any header named in the client's Connection field is also hop-by-hop
-// for that connection and is stripped.
+// ApplyInjection writes outbound headers; inject.Headers keys are stripped first so injected values always win.
 func ApplyInjection(src, dst http.Header, inject *InjectResult, extraStrip ...string) {
 	strip := make(map[string]bool, len(extraStrip)+len(inject.Headers))
 	for _, s := range extraStrip {
@@ -128,11 +98,7 @@ func helpLinks(baseURL string) string {
 	)
 }
 
-// ForbiddenHintBody returns the JSON-shaped body for a 403 response on the
-// MITM ingress when the target host is not matched by any broker service in
-// the vault. baseURL is the externally-reachable control-plane URL used to
-// build actionable help links so agents without the skill file pre-loaded
-// can self-discover available services and usage instructions.
+// ForbiddenHintBody returns the 403 JSON body when the target host matches no broker service; baseURL builds help links.
 func ForbiddenHintBody(targetHost, vaultName, baseURL string) map[string]interface{} {
 	body := map[string]interface{}{
 		"error":   "forbidden",
@@ -149,19 +115,12 @@ func ForbiddenHintBody(targetHost, vaultName, baseURL string) map[string]interfa
 	return body
 }
 
-// ShouldStripResponseHeader reports whether an upstream response header
-// must not be forwarded to the agent: hop-by-hop headers, Set-Cookie and
-// RefusalHeader. Stripping Set-Cookie prevents the upstream from planting
-// cookies in the agent's jar; stripping RefusalHeader keeps it the broker's
-// own.
+// ShouldStripResponseHeader reports whether an upstream header must not reach the agent (hop-by-hop, Set-Cookie, RefusalHeader).
 func ShouldStripResponseHeader(name string) bool {
 	return IsHopByHop(name) || strings.EqualFold(name, "Set-Cookie") || strings.EqualFold(name, RefusalHeader)
 }
 
-// WriteProxyError writes a JSON error response with Content-Type, the
-// X-Agent-Vault-Proxy-Error header (so SDKs can distinguish broker-layer
-// errors from upstream status codes that happen to match), and a
-// {error, message} body.
+// WriteProxyError writes a JSON {error, message} response with the ProxyErrorHeader set.
 func WriteProxyError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(ProxyErrorHeader, "true")
@@ -191,10 +150,7 @@ func WriteForbiddenHint(w http.ResponseWriter, targetHost, vaultName, baseURL st
 	_ = json.NewEncoder(w).Encode(ForbiddenHintBody(targetHost, vaultName, baseURL))
 }
 
-// WriteInjectError maps a CredentialProvider.Inject error to the standard
-// HTTP response on the MITM ingress. baseURL is the externally-reachable
-// control-plane URL for help links. Callers that want to log before
-// responding should do so before calling this helper.
+// WriteInjectError maps a CredentialProvider.Inject error to the standard ingress HTTP response.
 func WriteInjectError(w http.ResponseWriter, err error, targetHost, vaultName, baseURL string) {
 	switch {
 	case errors.Is(err, ErrServiceNotFound):

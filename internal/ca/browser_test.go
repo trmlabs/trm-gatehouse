@@ -23,9 +23,7 @@ func parsePEM(t *testing.T, data []byte) *x509.Certificate {
 
 func spkiHash(c *x509.Certificate) [32]byte { return sha256.Sum256(c.RawSubjectPublicKeyInfo) }
 
-// The browser CA is an intermediate under the root that may sign leaves
-// only, and every replica sharing the root derives the same key, so one pin
-// covers the fleet. A different root gives a different browser CA.
+// The browser CA is a leaf-only intermediate that every replica sharing the root derives identically; a different root gives a different CA.
 func TestBrowserCA_DerivedFromRoot(t *testing.T) {
 	dir := t.TempDir()
 	first, err := New(testMasterKey(), Options{Dir: dir})
@@ -54,9 +52,7 @@ func TestBrowserCA_DerivedFromRoot(t *testing.T) {
 	}
 }
 
-// A browser leaf names its host alone, chains leaf, browser CA, root, and
-// verifies through the browser CA. A pin on the browser CA matches it; an
-// ordinary leaf's chain never carries the browser CA, so the pin refuses it.
+// A browser leaf names its host alone and verifies through the browser CA; an ordinary leaf's chain never carries it, so the pin refuses it.
 func TestMintBrowserLeaf_ChainAndPin(t *testing.T) {
 	c := newTestCA(t, Options{ExtraSANs: []string{"gatehouse.example", "10.0.0.1"}})
 	leaf, err := c.MintBrowserLeaf("app.example.com")

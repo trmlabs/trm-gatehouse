@@ -43,10 +43,8 @@ func unresolved(t *testing.T, st *store.SQLStore) []store.DatabaseCleanup {
 	return records
 }
 
-// A restart arrives while a credential read is in flight: the broker's session
-// context ends and the minter closes. The read finishes, its lease is
-// journaled and, with no caller left to use it, revoked. Nothing is left for
-// an operator, and Close reports a complete shutdown.
+// A restart arrives while a credential read is in flight: the broker's session context ends and the minter
+// closes.
 func TestDurableLeaseCloseLetsIssuanceUnderWayFinish(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m := newDurableForTest(t, client, st)
@@ -154,9 +152,7 @@ func startMidMintHelper(t *testing.T, f *durableVaultFixture, path string) *exec
 	return cmd
 }
 
-// The incident: a routine restart sends SIGTERM to a broker process in the
-// middle of a credential read. The process drains instead of abandoning the
-// read, so it exits cleanly and leaves no unknown issuance behind.
+// The incident: a routine restart sends SIGTERM to a broker process in the middle of a credential read.
 func TestRestartMidMintLeavesNothingForTheOperator(t *testing.T) {
 	if os.Getenv("GH_MID_MINT_DB") != "" {
 		t.Skip("helper process")
@@ -187,10 +183,7 @@ func TestRestartMidMintLeavesNothingForTheOperator(t *testing.T) {
 	}
 }
 
-// A broker process killed in the middle of a credential read leaves an
-// unknown issuance. Its successor keeps the database open throughout, keeps
-// the record while Vault lists the lost credential's lease, and clears it on
-// its own once the lease is gone.
+// A broker process killed in the middle of a credential read leaves an unknown issuance.
 func TestKilledMidMintKeepsTheDatabaseOpenAndClearsWhenVaultShowsNoLease(t *testing.T) {
 	if os.Getenv("GH_MID_MINT_DB") != "" {
 		t.Skip("helper process")
@@ -250,9 +243,8 @@ func TestKilledMidMintKeepsTheDatabaseOpenAndClearsWhenVaultShowsNoLease(t *test
 	waitWithin(t, 3*time.Second, "automatic reconciliation", func() bool { return len(unresolved(t, st)) == 0 })
 }
 
-// TestMidMintHelperProcess is a broker process: it starts one credential read
-// and, on SIGTERM, stops as the server does: the session context ends, then
-// the minter closes on the server's five-second budget.
+// TestMidMintHelperProcess is a broker process: it starts one credential read and, on SIGTERM, stops as the
+// server does: the session context ends.
 func TestMidMintHelperProcess(t *testing.T) {
 	path := os.Getenv("GH_MID_MINT_DB")
 	if path == "" {
@@ -285,9 +277,7 @@ func TestMidMintHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-// A lost response in a live process: the process revokes the child token with
-// the token itself. The database keeps issuing, and the record clears once the
-// settle time has passed and Vault lists no lease for it.
+// A lost response in a live process: the process revokes the child token with the token itself.
 func TestLostResponseClearsAfterSettleWhenVaultListsNoLease(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
@@ -389,10 +379,7 @@ func TestUnresolvedUnknownIssuanceNeverClosesItsDatabase(t *testing.T) {
 	}
 }
 
-// A record from an older build names no credential path. The first request for
-// its binding is served and adopts the binding's mount and role and a token
-// expiry one TokenTTL from then; after that and the settle time, Vault's lease
-// list decides as for any other record.
+// A record from an older build names no credential path.
 func TestOlderBuildsUnknownIssuanceClearsAfterAdoption(t *testing.T) {
 	client, st, _ := durableFixture(t)
 	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
@@ -426,9 +413,8 @@ func TestOlderBuildsUnknownIssuanceClearsAfterAdoption(t *testing.T) {
 	waitWithin(t, 5*time.Second, "automatic reconciliation of the adopted record", func() bool { return len(unresolved(t, st)) == 0 })
 }
 
-// lostWithLiveLease loses a credential response whose child token cannot
-// revoke itself, so the lost lease stays live in Vault, issued an orphan's
-// age ago.
+// lostWithLiveLease loses a credential response whose child token cannot revoke itself, so the lost lease
+// stays live in Vault, issued an orphan's age ago.
 func lostWithLiveLease(t *testing.T, m *DurableLeaseMinter, f *durableVaultFixture) {
 	t.Helper()
 	f.mu.Lock()
@@ -445,9 +431,8 @@ func lostWithLiveLease(t *testing.T, m *DurableLeaseMinter, f *durableVaultFixtu
 	f.mu.Unlock()
 }
 
-// Once the child token is dead, an unaccounted lease older than any issuance
-// still under way is an orphan: the broker revokes it by path and clears the
-// record, without waiting for Vault.
+// Once the child token is dead, an unaccounted lease older than any issuance still under way is an orphan:
+// the broker revokes it by path and clears the record, without waiting for Vault.
 func TestTheBrokerRevokesAnOrphanLease(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{
@@ -466,9 +451,8 @@ func TestTheBrokerRevokesAnOrphanLease(t *testing.T) {
 	}
 }
 
-// The one case that closes a database: Vault cannot revoke the orphan lease
-// (the database refuses to drop the role). Only that database closes; others
-// keep issuing; it reopens on its own once the revocation succeeds.
+// The one case that closes a database: Vault cannot revoke the orphan lease (the database refuses to drop the
+// role).
 func TestAnUnrevocableOrphanClosesOnlyItsOwnDatabase(t *testing.T) {
 	client, st, f := durableFixture(t)
 	m, err := NewDurableLeaseMinter(context.Background(), client, st, DurableLeaseOptions{

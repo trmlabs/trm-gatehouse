@@ -105,9 +105,7 @@ var vaultCredentialStoreCmd = &cobra.Command{
 	Short: "Inspect the credential store backing a vault",
 }
 
-// infisicalStorePayloadFromFlags validates the shared Infisical flags and
-// returns the {kind, config, poll_interval_seconds} block used by both
-// `vault create` and `vault credential-store set`.
+// infisicalStorePayloadFromFlags validates the Infisical flags and returns the credential-store payload.
 func infisicalStorePayloadFromFlags(cmd *cobra.Command) (map[string]interface{}, error) {
 	projectID, _ := cmd.Flags().GetString("infisical-project-id")
 	environment, _ := cmd.Flags().GetString("infisical-environment")
@@ -286,8 +284,7 @@ func printCredentialStore(out io.Writer, cs map[string]interface{}) {
 			fmt.Fprintf(out, "  Path:        %v\n", cfg["secret_path"])
 			fmt.Fprintf(out, "  KV version:  %v\n", cfg["kv_version"])
 		default:
-			// Unknown kind (e.g. a newer store this CLI predates): print the
-			// raw config rather than mislabeling it with another store's fields.
+			// Unknown kind (a newer store): print the raw config rather than mislabel it.
 			for k, v := range cfg {
 				fmt.Fprintf(out, "  %s: %v\n", k, v)
 			}

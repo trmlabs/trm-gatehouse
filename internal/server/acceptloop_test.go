@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// scriptedListener answers each Accept with the next scripted result, then
-// reports itself closed.
 type scriptedListener struct {
 	mu      sync.Mutex
 	results []acceptResult
@@ -48,9 +46,6 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-// A temporary accept error (descriptor exhaustion, an aborted connection) is
-// logged and retried, so the next connection is still served. Before, the
-// first such error ended the loop while the port stayed bound.
 func TestAcceptLoopLogsAndRetriesTemporaryErrors(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
@@ -74,8 +69,6 @@ func TestAcceptLoopLogsAndRetriesTemporaryErrors(t *testing.T) {
 	}
 }
 
-// Any other accept error is logged and returned, so the caller can stop the
-// server and the Pod restarts instead of refusing every client in silence.
 func TestAcceptLoopReturnsAPermanentError(t *testing.T) {
 	boom := errors.New("the listener is broken")
 	l := &scriptedListener{results: []acceptResult{{err: boom}, {conn: nil}}}
@@ -93,9 +86,6 @@ func TestAcceptLoopReturnsAPermanentError(t *testing.T) {
 	}
 }
 
-// The same holds for both listeners that use the loop: a temporary error does
-// not stop the static-token listener serving, and a permanent one ends it
-// with the error.
 func TestServeStaticTokenSurvivesTemporaryAndReturnsPermanentErrors(t *testing.T) {
 	l := &scriptedListener{results: []acceptResult{{err: &net.OpError{Op: "accept", Err: syscall.ENFILE}}}}
 	if err := serveStaticToken(l, nil, slog.New(slog.DiscardHandler)); !errors.Is(err, net.ErrClosed) {

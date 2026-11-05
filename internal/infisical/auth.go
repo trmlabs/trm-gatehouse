@@ -27,9 +27,7 @@ type authProbe struct {
 	required []string // all required to consider this method "configured"
 }
 
-// authProbes is the priority order; first complete row wins. GCP IAM and
-// GCP ID Token share INFISICAL_GCP_AUTH_IDENTITY_ID; IAM ranks first so its
-// IAM-only key-file path tips selection.
+// authProbes is priority order, first complete row wins; GCP IAM outranks GCP ID Token though both share INFISICAL_GCP_AUTH_IDENTITY_ID.
 var authProbes = []authProbe{
 	{AuthUniversal, []string{"INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET"}},
 	{AuthKubernetes, []string{"INFISICAL_KUBERNETES_IDENTITY_ID"}},

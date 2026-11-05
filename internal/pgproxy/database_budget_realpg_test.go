@@ -33,9 +33,8 @@ func (l storeLedger) Remove(ctx context.Context, id string) error {
 	return l.st.RemoveBrokerSession(ctx, id)
 }
 
-// Two broker replicas on one PostgreSQL store hold a database's maxConns
-// across the fleet: counted on the real database, together they hold no more
-// connections than it, however the load is spread between them.
+// Two broker replicas on one PostgreSQL store hold a database's maxConns across the fleet: counted on the
+// real database, together they hold no more connections than it.
 func TestRealPostgres_DatabaseBudgetHoldsAcrossReplicas(t *testing.T) {
 	upstream, adminDSN, database, storeDSN := os.Getenv("AV_TEST_PG_UPSTREAM"), os.Getenv("AV_TEST_PG_ADMIN"), os.Getenv("AV_TEST_PG_DB"), os.Getenv("AV_TEST_STORE_PG_URL")
 	if upstream == "" || adminDSN == "" || database == "" || storeDSN == "" {

@@ -13,9 +13,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/pgproxy"
 )
 
-// NewCatalogGraphResolver resolves graph databases (kind memgraph) from a live
-// catalog on every Bolt connection and at every recheck, with the same grant,
-// tier and entitlement decision as a PostgreSQL database.
+// NewCatalogGraphResolver resolves graph databases from the live catalog on every Bolt connection and recheck.
 func NewCatalogGraphResolver(catalog interface{ Current() httpcatalog.Catalog }, runner authorize.Verifier, entitlements *entitlement.Cache, sessions authorize.Binder) pgproxy.GraphResolver {
 	return catalogGraphResolver{catalogDatabaseResolver{catalog: catalog, runner: runner, entitlements: entitlements, sessions: sessions}}
 }
@@ -42,9 +40,7 @@ func (r catalogGraphResolver) ResolveGraph(ctx context.Context, scope pgproxy.Ag
 		Write: m.Access == "write"}, nil
 }
 
-// NewVaultGraphLogins reads graph database logins through the catalog's key
-// cache: fields username and password of the entry's login secret, each read
-// from Vault about once a minute.
+// NewVaultGraphLogins reads graph logins (username, password) from Vault through the catalog's key cache.
 func NewVaultGraphLogins(keys *httpcatalog.Keys) pgproxy.GraphLogins {
 	return vaultGraphLogins{keys: keys}
 }

@@ -44,10 +44,7 @@ func (s *recordingSink) snapshot() []requestlog.Record {
 	return out
 }
 
-// waitForRows polls until the sink holds at least n records, then returns
-// them. forwardRequest emits its log row *after* the response body has been
-// flushed to the client, so a test that reads the sink the instant its
-// request returns races the server goroutine and can observe a short count.
+// waitForRows polls until the sink holds n records; the log row is emitted after the body is flushed, so reading immediately races.
 func (s *recordingSink) waitForRows(t *testing.T, n int) []requestlog.Record {
 	t.Helper()
 	const timeout = 2 * time.Second
@@ -64,10 +61,7 @@ func (s *recordingSink) waitForRows(t *testing.T, n int) []requestlog.Record {
 	}
 }
 
-// dialProxy opens a plain TCP connection to the proxy listener (no
-// CONNECT, no absolute-form request). Tests use it to write malformed
-// or hand-shaped request lines so we can exercise the dispatch
-// validator directly.
+// dialProxy opens a plain TCP connection so tests can write malformed request lines.
 func dialProxy(t *testing.T, proxyURL *url.URL) net.Conn {
 	t.Helper()
 	conn, err := net.Dial("tcp", proxyURL.Host)
@@ -77,11 +71,7 @@ func dialProxy(t *testing.T, proxyURL *url.URL) net.Conn {
 	return conn
 }
 
-// writeRawRequestLine writes an arbitrary request line + headers to the
-// proxy and returns the parsed response. The HTTP method passed to
-// http.ReadResponse is informational only (controls how the reader
-// handles bodies for HEAD); for our tests "GET" is fine across the
-// board.
+// writeRawRequestLine writes a raw request line and headers and returns the parsed response.
 func writeRawRequestLine(t *testing.T, conn net.Conn, line string, headers map[string]string) *http.Response {
 	t.Helper()
 	var buf bytes.Buffer
@@ -100,12 +90,7 @@ func writeRawRequestLine(t *testing.T, conn net.Conn, line string, headers map[s
 	return resp
 }
 
-// TestMITMForwardPlainHTTPInjectsCredentials is the flagship test for
-// the plain-HTTP forward-proxy path. A standard Go client with
-// HTTPS_PROXY pointing at the proxy sends an absolute-form
-// request to a plain-HTTP upstream; the proxy authenticates, injects
-// the configured credential, strips broker-scoped headers, and returns
-// the upstream response.
+// TestMITMForwardPlainHTTPInjectsCredentials covers the plain-HTTP forward path: auth, credential injection, header stripping.
 func TestMITMForwardPlainHTTPInjectsCredentials(t *testing.T) {
 	var sawAuth, sawClientHeader, sawProxyAuth, sawHost, sawMethod, sawPath string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -169,18 +154,13 @@ func TestMITMForwardPlainHTTPInjectsCredentials(t *testing.T) {
 	if sawProxyAuth != "" {
 		t.Errorf("upstream Proxy-Authorization = %q; must be stripped", sawProxyAuth)
 	}
-	// RFC 7230 §5.4: forwarded Host MUST equal the URI authority,
-	// including non-default port. handleForward canonicalises target
-	// as host:port and forwardRequest sets outReq.Host = target.
+	// Forwarded Host must equal the URI authority, including a non-default port.
 	if sawHost != upstreamAuthority {
 		t.Errorf("upstream Host = %q, want %q", sawHost, upstreamAuthority)
 	}
 }
 
-// TestMITMForwardRejectsHTTPSScheme: a client erroneously sending
-// `POST https://upstream/...` (absolute form) to the forward-proxy
-// must be rejected with 400, not silently TLS-stripped. The hint
-// nudges the client toward CONNECT for HTTPS upstreams.
+// TestMITMForwardRejectsHTTPSScheme expects 400 for an absolute-form https:// request rather than silently stripping TLS.
 func TestMITMForwardRejectsHTTPSScheme(t *testing.T) {
 	proxyURL, _, _ := setupProxy(t,
 		validTokenResolver("av_sess_ok", &brokercore.ProxyScope{VaultID: "v1", VaultName: "default", VaultRole: "proxy"}),
@@ -207,9 +187,7 @@ func TestMITMForwardRejectsHTTPSScheme(t *testing.T) {
 	}
 }
 
-// TestMITMForwardRejectsNonHTTPSchemes: schemes other than http (file,
-// gopher, ftp, ws) reach the listener over TLS but are rejected as
-// malformed forward-proxy requests.
+// TestMITMForwardRejectsNonHTTPSchemes expects non-http schemes (file, gopher, ftp, ws) to be rejected as malformed.
 func TestMITMForwardRejectsNonHTTPSchemes(t *testing.T) {
 	proxyURL, _, _ := setupProxy(t,
 		validTokenResolver("av_sess_ok", &brokercore.ProxyScope{VaultID: "v1", VaultName: "default", VaultRole: "proxy"}),
@@ -302,10 +280,7 @@ func TestMITMForwardVaultHintMismatchReturns403(t *testing.T) {
 	}
 }
 
-// TestMITMForwardStripsHopByHopHeaders verifies RFC 7230 §6.1: any
-// header named in the client's Connection field is stripped before
-// forwarding, alongside the static hop-by-hop set and the broker-
-// scoped Proxy-Authorization / X-Vault headers.
+// TestMITMForwardStripsHopByHopHeaders verifies headers named in Connection, the static hop-by-hop set, Proxy-Authorization and X-Vault are stripped.
 func TestMITMForwardStripsHopByHopHeaders(t *testing.T) {
 	var sawCustom, sawConnection, sawProxyAuth, sawXVault, sawTE string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -362,10 +337,7 @@ func TestMITMForwardStripsHopByHopHeaders(t *testing.T) {
 	}
 }
 
-// TestMITMForwardWebSocketPlainHTTP: a ws:// upgrade through the
-// forward proxy succeeds; frames pipe both ways. Exercises the
-// scheme-aware branch in dialWebSocketUpstream that skips TLS for
-// http:// upstreams.
+// TestMITMForwardWebSocketPlainHTTP checks a ws:// upgrade through the forward proxy pipes frames both ways.
 func TestMITMForwardWebSocketPlainHTTP(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
@@ -455,10 +427,7 @@ func TestMITMForwardWebSocketPlainHTTP(t *testing.T) {
 	}
 }
 
-// TestMITMForwardSSRFLoopbackBlocked: with the upstream Transport
-// configured with netguard.SafeDialContext(false) (no allowlist), a
-// forward request to 127.0.0.1 must be rejected at dial time and
-// surfaced as 502.
+// TestMITMForwardSSRFLoopbackBlocked expects a forward request to loopback to fail at dial time as 502 under SafeDialContext(false).
 func TestMITMForwardSSRFLoopbackBlocked(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "should-not-reach")
@@ -472,9 +441,7 @@ func TestMITMForwardSSRFLoopbackBlocked(t *testing.T) {
 		upstreamHost: {result: &brokercore.InjectResult{Passthrough: true}},
 	}}
 	proxyURL, clientRoots, p := setupProxy(t, sr, cp)
-	// Override the dialler with a stricter SafeDialContext that blocks
-	// loopback (setupProxy seeded ALLOW_PRIVATE_RANGES=true for the
-	// other tests; we bypass that policy here directly).
+	// Use a stricter SafeDialContext that blocks loopback; setupProxy allows private ranges for other tests.
 	p.upstream.DialContext = netguard.SafeDialContext(false)
 
 	client := newTrustingClient(proxyURL, url.User("av_sess_ok"), clientRoots)
@@ -488,9 +455,7 @@ func TestMITMForwardSSRFLoopbackBlocked(t *testing.T) {
 	}
 }
 
-// TestMITMForwardEmitsRequestLogRow asserts the audit row shape on the
-// plain-HTTP forward path: ingress, method, host (with port), path,
-// vault id, actor type+id, status.
+// TestMITMForwardEmitsRequestLogRow asserts the audit row fields on the plain-HTTP forward path.
 func TestMITMForwardEmitsRequestLogRow(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -584,10 +549,7 @@ func TestMITMForwardEmitsRequestLogRow(t *testing.T) {
 	}
 }
 
-// TestMITMForwardKeepalivePersistsAcrossRequests: two back-to-back
-// forward requests over the same TLS-to-proxy connection both succeed.
-// Per-request scope resolution and per-request EnforceProxy must work
-// without state leaks between requests on the keepalive channel.
+// TestMITMForwardKeepalivePersistsAcrossRequests checks two requests on one connection succeed without state leaking between them.
 func TestMITMForwardKeepalivePersistsAcrossRequests(t *testing.T) {
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -633,19 +595,10 @@ func TestMITMForwardKeepalivePersistsAcrossRequests(t *testing.T) {
 	}
 }
 
-// TestMITMForwardIPv6PreservesHostHeader locks in the Host-header
-// port-preservation fix on the IPv6 forward-proxy path: outReq.Host
-// must equal target ("[::1]:port"), not the port-stripped form ("::1")
-// the old code emitted. The request line carries an explicit port so
-// the no-port canonicalisation branch (URL.Hostname/Port instead of
-// net.SplitHostPort) is not driven here — exercising that end-to-end
-// would require binding port 80 on ::1. Sending raw via dialProxyTLS
-// because Go's http.Client rewrites URLs through ProxyURL in ways
-// that would obscure what we want to assert.
+// TestMITMForwardIPv6PreservesHostHeader asserts outReq.Host is "[::1]:port", not the port-stripped form.
+// Sent raw via dialProxyTLS because http.Client rewrites URLs through ProxyURL.
 func TestMITMForwardIPv6PreservesHostHeader(t *testing.T) {
-	// Bind an upstream on an ephemeral ::1 port so we can send an
-	// IPv6-literal-with-port URL through the forward proxy. SkipNow if
-	// the host has no IPv6 loopback (CI sometimes).
+	// Bind an upstream on an ephemeral ::1 port; skip if the host has no IPv6 loopback.
 	l, err := net.Listen("tcp", "[::1]:0")
 	if err != nil {
 		t.Skipf("no IPv6 loopback available: %v", err)

@@ -1,6 +1,4 @@
-// Package actionref provides a local acceptance reference for fixed read actions.
-// It is not wired into the server. Deployment must supply a trusted identity
-// verifier, an authoritative policy store, and an isolated credential proxy.
+// Package actionref is a local acceptance reference for fixed read actions; it is not wired into the server.
 package actionref
 
 import (
@@ -32,7 +30,6 @@ type Config struct {
 var errDenied = errors.New("access withdrawn")
 
 // New serves only POST /actions/read with an empty body and no query string.
-// Upstream routing and output fields are configured by trusted code.
 func New(c Config) (http.Handler, error) {
 	u, err := url.Parse(c.Upstream)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || c.Verify == nil || c.Allow == nil || c.Client == nil || len(c.Fields) == 0 {

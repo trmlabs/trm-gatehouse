@@ -13,22 +13,7 @@ interface InternalArgs {
   vaultName: string;
 }
 
-/**
- * Vault-scoped client for Agent Vault.
- *
- * Use this when you have a vault-scoped session token (e.g. minted by
- * `AgentVault.vault(name).sessions.create()` or via `vault run` / `vault token`).
- *
- * ```typescript
- * // Auto-detect from environment variables
- * const vault = new VaultClient();
- *
- * // Explicit config
- * const vault = new VaultClient({ token: "...", address: "..." });
- * ```
- *
- * Can also be obtained via `AgentVault.vault(name)` for instance-level tokens.
- */
+/** Vault-scoped client for Agent Vault, built from a vault-scoped session token. */
 export class VaultClient {
   /** @internal */
   readonly _httpClient: HttpClient;
@@ -36,24 +21,13 @@ export class VaultClient {
   /** Vault name, if known. Undefined for standalone vault-scoped tokens. */
   readonly name: string | undefined;
 
-  /**
-   * Sessions resource for minting vault-scoped tokens.
-   * Only available when the vault name is known (i.e. created via `AgentVault.vault(name)`).
-   * Undefined for standalone VaultClient constructed with a vault-scoped token.
-   */
+  /** Sessions resource; only set when the vault name is known. */
   readonly sessions: SessionsResource | undefined;
 
-  /**
-   * Services resource for managing vault services (proxy rules).
-   * Only available when the vault name is known (i.e. created via `AgentVault.vault(name)`).
-   * Undefined for standalone VaultClient constructed with a vault-scoped token.
-   */
+  /** Services resource; only set when the vault name is known. */
   readonly services: ServicesResource | undefined;
 
-  /**
-   * Credentials resource for managing vault credentials (secrets).
-   * Available on all VaultClient instances — both via `AgentVault.vault(name)` and standalone.
-   */
+  /** Credentials resource; available on all instances. */
   readonly credentials: CredentialsResource;
 
   constructor(config?: VaultClientConfig | InternalArgs) {

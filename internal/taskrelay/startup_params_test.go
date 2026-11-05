@@ -9,9 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// What real drivers send at startup reaches the broker unchanged: JDBC's
-// defaults, and libpq with PGTZ and PGDATESTYLE set. The broker applies the
-// same rule (brokercore.StartupValue), so it accepts what passes here.
 func TestPostgresPassesDriverStartupParameters(t *testing.T) {
 	f := newRelayFixture(t)
 	l, e := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{f.cert}})
@@ -45,7 +42,6 @@ func TestPostgresPassesDriverStartupParameters(t *testing.T) {
 	drivers := map[string]map[string]string{
 		"jdbc": {"client_encoding": "UTF8", "DateStyle": "ISO", "TimeZone": "America/Denver", "extra_float_digits": "2",
 			"application_name": "PostgreSQL JDBC Driver"},
-		// libpq sends PGTZ and PGDATESTYLE under lowercase keys.
 		"psql with PGTZ and PGDATESTYLE": {"timezone": "Asia/Tokyo", "datestyle": "ISO, DMY", "client_encoding": "SQL_ASCII",
 			"application_name": "psql"},
 		"search_path and conforming strings": {"search_path": "public, analytics", "standard_conforming_strings": "on",

@@ -95,9 +95,7 @@ func TestFindUnresolvedCredentials(t *testing.T) {
 	}
 }
 
-// buildService prompts for Name explicitly, so the merged slice that
-// reaches broker.Validate carries every name the user typed and does
-// not need any client-side backfill step.
+// buildService prompts for Name explicitly, so no client-side name backfill is needed.
 func TestInteractiveServiceSetMergeReplaceFeedsValidate(t *testing.T) {
 	builderOutput := []broker.Service{
 		{Name: "stripe", Host: "api.stripe.com", Auth: broker.Auth{Type: "bearer", Token: "STRIPE_KEY"}},

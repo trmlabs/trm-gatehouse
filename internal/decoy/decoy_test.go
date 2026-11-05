@@ -39,8 +39,7 @@ func basic(user, password string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+password))
 }
 
-// Each place a request can carry a credential reports the decoy's label and
-// that place.
+// Each place a request can carry a credential reports the decoy's label and that place.
 func TestRequestFindsADecoyOnEverySurface(t *testing.T) {
 	set := testSet(t)
 	for _, tc := range []struct {
@@ -91,8 +90,7 @@ func TestBodyAndPasswordFindADecoy(t *testing.T) {
 	}
 }
 
-// A JSON control escape ends the text before a decoy: the escape's letter
-// would otherwise run into it, as "out:\n<decoy>" did.
+// A JSON control escape ends the text before a decoy, as in "out:\n<decoy>".
 func TestJSONControlEscapeBeforeADecoy(t *testing.T) {
 	set := testSet(t)
 	for _, escape := range []string{`\n`, `\r`, `\t`, `\b`, `\f`} {
@@ -106,8 +104,7 @@ func TestJSONControlEscapeBeforeADecoy(t *testing.T) {
 	}
 }
 
-// Only a whole decoy matches: not a part of one, not one inside a longer run
-// of the same characters, and not one character off.
+// Only a whole decoy matches: not a part, not one inside a longer run, not one character off.
 func TestOnlyAWholeDecoyMatches(t *testing.T) {
 	set := testSet(t)
 	near := []byte(decoyToken)
@@ -155,8 +152,7 @@ func TestEmptySetMatchesNothing(t *testing.T) {
 	}
 }
 
-// A value that could match ordinary traffic, or that the scanner could not
-// see whole, is left out and named by label only.
+// A value that could match ordinary traffic or that the scanner could not see whole is left out, named by label only.
 func TestNewSetRejectsUnsafeValues(t *testing.T) {
 	values := map[string]string{
 		"p/short":       "abc",
@@ -194,8 +190,7 @@ func TestNewSetRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
-// The set scales to a fleet's worth of decoys: every one is found, and a body
-// scan stays one pass over the bytes.
+// Every decoy of a fleet-sized set is found in one pass over the body.
 func TestLargeSet(t *testing.T) {
 	const n = 100_000
 	values := make(map[string]string, n)

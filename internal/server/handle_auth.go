@@ -49,8 +49,7 @@ func (s *Server) generateAndSendVerificationCode(ctx context.Context, email stri
 		return false, fmt.Errorf("failed to create verification: %w", err)
 	}
 
-	// Send the verification code by email only. The code is a credential:
-	// never write it to logs, which are copied to shared log storage.
+	// The code is a credential: send by email only, never log it.
 	emailSent := false
 	if s.notifier.Enabled() {
 		body := strings.Replace(verificationCodeEmailHTML, "{{CODE}}", html.EscapeString(code), 1)
@@ -114,9 +113,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If an inactive user exists, resend a verification code but do NOT
-	// overwrite their password — that would let an unauthenticated attacker
-	// silently replace the password before the legitimate user verifies.
+	// Resend a code for an inactive user but never overwrite the password: an unauthenticated attacker could replace it.
 	if existing != nil && !existing.IsActive {
 		_, err := s.generateAndSendVerificationCode(ctx, req.Email)
 		if errors.Is(err, errTooManyPendingCodes) {
@@ -154,9 +151,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// First user: owner created successfully.
 		s.initialized.Store(true)
 
-		// Auto-login: token + expires_at are returned alongside the
-		// cookie so non-cookie clients (the CLI) can persist the
-		// session without a follow-up /v1/auth/login.
+		// Return token and expires_at too so non-cookie clients (the CLI) can persist the session.
 		params := newUserSessionParams(r, user.ID)
 		params.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
 		session, err := s.store.CreateUserSession(ctx, params)
@@ -276,9 +271,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Reset rate limit on successful verification.
 	s.rateLimit.FailureReset(ratelimit.TierVerifyFailure, verifyKey)
 
-	// Auto-login: token + expires_at are returned alongside the cookie
-	// so non-cookie clients (the CLI) can persist the session without a
-	// follow-up /v1/auth/login. Mirrors handleRegister's first-user path.
+	// Return token and expires_at so the CLI can persist the session without a follow-up login.
 	params := newUserSessionParams(r, user.ID)
 	params.DeviceLabel = truncateDeviceLabel(req.DeviceLabel)
 	session, err := s.store.CreateUserSession(ctx, params)
@@ -297,10 +290,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// verifyResponse is the JSON shape returned by POST /v1/auth/verify on
-// success. Mirrors registerResponse so the CLI's verify path can persist
-// the auto-login session without a follow-up /v1/auth/login (which would
-// orphan the verify-time row for the full 30-day idle window).
+// verifyResponse is the POST /v1/auth/verify result; it carries the auto-login session like registerResponse.
 type verifyResponse struct {
 	Email         string `json:"email"`
 	Authenticated bool   `json:"authenticated"`
@@ -399,8 +389,7 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send the reset code by email only. The code resets an account,
-	// including the owner's: never write it to logs.
+	// The reset code can take over any account, including the owner's: never log it.
 	emailSent := false
 	if s.notifier.Enabled() {
 		body := strings.Replace(passwordResetEmailHTML, "{{CODE}}", html.EscapeString(code), 1)
@@ -630,9 +619,7 @@ func userKDFParams(u *store.User) crypto.KDFParams {
 	}
 }
 
-// clientIP extracts the client's IP address. X-Forwarded-For is only trusted
-// when AGENT_VAULT_TRUSTED_PROXIES is configured and the direct connection
-// comes from a listed proxy. Falls back to RemoteAddr for direct connections.
+// clientIP trusts X-Forwarded-For only from a listed AGENT_VAULT_TRUSTED_PROXIES proxy, else RemoteAddr.
 func clientIP(r *http.Request) string {
 	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if remoteIP == "" {
@@ -666,12 +653,8 @@ func clientIP(r *http.Request) string {
 	return remoteIP
 }
 
-// newUserSessionParams builds a CreateUserSessionParams populated with the
-// caller's IP and User-Agent. Centralized so every login path (password,
-// verification, password reset) records the same shape and applies the
-// same TTLs. DeviceLabel is left empty here because only the password
-// login path receives one in the request body — other paths set it
-// post-construction if needed.
+// newUserSessionParams builds a CreateUserSessionParams with the caller's IP and User-Agent and the shared TTLs.
+// DeviceLabel is left empty because only the password login path receives one in the request body.
 func newUserSessionParams(r *http.Request, userID string) store.CreateUserSessionParams {
 	return store.CreateUserSessionParams{
 		UserID:        userID,
@@ -689,10 +672,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limit by IP (read-only peek — the ipAuth middleware already
-	// recorded this request) and by email (reject if either is full).
-	// Normalize the email key so case/whitespace variations don't
-	// let an attacker bypass the email bucket for a legitimate user.
+	// Rate limit by IP (peek only, ipAuth already recorded it) and by normalized email so case variations cannot bypass the bucket.
 	ip := clientIP(r)
 	ipDecision := s.rateLimit.Check(ratelimit.TierAuth, "ip:"+ip)
 	emailDecision := s.rateLimit.Allow(ratelimit.TierAuth, "email:"+strings.ToLower(strings.TrimSpace(req.Email)))
@@ -798,9 +778,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Carry the caller's device_label onto the post-change session so
-	// `auth sessions list` keeps showing the same DEVICE label across
-	// password changes. Captured before DeleteUserSessions wipes the row.
+	// Carry device_label onto the new session; capture it before DeleteUserSessions wipes the row.
 	var carryDeviceLabel string
 	if caller := sessionFromContext(ctx); caller != nil {
 		carryDeviceLabel = caller.DeviceLabel

@@ -289,9 +289,7 @@ func TestServerSubcommandsRegistered(t *testing.T) {
 	}
 }
 
-// TestServerCmd_RefusesWhenPIDFileLive ensures the server command bails out
-// at the pre-flight stage when another live server already owns the PID file,
-// without prompting for a password and without touching the file.
+// TestServerCmd_RefusesWhenPIDFileLive checks the command exits before prompting when a live server owns the PID file.
 func TestServerCmd_RefusesWhenPIDFileLive(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -312,9 +310,7 @@ func TestServerCmd_RefusesWhenPIDFileLive(t *testing.T) {
 		t.Fatalf("seed pidfile: %v", err)
 	}
 
-	// Set a master password env var that would normally drive setup; the
-	// pre-flight check must fire before we ever reach unlockOrSetup, so this
-	// value should be irrelevant.
+	// The pre-flight check must fire before unlockOrSetup, so this value is irrelevant.
 	t.Setenv("AGENT_VAULT_MASTER_PASSWORD", "irrelevant-because-we-bail-first")
 
 	_, err := executeCommand("server", "--port", "0", "--mitm-port", "0")

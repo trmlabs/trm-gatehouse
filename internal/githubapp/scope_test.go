@@ -17,8 +17,7 @@ import (
 	"time"
 )
 
-// scopeGitHub is a fake GitHub for the installation scope check: the
-// installation's settings, metadata-only listing tokens and its repositories.
+// scopeGitHub is a fake GitHub for the installation scope check.
 type scopeGitHub struct {
 	mu          sync.Mutex
 	appID       int64
@@ -29,7 +28,7 @@ type scopeGitHub struct {
 	settingsErr int
 	wideMint    bool
 	listErr     int
-	stateless   bool // mint GitHub's longer ghs_<app id>_<JWT> tokens
+	stateless   bool // mint longer ghs_<app id>_<JWT> tokens
 	settings    int  // GET /app/installations/42 calls
 	listMints   int  // metadata-only tokens
 	repoMints   int  // one-repository tokens
@@ -166,9 +165,7 @@ func TestScopeInsideCatalogMintsAndRevokesListingToken(t *testing.T) {
 	}
 }
 
-// An installation that also reaches repositories the catalog does not list
-// (or every repository) is reported, and the listed repositories keep their
-// tokens: one App installed somewhere new never takes down every pool.
+// Unlisted reach is reported and listed repositories keep their tokens.
 func TestScopeReachBeyondTheCatalogKeepsListedRepositories(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"all repositories":    func(g *scopeGitHub) { g.selection = "all" },
@@ -189,8 +186,7 @@ func TestScopeReachBeyondTheCatalogKeepsListedRepositories(t *testing.T) {
 	}
 }
 
-// Refuse mode never mints for a repository the catalog does not list, even
-// one the installation reaches, and asks GitHub nothing for it.
+// Refuse mode never mints for an unlisted repository and asks GitHub nothing for it.
 func TestScopeRefusesOnlyTheUnlistedRepository(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	g.mu.Lock()
@@ -211,8 +207,7 @@ func TestScopeRefusesOnlyTheUnlistedRepository(t *testing.T) {
 	}
 }
 
-// A repository list that cannot be read leaves no repository's place known,
-// so refuse mode stops the installation's tokens until a check succeeds.
+// An unreadable repository list stops the installation's tokens in refuse mode until a check succeeds.
 func TestScopeUnreadableListingRefuses(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	var logs bytes.Buffer
@@ -231,8 +226,7 @@ func TestScopeUnreadableListingRefuses(t *testing.T) {
 	}
 }
 
-// Settings wider than the catalog needs are reported once, and git keeps
-// working: the broker requests only what each token needs.
+// Settings wider than the catalog needs are reported once, and git keeps working.
 func TestScopeWarnsOnWiderSettings(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"pull requests":        func(g *scopeGitHub) { g.permissions["pull_requests"] = "write" },
@@ -277,8 +271,7 @@ func TestScopeAllowsPullRequestsOnlyWithAGitHubAPIEntry(t *testing.T) {
 	}
 }
 
-// An Actions read grant also reads check runs and commit statuses, so an
-// installation holding them is not reported.
+// An Actions read grant also reads check runs and statuses, so holding them is not reported.
 func TestScopeAllowsChecksAndStatusesWithActions(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	var logs bytes.Buffer
@@ -297,15 +290,16 @@ func TestScopeAllowsChecksAndStatusesWithActions(t *testing.T) {
 	}
 }
 
-// A CI restart grant holds Actions write, so an installation holding it is
-// not reported; one holding it without that grant is.
+// Actions write is reported unless a CI restart grant holds it.
 func TestScopeAllowsActionsWriteOnlyWithARestartGrant(t *testing.T) {
 	for _, granted := range []bool{true, false} {
 		g, m := newScopeGitHub(t)
 		var logs bytes.Buffer
 		m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 		g.permissions["actions"], g.repos = "write", []string{"example-org/example-repo"}
-		m.Scope = func(int64) Scope { return Scope{Repos: []string{"example-org/example-repo"}, Actions: true, ActionsWrite: granted} }
+		m.Scope = func(int64) Scope {
+			return Scope{Repos: []string{"example-org/example-repo"}, Actions: true, ActionsWrite: granted}
+		}
 		if _, err := m.Token(context.Background(), app, "example-org/example-repo", ActionsWrite); err != nil {
 			t.Fatalf("granted=%v: %v", granted, err)
 		}
@@ -371,8 +365,7 @@ func TestScopeReadsEveryPageWithNoCap(t *testing.T) {
 		t.Fatalf("read %d pages, want 11", pages)
 	}
 
-	// Unlisted repositories on the last page are found; a few are named and
-	// the rest counted.
+	// Unlisted repositories on the last page are found; a few are named, the rest counted.
 	g2, m2 := newScopeGitHub(t)
 	var logs bytes.Buffer
 	m2.Log = slog.New(slog.NewJSONHandler(&logs, nil))
@@ -386,8 +379,7 @@ func TestScopeReadsEveryPageWithNoCap(t *testing.T) {
 	}
 }
 
-// Warn mode reports reach beyond the catalog and keeps serving; the
-// one-repository mint and the wide-token revoke still hold.
+// Warn mode reports unlisted reach and keeps serving; one-repository mints and wide-token revokes still hold.
 func TestWarnModeServesAndKeepsThePerTokenLimits(t *testing.T) {
 	for name, widen := range map[string]func(*scopeGitHub){
 		"all repositories":    func(g *scopeGitHub) { g.selection = "all" },
@@ -434,8 +426,7 @@ func TestScopeModeDefaultsToRefuse(t *testing.T) {
 	}
 }
 
-// Concurrent callers share one check per installation, and the check runs
-// outside the lock: a slow GitHub never holds the verdicts.
+// Concurrent callers share one check per installation, which runs outside the lock.
 func TestScopeChecksOncePerInstallationOutsideTheLock(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	release, reached := make(chan struct{}), make(chan struct{}, 1)
@@ -471,8 +462,7 @@ func TestScopeChecksOncePerInstallationOutsideTheLock(t *testing.T) {
 	}
 	close(release)
 	wg.Wait()
-	// The catalog changed mid-check, so that verdict is not kept: the
-	// waiting callers share exactly one fresh check.
+	// The catalog changed mid-check, so that verdict is dropped and waiters share one fresh check.
 	if settings, _, _, _ := g.counts(); settings != 2 {
 		t.Fatalf("%d checks for 50 callers and one catalog change", settings)
 	}
@@ -498,8 +488,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// A caller that goes away mid-check does not cancel the shared check: the
-// verdict is the installation's, not that caller's.
+// A departing caller does not cancel the shared check.
 func TestScopeCheckOutlivesItsCaller(t *testing.T) {
 	g, m := newScopeGitHub(t)
 	release, reached := make(chan struct{}), make(chan struct{}, 1)

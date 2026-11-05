@@ -15,9 +15,8 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// DatabaseSession retains its child token only in memory. Persist Accessor before
-// ReadCredential. Revocation requests cleanup without touching other sessions;
-// an unknown issuance still requires database evidence before reopening access.
+// DatabaseSession keeps its child token only in memory; persist Accessor before ReadCredential.
+// Revocation touches no other session; an unknown issuance still needs database evidence before access reopens.
 type DatabaseSession struct {
 	Accessor    string
 	ExpiresAt   time.Time
@@ -26,8 +25,7 @@ type DatabaseSession struct {
 	mount, role string
 }
 
-// DatabaseCredentialPolicyName names the pre-provisioned policy granting only
-// read on the selected mount/creds/role. The broker never writes Vault policies.
+// DatabaseCredentialPolicyName names the pre-provisioned read-only policy on mount/creds/role; the broker never writes Vault policies.
 func DatabaseCredentialPolicyName(mount, role string) string {
 	path := strings.Trim(strings.TrimSpace(mount), "/") + "/creds/" + strings.TrimSpace(role)
 	return fmt.Sprintf("agent-vault-db-%x", sha256.Sum256([]byte(path)))
@@ -44,11 +42,8 @@ func (c *Client) NewDatabaseSession(ctx context.Context, mount, role string, ttl
 	if denied == "" || c.logins == nil {
 		return session, err
 	}
-	// Vault refused the child policy to this login. If the catalog added the
-	// database after the login was issued, a new login holds it: log in
-	// again once and retry once. A policy a new login also lacked is missing,
-	// not new: it waits for the next scheduled login instead of minting
-	// logins that would each live out their maximum lifetime.
+	// A new login may hold a child policy added after the old login was issued: log in again and retry once.
+	// A policy a new login also lacked waits for the next scheduled login, so logins don't each live out their maximum lifetime.
 	policy := DatabaseCredentialPolicyName(mount, role)
 	if c.policyMissing(policy) {
 		return nil, errSessionPolicy
@@ -67,8 +62,7 @@ func (c *Client) NewDatabaseSession(ctx context.Context, mount, role string, ttl
 
 var errSessionPolicy = errors.New("create database session failed: vault login lacks this database's policy")
 
-// newDatabaseSession mints one child token. denied is the parent login's
-// token when Vault answered 403, the login lacking the child policy.
+// newDatabaseSession mints one child token; denied is the parent login's token when Vault answered 403.
 func (c *Client) newDatabaseSession(ctx context.Context, mount, role string, ttl time.Duration) (session *DatabaseSession, denied string, err error) {
 	api, err := c.api.CloneWithHeaders()
 	if err != nil {
@@ -128,12 +122,8 @@ func (c *Client) newDatabaseSession(ctx context.Context, mount, role string, ttl
 	return &DatabaseSession{Accessor: accessor, ExpiresAt: expiry, client: child, parent: c, mount: mount, role: role}, "", nil
 }
 
-// Revoke ends the session with its own child token (auth/token/revoke-self),
-// which revokes the leases it issued with it. Only this process ever held the
-// token, so the broker needs no right over any other token. If it fails, the
-// token stays harmless: its value lives only in this process, its leases are
-// revoked by path, and it expires within its TTL, or sooner with its parent
-// login, which no longer waits for it.
+// Revoke ends the session with its own child token, revoking its leases. If it fails the token stays harmless:
+// it lives only in this process, its leases are revoked by path, and it expires within its TTL.
 func (s *DatabaseSession) Revoke(ctx context.Context) error {
 	err := s.client.api.Auth().Token().RevokeSelfWithContext(ctx, "")
 	if s.parent != nil && s.parent.logins != nil {
@@ -158,11 +148,7 @@ func (s *DatabaseSession) ReadCredential(ctx context.Context) (*DatabaseCredenti
 	return credential, nil
 }
 
-// RevokeDatabaseSession revokes a child token by accessor. The broker's own
-// cleanup no longer uses it: a held session revokes itself, and a dead
-// replica's tokens expire within their TTL after their leases are revoked by
-// path. It remains for operators with revoke-accessor. A policy without that
-// right refuses it (403), which counts as done.
+// RevokeDatabaseSession revokes a child token by accessor, for operators with revoke-accessor; a 403 from a policy lacking it counts as done.
 func (c *Client) RevokeDatabaseSession(ctx context.Context, accessor string) error {
 	if accessor == "" {
 		return fmt.Errorf("database session accessor is required")
@@ -193,8 +179,7 @@ func (c *Client) RevokeDatabaseSession(ctx context.Context, accessor string) err
 	return nil
 }
 
-// RevokeDatabaseLeaseConfirmed refuses to treat a queued revoke as cleanup.
-// The path form lets policy scope revocation to the integration's lease prefix.
+// RevokeDatabaseLeaseConfirmed refuses to treat a queued revoke as cleanup; the path form lets policy scope revocation to the lease prefix.
 func (c *Client) RevokeDatabaseLeaseConfirmed(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return fmt.Errorf("database lease ID is required")
@@ -225,10 +210,7 @@ func (c *Client) RevokeDatabaseLeaseConfirmed(ctx context.Context, leaseID strin
 	return fmt.Errorf("database lease still present after revoke: %w", ErrLeaseRevokeRefused)
 }
 
-// ErrLeaseRevokeRefused marks a revocation Vault answered and refused, or
-// confirmed but still lists: a fault on Vault's or the database's side that a
-// retry will meet again. A timeout, a transport error or a 429, 502, 503 or
-// 504 reply is a blip and does not carry it.
+// ErrLeaseRevokeRefused marks a revocation Vault refused or still lists, which a retry will meet again; timeouts, transport errors and 429/502/503/504 do not carry it.
 var ErrLeaseRevokeRefused = errors.New("vault refused the database lease revocation")
 
 func revokeFailure(message string, err error) error {
@@ -243,8 +225,7 @@ func revokeFailure(message string, err error) error {
 	return fmt.Errorf("%s: %w", message, ErrLeaseRevokeRefused)
 }
 
-// DatabaseLeasePrefix is the lease ID prefix of every credential read from
-// <mount>/creds/<role>, built as ReadDatabaseCredential builds its path.
+// DatabaseLeasePrefix is the lease ID prefix of every credential read from <mount>/creds/<role>.
 func DatabaseLeasePrefix(mount, role string) (string, error) {
 	mount = strings.Trim(strings.TrimSpace(mount), "/")
 	role = strings.TrimSpace(role)
@@ -254,12 +235,8 @@ func DatabaseLeasePrefix(mount, role string) (string, error) {
 	return mount + "/creds/" + role + "/", nil
 }
 
-// ListDatabaseLeases returns the full ID of every lease Vault holds under one
-// credential path: live leases, leases whose revocation is pending or failing,
-// and leases Vault has marked irrevocable. Vault deletes a lease only after
-// the database engine has removed its user, so an ID missing here was revoked
-// or never registered. Only Vault's own empty-list answer, a 404 whose body is
-// {"errors":[]}, counts as none; any other reply is an error.
+// ListDatabaseLeases returns every lease ID under a credential path, including pending, failing and irrevocable ones; a missing ID was revoked or never registered.
+// Only Vault's empty-list answer (a 404 with {"errors":[]}) counts as none.
 func (c *Client) ListDatabaseLeases(ctx context.Context, mount, role string) ([]string, error) {
 	prefix, err := DatabaseLeasePrefix(mount, role)
 	if err != nil {
@@ -308,8 +285,7 @@ func (c *Client) ListDatabaseLeases(ctx context.Context, mount, role string) ([]
 	return leases, nil
 }
 
-// DatabaseLeaseIssued returns when Vault registered a lease, by Vault's clock.
-// A lease Vault no longer holds returns ErrLeaseGone.
+// DatabaseLeaseIssued returns when Vault registered a lease, by Vault's clock; a lease it no longer holds returns ErrLeaseGone.
 func (c *Client) DatabaseLeaseIssued(ctx context.Context, leaseID string) (time.Time, error) {
 	for _, part := range strings.Split(leaseID, "/") {
 		if !databasePathSegment.MatchString(part) {
@@ -332,5 +308,4 @@ func (c *Client) DatabaseLeaseIssued(ctx context.Context, leaseID string) (time.
 	return issued, nil
 }
 
-// ErrLeaseGone is a lease Vault no longer holds.
 var ErrLeaseGone = errors.New("database lease no longer held by Vault")

@@ -89,9 +89,7 @@ func (n *Notifier) Enabled() bool {
 	return n != nil && n.config != nil
 }
 
-// SendMail sends an email to the given recipients. Returns an error if the
-// send fails. Callers that want fire-and-forget semantics should invoke this
-// in a goroutine.
+// SendMail sends an email to the given recipients; callers wanting fire-and-forget should run it in a goroutine.
 func (n *Notifier) SendMail(to []string, subject, body string) error {
 	if !n.Enabled() || len(to) == 0 {
 		return nil

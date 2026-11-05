@@ -107,9 +107,7 @@ func TestProxyActivityIsPerBinding(t *testing.T) {
 	}
 }
 
-// Anything but a proxy, a row outside its namespaces, a malformed row, a
-// time from the future or an oversized report is refused, and nothing is
-// written.
+// Anything but a proxy, a row outside its namespaces, a malformed row, a future time or an oversized report is refused and nothing is written.
 func TestProxyActivityRefusals(t *testing.T) {
 	t.Parallel()
 	_, h := newService(t)
@@ -211,11 +209,7 @@ func TestProxyActivityHistoryAndCeiling(t *testing.T) {
 	}
 }
 
-// A report is acknowledged with its stream's next sequence and the broker's
-// retention; one carrying an acknowledged sequence the store no longer
-// reaches is a loss, and the read gives each stream's sequence. Rows go after
-// one retention and streams after two, so a stream outlives the
-// acknowledgment its replica keeps.
+// A report is acknowledged with its stream's next sequence and the retention; an acknowledged sequence the store no longer reaches is a loss. Rows go after one retention and streams after two.
 func TestProxyActivitySequenceOnTheWire(t *testing.T) {
 	t.Parallel()
 	svc, h := newService(t)

@@ -48,7 +48,7 @@ func TestRealPostgres_DatabaseServiceLifecycle(t *testing.T) {
 	if rows, err := s.ListDatabaseServices(ctx, v.ID); err != nil || len(rows) != 0 {
 		t.Fatalf("cascade failed: %v", err)
 	}
-	// Migration history must also reopen cleanly on an existing database.
+	// Migration history must reopen cleanly on an existing database.
 	reopened, err := openPostgres(dsn)
 	if err != nil {
 		t.Fatal(err)

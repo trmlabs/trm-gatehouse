@@ -6,12 +6,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/broker"
 )
 
-// MergeServices upserts and deletes by Name. Callers must normalize
-// every input (existing + proposed) to have a non-empty Name first;
-// MergeServices panics otherwise because the Name-keyed index would
-// silently collapse empty-name entries onto the "" key and overwrite
-// unrelated services — a data-loss class bug not worth papering over.
-// Returns the merged slice and warnings for no-op operations.
+// MergeServices upserts and deletes by Name and panics on an empty Name, which would collapse entries onto one key.
 func MergeServices(existing []broker.Service, proposed []Service) ([]broker.Service, []string) {
 	for i, s := range existing {
 		if s.Name == "" {

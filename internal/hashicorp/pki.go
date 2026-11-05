@@ -7,10 +7,8 @@ import (
 	"time"
 )
 
-// SignCertificate asks a Vault PKI role to sign a certificate request for
-// exactly the given DNS names. The role, not the broker, holds the CA key and
-// limits what Vault will sign; the broker checks the request first as well.
-// It returns the PEM certificate and the PEM chain above it.
+// SignCertificate has a Vault PKI role sign a request for exactly the given DNS names; the role holds the CA key and limits what is signed,
+// and the broker checks the request first too. It returns the PEM certificate and the PEM chain above it.
 func (c *Client) SignCertificate(ctx context.Context, mount, role, csrPEM string, names []string, ttl time.Duration) (string, string, error) {
 	if err := ValidateDatabaseReference(mount, role); err != nil {
 		return "", "", fmt.Errorf("invalid Vault PKI mount or role")

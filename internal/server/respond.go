@@ -41,9 +41,7 @@ func jsonCodedError(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": message})
 }
 
-// proxyError writes a JSON error response with separate code and message fields.
-// Sets X-Agent-Vault-Proxy-Error so SDK clients can distinguish broker errors
-// from upstream responses that happen to share the same status code.
+// proxyError writes a JSON error with code and message and sets X-Agent-Vault-Proxy-Error for SDK clients.
 func proxyError(w http.ResponseWriter, status int, code, message string) {
 	brokercore.WriteProxyError(w, status, code, message)
 }

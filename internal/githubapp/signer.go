@@ -21,9 +21,7 @@ type Logical interface {
 	WriteWithContext(ctx context.Context, path string, data map[string]interface{}) (*vaultapi.Secret, error)
 }
 
-// TransitSigner signs with an RSA key imported into Vault Transit, so the App
-// private key never leaves Vault. The broker's policy needs only update on
-// <mount>/sign/<key>/sha2-256.
+// TransitSigner signs with an RSA key imported into Vault Transit; the broker needs only update on <mount>/sign/<key>/sha2-256.
 type TransitSigner struct {
 	Vault Logical
 	Mount string
@@ -51,8 +49,7 @@ func (t TransitSigner) SignRS256(ctx context.Context, input []byte) ([]byte, err
 	return raw, nil
 }
 
-// KVSigner is the fallback: it reads the App private key (PEM) from a KV
-// version 2 secret into broker memory for each signature. Prefer TransitSigner.
+// KVSigner reads the PEM App key from a KV v2 secret into broker memory per signature. Prefer TransitSigner.
 type KVSigner struct {
 	Vault Logical
 	Mount string

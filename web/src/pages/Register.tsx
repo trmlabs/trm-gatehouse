@@ -62,7 +62,7 @@ function InviteOnlyNotice() {
   );
 }
 
-const INSTALL_COMMAND = "curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh";
+const INSTALL_COMMAND = "git clone https://github.com/trmlabs/trm-gatehouse.git && cd trm-gatehouse && make build && sudo mv agent-vault /usr/local/bin/";
 
 function CommandBlock({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);

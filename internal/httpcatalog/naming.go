@@ -7,24 +7,14 @@ import (
 	"sync/atomic"
 )
 
-// The operator's Vault naming rules, each a setting with a default. The
-// broker reads them from its environment and validate from its flags, so
-// both apply the same rules. Every name they allow still has the
-// policy-safe shape, since it ends up in the broker's Vault policy.
+// The operator's Vault naming rules, each a setting with a default; every allowed name still has the policy-safe shape.
 const (
-	// KeyPrefixEnv names the setting for the KV path every HTTP key lies
-	// under (validate --key-prefix): lower-case segments, such as vendors or
-	// agents/keys. Empty means DefaultKeyPrefix.
+	// KeyPrefixEnv names the KV path every HTTP key lies under (validate --key-prefix): lower-case segments. Empty means DefaultKeyPrefix.
 	KeyPrefixEnv     = "AGENT_VAULT_CATALOG_KEY_PREFIX"
 	DefaultKeyPrefix = "vendors"
-	// RolePatternEnv names the setting for the database role naming rule
-	// (validate --role-pattern): a regular expression for the role name
-	// before its -readonly or -readwrite suffix, with {environment} where
-	// the catalog's environment goes. Empty means DefaultRolePattern.
+	// RolePatternEnv names the database role naming rule (validate --role-pattern): a regular expression for the role name before its suffix, with {environment}. Empty means DefaultRolePattern.
 	RolePatternEnv = "AGENT_VAULT_CATALOG_ROLE_PATTERN"
-	// DefaultRolePattern is <env>.<region>.<cluster>.<name>, or the
-	// Gatehouse-only role for the same connection, the same name prefixed
-	// with "gatehouse-".
+	// DefaultRolePattern is <env>.<region>.<cluster>.<name>, or the same prefixed with "gatehouse-".
 	DefaultRolePattern = `(gatehouse-)?{environment}\.[a-z]+\.[a-z0-9]+\.[a-z0-9-]+`
 )
 
@@ -41,8 +31,6 @@ var (
 	roleRules   atomic.Pointer[roleRule]
 )
 
-// SetKeyPrefix sets the KV path every HTTP key must lie under. Empty
-// restores DefaultKeyPrefix.
 func SetKeyPrefix(prefix string) error {
 	if prefix == "" {
 		keyRules.Store(nil)
@@ -55,8 +43,6 @@ func SetKeyPrefix(prefix string) error {
 	return nil
 }
 
-// keyPath returns the key prefix and the rule a key path must match: one or
-// more lower-case segments under the prefix.
 func keyPath() (string, *regexp.Regexp) {
 	if r := keyRules.Load(); r != nil {
 		return r.prefix, r.path
@@ -64,9 +50,7 @@ func keyPath() (string, *regexp.Regexp) {
 	return DefaultKeyPrefix, vendorKeyPath
 }
 
-// SetRolePattern sets the database role naming rule. The pattern must name
-// {environment}, so a catalog for one environment never reaches another's
-// roles. Empty restores DefaultRolePattern.
+// SetRolePattern sets the database role naming rule; it must name {environment} so a catalog never reaches another environment's roles. Empty restores DefaultRolePattern.
 func SetRolePattern(pattern string) error {
 	if pattern != "" {
 		if !strings.Contains(pattern, environmentSlot) {
@@ -84,8 +68,6 @@ func roleExpression(pattern, env string) string {
 	return `^(?:` + strings.ReplaceAll(pattern, environmentSlot, regexp.QuoteMeta(env)) + `)-(readonly|readwrite)$`
 }
 
-// roleRule is the compiled rule for one pattern and environment, kept until
-// either changes so a large catalog compiles it once.
 type roleRule struct {
 	pattern, env string
 	role         *regexp.Regexp

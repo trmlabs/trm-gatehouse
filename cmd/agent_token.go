@@ -50,9 +50,7 @@ new token with --keep-hash.`,
 	},
 }
 
-// tokenExpiry is when a token minted at now expires. A token always expires:
-// the default is the longest the catalog accepts, and --expires-in chooses a
-// shorter life.
+// tokenExpiry is when a token minted at now expires; the default is the longest life the catalog accepts.
 func tokenExpiry(in time.Duration, now time.Time) (time.Time, error) {
 	if in <= 0 {
 		return time.Time{}, errors.New("--expires-in must be positive")
@@ -63,7 +61,6 @@ func tokenExpiry(in time.Duration, now time.Time) (time.Time, error) {
 	return now.Add(in).UTC().Truncate(time.Second), nil
 }
 
-// agentBlock is what mint-agent-token needs to print one Automation block.
 type agentBlock struct {
 	ID, Name, Owner string
 	Entries, Write  []string
@@ -98,9 +95,7 @@ Catalog block (holds only the token's hash; paste under "automations:"):
 	return err
 }
 
-// renderAgentBlock writes one Automation block as YAML. Every string is
-// double-quoted, which is valid YAML and keeps an owner address or any odd
-// character from changing how the block reads.
+// renderAgentBlock double-quotes every string so an odd owner address cannot change how the YAML reads.
 func renderAgentBlock(spec agentBlock, hashes []string) string {
 	var b strings.Builder
 	q := strconv.Quote

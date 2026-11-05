@@ -18,8 +18,7 @@ const (
 	testApp    = "22222222-2222-2222-2222-222222222222"
 )
 
-// entra stands in for the token endpoint: it checks the form and answers with
-// the configured status and body, counting exchanges.
+// entra stands in for the token endpoint: it checks the form, answers with the configured status and body, and counts exchanges.
 func entra(t *testing.T, status int, body func(n int64) any) (*httptest.Server, *atomic.Int64, *atomic.Value) {
 	t.Helper()
 	var calls atomic.Int64

@@ -1,16 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-compose() {
-  if docker compose version >/dev/null 2>&1; then docker compose -f examples/playground/compose.yaml "$@"
-  elif command -v docker-compose >/dev/null; then docker-compose -f examples/playground/compose.yaml "$@"
-  elif [[ -x /private/tmp/gatehouse-tools/docker-compose ]]; then /private/tmp/gatehouse-tools/docker-compose -f examples/playground/compose.yaml "$@"
-  else echo 'Docker Compose is required. Install its plugin, then rerun.' >&2; exit 1; fi
+compose_cmd=()
+compose() { "${compose_cmd[@]}" -f examples/playground/compose.yaml "$@"; }
+precheck() {
+  if ! command -v docker >/dev/null; then echo 'Docker is not installed. Install Docker Desktop, OrbStack, colima or Docker Engine, then run make playground again.' >&2; exit 1; fi
+  local rc=0 err t
+  t=$(command -v timeout || command -v gtimeout || true)
+  if [[ -n "$t" ]]; then err=$("$t" 10 docker info 2>&1 >/dev/null) || rc=$?; else err=$(docker info 2>&1 >/dev/null) || rc=$?; fi
+  if [[ $rc -eq 124 ]]; then echo 'Docker did not answer within 10 seconds. Check that it has finished starting, then run make playground again.' >&2; exit 1; fi
+  if [[ $rc -ne 0 && "$err" == *"permission denied"* ]]; then echo 'Docker is running but this user cannot reach it (permission denied). Add your user to the docker group or use a rootless setup, then run make playground again.' >&2; exit 1; fi
+  if [[ $rc -ne 0 ]]; then echo 'Docker is not running. Start Docker Desktop, OrbStack, colima or your Docker service, then run make playground again.' >&2; exit 1; fi
+  if docker compose version >/dev/null 2>&1; then compose_cmd=(docker compose)
+  elif command -v docker-compose >/dev/null; then compose_cmd=(docker-compose)
+  else echo 'Docker Compose is required. Install the Compose plugin, or on a Mac run: brew install docker-compose' >&2; exit 1; fi
 }
+legacy_down() { # lab started before the project rename
+  local err
+  if ! err=$(compose -p agent-vault-playground down --volumes --remove-orphans 2>&1 >/dev/null); then
+    echo "Could not remove the old agent-vault-playground lab: $err. Force-remove its containers with: docker rm -f \$(docker ps -aq --filter label=com.docker.compose.project=agent-vault-playground), then rerun." >&2
+    return 1
+  fi
+  docker image rm agent-vault-playground:local >/dev/null 2>&1 || true
+}
+precheck
 case "${1:-up}" in
   up)
-    opts=(-f examples/playground/Dockerfile -t agent-vault-playground:local)
+    opts=(-f examples/playground/Dockerfile -t gatehouse-playground:local)
     if [[ -n "${SSL_CERT_FILE:-}" ]]; then opts+=(--secret "id=build_ca,src=$SSL_CERT_FILE"); fi
+    legacy_down || exit 1
     docker build "${opts[@]}" .
     compose down --volumes --remove-orphans
     compose up -d
@@ -39,6 +57,6 @@ case "${1:-up}" in
     compose exec -T sandbox request -X POST -H 'Authorization: Bearer __vault_PAYMENTS_KEY__' https://payments.example/scheduler/test-run
     echo 'The extra schedule is disabled. The new test batch has one refund per order; historical refunds remain unchanged. Your turn: try to get a key out.'
     ;;
-  down) compose down --volumes --remove-orphans ;;
+  down) legacy_down || echo 'Continuing to remove the current lab.' >&2; compose down --volumes --remove-orphans ;;
   *) compose "$@" ;;
 esac

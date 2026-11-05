@@ -32,10 +32,6 @@ func sandboxSeen(r ActivityReport, owner string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// The admin listener reports, per Sandbox, when it was last in use through
-// this replica: its Pod's start, admission, and every second while a
-// connection stays open. The entry outlives the Pod, and a replacement Pod's
-// start counts as use of the same Sandbox.
 func TestActivityRecordsUseBySandbox(t *testing.T) {
 	t.Parallel()
 	admin := freeAddress(t)
@@ -55,13 +51,10 @@ func TestActivityRecordsUseBySandbox(t *testing.T) {
 	if time.Since(admitted) > 5*time.Second {
 		t.Fatalf("after admission: %v", admitted)
 	}
-	// Held open with no traffic, the tunnel still counts as use.
 	time.Sleep(2500 * time.Millisecond)
 	if later, _ := sandboxSeen(readActivity(t, admin), "sandbox-pod-a"); !later.After(admitted) {
 		t.Fatalf("an open connection did not count: %v then %v", admitted, later)
 	}
-	// The Pod is replaced (eviction, node loss): the old one goes, and the
-	// Sandbox keeps its history.
 	sf.api.send(t, "DELETED", sandboxPod("sandbox-a", "pod-a", "127.0.0.1"))
 	if !tunnelCloses(t, c, b) {
 		t.Fatal("tunnel stayed open")
@@ -84,8 +77,6 @@ func TestActivityRecordsUseBySandbox(t *testing.T) {
 	}
 }
 
-// Entries past the retention time are dropped, and an earlier time never
-// replaces a later one.
 func TestActivityRetention(t *testing.T) {
 	now := time.Now()
 	a := newActivity(now, time.Hour)
@@ -101,7 +92,6 @@ func TestActivityRetention(t *testing.T) {
 	}
 }
 
-// Only GET /v1/activity is served; every other path and method is 404.
 func TestActivityListenerServesOneRoute(t *testing.T) {
 	admin := freeAddress(t)
 	startSharedWith(t, false, false, func(c *FixedConfig) { c.AdminListen = admin })
@@ -124,7 +114,6 @@ func TestActivityListenerServesOneRoute(t *testing.T) {
 	}
 }
 
-// adminListen is for a shared proxy only, on its own address.
 func TestAdminListenValidation(t *testing.T) {
 	f := newRelayFixture(t)
 	c := f.c
@@ -144,7 +133,6 @@ func TestAdminListenValidation(t *testing.T) {
 	}
 }
 
-// Retention needs the admin listener and lies between a minute and a year.
 func TestActivityRetentionValidation(t *testing.T) {
 	sf := startShared(t, false)
 	c := sf.f.c

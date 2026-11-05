@@ -15,8 +15,6 @@ import (
 	"time"
 )
 
-// dbStubState records what the stub database-engine Vault was asked to do so
-// tests can assert on lease lifecycle calls.
 type dbStubState struct {
 	mu          sync.Mutex
 	mintCount   int
@@ -30,12 +28,7 @@ func (s *dbStubState) snapshot() (mint int, renews, revokes []string) {
 	return s.mintCount, append([]string(nil), s.renewLeases...), append([]string(nil), s.revoked...)
 }
 
-// stubDatabaseVault stands up a minimal Vault HTTP API covering the database
-// secrets engine reads and the sys/leases renew+revoke writes the real vault/api
-// client issues, so these tests exercise Client.ReadDatabaseCredential /
-// RenewLease / RevokeLease end-to-end without a live Vault. validRoles is the
-// set of roles that mint a credential; noPasswordRole mints a malformed
-// credential (username only) to exercise the validation path.
+// stubDatabaseVault stubs the database engine reads and the sys/leases renew and revoke writes; noPasswordRole mints a username-only credential.
 func stubDatabaseVault(t *testing.T, mount string, validRoles []string, noPasswordRole string) (*httptest.Server, *dbStubState) {
 	t.Helper()
 	state := &dbStubState{}
@@ -294,8 +287,6 @@ func TestDatabaseMintNilDataStillRevokesKnownLease(t *testing.T) {
 	}
 }
 
-// A failed credential read names Vault's status and messages, so the broker's
-// log says why, and marks the answers that prove nothing was issued.
 func TestDatabaseMintReportsVaultAnswer(t *testing.T) {
 	for _, test := range []struct {
 		status    int
@@ -347,11 +338,8 @@ func TestDatabaseMintMessageIsBounded(t *testing.T) {
 	}
 }
 
-// Each shape a database or a proxy can echo a password or a token in is
-// masked, and the words around it are kept.
 func TestDatabaseMintMasksSecretShapes(t *testing.T) {
-	// Token-shaped values are built at run time, so no literal here matches a
-	// secret scanner's pattern.
+	// Token-shaped values are built at run time so no literal matches a secret scanner.
 	fill := strings.Repeat("x", 18)
 	for _, test := range []struct{ name, message, want string }{
 		{"JSON password field", `plugin config: {"username":"admin","password":"CANARY"}`, `plugin config: {"username":"admin","password":"***"}`},
@@ -379,8 +367,7 @@ func TestDatabaseMintMasksSecretShapes(t *testing.T) {
 	}
 }
 
-// A reply that is not Vault's error JSON, such as a proxy's page that echoes
-// the request's headers, is reported by status and size only.
+// A reply that is not Vault's error JSON, such as a proxy page echoing headers, is reported by status and size only.
 func TestDatabaseMintReportsOnlyTheSizeOfAReplyThatIsNotVaults(t *testing.T) {
 	body := "<html>502 Bad Gateway. Request headers: X-Vault-Token: hvs.CANARY" + strings.Repeat("x", 18) + "</html>"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

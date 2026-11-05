@@ -1,6 +1,6 @@
 # Agent Vault Slack Agent Template
 
-A TypeScript starter for building custom Slack agents that run behind [Agent Vault](https://github.com/Infisical/agent-vault). It gives you a working Slack Socket Mode bot, a Claude Agent SDK runtime, MCP-style tool registration, Docker deployment, and Agent Vault credential brokering defaults.
+A TypeScript starter for building custom Slack agents that run behind Gatehouse. It gives you a working Slack Socket Mode bot, a Claude Agent SDK runtime, MCP-style tool registration, Docker deployment, and Agent Vault credential brokering defaults.
 
 Use this repo when you want to fork a working Slack agent and replace the persona plus tools with your own workflow.
 
@@ -168,7 +168,7 @@ PORT=3000
 EXAMPLE_API_BASE_URL=https://api.example.com
 ```
 
-The Dockerfile copies the Agent Vault CLI from `infisical/agent-vault:latest` and starts:
+The Dockerfile copies the Agent Vault CLI from `gatehouse:local` and starts:
 
 ```bash
 agent-vault run -- node dist/slack.js

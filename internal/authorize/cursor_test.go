@@ -45,8 +45,7 @@ func TestCursorRunNamesItsPerson(t *testing.T) {
 	}
 }
 
-// Any process on a worker can mint a token for that worker's run, so a token
-// counts only on the Pod the controller recorded for its run.
+// Any process on a worker can mint a token for its run, so a token counts only on the Pod recorded for that run.
 func TestCursorTokenCountsOnlyOnItsRunsPod(t *testing.T) {
 	b := &authorizetest.MemBinder{}
 	ctx := context.Background()
@@ -67,8 +66,7 @@ func TestCursorTokenCountsOnlyOnItsRunsPod(t *testing.T) {
 	}
 }
 
-// A worker Pod serves one owner in its life: anyone else's run is refused,
-// even if the Pod's recorded run changed, and a token copied to another Pod is too.
+// A worker Pod serves one owner: anyone else's run is refused, even if the recorded run changed.
 func TestCursorPodIsPinnedToItsFirstOwner(t *testing.T) {
 	b := &authorizetest.MemBinder{}
 	ctx := context.Background()
@@ -84,8 +82,7 @@ func TestCursorPodIsPinnedToItsFirstOwner(t *testing.T) {
 	if _, refusal := Resolve(ctx, cursorPool, "alice-1", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, b); refusal != "session_pod_mismatch" {
 		t.Fatalf("alice's token on another Pod: %q", refusal)
 	}
-	// A run with no mappable person still owns its Pod, but names nobody, so
-	// its requests are refused rather than served as the pool.
+	// A run with no mappable person still owns its Pod but is refused.
 	if who, refusal := Resolve(ctx, cursorPool, "no-mail", Claims{Pod: "pod-c", ClaimedRun: "bc-4"}, runs, b); refusal != "no_person" || who.Kind != "none" {
 		t.Fatalf("no email: %q %+v", refusal, who)
 	}

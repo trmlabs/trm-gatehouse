@@ -10,32 +10,19 @@ import (
 )
 
 // DatabaseCleanup stores only a revocation reference, never a token or password.
-// ActorID names the actor whose connection minted the credential; an empty
-// ActorID is unattributed (legacy or unknown) and counts against every actor.
-// WorkloadID is that connection's verified runtime instance UID; an empty
-// WorkloadID counts against every instance of the actor. Mount and Role name
-// the Vault credential path the record's child token could read; they are
-// empty on records from before they were kept. TokenTTL is the child token's
-// maximum lifetime, written as an expiry by the database clock and not read
-// back.
+// Empty ActorID or WorkloadID is unattributed and counts against every actor or instance; TokenTTL is written as an expiry, not read back.
 type DatabaseCleanup struct {
 	Accessor, Binding, LeaseID, ActorID, WorkloadID string
 	Mount, Role                                     string
 	TokenTTL                                        time.Duration
-	// Quarantined: the binding is closed because Vault cannot revoke an
-	// orphan lease under its role. Read back, never written by Add.
+	// Quarantined: Vault cannot revoke an orphan lease under the role. Read back, never written by Add.
 	Quarantined bool
 }
 
-// ErrReplicaNameInUse means another broker process that is still renewing its
-// owner row uses the same replica name. Two processes under one name would
-// share an audit chain and confuse cleanup ownership, so the later one must not
-// run.
+// ErrReplicaNameInUse: two processes under one replica name would share an audit chain and confuse cleanup ownership.
 var ErrReplicaNameInUse = errors.New("another live broker process holds this replica name")
 
-// replicaPattern is the LIKE pattern for every owner row of owner's replica,
-// or "" when the owner carries no replica name. Replica names are DNS-style,
-// so they hold no LIKE wildcards.
+// replicaPattern is the LIKE pattern for the owner's replica, or "". Replica names are DNS-style, so hold no wildcards.
 func replicaPattern(owner string) string {
 	replica, _, ok := strings.Cut(owner, "/")
 	if !ok || replica == "" {
@@ -44,7 +31,6 @@ func replicaPattern(owner string) string {
 	return replica + "/%"
 }
 
-// replicaNameInUse reports whether another live owner row shares owner's replica name.
 func (s *SQLStore) replicaNameInUse(ctx context.Context, owner string) (bool, error) {
 	pattern := replicaPattern(owner)
 	if pattern == "" {
@@ -56,22 +42,18 @@ func (s *SQLStore) replicaNameInUse(ctx context.Context, owner string) (bool, er
 	return n > 0, err
 }
 
-// noOtherLiveReplicaOwner is a condition (binding pattern, owner) true while
-// no other live owner row shares the replica name.
+// noOtherLiveReplicaOwner takes (pattern, owner) and holds while no other live owner row shares the replica name.
 func (s *SQLStore) noOtherLiveReplicaOwner() string {
 	return `NOT EXISTS (SELECT 1 FROM database_cleanup_replica other WHERE other.owner LIKE ? AND other.owner <> ? AND other.expires_ms > ` + s.dbNowMs() + `)`
 }
 
-// ErrDatabaseCleanupOwnershipLost means the owner row expired or was released.
-// An expired owner can never renew, so its records belong to the survivors.
+// ErrDatabaseCleanupOwnershipLost: an expired owner can never renew, so its records belong to the survivors.
 var ErrDatabaseCleanupOwnershipLost = errors.New("database cleanup ownership lost")
 
-// ErrPodSessionLimit refuses a session beyond a Pod's fleet-wide cap.
 var ErrPodSessionLimit = errors.New("pod session limit reached")
 
 func (s *SQLStore) databaseCleanupExec(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var result sql.Result
-	// Share the committed, synchronous write boundary with the audit journal.
 	err := s.auditWrite(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = tx.ExecContext(ctx, query, args...)
@@ -80,8 +62,7 @@ func (s *SQLStore) databaseCleanupExec(ctx context.Context, query string, args .
 	return result, err
 }
 
-// dbNowMs is the database clock in Unix milliseconds. Every owner expiry is
-// written and compared with it, so replica clocks never decide ownership.
+// dbNowMs is the database clock in Unix milliseconds; owner expiry uses it so replica clocks never decide ownership.
 func (s *SQLStore) dbNowMs() string {
 	if s.dialect.Name() == "postgres" {
 		return `CAST(EXTRACT(EPOCH FROM now()) * 1000 AS BIGINT)`
@@ -89,8 +70,7 @@ func (s *SQLStore) dbNowMs() string {
 	return `CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`
 }
 
-// liveOwner is a condition true while the owner bound at that placeholder holds
-// an unexpired row.
+// liveOwner holds while the owner bound at its placeholder has an unexpired row.
 func (s *SQLStore) liveOwner() string {
 	return `EXISTS (SELECT 1 FROM database_cleanup_replica WHERE owner = ? AND expires_ms > ` + s.dbNowMs() + `)`
 }
@@ -109,22 +89,17 @@ func affectedOne(result sql.Result, err error, lost error) error {
 	return nil
 }
 
-// ClaimDatabaseCleanupOwner registers one broker process. Owner IDs are unique
-// per process, so any number of replicas may hold rows at once; each owns only
-// the records it wrote or claimed.
+// ClaimDatabaseCleanupOwner registers one broker process; each owner holds only the records it wrote or claimed.
 func (s *SQLStore) ClaimDatabaseCleanupOwner(ctx context.Context, owner string, ttl time.Duration) error {
 	if owner == "" || ttl <= 0 {
 		return fmt.Errorf("invalid database cleanup owner")
 	}
-	// Owner IDs are replica/boot. A second live boot under one replica name is
-	// refused here, in the same statement that registers the owner.
+	// Owner IDs are replica/boot; a second live boot under one replica name is refused in the registering statement.
 	pattern := replicaPattern(owner)
 	var result sql.Result
 	err := s.auditWrite(ctx, func(tx *sql.Tx) error {
-		// Under READ COMMITTED two boots starting together could both pass
-		// the NOT EXISTS check; a transaction-scoped lock on the replica name
-		// makes the check and the insert one step. SQLite writes are already
-		// serialized.
+		// Under READ COMMITTED two simultaneous boots could both pass the NOT EXISTS check;
+		// the advisory lock makes check and insert one step.
 		if pattern != "" && s.dialect.Name() == "postgres" {
 			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "gatehouse-replica:"+pattern); err != nil {
 				return err
@@ -144,15 +119,14 @@ func (s *SQLStore) ClaimDatabaseCleanupOwner(ctx context.Context, owner string, 
 	return err
 }
 
-// RenewDatabaseCleanupOwner extends a live owner. It never revives an expired
-// one: after expiry a survivor may already have claimed the records.
+// RenewDatabaseCleanupOwner never revives an expired owner: a survivor may already have claimed its records.
 func (s *SQLStore) RenewDatabaseCleanupOwner(ctx context.Context, owner string, ttl time.Duration) error {
 	now := s.dbNowMs()
 	pattern := replicaPattern(owner)
 	result, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup_replica SET expires_ms = `+now+` + ?
 		WHERE owner = ? AND expires_ms > `+now+` AND (CAST(? AS TEXT) = '' OR `+s.noOtherLiveReplicaOwner()+`)`), ttl.Milliseconds(), owner, pattern, pattern, owner)
 	if err = affectedOne(result, err, ErrDatabaseCleanupOwnershipLost); errors.Is(err, ErrDatabaseCleanupOwnershipLost) {
-		// Both processes under a duplicated name stop renewing and fence.
+		// Both processes under a duplicated name stop renewing.
 		if inUse, checkErr := s.replicaNameInUse(ctx, owner); checkErr == nil && inUse {
 			return ErrReplicaNameInUse
 		}
@@ -160,14 +134,12 @@ func (s *SQLStore) RenewDatabaseCleanupOwner(ctx context.Context, owner string, 
 	return err
 }
 
-// ReleaseDatabaseCleanupOwner ends ownership at once. Records the owner still
-// holds become claimable by the next heartbeat of any survivor.
+// ReleaseDatabaseCleanupOwner makes the owner's records claimable by the next survivor heartbeat.
 func (s *SQLStore) ReleaseDatabaseCleanupOwner(ctx context.Context, owner string) error {
 	_, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`DELETE FROM database_cleanup_replica WHERE owner = ?`), owner)
 	return err
 }
 
-// CheckDatabaseCleanupOwner verifies current fencing without extending it.
 func (s *SQLStore) CheckDatabaseCleanupOwner(ctx context.Context, owner string) error {
 	var owned bool
 	err := s.db.QueryRowContext(ctx, s.dialect.Rebind(`SELECT `+s.liveOwner()), owner).Scan(&owned)
@@ -180,18 +152,14 @@ func (s *SQLStore) CheckDatabaseCleanupOwner(ctx context.Context, owner string) 
 	return nil
 }
 
-// LiveDatabaseCleanupOwners counts unexpired owners, the fleet's live replicas.
 func (s *SQLStore) LiveDatabaseCleanupOwners(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM database_cleanup_replica WHERE expires_ms > `+s.dbNowMs()).Scan(&n)
 	return n, err
 }
 
-// ClaimOrphanedDatabaseCleanup gives a live owner every unresolved record whose
-// owner is expired, released or absent. Each record moves only from the owner
-// read in the same statement, so when two survivors race, the second finds the
-// record already owned by a live replica and claims nothing. It also drops
-// session rows of dead owners and owner rows expired for a minute.
+// ClaimOrphanedDatabaseCleanup moves each record only from the owner read in the same statement, so racing survivors claim nothing twice.
+// It also drops session rows of dead owners and owner rows expired for a minute.
 func (s *SQLStore) ClaimOrphanedDatabaseCleanup(ctx context.Context, owner string) (int, error) {
 	now := s.dbNowMs()
 	var claimed int64
@@ -221,8 +189,7 @@ func (s *SQLStore) AddDatabaseCleanup(ctx context.Context, owner string, record 
 	if record.Accessor == "" || record.Binding == "" {
 		return fmt.Errorf("incomplete database cleanup record")
 	}
-	// The child token was created before this write, so the database clock
-	// now plus its lifetime is no earlier than its real expiry.
+	// The token predates this write, so database now plus its lifetime is no earlier than its real expiry.
 	result, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`INSERT INTO database_cleanup (accessor, binding, actor_id, workload_id, owner, mount, role, token_expires_ms)
 		SELECT ?, ?, ?, ?, ?, ?, ?, CASE WHEN CAST(? AS BIGINT) > 0 THEN `+s.dbNowMs()+` + CAST(? AS BIGINT) ELSE 0 END WHERE `+s.liveOwner()),
 		record.Accessor, record.Binding, record.ActorID, record.WorkloadID, owner, record.Mount, record.Role,
@@ -230,22 +197,15 @@ func (s *SQLStore) AddDatabaseCleanup(ctx context.Context, owner string, record 
 	return affectedOne(result, err, ErrDatabaseCleanupOwnershipLost)
 }
 
-// MarkDatabaseCleanupTokenRevoked records, by the database clock, that this
-// owner revoked an unknown issuance's child token with the token itself. It is
-// written after Vault confirmed the revocation, so the token was dead by then.
+// MarkDatabaseCleanupTokenRevoked is written after Vault confirmed the revocation, so the token was dead by then.
 func (s *SQLStore) MarkDatabaseCleanupTokenRevoked(ctx context.Context, owner, accessor string) error {
 	result, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET token_revoked_ms = `+s.dbNowMs()+`
 		WHERE accessor = ? AND owner = ? AND lease_id = '' AND reconciliation_evidence = '' AND `+s.liveOwner()), accessor, owner, owner)
 	return affectedOne(result, err, ErrDatabaseCleanupOwnershipLost)
 }
 
-// AdoptDatabaseCleanup gives an unknown issuance written before records kept
-// their credential path the binding's current mount and role, and a token
-// expiry of now plus ttl by the database clock. The record already existed, so
-// its child token was created before now; ttl must be the longest lifetime a
-// child token could have been given. Only this owner's records that still
-// lack a path change. Adoption also lifts a quarantine mark an older build
-// wrote, since an unknown issuance alone no longer closes its binding.
+// AdoptDatabaseCleanup gives a record without a credential path the binding's current mount and role, and expiry now plus ttl.
+// ttl must be the longest lifetime a child token could have had. It also lifts any quarantine mark an older build wrote.
 func (s *SQLStore) AdoptDatabaseCleanup(ctx context.Context, owner, accessor, mount, role string, ttl time.Duration) error {
 	if mount == "" || role == "" || ttl <= 0 {
 		return fmt.Errorf("mount, role and token lifetime are required")
@@ -256,9 +216,7 @@ func (s *SQLStore) AdoptDatabaseCleanup(ctx context.Context, owner, accessor, mo
 	return affectedOne(result, err, ErrDatabaseCleanupOwnershipLost)
 }
 
-// SettledDatabaseCleanup returns this owner's unknown issuances whose child
-// token has been dead, by revocation or expiry, for at least settle by the
-// database clock. Only records that name their mount and role qualify.
+// SettledDatabaseCleanup returns this owner's unknown issuances whose child token has been dead for at least settle.
 func (s *SQLStore) SettledDatabaseCleanup(ctx context.Context, owner string, settle time.Duration) ([]DatabaseCleanup, error) {
 	return s.listDatabaseCleanup(ctx, s.dialect.Rebind(`SELECT `+databaseCleanupColumns+` FROM database_cleanup
 		WHERE reconciliation_evidence = '' AND lease_id = '' AND owner = ? AND mount <> '' AND role <> '' AND token_expires_ms > 0
@@ -266,14 +224,12 @@ func (s *SQLStore) SettledDatabaseCleanup(ctx context.Context, owner string, set
 		ORDER BY accessor`), owner, settle.Milliseconds())
 }
 
-// ListDatabaseCleanup returns the whole fleet's unresolved records.
 func (s *SQLStore) ListDatabaseCleanup(ctx context.Context) ([]DatabaseCleanup, error) {
 	return s.listDatabaseCleanup(ctx, `SELECT `+databaseCleanupColumns+` FROM database_cleanup WHERE reconciliation_evidence = '' ORDER BY accessor`)
 }
 
 const databaseCleanupColumns = `accessor, binding, lease_id, actor_id, workload_id, mount, role, quarantined`
 
-// ListOwnedDatabaseCleanup returns only the records one owner must resolve.
 func (s *SQLStore) ListOwnedDatabaseCleanup(ctx context.Context, owner string) ([]DatabaseCleanup, error) {
 	return s.listDatabaseCleanup(ctx, s.dialect.Rebind(`SELECT `+databaseCleanupColumns+` FROM database_cleanup
 		WHERE reconciliation_evidence = '' AND owner = ? ORDER BY accessor`), owner)
@@ -307,25 +263,19 @@ func (s *SQLStore) SetDatabaseCleanupLease(ctx context.Context, owner, accessor,
 	return affectedOne(result, err, fmt.Errorf("database cleanup ownership or record lost"))
 }
 
-// QuarantineDatabaseCleanup closes an unknown issuance's binding fleet-wide:
-// Vault cannot revoke an orphan lease under its role. The mark lifts when the
-// record is confirmed or ReleaseDatabaseCleanupQuarantine clears it.
+// QuarantineDatabaseCleanup closes the binding fleet-wide until the record is confirmed or the mark is released.
 func (s *SQLStore) QuarantineDatabaseCleanup(ctx context.Context, owner, accessor string) error {
 	_, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET quarantined = 1
 		WHERE accessor = ? AND owner = ? AND lease_id = '' AND reconciliation_evidence = ''`), accessor, owner)
 	return err
 }
 
-// ReleaseDatabaseCleanupQuarantine reopens a binding this owner closed, once
-// its check no longer finds an orphan lease Vault cannot revoke.
 func (s *SQLStore) ReleaseDatabaseCleanupQuarantine(ctx context.Context, owner, accessor string) error {
 	_, err := s.databaseCleanupExec(ctx, s.dialect.Rebind(`UPDATE database_cleanup SET quarantined = 0
 		WHERE accessor = ? AND owner = ?`), accessor, owner)
 	return err
 }
 
-// DatabaseBindingQuarantined reports a quarantined record on the binding held
-// by any owner.
 func (s *SQLStore) DatabaseBindingQuarantined(ctx context.Context, binding string) (bool, error) {
 	var quarantined bool
 	err := s.db.QueryRowContext(ctx, s.dialect.Rebind(`SELECT EXISTS (SELECT 1 FROM database_cleanup
@@ -333,10 +283,7 @@ func (s *SQLStore) DatabaseBindingQuarantined(ctx context.Context, binding strin
 	return quarantined, err
 }
 
-// ConfirmDatabaseCleanup records the evidence that resolved an unknown
-// issuance: an operator's attestation, or the broker's automated Vault lease
-// check, which the evidence names. Keep it after removing the binding's
-// quarantine. Any live replica may record it, whichever replica owns the record.
+// ConfirmDatabaseCleanup records the resolving evidence (operator attestation or automated lease check); any live replica may record it.
 func (s *SQLStore) ConfirmDatabaseCleanup(ctx context.Context, owner, accessor, evidence string) error {
 	if strings.TrimSpace(accessor) == "" || strings.TrimSpace(evidence) == "" {
 		return fmt.Errorf("accessor and database reconciliation evidence are required")
@@ -351,11 +298,8 @@ func (s *SQLStore) DeleteDatabaseCleanup(ctx context.Context, accessor string) e
 	return err
 }
 
-// AddBrokerSession records one client session against its Pod for a
-// fleet-wide cap; the broker also counts each database's connections here,
-// under a "database:" key in the pod column. A limit of zero records without
-// a cap. Rows count only while
-// their owner is live, so a dead replica's sessions drop out with it.
+// AddBrokerSession records a session against its Pod for a fleet-wide cap (zero limit: no cap); database connections use a "database:" pod key.
+// Rows count only while their owner is live.
 func (s *SQLStore) AddBrokerSession(ctx context.Context, owner, id, pod string, limit int) error {
 	if owner == "" || id == "" || pod == "" {
 		return fmt.Errorf("incomplete broker session")
@@ -387,7 +331,6 @@ func (s *SQLStore) RemoveBrokerSession(ctx context.Context, id string) error {
 	return err
 }
 
-// CountPodSessions counts a Pod's sessions on live replicas.
 func (s *SQLStore) CountPodSessions(ctx context.Context, pod string) (int, error) {
 	return s.countPodSessions(ctx, s.db, pod)
 }

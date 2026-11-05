@@ -2,11 +2,7 @@ package store
 
 import "gorm.io/gorm"
 
-// Create database_services: managed PostgreSQL-broker upstreams, one row per
-// (vault, name). It backs the live, per-vault database-service management API so
-// onboarding or removing an upstream is a runtime operation rather than a config
-// change and restart. New table on both dialects (absent from the Postgres
-// baseline), so each branch creates it IF NOT EXISTS and is idempotent.
+// New table on both dialects (absent from the Postgres baseline), so each branch is IF NOT EXISTS.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		var ddl string

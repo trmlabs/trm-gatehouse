@@ -8,16 +8,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// needsSession reports whether SQL text might leave session state on a
-// server connection, so the client must keep that connection for the rest of
-// its session (session mode) instead of returning it after each transaction.
-//
-// It fails safe: the text is lexed (comments, quoted strings, E-strings,
-// dollar quotes and quoted identifiers), and every statement must start with
-// a keyword known to leave no session state, and call no function known to
-// set it. Anything else pins, including unterminated text. The check-in
-// verification in verifyClean is the backstop for state this misses, such as
-// a function that calls set_config internally.
+// needsSession reports whether SQL text might leave session state on a server connection.
 func needsSession(sql string) bool {
 	statements, ok := splitStatements(sql)
 	if !ok {
@@ -31,9 +22,8 @@ func needsSession(sql string) bool {
 	return false
 }
 
-// splitStatements returns each statement with comments removed and string
-// contents blanked, so keywords inside them are not seen. ok is false when
-// the text ends inside a comment, string or quoted identifier.
+// splitStatements returns each statement with comments removed and string contents blanked, so keywords
+// inside them are not seen. ok is false when the text ends inside a comment.
 func splitStatements(sql string) ([]string, bool) {
 	statements, _, ok := splitStatementsRaw(sql)
 	return statements, ok
@@ -151,11 +141,7 @@ func splitStatementsRaw(sql string) ([]string, []string, bool) {
 	return append(statements, cur.String()), append(raw, sql[start:]), true
 }
 
-// changesRole reports whether SQL text alters a role or a database's
-// defaults. On a pooled connection that would persist for every later client
-// of the shared login (ALTER ROLE CURRENT_USER SET search_path survives
-// DISCARD ALL) or lock them all out (a new password), so it is refused.
-// Unterminated text is refused too.
+// changesRole reports whether SQL text alters a role or a database's defaults.
 func changesRole(sql string) bool {
 	statements, ok := splitStatements(sql)
 	if !ok {
@@ -170,15 +156,8 @@ func changesRole(sql string) bool {
 	return false
 }
 
-// createsTemporary reports whether SQL text on a read-only login could
-// create a temporary table, view, sequence or other object. PUBLIC holds the
-// TEMP privilege by default, so the broker refuses these itself rather than
-// rely on a database change. It fails closed: besides CREATE ... TEMP and
-// SELECT ... INTO TEMP, it refuses what could create one unseen (pg_temp in
-// any text, Unicode escapes that could spell it, DO blocks and set_config
-// with computed text, UPDATE pg_settings), and settings that would make the
-// server read later text differently from the broker's lexer. Unterminated
-// text is refused too.
+// createsTemporary reports whether SQL text on a read-only login could create a temporary table, view,
+// sequence or other object.
 func createsTemporary(sql string) bool {
 	lower := strings.ToLower(sql)
 	if strings.Contains(lower, "pg_temp") || strings.Contains(lower, "u&'") || strings.Contains(lower, `u&"`) {
@@ -233,10 +212,8 @@ func createsTemporary(sql string) bool {
 // reads later text, such as Sequelize's SET standard_conforming_strings=on.
 var lexerSet = regexp.MustCompile(`(?i)^\s*set\s+(?:session\s+)?(standard_conforming_strings|client_encoding|names)\s*(?:=|\s+to\s+|\s)\s*'?([A-Za-z0-9_-]+)'?\s*$`)
 
-// lexerSetting reports whether a statement sets standard_conforming_strings,
-// client_encoding or NAMES, and whether it is the one safe form: a lone SET
-// to on, or to UTF8. Any other value could make the server read later text
-// differently from the broker's lexer, hiding a statement inside a literal.
+// lexerSetting reports whether a statement sets standard_conforming_strings, client_encoding or NAMES, and
+// whether it is the one safe form: a lone SET to on, or to UTF8.
 func lexerSetting(words []string, raw string) (isSet, safe bool) {
 	if len(words) < 2 || words[0] != "set" {
 		return false, false
@@ -260,11 +237,8 @@ func lexerSetting(words []string, raw string) (isSet, safe bool) {
 	return true, value == "utf8"
 }
 
-// changesLexer reports whether SQL text changes how the server reads later
-// text, which no pooled session may do: the only exception is the safe form
-// (standard_conforming_strings on, client_encoding UTF8) before the session's
-// first other statement, as drivers send on connect. started reports whether
-// the session has run another statement; next is its value after this text.
+// changesLexer reports whether SQL text changes how the server reads later text, which no pooled session may do,
+// except the safe form (standard_conforming_strings on, client_encoding UTF8) before its first other statement.
 func changesLexer(sql string, started bool) (refuse, next bool) {
 	statements, raw, ok := splitStatementsRaw(sql)
 	if !ok {
@@ -286,9 +260,8 @@ func changesLexer(sql string, started bool) (refuse, next bool) {
 	return false, started
 }
 
-// unsafeLexerParameter reports a server-reported setting, from ParameterStatus,
-// that would make the server read text differently from the broker's lexer.
-// It is the backstop for a change the classifier did not see.
+// unsafeLexerParameter reports a server-reported setting, from ParameterStatus, that would make the server
+// read text differently from the broker's lexer.
 func unsafeLexerParameter(name, value string) bool {
 	if name != "standard_conforming_strings" && name != "client_encoding" {
 		return false
@@ -301,14 +274,7 @@ func sqlWords(statement string) []string {
 	return strings.FieldsFunc(strings.ToLower(statement), func(r rune) bool { return r > 0x7f || !identChar(byte(r)) })
 }
 
-// readOnlyAllowed reports whether SQL text may run on a read-only login. It is
-// an allowlist: every statement must be a read (SELECT, VALUES, TABLE, a WITH
-// or EXPLAIN of one, SHOW, a cursor over one), transaction control that keeps
-// the transaction read-only, or a SET or RESET of a listed setting. Behind it,
-// text naming pg_temp, set_config or pg_settings in any spelling or quoting,
-// or using Unicode escapes, is refused, as is anything createsTemporary
-// refuses. The login's transactions are also read-only on the database side
-// (default_transaction_read_only), which the allowlist keeps on.
+// readOnlyAllowed reports whether SQL text may run on a read-only login.
 func readOnlyAllowed(sql string) bool {
 	lower := strings.ToLower(sql)
 	for _, banned := range []string{"pg_temp", "set_config", "pg_settings", "u&'", `u&"`} {
@@ -358,9 +324,8 @@ func readOnlyStatement(words []string, raw string) bool {
 	return false
 }
 
-// readQuery reports whether a query only reads: it names no data-modifying
-// or object-creating keyword anywhere, including in a WITH clause, a cursor,
-// SELECT ... INTO, or a row lock (FOR UPDATE).
+// readQuery reports whether a query only reads: it names no data-modifying or object-creating keyword
+// anywhere, including in a WITH clause, a cursor, SELECT ...
 func readQuery(words []string) bool {
 	for _, w := range words {
 		switch w {
@@ -372,9 +337,7 @@ func readQuery(words []string) bool {
 	return true
 }
 
-// readOnlySettings are what a read-only login may SET or RESET, sized from
-// what drivers and the internal API send (Sequelize: client_min_messages and
-// TIME ZONE on connect; node-postgres: startup parameters only).
+// readOnlySettings are what a read-only login may SET or RESET.
 var readOnlySettings = map[string]bool{
 	"search_path": true, "schema": true, "statement_timeout": true, "lock_timeout": true, "idle_in_transaction_session_timeout": true,
 	"application_name": true, "timezone": true, "datestyle": true, "intervalstyle": true, "extra_float_digits": true,

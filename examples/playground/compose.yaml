@@ -1,8 +1,8 @@
 {
-  "name": "agent-vault-playground",
+  "name": "gatehouse-playground",
   "services": {
     "operator": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "operator"
       ],
@@ -55,7 +55,7 @@
       }
     },
     "broker": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "broker"
       ],
@@ -96,7 +96,7 @@
       }
     },
     "vault": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "vault"
       ],
@@ -134,7 +134,7 @@
       }
     },
     "relay": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "relay"
       ],
@@ -173,7 +173,7 @@
       }
     },
     "payments": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "payments"
       ],
@@ -212,7 +212,7 @@
       }
     },
     "logs": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "logs"
       ],
@@ -251,7 +251,7 @@
       }
     },
     "attacker": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "attacker"
       ],
@@ -295,7 +295,7 @@
       }
     },
     "baseline": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "baseline"
       ],
@@ -330,7 +330,7 @@
       }
     },
     "sandbox": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "sandbox"
       ],
@@ -368,7 +368,7 @@
       }
     },
     "web": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "web"
       ],
@@ -418,7 +418,7 @@
       }
     },
     "database": {
-      "image": "agent-vault-playground:local",
+      "image": "gatehouse-playground:local",
       "command": [
         "database"
       ],

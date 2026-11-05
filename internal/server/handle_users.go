@@ -97,9 +97,7 @@ func (s *Server) buildOwnerUserList(ctx context.Context, users []store.User) []m
 	return items
 }
 
-// handlePublicUserList returns all users to any instance member or owner.
-// Owners get full data (including vault memberships); members get a reduced view.
-// no-access actors are blocked — the actor directory is instance-scoped.
+// handlePublicUserList returns users to instance members and owners (owners get full data); no-access actors are blocked.
 func (s *Server) handlePublicUserList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	actor, err := s.requireInstanceMember(w, r)
@@ -152,9 +150,7 @@ func (s *Server) handleUserGet(w http.ResponseWriter, r *http.Request) {
 		email = actor.User.Email
 	}
 
-	// Self-lookup is always allowed. Looking up other users is instance-scoped:
-	// no-access actors are blocked entirely; members are blocked from viewing
-	// other users (owner-only).
+	// Self-lookup is always allowed; looking up others is owner-only and blocked for no-access actors.
 	isSelf := actor.User != nil && actor.User.Email == email
 	if !isSelf {
 		if !instanceRoleSatisfies(actor.Role, "member") {

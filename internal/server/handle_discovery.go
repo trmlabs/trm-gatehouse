@@ -12,9 +12,7 @@ type discoverService struct {
 	Host string `json:"host"`
 }
 
-// discoverDatabase is one managed PostgreSQL-broker database an agent may select
-// by Name. It carries the selector and upstream host only — never the Vault
-// mount/role or any credential.
+// discoverDatabase carries the selector and upstream host only, never the Vault mount/role or a credential.
 type discoverDatabase struct {
 	Name string `json:"name"`
 	Host string `json:"host"`
@@ -44,7 +42,6 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 
 	credentialKeys := s.listCredentialKeys(ctx, ns.ID)
 
-	// Managed PostgreSQL-broker databases the agent may select by name.
 	databases := []discoverDatabase{}
 	if dbRows, err := s.store.ListDatabaseServices(ctx, ns.ID); err != nil {
 		proxyError(w, http.StatusInternalServerError, "internal", "Failed to list databases")
@@ -78,9 +75,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	for i := range svcList {
 		svcList[i].Host, svcList[i].Path, svcList[i].Port = broker.SplitInlineHost(svcList[i].Host, svcList[i].Path)
 	}
-	// Heal legacy unnamed entries on the agent-facing read path too —
-	// agents identify services by Name (per skill_cli.md) and a blank
-	// Name in this response makes the service un-addressable.
+	// Heal legacy unnamed entries here too; a blank Name makes the service un-addressable for agents.
 	broker.AssignSlugNames(svcList)
 
 	services := make([]discoverService, len(svcList))

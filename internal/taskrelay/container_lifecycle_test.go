@@ -91,7 +91,6 @@ func TestPairRequiresRunningTaskContainerWithoutReportedRestarts(t *testing.T) {
 				t.Fatal(e)
 			}
 			statuses := tt.change(runningContainer("worker"))
-			// The Pod and its transport sidecar remain Running throughout every case.
 			statuses = append(statuses, runningContainer("tunnel"))
 			setContainerStatuses(t, f, statuses...)
 			if v.check(context.Background(), "127.0.0.1:1234") == nil {
@@ -115,7 +114,6 @@ func TestTaskContainerExitClosesEstablishedDatabaseStream(t *testing.T) {
 			f.c.PostgresBindings = []PostgresConfig{binding}
 			f.start(t)
 			client, _ := openBinding(t, f, binding)
-			// The backend echoes; the relay passes whole frames.
 			if _, e := client.Write(encodePGFrame('d', []byte{'x'})); e != nil {
 				t.Fatal(e)
 			}

@@ -13,9 +13,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// Defaults shipped with the built-in SQLite sink. Both limits apply;
-// whichever is hit first trims rows. Owner can tune via the
-// "logs_retention" instance setting or pin via env vars.
+// Defaults for the built-in SQLite sink; whichever limit is hit first trims rows.
 const (
 	DefaultMaxAge          = 7 * 24 * time.Hour
 	DefaultMaxRowsPerVault = 10_000
@@ -29,9 +27,7 @@ const (
 	envRetentionLock = "AGENT_VAULT_LOGS_RETENTION_LOCK"
 )
 
-// RetentionConfig controls the background cleanup job. Zero-valued
-// limits disable that dimension (e.g. MaxAge == 0 skips time-based
-// trimming).
+// RetentionConfig controls the cleanup job; a zero limit disables that dimension.
 type RetentionConfig struct {
 	MaxAge          time.Duration
 	MaxRowsPerVault int64
@@ -52,9 +48,7 @@ type retentionStore interface {
 	VaultIDsWithLogs(ctx context.Context) ([]string, error)
 }
 
-// ResolveRetention returns the effective RetentionConfig. Precedence:
-// env (when lock is set) > instance setting > env defaults > built-in
-// defaults. Absent setting is not an error.
+// ResolveRetention returns the effective config: env (when locked) > instance setting > env defaults > built-in defaults.
 func ResolveRetention(ctx context.Context, s retentionStore) RetentionConfig {
 	cfg := RetentionConfig{
 		MaxAge:          DefaultMaxAge,

@@ -2,11 +2,7 @@ package store
 
 import "gorm.io/gorm"
 
-// Broker fleet: one owner row per running broker process, expiring by the
-// database clock, and an owner on every cleanup record so a survivor can claim
-// a dead replica's records. Records from before this migration have no owner
-// and are claimed by the first live broker. The single-owner table stays in
-// place, unused, so the migration only adds.
+// Pre-migration records have no owner and are claimed by the first live broker; the old single-owner table stays, unused.
 func init() {
 	RegisterGORMMigration(func(db *gorm.DB) error {
 		if err := db.Exec(`CREATE TABLE IF NOT EXISTS database_cleanup_replica (

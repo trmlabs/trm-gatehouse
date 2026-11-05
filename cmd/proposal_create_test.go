@@ -7,9 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newAuthFlagCmd returns a cobra.Command with all the auth-related flags
-// that proposal_create / service add define, so buildAuthFromFlags has
-// something to read from.
+// newAuthFlagCmd returns a cobra.Command carrying the auth flags buildAuthFromFlags reads.
 func newAuthFlagCmd() *cobra.Command {
 	c := &cobra.Command{Use: "test"}
 	c.Flags().String("token-key", "", "")

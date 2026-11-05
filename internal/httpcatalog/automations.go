@@ -12,54 +12,24 @@ import (
 	"time"
 )
 
-// Automation is one unattended agent the catalog grants access to by its
-// vendor id. It has no pool of its own: its runs land on a shared pool with
-// identity "cursor-automation", and each request is decided for the
-// Automation that started the run (the run token's automation_id). A new
-// Automation is one block of catalog data, never a new pool, image or
-// deployment.
-//
-// Its access is its own: the entries listed here, which the catalog's review
-// approves. No person's groups or account decide it, whoever the run's token
-// names, so a run with no person behind it is served the same entries.
+// Automation is one unattended agent the catalog grants access to by vendor id; its runs land on a shared pool and each request is decided for the Automation that started the run.
+// Its access is only the entries listed here, whoever the run's token names.
 type Automation struct {
-	// ID is the vendor's automation id, as the run token carries it.
-	ID string `json:"id"`
-	// Name is a short label for audit rows and logs.
+	ID   string `json:"id"`
 	Name string `json:"name"`
-	// Owner names the team accountable for the Automation, for audit rows and
-	// alerts: a directory group's name or object id. A catalog written before
-	// owners named teams may still give a person's lower-case email, read as
-	// the team's contact. It decides no access.
+	// Owner names the team accountable for the Automation, for audit rows and alerts; it decides no access.
 	Owner string `json:"owner"`
-	// RunnerGroup is refused at load: who sets off a run decides nothing, so
-	// a group of allowed runners would limit no one. The field is declared so
-	// a catalog that sets it gets that reason, not an unknown-field error.
+	// RunnerGroup is refused at load: who sets off a run decides nothing. Declared so a catalog that sets it gets that reason.
 	RunnerGroup string `json:"runnerGroup,omitempty"`
-	// Entries are the catalog entries the Automation may use. Each must also
-	// be granted to the pool its runs land on, whose ceiling caps their tier.
+	// Entries are the catalog entries the Automation may use; each must also be granted to the pool, whose ceiling caps their tier.
 	Entries []string `json:"entries"`
-	// Write sets where the Automation gets the pool's write grant: the push
-	// prefixes its git entry gives the pool, and the operations a github-api
-	// repository's poolOperations give it. A block without the key keeps the
-	// pool's grant on every entry, as a block did before the key existed. A
-	// block with it, an empty list included, gets exactly the git and
-	// github-api entries it names: on one it lists but does not name, the
-	// Automation fetches and reads only, with no push and no GitHub operation
-	// outside the reads (GitHubOperationWrites). The pool's own prefixes and
-	// operations stay the ceiling; Write decides which of the pool's
-	// Automations reach it, so one Automation's grant never widens another's.
-	// A name must be one of Entries and refers to a git or github-api entry.
+	// Write sets where the Automation gets the pool's write grant. No key keeps the pool's grant on every entry; a key, even empty, grants exactly the git and github-api entries it names.
+	// On a listed entry it does not name, the Automation fetches and reads only. The pool's prefixes and operations stay the ceiling.
 	Write WriteList `json:"write,omitzero"`
-	// TokenSHA256 makes the block an agent that proves itself with a static
-	// token (the static-token harness) instead of a vendor's run token: the
-	// lower-case hex SHA-256 of the token, one value, or two while a rotation
-	// overlaps. A block with it is reached only by that token, and a block
-	// without it only by a run token, so the two sources never share an id.
-	// Removing the block revokes the token at the next catalog reload.
+	// TokenSHA256 makes the block an agent that proves itself with a static token: lower-case hex SHA-256, two while a rotation overlaps.
+	// Such a block is reached only by that token; removing it revokes the token at the next reload.
 	TokenSHA256 []string `json:"tokenSHA256,omitempty"`
-	// Expires, optional and only with TokenSHA256, is an RFC 3339 time after
-	// which the token is refused whatever its hash.
+	// Expires, only with TokenSHA256, is an RFC 3339 time after which the token is refused.
 	Expires string `json:"expires,omitempty"`
 	// Subagents caps how many subagent runs one run may register with this block's grant; zero registers none, and only run-token blocks may set it.
 	Subagents int `json:"subagents,omitempty"`
@@ -96,25 +66,20 @@ func (w *WriteList) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, &w.Names)
 }
 
-// MarshalJSON writes a set list as a list, [] when it names nothing, so a
-// block that is written out and read back keeps what it granted.
+// MarshalJSON writes a set list as a list, [] when empty, so a round trip keeps the grant.
 func (w WriteList) MarshalJSON() ([]byte, error) {
 	return json.Marshal(append([]string{}, w.Names...))
 }
 
-// IsZero reports a block without the key, which omitzero then leaves out.
 func (w WriteList) IsZero() bool { return !w.Set }
 
-// ErrAutomationReadOnly is a push or a GitHub write by an Automation whose
-// block has a write list that does not name the entry (Automation.Write).
+// ErrAutomationReadOnly is a push or GitHub write by an Automation whose write list does not name the entry.
 var ErrAutomationReadOnly = errors.New("automation has no write grant for this destination")
 
-// automationContact is a plain lower-case email address: an owner as
-// catalogs named it before owners named teams.
+// automationContact is a plain lower-case email address, an owner as older catalogs named them.
 var automationContact = regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 
-// validate checks one Automation on its own and sorts its entries, so Uses is
-// a binary search. Whether each entry exists is checked against the catalog.
+// validate checks one Automation on its own and sorts its entries so Uses is a binary search.
 func (a *Automation) validate() error {
 	if !idPattern.MatchString(a.ID) {
 		return errors.New("id must be a short identifier")
@@ -122,9 +87,7 @@ func (a *Automation) validate() error {
 	if !idPattern.MatchString(a.Name) {
 		return errors.New("name must be a short identifier")
 	}
-	// A plain identifier covers a group's object id and a name without
-	// spaces; an audit row holds no space, so a group whose name has one is
-	// named by its id.
+	// A group whose name has a space is named by its id, since audit rows hold no space.
 	if !idPattern.MatchString(a.Owner) && (len(a.Owner) > 254 || !automationContact.MatchString(a.Owner)) {
 		return errors.New("owner must name a team: a group's name (letters, digits, '.', '_' or '-') or object id, or a lower-case contact email")
 	}
@@ -199,10 +162,7 @@ func (a *Automation) validateToken() error {
 		}
 		a.hashes = append(a.hashes, raw)
 	}
-	// A static token is a standing credential held in another platform's
-	// secret store, so the catalog bounds it: every token block carries an
-	// expiry, and none reaches further than MaxTokenLifetime from now. This
-	// is checked at load, so a hand-written or templated block cannot skip it.
+	// A static token is a standing credential, so every token block needs an expiry no further than MaxTokenLifetime from now, checked at load.
 	a.expires = time.Time{}
 	if a.Expires == "" {
 		return fmt.Errorf("expires is required with tokenSHA256, at most %s from now", maxTokenLifetimeText)
@@ -211,8 +171,7 @@ func (a *Automation) validateToken() error {
 	if err != nil {
 		return errors.New("expires must be an RFC 3339 time")
 	}
-	// The zero time reads as "never expires" to the checks that use it, so a
-	// templating slip that leaves it must fail closed.
+	// The zero time reads as "never expires", so it must fail closed.
 	if t.IsZero() {
 		return errors.New("expires must be a real time, not the zero time")
 	}
@@ -235,11 +194,8 @@ const MaxTokenLifetime = 90 * 24 * time.Hour
 
 var maxTokenLifetimeText = fmt.Sprintf("%d days", int(MaxTokenLifetime/(24*time.Hour)))
 
-// tokenClock is the time the cap is measured from; tests replace it.
 var tokenClock = time.Now
 
-// HasToken reports whether the block is an agent that proves itself with a
-// static token.
 func (a Automation) HasToken() bool { return len(a.TokenSHA256) > 0 }
 
 // HasOwnIdentity is true for a static token or Gumloop ID token block, so no Cursor run token may name its id.
@@ -249,11 +205,7 @@ func (a Automation) HasOwnIdentity() bool { return a.HasToken() || a.Gumloop != 
 // time for none.
 func (a Automation) TokenExpires() time.Time { return a.expires }
 
-// MatchToken reports whether the token is one the block lists. It hashes the
-// token once and always makes two constant-time comparisons, padding with a
-// slot that cannot match, so the work is the same for one hash or two and for a
-// block with none: an unknown id, which has no block, calls it on an empty
-// Automation and does the same work as a known one.
+// MatchToken hashes once and always makes two constant-time comparisons, so the work is the same for one hash, two, or an unknown id.
 func (a Automation) MatchToken(token string) bool {
 	sum := sha256.Sum256([]byte(token))
 	ok := 0
@@ -268,10 +220,7 @@ func (a Automation) MatchToken(token string) bool {
 	return ok == 1
 }
 
-// checkWrite checks Write against the catalog: each name must be one of the
-// Automation's own entries, and a git or github-api entry, the only kinds that
-// have a write grant to give. kind returns an entry's kind, "" for none. It
-// runs after validate, which sorts Entries for Uses.
+// checkWrite requires each write name to be one of the Automation's own git or github-api entries; it runs after validate.
 func (a Automation) checkWrite(kind func(entry string) string) error {
 	for _, name := range a.Write.Names {
 		if !a.Uses(name) {
@@ -284,15 +233,12 @@ func (a Automation) checkWrite(kind func(entry string) string) error {
 	return nil
 }
 
-// Uses reports whether the Automation may use the named entry.
 func (a Automation) Uses(entry string) bool {
 	_, ok := slices.BinarySearch(a.Entries, entry)
 	return ok
 }
 
-// Writes reports whether the Automation gets the pool's write grant on the
-// named git or github-api entry: on every entry when its block has no write
-// key, and otherwise only on the entries the list names (Write).
+// Writes reports whether the Automation gets the pool's write grant on the entry: everywhere with no write key, else only the named entries.
 func (a Automation) Writes(entry string) bool {
 	if !a.Write.Set {
 		return true
@@ -301,9 +247,6 @@ func (a Automation) Writes(entry string) bool {
 	return ok
 }
 
-// indexAutomations validates the Automations against the catalog's entries (by
-// name, each with its kind) and indexes them by id, so a lookup costs the same
-// at any count.
 func indexAutomations(list []Automation, entries map[string]string) (map[string]Automation, error) {
 	index := make(map[string]Automation, len(list))
 	claimed := map[string]string{} // gumloop org and owner: automation id
@@ -342,17 +285,14 @@ func automationName(id string, i int) string {
 	return fmt.Sprintf("#%d", i)
 }
 
-// Automation returns the listed Automation with this id.
 func (c Catalog) Automation(id string) (Automation, bool) {
 	a, ok := c.automations[id]
 	return a, ok
 }
 
-// Automations returns how many Automations the catalog lists.
 func (c Catalog) Automations() int { return len(c.automations) }
 
-// Automation returns the Automation with this id when the pool decides per
-// Automation; any other pool lists none.
+// Automation returns the Automation with this id when the pool decides per Automation; any other pool lists none.
 func (p Pool) Automation(id string) (Automation, bool) {
 	if p.Identity != IdentityCursorAutomation || id == "" {
 		return Automation{}, false
@@ -378,10 +318,7 @@ func (p Pool) GrantsSubagents() bool {
 // Automation, on its own entries.
 const IdentityCursorAutomation = "cursor-automation"
 
-// ParseAutomationBlock reads one Automation block from a catalog's YAML or
-// JSON list item and validates it on its own, as the catalog does before it
-// checks the block against the entries. It is for tools that write a block,
-// so they print only one the broker would accept.
+// ParseAutomationBlock validates one Automation block on its own, for tools that write a block.
 func ParseAutomationBlock(data []byte) (Automation, error) {
 	document, err := FromYAML(append([]byte("automations:\n"), data...))
 	if err != nil {
@@ -400,8 +337,6 @@ func ParseAutomationBlock(data []byte) (Automation, error) {
 	if err := a.validate(); err != nil {
 		return Automation{}, err
 	}
-	// Which entries are git or github-api ones needs the catalog, and the
-	// validator checks it; that a write name is one of the block's own does not.
 	for _, name := range a.Write.Names {
 		if !a.Uses(name) {
 			return Automation{}, fmt.Errorf("write names entry %q, which entries does not list", name)

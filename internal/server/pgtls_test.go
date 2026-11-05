@@ -19,8 +19,6 @@ import (
 	"time"
 )
 
-// testPair makes a self-signed certificate for name and returns its PEM
-// certificate, PEM key and parsed certificate.
 func testPair(t *testing.T, name string) ([]byte, []byte, *x509.Certificate) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -59,9 +57,6 @@ func writePair(t *testing.T, dir string, certPEM, keyPEM []byte) (string, string
 	return certFile, keyFile
 }
 
-// startPostgresTLS runs the TLS front onto a loopback listener standing in
-// for the PostgreSQL broker's, and returns the front's address and the
-// listener the broker would serve.
 func startPostgresTLS(t *testing.T, certFile, keyFile string) (string, *mergedListener) {
 	t.Helper()
 	s := &Server{logger: slog.New(slog.DiscardHandler)}
@@ -101,9 +96,6 @@ func acceptWithin(t *testing.T, l net.Listener) net.Conn {
 	}
 }
 
-// A TLS client's bytes reach the broker's listener decrypted, and the
-// connection's remote address is the client's own, which pool admission
-// reads in place of a PROXY header.
 func TestPostgresTLSHandsOffWithClientAddress(t *testing.T) {
 	certPEM, keyPEM, cert := testPair(t, "broker.gatehouse.svc.cluster.local")
 	certFile, keyFile := writePair(t, t.TempDir(), certPEM, keyPEM)
@@ -111,8 +103,6 @@ func TestPostgresTLSHandsOffWithClientAddress(t *testing.T) {
 
 	roots := x509.NewCertPool()
 	roots.AddCert(cert)
-	// The server's half of the handshake runs when the broker first reads, as
-	// in the broker's connection handler, so the client dials alongside it.
 	dialed := make(chan *tls.Conn, 1)
 	go func() {
 		client, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
@@ -142,8 +132,6 @@ func TestPostgresTLSHandsOffWithClientAddress(t *testing.T) {
 	}
 }
 
-// A plaintext client gets nothing through: the handshake fails before any of
-// its bytes reach the broker as protocol data.
 func TestPostgresTLSRefusesPlaintext(t *testing.T) {
 	certPEM, keyPEM, _ := testPair(t, "broker")
 	certFile, keyFile := writePair(t, t.TempDir(), certPEM, keyPEM)
@@ -154,7 +142,6 @@ func TestPostgresTLSRefusesPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	// A PostgreSQL SSLRequest, sent without TLS.
 	if _, err := client.Write([]byte{0, 0, 0, 8, 4, 210, 22, 47}); err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +152,6 @@ func TestPostgresTLSRefusesPlaintext(t *testing.T) {
 	}
 }
 
-// A rotated certificate serves from the next handshake after the reload
-// interval, and a half-written rotation keeps the last good pair.
 func TestCertificateFilesReload(t *testing.T) {
 	dir := t.TempDir()
 	certA, keyA, _ := testPair(t, "a")
@@ -217,8 +202,6 @@ func TestCertificateFilesReload(t *testing.T) {
 	}
 }
 
-// Startup fails closed on a pair that does not load, and the TLS listener
-// cannot sit beside the cross-cluster listener's PROXY header.
 func TestEnablePostgresTLSFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	certA, keyA, _ := testPair(t, "a")

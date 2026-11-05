@@ -14,13 +14,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/pgproxy"
 )
 
-// catalogDatabaseResolver resolves databases from the live catalog on every
-// connection, so a database added to the catalog is reachable at the next
-// reload without a broker restart. The requested database name selects the
-// entry; the connecting pool must be granted it, and the requester must pass
-// the same tier and entitlement decision as an HTTP request. The resolver runs
-// again at every recheck, so the session token is re-verified and membership
-// re-read (through the cache) for the life of the session.
+// catalogDatabaseResolver re-resolves from the live catalog on every connection and recheck, re-verifying the session token and membership for the session's life.
 type catalogDatabaseResolver struct {
 	catalog      interface{ Current() httpcatalog.Catalog }
 	runner       authorize.Verifier
@@ -28,9 +22,7 @@ type catalogDatabaseResolver struct {
 	sessions     authorize.Binder
 }
 
-// NewCatalogDatabaseResolver builds a resolver over a live catalog source.
-// runner, entitlements and sessions may be nil; entries that need them are
-// then refused.
+// NewCatalogDatabaseResolver: runner, entitlements and sessions may be nil; entries needing them are refused.
 func NewCatalogDatabaseResolver(catalog interface{ Current() httpcatalog.Catalog }, runner authorize.Verifier, entitlements *entitlement.Cache, sessions authorize.Binder) pgproxy.DatabaseResolver {
 	return catalogDatabaseResolver{catalog: catalog, runner: runner, entitlements: entitlements, sessions: sessions}
 }
@@ -51,8 +43,6 @@ func (r catalogDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgpr
 	svc := &pgproxy.DatabaseService{Name: entry.Name, Addr: net.JoinHostPort(entry.Host, strconv.Itoa(entry.Port)),
 		Database: p.Database, Mount: p.Mount, Role: p.Role, SSLMode: p.SSLMode, MaxConns: p.MaxConns, ReadOnly: p.Access != "write",
 		CA: p.CA, ServerName: p.ServerName}
-	// Entries on one endpoint share its strictest explicit budget, as the
-	// store resolver does.
 	for _, other := range catalog.Entries() {
 		if other.Kind == "postgres" && other.Host == entry.Host && other.Port == entry.Port && other.Postgres.MaxConns > 0 &&
 			(svc.MaxConns == 0 || other.Postgres.MaxConns < svc.MaxConns) {
@@ -62,9 +52,6 @@ func (r catalogDatabaseResolver) ResolveDatabase(ctx context.Context, scope pgpr
 	return svc, nil
 }
 
-// authorize applies the tier and entitlement decision for entry to the
-// connection's requester, records who it was for the audit trail, and returns
-// a *pgproxy.RefusedError when the decision refuses.
 func (r catalogDatabaseResolver) authorize(ctx context.Context, catalog httpcatalog.Catalog, entry *httpcatalog.Entry, scope pgproxy.AgentScope) error {
 	pool, _ := catalog.Pool(scope.Pool) // undefined pools: no identity, ceiling T0
 	who, refusal := authorize.Resolve(ctx, pool, pgproxy.Session(ctx), authorize.Claims{Pod: scope.WorkloadID, ClaimedRun: scope.ClaimedRun, AttestedRequester: scope.AttestedRequester}, r.runner, r.sessions)

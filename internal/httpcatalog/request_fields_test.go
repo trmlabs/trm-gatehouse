@@ -48,15 +48,12 @@ func TestRequestFieldsLoadRules(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// Another vendor may limit any field, or none.
 	other := strings.NewReplacer(`"host":"slack.com"`, `"host":"api.linear.app"`, `"name":"channel"`, `"name":"teamId"`).Replace(slackEntry)
 	if _, err := Parse([]byte(`{"entries":[` + other + `]}`)); err != nil {
 		t.Errorf("non-Slack entry: %v", err)
 	}
 }
 
-// A Slack entry reaches only the listed message methods. A method that names
-// a person or another conversation outside channel is never matched.
 func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 	c, err := Parse([]byte(`{"entries":[` + slackEntry + `]}`))
 	if err != nil {
@@ -67,8 +64,6 @@ func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 			t.Errorf("%s: %v", path, err)
 		}
 	}
-	// A reaction and the two channel reads also name their one conversation in
-	// channel, so an entry may list them.
 	read := strings.Replace(slackEntry, `"/api/chat.postMessage","/api/chat.update"`,
 		`"/api/reactions.add","/api/conversations.history","/api/conversations.replies"`, 1)
 	rc, err := Parse([]byte(`{"entries":[` + strings.Replace(read, `"methods":["POST"]`, `"methods":["GET","POST"]`, 1) + `]}`))
@@ -91,9 +86,6 @@ func TestRequestFieldsSlackMethodsOnly(t *testing.T) {
 	}
 }
 
-// A Slack entry names each listed method as its audit operation, one the
-// audit chain accepts (a name it refuses would fail every call to that method
-// as audit_unavailable); any other path or entry names none.
 func TestSlackOperationNamesTheMethod(t *testing.T) {
 	want := map[string]string{
 		"/api/chat.postMessage":      "slack.chat_post_message",
@@ -164,8 +156,6 @@ func TestRequestFieldsCheckRequests(t *testing.T) {
 		{"array key in the query", "channel=C0123456789&channel[]=D0123456789", nil, "", false},
 		{"indexed key in a form", "", form, "channel=C0123456789&channel[0]=D0123456789", false},
 		{"array key in the query beside a form", "channel[]=D0123456789", form, "channel=C0123456789", false},
-		// A PHP-style parser drops leading spaces and cuts a name at NUL, so
-		// each of these keys reaches Slack as a second channel.
 		{"leading space in the query", "channel=C0123456789&%20channel=D0123456789", nil, "", false},
 		{"plus as a leading space in the query", "channel=C0123456789&+channel=D0123456789", nil, "", false},
 		{"leading tab in the query", "channel=C0123456789&%09channel=D0123456789", nil, "", false},
@@ -188,7 +178,6 @@ func TestRequestFieldsCheckRequests(t *testing.T) {
 		{"leading space in the query beside JSON", "%20channel=D0123456789", json, `{"channel":"C0123456789"}`, false},
 		{"leading space in a JSON key", "", json, `{"channel":"C0123456789"," channel":"D0123456789"}`, false},
 		{"NUL in a JSON key", "", json, `{"channel":"C0123456789","channel\u0000":"D0123456789"}`, false},
-		// Only the parameters the method takes, spelled exactly.
 		{"a parameter the method does not take", "channel_name=x", json, `{"channel":"C0123456789"}`, false},
 		{"a dot for an underscore", "channel=C0123456789&thread.ts=1700000000.000100", nil, "", false},
 		{"a token parameter", "", form, "channel=C0123456789&token=x", false},
@@ -205,8 +194,6 @@ func TestRequestFieldsCheckRequests(t *testing.T) {
 	}
 }
 
-// Each listed Slack method takes the parameters Slack documents for it and no
-// others, and a path that is not exactly a listed method is refused.
 func TestRequestFieldsSlackMethodParameters(t *testing.T) {
 	all := strings.NewReplacer(`"/api/chat.postMessage","/api/chat.update"`,
 		`"/api/chat.postMessage","/api/chat.update","/api/reactions.add","/api/conversations.history","/api/conversations.replies"`,
@@ -242,9 +229,6 @@ func TestRequestFieldsSlackMethodParameters(t *testing.T) {
 	}
 }
 
-// Another vendor's entry takes any plain key, but never one with whitespace,
-// a control byte or a bracket, which some parser could read as the limited
-// name.
 func TestRequestFieldsOtherVendorKeys(t *testing.T) {
 	other := strings.NewReplacer(`"host":"slack.com"`, `"host":"api.example.com"`, `"pathPrefixes":["/api/chat.postMessage","/api/chat.update"]`,
 		`"pathPrefixes":["/v1"]`, `"name":"channel"`, `"name":"teamId"`).Replace(slackEntry)

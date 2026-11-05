@@ -12,11 +12,6 @@ import (
 	"path/filepath"
 )
 
-// embedded isolation assets: Dockerfile + init/entrypoint scripts. The
-// sha256 of their concatenated bytes (sorted by name for stability)
-// becomes the image tag, so a binary that ships different assets
-// automatically produces a different tag on first use.
-//
 //go:embed assets/Dockerfile assets/init-firewall.sh assets/entrypoint.sh
 var isolationAssets embed.FS
 
@@ -27,25 +22,16 @@ const (
 	assetsHashLen = 12
 )
 
-// assetFiles lists embedded assets in the canonical order used for
-// hashing. Order is load-bearing — changing it invalidates every
-// user's cached image.
+// assetFiles lists embedded assets in hashing order; changing it invalidates every cached image.
 var assetFiles = []string{
 	"assets/Dockerfile",
 	"assets/entrypoint.sh",
 	"assets/init-firewall.sh",
 }
 
-// TODO: concurrent vault-run invocations that both miss the image
-// cache each docker-build the same content. Last writer wins, same
-// bytes — one extra minute of wasted CPU. Acceptable for v1.
+// TODO: concurrent runs that miss the image cache each build the same bytes; acceptable for v1.
 
-// EnsureImage guarantees the isolation image exists locally and returns
-// the fully qualified tag. If override is non-empty, the user's own
-// image is used as-is and no build is performed.
-//
-// Content-hash tag pinning means that bumping agent-vault with changed
-// assets automatically triggers a rebuild on next use.
+// EnsureImage returns the local isolation image tag, building it if needed; a non-empty override is used as-is.
 func EnsureImage(ctx context.Context, override string, stderr io.Writer) (string, error) {
 	if override != "" {
 		return override, nil
@@ -95,9 +81,7 @@ func assetsHash() (string, error) {
 	return hex.EncodeToString(h.Sum(nil))[:assetsHashLen], nil
 }
 
-// unpackAssets writes the embedded files to
-// ~/.agent-vault/isolation/<hash>/ (idempotent) and returns the path.
-// Scripts are emitted 0o755 so docker build's COPY preserves mode.
+// unpackAssets writes the embedded files to ~/.agent-vault/isolation/<hash>/ (idempotent) with scripts 0o755.
 func unpackAssets(hash string) (string, error) {
 	dir, err := hostIsolationDir()
 	if err != nil {

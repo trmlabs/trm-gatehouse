@@ -101,9 +101,7 @@ func TestApplySubstitutionsHeaderRejectsCRLF(t *testing.T) {
 }
 
 func TestApplySubstitutionsScopingSkipsUndeclaredSurfaces(t *testing.T) {
-	// Substitution declared only for "path"; placeholder also appears
-	// in query, header, and would-be body. Only the path is rewritten;
-	// the others retain the literal token.
+	// Only the path is rewritten; the other surfaces keep the literal token.
 	u := mustParseURL(t, "https://api.example.com/items/__sid__?id=__sid__")
 	headers := http.Header{}
 	headers.Set("X-Echo", "__sid__")

@@ -371,9 +371,7 @@ function AddAgentButton({
       .catch(() => {});
   }, [open, isOwner]);
 
-  // Unmount paths that bypass close() (browser back, programmatic redirect)
-  // would otherwise let an in-flight create land its token on an unmounted
-  // component and disappear.
+  // Unmount paths that bypass close() would otherwise lose an in-flight create's token.
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -433,9 +431,7 @@ function AddAgentButton({
         if (isAbortError(err)) throw err;
         return {};
       });
-      // Refresh regardless of outcome: the server may have committed the
-      // agent even if the response failed to deserialize, and the operator
-      // needs to see the resulting row.
+      // Refresh even on failure: the server may have created the agent anyway.
       onCreated();
       if (!createResp.ok) {
         setError(createData.error || "Failed to create agent.");
@@ -624,8 +620,8 @@ function AddAgentButton({
 type InstallTab = "shell" | "docker";
 
 const INSTALL_SNIPPETS: Record<InstallTab, string> = {
-  shell: "curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL https://get.agent-vault.dev | sh",
-  docker: "COPY --from=infisical/agent-vault:latest /usr/local/bin/agent-vault /usr/local/bin/agent-vault",
+  shell: "git clone https://github.com/trmlabs/trm-gatehouse.git && cd trm-gatehouse && make build && sudo mv agent-vault /usr/local/bin/",
+  docker: "COPY --from=gatehouse:local /usr/local/bin/agent-vault /usr/local/bin/agent-vault",
 };
 
 const RUN_SNIPPETS: Record<InstallTab, string> = {

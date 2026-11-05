@@ -16,9 +16,7 @@ const (
 	ContainerClaudeConfig = "/home/claude/.claude.json"
 )
 
-// ProxyEnvParams feeds BuildProxyEnv. Process mode and container mode
-// differ only in Host (loopback vs host.docker.internal) and CAPath
-// (host-local vs container-local bind mount).
+// ProxyEnvParams feeds BuildProxyEnv; process and container mode differ only in Host and CAPath.
 type ProxyEnvParams struct {
 	Host   string // MITM listener host from the child's point of view
 	Port   int
@@ -27,18 +25,7 @@ type ProxyEnvParams struct {
 	CAPath string // path the child reads the CA PEM from
 }
 
-// BuildProxyEnv returns the env vars that point an HTTP/HTTPS client at
-// agent-vault's MITM proxy with the right credentials and CA trust.
-// Canonical source for both the process path (augmentEnvWithMITM) and
-// the container path (BuildContainerEnv) so the list can't drift.
-//
-// HTTPS_PROXY and HTTP_PROXY both point at the same proxy URL so the
-// client uses the same listener for https:// and http:// upstreams;
-// the proxy listener accepts CONNECT and absolute-form forward-proxy
-// requests on the same port.
-//
-// NB: keep in sync with buildProxyEnv() in
-// sdks/sdk-typescript/src/resources/sessions.ts.
+// BuildProxyEnv returns the env vars pointing a client at the MITM proxy; keep in sync with buildProxyEnv() in the TypeScript SDK sessions.ts.
 func BuildProxyEnv(p ProxyEnvParams) []string {
 	scheme := "http"
 	proxyURL := (&url.URL{
@@ -61,9 +48,7 @@ func BuildProxyEnv(p ProxyEnvParams) []string {
 	}
 }
 
-// ProxyEnvKeys are the keys BuildProxyEnv emits. POSIX getenv returns
-// the first match in C code paths, so parent-env occurrences must be
-// stripped before appending these.
+// ProxyEnvKeys are the keys BuildProxyEnv emits; strip them from the parent env first since getenv returns the first match.
 var ProxyEnvKeys = []string{
 	"HTTPS_PROXY",
 	"HTTP_PROXY",
@@ -78,9 +63,7 @@ var ProxyEnvKeys = []string{
 	"DENO_CERT",
 }
 
-// BuildContainerEnv returns the KEY=VALUE entries to pass to `docker
-// run` via -e flags. Produces a fresh list rather than augmenting
-// os.Environ() — the container should not inherit the host's env.
+// BuildContainerEnv returns KEY=VALUE entries for `docker run -e`, built fresh so the host env is not inherited.
 func BuildContainerEnv(token, vault string, httpPort, mitmPort int) []string {
 	env := BuildProxyEnv(ProxyEnvParams{
 		Host:   ContainerProxyHost,

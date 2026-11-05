@@ -485,9 +485,7 @@ function ServiceModal({
   const [apiKeyHeader, setApiKeyHeader] = useState(initial?.auth?.header ?? (defaultAuthScheme === "api-key" ? defaultAuthHeader ?? "" : ""));
   const [apiKeyPrefix, setApiKeyPrefix] = useState(initial?.auth?.prefix ?? "");
 
-  // Stable row IDs so React reconciliation keys editable rows by identity
-  // rather than array index — without this, deleting a middle row causes
-  // input values to bleed between adjacent rows during the re-render.
+  // Stable row IDs so deleting a middle row does not bleed input values between rows.
   const rowIdSeq = useRef(0);
   const nextRowId = () => ++rowIdSeq.current;
 

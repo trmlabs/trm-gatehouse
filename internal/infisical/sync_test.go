@@ -170,9 +170,7 @@ func TestSyncerRefresh_SuccessReplacesCredentials(t *testing.T) {
 	}
 }
 
-// A refresh whose vault was disconnected (row removed) between the list scan
-// and the write must drop the snapshot, leaving the kept credentials and the
-// health row untouched — not record a failure.
+// A refresh whose vault row was removed mid-flight must drop the snapshot, not record a failure.
 func TestSyncerRefresh_DisconnectedMidSyncSkipsWrite(t *testing.T) {
 	dek := makeDEK(t)
 	pastSynced := time.Now().Add(-time.Hour)

@@ -21,17 +21,12 @@ import (
 	"github.com/Infisical/agent-vault/internal/store/storetest"
 )
 
-// anyProxy admits every caller as one proxy binding serving the fixture's
-// agent namespace.
 type anyProxy struct{}
 
 func (anyProxy) IdentifyProxy(context.Context, string, netip.Addr) (proxyactivity.Identity, error) {
 	return proxyactivity.Identity{Scope: "td/gatehouse-proxy/uid", Namespaces: []string{"agent-sandboxes"}}, nil
 }
 
-// restoreRig is a real broker activity service and store behind a TLS
-// front, with the store's database open for the test to restore, and the
-// service swappable to restart the broker.
 type restoreRig struct {
 	path   string
 	raw    *sql.DB
@@ -45,8 +40,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	rig := &restoreRig{path: filepath.Join(t.TempDir(), "broker.db")}
 	storetest.Seed(t, rig.path)
 	rig.restartBroker(t)
-	// The broker writes the same file; wait out its write lock as the broker
-	// does rather than failing at once with SQLITE_BUSY.
+	// Wait out the broker's write lock rather than failing with SQLITE_BUSY.
 	raw, err := sql.Open("sqlite", rig.path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
@@ -73,8 +67,6 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	return rig
 }
 
-// restartBroker replaces the broker process: a new service over a newly
-// opened store on the same database, nothing kept in memory.
 func (rig *restoreRig) restartBroker(t *testing.T) {
 	t.Helper()
 	db, err := store.Open(rig.path)
@@ -107,18 +99,13 @@ func (rig *restoreRig) int64(t *testing.T, query string) int64 {
 	return n
 }
 
-// replica starts a proxy replica reporting to the rig every second, whose
-// agent Pod belongs to Sandbox sb-00007; it returns the replica and its
-// admin address.
 func (rig *restoreRig) replica(t *testing.T) (*sharedFixture, string) {
 	t.Helper()
 	sf, admin := rig.start(t, sandboxPod("sandbox-a", "pod-a", "127.0.0.1"))
 	pod := sandboxPod("sandbox-a", "pod-a", "127.0.0.1")
 	pod["metadata"].(map[string]any)["ownerReferences"].([]any)[0].(map[string]any)["uid"] = "uid-sb-00007"
 	sf.api.send(t, "MODIFIED", pod)
-	// The watch applies the change on its own goroutine: until it has, a
-	// tunnel is attributed to the Pod's old owner. The Pod's start, recorded
-	// for its new owner, shows it has.
+	// The watch applies on its own goroutine; until then a tunnel is attributed to the Pod's old owner.
 	waitUntil(t, "the replica to see sb-00007's Pod", func() bool {
 		for _, s := range local(t, admin).Sandboxes {
 			if s.OwnerUID == "uid-sb-00007" {
@@ -130,8 +117,6 @@ func (rig *restoreRig) replica(t *testing.T) (*sharedFixture, string) {
 	return sf, admin
 }
 
-// idleReplica starts a proxy replica that sees no agent Pod and so has no
-// activity to report.
 func (rig *restoreRig) idleReplica(t *testing.T) (*sharedFixture, string) {
 	t.Helper()
 	return rig.start(t)
@@ -149,7 +134,6 @@ func (rig *restoreRig) start(t *testing.T, pods ...map[string]any) (*sharedFixtu
 	return sf, admin
 }
 
-// local is the replica at admin's own report.
 func local(t *testing.T, admin string) ActivityReport {
 	t.Helper()
 	var r ActivityReport
@@ -164,8 +148,6 @@ func local(t *testing.T, admin string) ActivityReport {
 	return r
 }
 
-// use opens and closes one tunnel for sb-00007 and waits until its use is in
-// the broker's store.
 func (rig *restoreRig) use(t *testing.T, sf *sharedFixture) {
 	t.Helper()
 	before := time.Now().UnixMilli()
@@ -181,16 +163,11 @@ func (rig *restoreRig) use(t *testing.T, sf *sharedFixture) {
 	})
 }
 
-// pass runs exactly one janitor pass against the replica at admin, over an
-// unused Sandbox sb-00001 and the agent's sb-00007, both created hours ago,
-// with an idle window of idle.
 func pass(t *testing.T, admin string, idle time.Duration) *janitorFixture {
 	t.Helper()
 	return passOver(t, idle, admin)
 }
 
-// passOver is pass over several replicas; the first is asked for the durable
-// view.
 func passOver(t *testing.T, idle time.Duration, admins ...string) *janitorFixture {
 	t.Helper()
 	jf := newJanitor(t, nil)
@@ -216,38 +193,26 @@ func held(t *testing.T, jf *janitorFixture) any {
 	return jf.events(t, "janitor_pass")[0]["held"]
 }
 
-// A broker database restored to an earlier point, end to end: a real proxy
-// replica reporting to the real proxy-activity service and store, and the
-// janitor's first pass after the restore.
 func TestJanitorFirstPassAfterARestore(t *testing.T) {
 	t.Parallel()
 	const idle = 4 * time.Second
 	rig := newRestoreRig(t)
 	sf, admin := rig.replica(t)
 	rig.use(t, sf)
-	// The binding's history goes back hours, and the replica has vouched for
-	// longer than the idle window.
 	rig.exec(t, `UPDATE proxy_activity_scope SET history_started_ms = history_started_ms - 7200000`)
 	time.Sleep(idle + time.Second)
 
-	// A restore that took only the Sandbox's row (the sequence still covers
-	// every acknowledgment). The agent's last use was just before it.
 	rig.use(t, sf)
 	rig.exec(t, `DELETE FROM proxy_activity WHERE owner_uid = 'uid-sb-00007'`)
 	time.Sleep(2 * time.Second) // two report intervals: nothing puts the row back
 	if rig.int64(t, `SELECT COUNT(*) FROM proxy_activity WHERE owner_uid = 'uid-sb-00007'`) != 0 {
 		t.Fatal("the lost row came back before the pass; the test would prove nothing")
 	}
-	// Exactly one pass: the live replica's own activity is merged into the
-	// same decision, so the used Sandbox is kept and only the unused one goes.
 	jf := pass(t, admin, idle)
 	if jf.api.deleted["sb-00007"] || !jf.api.deleted["sb-00001"] {
 		t.Fatalf("restore of a row: deleted %v", jf.api.deleted)
 	}
 
-	// A restore to a backup three reports old: every row gone and the
-	// sequence behind what the replica saw acknowledged. Exactly one pass:
-	// it holds and deletes nothing.
 	rig.use(t, sf)
 	rig.exec(t, `DELETE FROM proxy_activity`)
 	rig.exec(t, `UPDATE proxy_activity_stream SET seq = seq - 3`)
@@ -255,8 +220,6 @@ func TestJanitorFirstPassAfterARestore(t *testing.T) {
 	if len(jf.api.deleted) != 0 || held(t, jf) != "activity_history_lost" {
 		t.Fatalf("restore past acknowledged reports: deleted %v, held %v", jf.api.deleted, held(t, jf))
 	}
-	// The replica's next report finds the loss, sends everything it holds
-	// and restarts the history: the janitor holds one idle window, then goes on.
 	waitUntil(t, "the replica's report of the loss", func() bool {
 		return rig.int64(t, `SELECT COUNT(*) FROM proxy_activity WHERE owner_uid = 'uid-sb-00007'`) == 1
 	})
@@ -269,9 +232,6 @@ func TestJanitorFirstPassAfterARestore(t *testing.T) {
 		t.Fatalf("one idle window after the loss: deleted %v, held %v", jf.api.deleted, held(t, jf))
 	}
 
-	// A broker restart that loses nothing: a new service over the same
-	// database. The replica's next report matches, the history stays, and the
-	// janitor goes on without a hold.
 	historyBefore := rig.int64(t, `SELECT history_started_ms FROM proxy_activity_scope`)
 	rig.restartBroker(t)
 	rig.use(t, sf)
@@ -283,25 +243,17 @@ func TestJanitorFirstPassAfterARestore(t *testing.T) {
 	}
 }
 
-// Every replica of a binding restarted, so none holds an acknowledgment and a
-// restore in between could not be seen: the binding is unverified, and the
-// janitor holds it until a replica's acknowledgment is older than the idle
-// window. One hold per rollout; nothing is deleted meanwhile.
 func TestJanitorHoldsAfterEveryReplicaRestarts(t *testing.T) {
 	const idle = 4 * time.Second
 	rig := newRestoreRig(t)
 	sf, _ := rig.replica(t)
 	rig.use(t, sf)
 	rig.exec(t, `UPDATE proxy_activity_scope SET history_started_ms = history_started_ms - 7200000`)
-	// The rollout: a new replica, with nothing acknowledged yet, is the only
-	// one the janitor sees.
 	_, admin := rig.replica(t)
 	jf := pass(t, admin, idle)
 	if len(jf.api.deleted) != 0 || held(t, jf) != "activity_history_unverified" {
 		t.Fatalf("before the new replica's first report: deleted %v, held %v", jf.api.deleted, held(t, jf))
 	}
-	// Its first report (its Pod starts count as use) is acknowledged; it
-	// vouches only from then.
 	waitUntil(t, "the new replica's acknowledgment", func() bool {
 		resp, err := http.Get("http://" + admin + ActivityLocalPath)
 		if err != nil {
@@ -321,11 +273,6 @@ func TestJanitorHoldsAfterEveryReplicaRestarts(t *testing.T) {
 	}
 }
 
-// A restore that set back only an idle replica's stream, after which a busy
-// replica reports before the idle one does: the busy replica's reports never
-// advance the idle one's stream, so its loss stays visible. The janitor holds,
-// shows the idle replica its loss, the idle replica reports it once with
-// nothing new, and the history restarts: one idle window, then on.
 func TestJanitorSeesAnIdleReplicasLossPastABusyOne(t *testing.T) {
 	t.Parallel()
 	const idle = 4 * time.Second
@@ -339,7 +286,6 @@ func TestJanitorSeesAnIdleReplicasLossPastABusyOne(t *testing.T) {
 	})
 	rig.exec(t, `UPDATE proxy_activity_scope SET history_started_ms = history_started_ms - 7200000`)
 	time.Sleep(idle + time.Second)
-	// The backup was taken just before the idle replica's last report.
 	rig.use(t, quiet)
 	stream := local(t, quietAdmin).Replica
 	waitUntil(t, "the idle replica's last report", func() bool {
@@ -371,9 +317,6 @@ func TestJanitorSeesAnIdleReplicasLossPastABusyOne(t *testing.T) {
 	}
 }
 
-// Every replica restarted and nothing has used any Sandbox since, so no
-// replica ever reports: the hold ends once every live replica has been up a
-// whole idle window, its own memory covering it, and not before.
 func TestJanitorHoldEndsAWindowAfterAQuietRestart(t *testing.T) {
 	t.Parallel()
 	const idle = 4 * time.Second

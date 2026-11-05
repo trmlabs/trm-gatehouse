@@ -10,7 +10,6 @@ import (
 // Magic opens every Bolt connection.
 var Magic = [4]byte{0x60, 0x60, 0xB0, 0x17}
 
-// Version is a Bolt protocol version.
 type Version struct{ Major, Minor uint8 }
 
 func (v Version) String() string { return fmt.Sprintf("%d.%d", v.Major, v.Minor) }
@@ -23,15 +22,11 @@ func (v Version) AtLeast(major, minor uint8) bool {
 	return v.Major > major || v.Major == major && v.Minor >= minor
 }
 
-// Supported are the versions Gatehouse speaks, in the worker's sidecar and in
-// the broker alike: the ones Memgraph 3 accepts that current drivers offer,
-// 5.2 (every 5.x driver) and 4.3.
+// Supported are the versions Gatehouse speaks: 5.2 (every 5.x driver) and 4.3.
 var Supported = []Version{{Major: 5, Minor: 2}, {Major: 4, Minor: 3}}
 
-// Proposal is one of the client's four handshake slots: a version and how
-// many minor versions below it the client also speaks (Bolt 4.3 and later).
-// A manifest proposal (Bolt 5.7's version negotiation) is skipped: a server
-// may always answer with a plain version from another slot.
+// Proposal is one handshake slot: a version and how many minor versions below it the client also speaks.
+// Manifest proposals are skipped.
 type Proposal struct {
 	Version
 	Range uint8
@@ -42,8 +37,7 @@ type Handshake [20]byte
 
 var errMagic = errors.New("bolt: not a Bolt connection")
 
-// ReadHandshake reads the client's opening. When the magic has already been
-// read (a listener that sniffed the protocol), pass sniffed true.
+// ReadHandshake reads the client's opening; pass sniffed true when the magic was already read.
 func ReadHandshake(r io.Reader, sniffed bool) (Handshake, error) {
 	var h Handshake
 	copy(h[:4], Magic[:])
@@ -101,8 +95,7 @@ func ClientHandshake(v Version) []byte {
 	return append(out, make([]byte, 12)...)
 }
 
-// ReadVersion reads a server's answer to a handshake. The zero version means
-// the server speaks none of the proposals.
+// ReadVersion reads a server's answer; the zero version means no proposal was accepted.
 func ReadVersion(r io.Reader) (Version, error) {
 	var b [4]byte
 	if _, err := io.ReadFull(r, b[:]); err != nil {

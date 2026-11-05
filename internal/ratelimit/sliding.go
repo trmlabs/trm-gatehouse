@@ -5,14 +5,8 @@ import (
 	"time"
 )
 
-// slidingWindow is a generic sliding-window limiter keyed by string.
-// It tracks timestamps of recent events per key, drops entries older
-// than window on every check, and evicts cold keys when the map grows
-// past maxKeys. Thread-safe.
-//
-// The struct fields are mutable at runtime so Registry.Reload can
-// change window/max without rebuilding the bucket map; in-flight keys
-// pick up the new limits on their next call.
+// slidingWindow is a thread-safe sliding-window limiter keyed by string that evicts cold keys past maxKeys.
+// Fields are mutable so Registry.Reload can change window/max without rebuilding buckets.
 type slidingWindow struct {
 	mu       sync.Mutex
 	attempts map[string][]time.Time
@@ -60,9 +54,7 @@ func (l *slidingWindow) reconfigure(cfg TierConfig) {
 	}
 }
 
-// allow records an attempt for key and returns a Decision. The earliest
-// event in the window is used to compute RetryAfter on denial so the
-// response's Retry-After header is accurate.
+// allow records an attempt for key; RetryAfter on denial comes from the earliest event in the window.
 func (l *slidingWindow) allow(key string) Decision {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -92,9 +84,7 @@ func (l *slidingWindow) allow(key string) Decision {
 
 	l.attempts[key] = append(l.attempts[key], now)
 
-	// Evict cold keys to prevent unbounded growth. Walk once looking
-	// for entries whose most-recent attempt is already outside the
-	// window — cheap and correct, matches the legacy limiter.
+	// Evict cold keys to bound growth: drop entries whose latest attempt is outside the window.
 	if l.maxKeys > 0 && len(l.attempts) > l.maxKeys {
 		for k, v := range l.attempts {
 			if len(v) == 0 || v[len(v)-1].Before(cutoff) {
@@ -106,9 +96,7 @@ func (l *slidingWindow) allow(key string) Decision {
 	return AllowOK(l.max-len(recent)-1, l.max)
 }
 
-// check peeks at the current state for key without recording a new
-// event. Used by the MITM proxy to pre-gate requests before running
-// auth — only auth failures are recorded via allow().
+// check peeks at key's state without recording; the MITM proxy pre-gates with it and records only auth failures via allow().
 func (l *slidingWindow) check(key string) Decision {
 	l.mu.Lock()
 	defer l.mu.Unlock()

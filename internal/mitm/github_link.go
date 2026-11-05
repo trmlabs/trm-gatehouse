@@ -8,22 +8,10 @@ import (
 	"strings"
 )
 
-// linkTarget is the URL of one link in a Link header, between angle brackets.
 var linkTarget = regexp.MustCompile(`<([^<>]*)>`)
 
-// repointLinks rewrites the pagination links of a GitHub API answer so the next
-// page goes through the route the request took. GitHub names a repository's
-// next page by its numeric id (/repositories/{id}/...), which no route lists,
-// where the request named it as /repos/{owner}/{repo}/...; a client that follows
-// the link would be refused after the first page. A link is rewritten only when
-// it is an https URL on host, the host the request went to, and names the id of
-// the repository the request matched (the one repository its token was minted
-// for), with nothing else in the path to read two ways. Any other link, one
-// naming another repository's id included, is left as GitHub wrote it, so a
-// page is never pointed at a repository the request did not match. The
-// rewritten URL is an ordinary request: it is matched, authorized and held to
-// the entry's routes like the first one. id 0 means the id is not known, and
-// nothing is rewritten.
+// repointLinks rewrites an https Link URL on host that names the matched repository's numeric id (/repositories/{id}/...) to the /repos/{owner}/{repo}/... route the request took, since no route lists the id form.
+// Any other link is left as GitHub wrote it, so a page never points at a repository the request did not match; id 0 rewrites nothing.
 func repointLinks(h http.Header, host, repo string, id int64) {
 	values := h.Values("Link")
 	if id <= 0 || len(values) == 0 {
@@ -41,8 +29,6 @@ func repointLinks(h http.Header, host, repo string, id int64) {
 	h["Link"] = rewritten
 }
 
-// repointedLink returns the /repos/{repo}/ form of a /repositories/{id}/ URL on
-// host, and false for any other URL.
 func repointedLink(raw, host, repo string, id int64) (string, bool) {
 	u, err := url.Parse(raw)
 	prefix := "/repositories/" + strconv.FormatInt(id, 10) + "/"

@@ -57,7 +57,6 @@ func TestAgentIdentityExportOwnerOnlyAndStable(t *testing.T) {
 			}
 		})
 	}
-	// Rename through the actual API, then confirm binding authority is unchanged.
 	req := httptest.NewRequest(http.MethodPost, "/v1/agents/bootstrap-agent/rename", strings.NewReader(`{"name":"renamed-agent"}`))
 	req.Header.Set("Authorization", "Bearer "+owner)
 	rec := httptest.NewRecorder()

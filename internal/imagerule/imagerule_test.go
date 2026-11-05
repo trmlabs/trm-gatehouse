@@ -52,8 +52,7 @@ func TestAllowedMatchesThePulledImage(t *testing.T) {
 		"docker.io/library/busybox@" + d2:                                           false,
 		"registry.example.com/example-project/example-images/team-a/agent:latest":   false, // a tag, not a pull
 		"": false,
-		// Components outside the OCI grammar never parse, so none can climb
-		// out of the prefix or pad it.
+		// Components outside the OCI grammar never parse, so none can climb out of or pad the prefix.
 		"registry.example.com/example-project/example-images/team-a/../gatehouse/proxy@" + d2:      false,
 		"registry.example.com/example-project/example-images/team-a/./agent@" + d2:                 false,
 		"registry.example.com/example-project/example-images/team-a//agent@" + d2:                  false,
@@ -74,9 +73,7 @@ func TestAllowedMatchesThePulledImage(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	t.Cleanup(func() { _ = SetRegistry(testRegistry) })
-	// teamA has dots, which the prefix shape refuses with or without a
-	// registry; repo/tenant/ has the shape, so only the unset registry
-	// refuses it.
+	// teamA has dots, which the prefix shape refuses; repo/tenant/ has the shape, so only the unset registry refuses it.
 	if err := SetRegistry(""); err != nil || ValidPrefix(teamA) || ValidPrefix("repo/tenant/") {
 		t.Fatalf("no registry still admitted a prefix: %v", err)
 	}

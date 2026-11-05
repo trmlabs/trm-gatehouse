@@ -95,7 +95,6 @@ func TestCatalogDatabaseResolverAppliesTheAuthorizationModel(t *testing.T) {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
 	}
-	// The catalog itself never grants a T1 database to the Cursor pool.
 	if _, err := r.ResolveDatabase(pgproxy.WithSession(context.Background(), "alice"), pgproxy.AgentScope{ActorID: "a", Pool: "cursor", WorkloadID: "pod-a"}, "t1db"); err == nil {
 		t.Fatal("Cursor pool resolved a T1 database")
 	}
@@ -111,9 +110,6 @@ func (c *countingDirectory) Lookup(ctx context.Context, subject string, groups [
 	return c.directory.Lookup(ctx, subject, groups)
 }
 
-// The broker's recheck mark reaches the decision: a T2 admission asks the
-// directory every time, a T2 recheck may use the cache, and a refused recheck
-// purges the person.
 func TestCatalogDatabaseResolverFreshT2AdmissionsAndPurge(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })
@@ -154,8 +150,6 @@ func TestCatalogDatabaseResolverFreshT2AdmissionsAndPurge(t *testing.T) {
 	}
 }
 
-// An agent-sandbox pool in person mode authorizes the person its shared proxy
-// attested, on the database path as on HTTP; a pool-mode pool refuses one.
 func TestCatalogDatabaseResolverAuthorizesTheAttestedPerson(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })
@@ -197,7 +191,6 @@ func TestCatalogDatabaseResolverAuthorizesTheAttestedPerson(t *testing.T) {
 	}
 }
 
-// cursorRuns verifies Cursor run tokens from a fixed table.
 type cursorRuns map[string]runnerid.Session
 
 func (cursorRuns) Verify(context.Context, string) (runnerid.Session, error) {
@@ -213,11 +206,6 @@ func (c cursorRuns) VerifyCursor(_ context.Context, token string) (runnerid.Sess
 	return s, nil
 }
 
-// On an automation pool the database path records what the HTTP path does,
-// allowed or refused: the person whose run it is as the requester, if any,
-// and the run's source, Automation and owning team. The entry is decided on
-// the Automation's own entries, whoever's run it is: no one's groups or
-// account, and no object ID.
 func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })
@@ -240,9 +228,7 @@ func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	for _, c := range []struct{ token, database, decision string }{
 		{"alice", "t1db", "automation_granted"},
 		{"bob", "t1db", "automation_granted"},
-		// A service account's run names no person and is served the same.
 		{"svc", "t1db", "automation_granted"},
-		// Granted to the pool but not listed for the Automation.
 		{"alice", "open", "automation_not_granted"},
 	} {
 		run := runs[c.token]
@@ -264,13 +250,10 @@ func TestCatalogDatabaseResolverRecordsAnAutomationsRun(t *testing.T) {
 	}
 }
 
-// liveCatalog is a catalog source a test replaces between calls.
 type liveCatalog struct{ current httpcatalog.Catalog }
 
 func (l *liveCatalog) Current() httpcatalog.Catalog { return l.current }
 
-// Removing an entry from an Automation's list, or the Automation from the
-// catalog, is how it is stopped: the next recheck of an open session refuses.
 func TestCatalogEditStopsAnAutomationsOpenSession(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })

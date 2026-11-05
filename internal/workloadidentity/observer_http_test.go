@@ -58,8 +58,7 @@ func TestObserverOverVerifiedTLS(t *testing.T) {
 	}
 }
 
-// The list capability travels from the verified binding to the handler: the
-// same live proof is refused the list until its binding grants listAgents.
+// The list capability travels from the verified binding to the handler: the same proof is refused the list until its binding grants listAgents.
 func TestObserverAgentListFollowsBinding(t *testing.T) {
 	f := setup(t)
 	snapshot := func(context.Context) (runtimestatus.Observation, error) {

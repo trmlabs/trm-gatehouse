@@ -23,18 +23,13 @@ import (
 	"github.com/Infisical/agent-vault/internal/brokercore"
 )
 
-// sessionParams are the startup parameters a pooled session may set. The
-// broker applies each client's values to whichever server connection it is
-// given, so they never leak from one client to the next.
+// sessionParams are the startup parameters a pooled session may set.
+// The broker applies each client's values to whichever server connection it is given.
 var sessionParams = []string{"DateStyle", "TimeZone", "client_encoding", "extra_float_digits", "search_path", "standard_conforming_strings", "statement_timeout"}
 
 var errRebind = errors.New("server connection released; bind again")
 
-// pooledSession is one client session multiplexed onto shared server
-// connections. A server connection is bound at the client's first message
-// and returned when the server reports the transaction idle and nothing the
-// client sent is still unanswered. Session state pins the connection to the
-// client for the rest of the session instead.
+// pooledSession is one client session multiplexed onto shared server connections.
 type pooledSession struct {
 	b       *Broker
 	key     poolKey
@@ -77,9 +72,8 @@ const (
 	maxSessionStatementBytes = 16 << 20
 )
 
-// clientWriteTimeout ends a session whose client stops reading, so a full
-// socket cannot hold a server connection. A variable only so tests can
-// shorten it.
+// clientWriteTimeout ends a session whose client stops reading, so a full socket cannot hold a server
+// connection.
 var clientWriteTimeout = 30 * time.Second
 
 var (
@@ -132,9 +126,7 @@ func pooledKey(scope AgentScope, svc *DatabaseService) poolKey {
 	return key
 }
 
-// servePooled runs a client session on the shared pool. It returns when the
-// client leaves, the session is terminated, or the pool fails it. authenticated
-// is when the client authenticated; session_open records the time since.
+// servePooled runs a client session on the shared pool.
 func (b *Broker) servePooled(ctx context.Context, conn net.Conn, backend *pgproto3.Backend, scope AgentScope, svc *DatabaseService, token, hint, requested string, peer netip.Addr,
 	startupParams map[string]string, event auditchain.Event, authenticated time.Time) {
 	key := pooledKey(scope, svc)
@@ -339,9 +331,8 @@ func (s *pooledSession) run(ctx context.Context) {
 	}
 }
 
-// refuse reports a statement the session must not send at all: a change to
-// the shared login, a temporary object on a read-only login, or a prepared
-// statement beyond the session's cap.
+// refuse reports a statement the session must not send at all: a change to the shared login, a temporary
+// object on a read-only login, or a prepared statement beyond the session's cap.
 func (s *pooledSession) refuse(msg pgproto3.FrontendMessage, sql string) error {
 	if sql != "" && changesRole(sql) {
 		return errRoleChange
@@ -377,15 +368,8 @@ func (s *pooledSession) refuse(msg pgproto3.FrontendMessage, sql string) error {
 	return nil
 }
 
-// settleBeforeEscapes holds a statement whose text contains a backslash until
-// the server has answered everything sent before it. Only a backslash reads
-// differently when an earlier statement turned standard_conforming_strings off
-// or chose a client-only encoding, perhaps through a function the classifier
-// cannot see. The broker learns of that change from the server's
-// ParameterStatus, which ends the session, so waiting for the answers means a
-// pipelined statement is never lexed under a setting the broker has not seen.
-// After an Execute inside an unsynced batch there is no answer to wait for,
-// so the statement is refused.
+// settleBeforeEscapes holds a statement whose text contains a backslash until the server has answered
+// everything sent before it.
 func (s *pooledSession) settleBeforeEscapes(ctx context.Context, sql string) error {
 	if !strings.ContainsRune(sql, '\\') {
 		return nil
@@ -477,9 +461,7 @@ func (s *pooledSession) bind(ctx context.Context, pin bool) error {
 	return nil
 }
 
-// syncParams gives a server connection this client's session parameters
-// before any of its statements run. Responses are consumed here, so the
-// client sees none of them.
+// syncParams gives a server connection this client's session parameters before any of its statements run.
 func (s *pooledSession) syncParams(conn *serverConn) error {
 	var set [][2]string
 	var reset []string
@@ -496,9 +478,7 @@ func (s *pooledSession) syncParams(conn *serverConn) error {
 	if len(set) == 0 && len(reset) == 0 {
 		return nil
 	}
-	// One simple query applies every change: set_config keeps each value
-	// exactly as a startup parameter would, and a dollar-quoted literal is
-	// immune to standard_conforming_strings and to quotes in the value.
+	// One simple query applies every change: set_config keeps each value exactly as a startup parameter would.
 	var statements []string
 	for _, name := range reset {
 		statements = append(statements, "RESET "+name) // fixed names only, never client text
@@ -647,9 +627,8 @@ func (s *pooledSession) forward(msg pgproto3.FrontendMessage) error {
 	return nil
 }
 
-// serverStatement maps a client statement name to the server one, preparing
-// it on this connection first when it was prepared on another. Unknown names
-// pass through so the server reports them missing.
+// serverStatement maps a client statement name to the server one, preparing it on this connection first when
+// it was prepared on another.
 func (s *pooledSession) serverStatement(conn *serverConn, name string) string {
 	if name == "" {
 		return ""
@@ -721,9 +700,7 @@ func (s *pooledSession) readServer(conn *serverConn, done chan struct{}) {
 		case *pgproto3.ParameterStatus:
 			conn.seen[m.Name] = m.Value
 			if unsafeLexerParameter(m.Name, m.Value) {
-				// The classifier missed a change, such as a function that
-				// calls set_config. Nothing more this client sends can be
-				// read safely, so the session ends before the next statement.
+				// The classifier missed a change, such as a function that calls set_config.
 				s.mu.Unlock()
 				s.b.auditDenied(s.event, "encoding_change")
 				s.killWith(&noticeEncoding)
@@ -755,9 +732,8 @@ func (s *pooledSession) readServer(conn *serverConn, done chan struct{}) {
 		s.mu.Unlock()
 		s.writeClientMessage(msg, flush)
 		if _, ready := msg.(*pgproto3.ReadyForQuery); ready {
-			// Wake a draining session's read only once the client has this
-			// answer, so the session never ends between a result and its
-			// ReadyForQuery.
+			// Wake a draining session's read only once the client has this answer, so the session never ends between a
+			// result and its ReadyForQuery.
 			s.mu.Lock()
 			s.flushedSeq++
 			if s.draining && s.idleLocked() {
@@ -825,9 +801,7 @@ func (s *pooledSession) restart() {
 	s.writeClient(brokerError("FATAL", "57P01", "restarting", restartingMessage))
 }
 
-// end returns or closes the session's server connection when the client
-// leaves. A connection in a transaction or with unanswered messages is
-// closed; a pinned one is reset with DISCARD ALL before it is reused.
+// end returns or closes the session's server connection when the client leaves.
 func (s *pooledSession) end() {
 	s.mu.Lock()
 	conn, done := s.conn, s.serverDone
@@ -853,22 +827,13 @@ func (s *pooledSession) end() {
 	s.b.pools.release(conn, reusable)
 }
 
-// leakCheck finds session state on a connection that left transaction mode
-// unnoticed: temporary tables, listened channels, session advisory locks,
-// holdable cursors, SQL-level prepared statements, or settings changed for the
-// session other than the startup parameters the broker applies itself. The
-// broker's own protocol-level statements are not from_sql, so they pass.
-// The parameters the broker applied must still hold exactly its values; any
-// other setting changed for the session is a leak.
+// leakCheck finds session state on a connection that left transaction mode unnoticed: temporary tables,
+// listened channels, session advisory locks, holdable cursors, SQL-level prepared statements.
 func leakCheck(conn *serverConn) string {
 	names := make([]string, 0, len(conn.actual))
 	var check strings.Builder
-	// DISCARD SEQUENCES drops currval and lastval state, which no catalog
-	// shows; it runs in the same round trip as the check. Role-level defaults
-	// ('role') survive DISCARD ALL and reach every connection on the login. A
-	// role switched with SET ROLE ('switched') would hand the next client
-	// another role's access, so that connection is closed, never reset and
-	// reused. Anything else ('state') is reset with DISCARD ALL.
+	// DISCARD SEQUENCES drops currval and lastval state, which no catalog shows; it runs in the same round trip
+	// as the check.
 	check.WriteString("DISCARD SEQUENCES; SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_db_role_setting" +
 		" WHERE setrole = (SELECT oid FROM pg_roles WHERE rolname = session_user)) THEN 'role'" +
 		" WHEN current_user <> session_user THEN 'switched' WHEN" +
@@ -893,14 +858,10 @@ func leakCheck(conn *serverConn) string {
 	return check.String()
 }
 
-// verifyClean is the backstop behind needsSession, run at every check-in
-// after the client already has its answer: a connection with state the
-// classifier missed is reset with DISCARD ALL before anyone else gets it, and
-// the catch is audited. It reports whether the connection may be reused.
+// verifyClean is the backstop behind needsSession.
 func (s *pooledSession) verifyClean(conn *serverConn) bool {
-	// A reported parameter that ends the session differing from where the
-	// broker left it was set for the session. SET LOCAL reverts at commit,
-	// so its final report matches and is not a leak.
+	// A reported parameter that ends the session differing from where the broker left it was set for the
+	// session.
 	leaked := false
 	for name, value := range conn.seen {
 		if conn.reported[name] != value {
@@ -908,9 +869,8 @@ func (s *pooledSession) verifyClean(conn *serverConn) bool {
 		}
 	}
 	clear(conn.seen)
-	// The query runs even when a reported parameter already showed state:
-	// DISCARD ALL would reset that parameter but neither role-level defaults
-	// nor a switched role, so those are checked before any reuse.
+	// The query runs even when a reported parameter already showed state: DISCARD ALL would reset that parameter
+	// but neither role-level defaults nor a switched role, so those are checked before any reuse.
 	{
 		state, err := queryValue(conn, leakCheck(conn), s.b.opts.HandshakeTimeout)
 		if err != nil || state != "clean" && state != "state" && state != "role" && state != "switched" {
@@ -1033,16 +993,12 @@ func discardAll(conn *serverConn, timeout time.Duration) error {
 	}
 }
 
-// kill ends the session now: the client is disconnected, and a running
-// statement on its server connection is cancelled and the connection closed.
-// The connection is detached first, under the session lock, so it cannot
-// have gone back to the pool and to another client when the cancel lands.
+// kill ends the session now: the client is disconnected, and a running statement on its server connection is
+// cancelled and the connection closed.
 func (s *pooledSession) kill() { s.killWith(nil) }
 
-// killWith is kill with a close notice for the client, written once the
-// server connection is detached, so no later server message follows it. A
-// restart that finds a transaction open says so instead. A client whose
-// writes are blocked gets no notice rather than holding up the kill.
+// killWith is kill with a close notice for the client, written once the server connection is detached, so no
+// later server message follows it.
 func (s *pooledSession) killWith(n *closeNotice) {
 	s.mu.Lock()
 	if s.killed {

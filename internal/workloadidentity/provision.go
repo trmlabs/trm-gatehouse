@@ -12,7 +12,6 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// PoolStore is the store access ProvisionPools needs.
 type PoolStore interface {
 	Store
 	GetAgentByName(ctx context.Context, name string) (*store.Agent, error)
@@ -23,15 +22,12 @@ type PoolStore interface {
 	GrantVaultRoleIfAbsent(ctx context.Context, actorID, actorType, vaultID, role string) (bool, error)
 }
 
-// PoolCreator marks what ProvisionPools creates: it is the agent's creator
-// and the vault's provisionedBySetting. It is no user's ID and the settings
-// API cannot write that key, so no member can forge the mark.
+// PoolCreator marks what ProvisionPools creates (agent creator and vault provisionedBySetting); it is no user's ID and the settings API cannot write that key, so no member can forge it.
 const PoolCreator = "workload-identity"
 
 const provisionedBySetting = "provisioned_by"
 
-// reservedPools are names a pool may not take: the vault every owner is
-// granted, and a name the web interface routes.
+// reservedPools are names a pool may not take: the vault every owner is granted and a name the web interface routes.
 var reservedPools = map[string]bool{"default": true, "users": true}
 
 var errNotOurs = errors.New("one of that name exists that the broker did not create; to use it, name the binding's agentID and vaultID")
@@ -40,22 +36,8 @@ func needsProvisioning(b Binding) bool {
 	return b.Pool != "" && b.Proxy == nil && b.AgentID == "" && b.VaultID == ""
 }
 
-// ProvisionPools gives each pool binding that names its pool but neither
-// agentID nor vaultID the agent and the vault of that name, creating either
-// when missing, and grants the agent proxy on the vault when it holds no role
-// there. A deployment with no signed-in owner can then run its pools.
-//
-// It validates the whole policy as New does before writing anything. It
-// adopts only an agent and a vault it created itself and refuses any other of
-// the pool's name, so a binding never reaches a record someone else made. A
-// member who creates an agent or vault named after a pool first therefore
-// stops startup until an owner removes it: it fails closed. It is idempotent,
-// and replicas starting together settle on one agent and one vault because
-// both names are unique in the store. It never changes an existing role and
-// never reactivates a revoked agent; a deleted grant returns at the next
-// start, so withdraw a pool by removing its binding or revoking its agent.
-// Each pool's store calls share one deadline of the policy's timeoutSeconds.
-// Bindings that carry IDs are returned unchanged.
+// ProvisionPools gives each pool binding that names a pool but no agentID or vaultID the agent and vault of that name, creating them if missing and granting proxy on the vault when no role exists. It validates the whole policy before writing and adopts only records it created itself, so a member who creates one named after a pool first fails startup closed;
+// it is idempotent, never changes an existing role or reactivates a revoked agent, and shares one timeoutSeconds deadline per pool. Bindings that carry IDs are returned unchanged.
 func ProvisionPools(ctx context.Context, c Config, s PoolStore, logger *slog.Logger) (Config, error) {
 	standIn := c
 	standIn.Bindings = append([]Binding(nil), c.Bindings...)
@@ -101,12 +83,8 @@ func provision(ctx context.Context, b *Binding, s PoolStore, logger *slog.Logger
 		}
 		return mark == PoolCreator, err
 	}
-	// Both are read before either is made, so a refusal these reads find
-	// writes nothing. If someone makes the vault after this read and before
-	// the broker's create, the refusal comes after the agent is written; that
-	// agent has instance role no-access, no token and no grant. An agent
-	// someone else made would bring its tokens to the pool's vault, and proxy
-	// on a vault someone else made would reach their credentials.
+	// Both are read before either is made so a refusal writes nothing. If someone makes the vault between this read and the create,
+	// the already-written agent has role no-access, no token and no grant.
 	agent, err := lookup(ctx, b.Pool, s.GetAgentByName, agentOurs)
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
@@ -142,8 +120,7 @@ func provision(ctx context.Context, b *Binding, s PoolStore, logger *slog.Logger
 	return nil
 }
 
-// lookup returns the broker's record of that name, nil when there is none,
-// and errNotOurs for one someone else made.
+// lookup returns the broker's record of that name, nil if none, and errNotOurs for one someone else made.
 func lookup[T any](ctx context.Context, name string, get func(context.Context, string) (*T, error), ours func(*T) (bool, error)) (*T, error) {
 	found, err := get(ctx, name)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -163,8 +140,7 @@ func lookup[T any](ctx context.Context, name string, get func(context.Context, s
 	return found, nil
 }
 
-// create makes the record. A replica that loses the race fails on the unique
-// name, and lookup then finds the winner's record.
+// create makes the record; a replica losing the race fails on the unique name and lookup finds the winner's.
 func create[T any](ctx context.Context, name string, insert, get func(context.Context, string) (*T, error), ours func(*T) (bool, error)) (*T, error) {
 	made, err := insert(ctx, name)
 	if err == nil && made != nil {

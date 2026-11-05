@@ -1,5 +1,3 @@
-// Real-browser check: auth0-spa-js 2.1.3, configured like an organization-enabled app,
-// treats the Gatehouse seed as a signed-in session with no network call.
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 const require = createRequire(process.env.NM + '/');

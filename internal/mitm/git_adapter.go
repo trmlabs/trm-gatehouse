@@ -19,14 +19,8 @@ import (
 	"github.com/Infisical/agent-vault/internal/httpcatalog"
 )
 
-// forwardGit serves git smart-HTTP for a catalog git entry. The worker sends
-// no credential; the broker adds a token minted for this one repository with
-// contents read, or write only for a push to a write binding. GitHub's own
-// branch protection still governs every push, and the pool's ref prefixes
-// (httpcatalog GitRepo.PushPrefixes), narrowed to the requester's own where
-// the pool gives each requester theirs (GitRequest.ForRequester), narrow it.
-// Every ref a push names is checked, so a force push or a branch delete is
-// held to the same prefixes as any other update.
+// forwardGit serves git smart-HTTP for a catalog git entry: the worker sends no credential and the broker adds a token for this one repository, write only for a push to a write binding.
+// Every ref a push names is checked against the pool's prefixes, so a force push or branch delete is held to the same limits.
 func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string, scope *brokercore.ProxyScope, event auditchain.Event, git httpcatalog.GitRequest, matchErr error) {
 	a := p.adapter
 	if git.Entry != nil {
@@ -50,16 +44,13 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 		deny(http.StatusForbidden, "pool")
 		return
 	case git.Write && git.Limited && len(git.RefPrefixes) == 0:
-		// Every prefix was a {requester} one, and this request names no
-		// requester with a branch segment (a runner agent, no session): it
-		// may clone and fetch only.
+		// Every prefix was a {requester} one and this request names no requester branch segment (no session): clone and fetch only.
 		deny(http.StatusForbidden, "no_branch_prefix")
 		return
 	}
 	entry := git.Entry
 	if a.GitTokens == nil {
-		// Waiting does not help: only an operator (a restart, for a minter
-		// wired at startup) can give the broker one.
+		// Waiting does not help: only an operator can give the broker a minter.
 		p.adapterDenyAs(w, event, target, http.StatusServiceUnavailable, "token_unavailable", "broker_misconfigured", 0)
 		return
 	}
@@ -84,8 +75,7 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	body := &limitedBody{reader: r.Body, remaining: entry.MaxRequestBytes}
 	var outBody io.Reader = body
 	if git.Write && r.Method == http.MethodPost {
-		// Every push names its refs in the audit row, and a limited one may
-		// change only refs under its prefixes.
+		// Every push names its refs in the audit row; a limited one may change only refs under its prefixes.
 		consumed, refs, capabilities, err := readReceivePackCommands(body, entry.Git.MaxPushCommandBytes)
 		if err != nil {
 			deny(http.StatusBadRequest, "push_shape")
@@ -162,7 +152,6 @@ func (p *Proxy) forwardGit(w http.ResponseWriter, r *http.Request, target string
 	}, body.exceeded.Load)
 }
 
-// limitedBody streams a request body and fails once it passes its limit.
 type limitedBody struct {
 	reader    io.Reader
 	remaining int64
@@ -188,11 +177,7 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// readReceivePackCommands reads a push's command list (pkt-lines up to the
-// flush, at most limit bytes: the entry's maxPushCommandBytes) and returns the
-// bytes read, every ref the push would change and the capabilities git asked
-// for on its first command. Push certificates are refused, since their refs
-// cannot be checked here.
+// readReceivePackCommands reads a push's command list (up to limit bytes) and returns the bytes read, the refs it would change and the capabilities requested; push certificates are refused, since their refs cannot be checked.
 func readReceivePackCommands(r io.Reader, limit int64) ([]byte, []string, []string, error) {
 	var consumed []byte
 	var refs, capabilities []string
@@ -251,8 +236,7 @@ func objectID(s string) bool {
 	return true
 }
 
-// hasAnyPrefix reports whether ref is under one of prefixes. A {requester}
-// prefix that ForRequester has not narrowed matches nothing.
+// hasAnyPrefix reports whether ref is under one of prefixes; a {requester} prefix not narrowed by ForRequester matches nothing.
 func hasAnyPrefix(ref string, prefixes []string) bool {
 	for _, prefix := range prefixes {
 		if !httpcatalog.IsRequesterTemplate(prefix) && strings.HasPrefix(ref, prefix) {
@@ -262,9 +246,7 @@ func hasAnyPrefix(ref string, prefixes []string) bool {
 	return false
 }
 
-// refsField is a push's refs for its audit row's branch field: the refs,
-// comma-separated, as many whole ones as fit the field with room left to
-// count the rest as "+N". A first ref the field cannot carry reads "invalid".
+// refsField is a push's refs for the audit branch field: as many whole refs as fit, the rest counted as "+N"; a first ref too long reads "invalid".
 func refsField(refs []string) string {
 	var field string
 	for i, ref := range refs {
@@ -289,15 +271,8 @@ func refsField(refs []string) string {
 // maxBranchField is auditchain's limit on a branch field.
 const maxBranchField = 255
 
-// refusePush refuses a push that would change a ref outside the branches this
-// run may write. The refusal is git's own when git asked for a report (every
-// git does): GitHub never sees the push, each ref is rejected with the
-// reason, so git prints "! [remote rejected] ... (reason)", and on a side
-// band the branches the run may push to, as "remote:" lines. An agent learns
-// where to push from the refusal alone, whatever named its branch. The rest
-// of the push is read and dropped first, as a git server does, so git reads
-// the report rather than a broken connection. A push that asked for no
-// report, or whose rest is over the entry's limit, gets the plain refusal.
+// refusePush refuses a push that would change a ref outside the run's branches, with git's own report: GitHub never sees the push, and each ref is rejected with the reason and the allowed branches.
+// The rest of the push is read and dropped first, so git reads the report and not a broken connection.
 func (p *Proxy) refusePush(w http.ResponseWriter, event auditchain.Event, target string, body *limitedBody, capabilities, refs, prefixes []string) {
 	reporting := containsString(capabilities, "report-status") || containsString(capabilities, "report-status-v2")
 	if _, err := io.Copy(io.Discard, body); err != nil || !reporting {
@@ -317,10 +292,7 @@ func (p *Proxy) refusePush(w http.ResponseWriter, event auditchain.Event, target
 	_, _ = w.Write(receivePackRefusal(capabilities, refs, prefixes))
 }
 
-// receivePackRefusal is a receive-pack report rejecting every ref of a push
-// (GitHub receives none of a refused push): each ref outside prefixes with
-// the branches the run may push to, and any other as not pushed, on the side
-// band git asked for, if any.
+// receivePackRefusal is a receive-pack report rejecting every ref of a push, naming the allowed branches for refs outside prefixes.
 func receivePackRefusal(capabilities, refs, prefixes []string) []byte {
 	var branches []string
 	for _, prefix := range prefixes {
@@ -373,5 +345,4 @@ func receivePackRefusal(capabilities, refs, prefixes []string) []byte {
 	return []byte(out.String())
 }
 
-// pktLine frames one git pkt-line.
 func pktLine(payload string) string { return fmt.Sprintf("%04x%s", len(payload)+4, payload) }

@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// An operator whose keys live under another KV path sets the prefix; every
-// key path must then lie under it, and vendors/ no longer qualifies.
 func TestKeyPrefixSetting(t *testing.T) {
 	t.Cleanup(func() { _ = SetKeyPrefix("") })
 	doc := func(path string) []byte {
@@ -48,8 +46,6 @@ func TestKeyPrefixSetting(t *testing.T) {
 	}
 }
 
-// A client certificate's path follows the same key prefix as an entry's key,
-// so the broker's read grant on the prefix covers both.
 func TestKeyPrefixAppliesToClientCertificates(t *testing.T) {
 	t.Cleanup(func() { _ = SetKeyPrefix("") })
 	doc := func(path string) []byte {
@@ -72,9 +68,6 @@ func TestKeyPrefixAppliesToClientCertificates(t *testing.T) {
 	}
 }
 
-// An operator with its own role naming sets the pattern. Roles are still
-// named for the catalog's environment, keep the -readonly or -readwrite
-// suffix that decides access, and stay plain Vault names.
 func TestRolePatternSetting(t *testing.T) {
 	doc := func(role, access string) []byte {
 		a := ""
@@ -106,7 +99,6 @@ func TestRolePatternSetting(t *testing.T) {
 			t.Errorf("%q: err=%v, want ok=%v", role, err, tc.ok)
 		}
 	}
-	// An environment change recompiles the rule.
 	Environment.Store("prod")
 	if _, err := Parse(doc("prod-app-readonly", "")); err != nil {
 		t.Errorf("prod role under environment prod: %v", err)
@@ -115,7 +107,6 @@ func TestRolePatternSetting(t *testing.T) {
 		t.Error("staging role accepted under environment prod")
 	}
 	Environment.Store("staging")
-	// A pattern wider than a Vault name still yields only plain Vault names.
 	if err := SetRolePattern(`{environment}/[a-z]+`); err != nil {
 		t.Fatal(err)
 	}

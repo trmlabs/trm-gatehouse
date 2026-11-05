@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Two disposable pods, real projected proof/services and enforced network policy.
 set -euo pipefail
 docker_host=${1:?Usage: verify-inpod.sh unix:///path/to/disposable/docker.sock}
 case "$docker_host" in unix://*) ;; *) echo 'Use an explicit disposable local Docker socket.' >&2; exit 1 ;; esac
@@ -40,8 +39,7 @@ networking:
 nodes:
   - role: control-plane
 YAML
-# Calico 3.32 documents support through Kubernetes 1.36. Do not use the separate
-# identity-only fixture's newer Kubernetes version for this enforcement proof.
+# Calico 3.32 supports Kubernetes up to 1.36, so this node image is older than verify-local.sh's.
 "$kind" create cluster --name "$cluster" --config "$scratch/kind.yaml" --image kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
 curl --fail --silent --show-error --location https://raw.githubusercontent.com/projectcalico/calico/db255c554b929afd73552fd3ac81d691107a1607/manifests/calico.yaml -o "$scratch/calico.yaml"
 python3 - "$scratch/calico.yaml" <<'PY'
@@ -53,7 +51,6 @@ python3 - "$scratch/calico.yaml" > "$scratch/calico-images" <<'PY'
 import pathlib,re,sys
 for image in sorted(set(re.findall(r'^\s*image:\s*(\S+)\s*$',pathlib.Path(sys.argv[1]).read_text(),re.M))): print(image)
 PY
-# The host daemon supplies registry trust without weakening node TLS checks.
 while IFS= read -r image; do
   docker pull "$image"
   docker image save "$image" | docker exec -i "$cluster-control-plane" ctr --namespace=k8s.io images import --platform "$platform" --digests - >/dev/null
@@ -101,7 +98,6 @@ PY
 kubectl -n combined exec -i broker -- sh -c 'cat > /tmp/combined-config.json' < "$scratch/config.json"
 kubectl -n combined exec agent -- cat /proof/allowed | kubectl -n combined exec -i broker -- sh -c 'cat > /tmp/combined-proof'
 kubectl -n combined exec agent -- cat /proof/wrong | kubectl -n combined exec -i broker -- sh -c 'cat > /tmp/combined-wrong-proof'
-# Compile once, then run the same caller helper binary in the separate agent pod.
 kubectl -n combined exec broker -- go test -c -tags realcombined ./internal/mitm -o /tmp/combined.test
 kubectl -n combined exec broker -- cat /tmp/combined.test | kubectl -n combined exec -i agent -- sh -c 'cat > /tmp/combined.test; chmod 700 /tmp/combined.test'
 pod_ip=$(kubectl -n combined get pod broker -o jsonpath='{.status.podIP}')

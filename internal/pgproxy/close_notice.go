@@ -10,10 +10,7 @@ import (
 	"time"
 )
 
-// closeNotice names why the broker itself ends a session. The client gets it
-// as a FATAL ErrorResponse at a message boundary before the connection
-// closes, so no broker-initiated close looks like a crashed backend. The
-// reason code lets the relay replace the message with fixed words.
+// closeNotice names why the broker itself ends a session.
 type closeNotice struct{ code, reason, message string }
 
 var (
@@ -67,9 +64,8 @@ func writeNotice(conn net.Conn, n closeNotice) bool {
 	return err == nil
 }
 
-// registerCloser lets Shutdown, a failed audit trail or lost cleanup
-// authority end an unpooled session with a notice. Pooled sessions are found
-// through b.pooled instead.
+// registerCloser lets Shutdown, a failed audit trail or lost cleanup authority end an unpooled session with a
+// notice.
 func (b *Broker) registerCloser(conn net.Conn, end func(closeNotice)) func() {
 	b.mu.Lock()
 	b.closers[conn] = end
@@ -81,9 +77,8 @@ func (b *Broker) registerCloser(conn net.Conn, end func(closeNotice)) func() {
 	}
 }
 
-// lockWithin takes mu if it frees within d, so a close notice can wait for a
-// write in progress to finish its message without waiting on a client that
-// has stopped reading.
+// lockWithin takes mu if it frees within d, so a close notice can wait for a write in progress to finish its
+// message without waiting on a client that has stopped reading.
 func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for !mu.TryLock() {
@@ -95,11 +90,8 @@ func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 	return true
 }
 
-// endConnLocked ends one connection the broker is closing for its own reason:
-// a pooled or unpooled session gets its notice first (between transactions,
-// restart becomes restartCut when one is open), anything still in its
-// handshake closes at once. Caller holds b.mu; the notice is written off the
-// lock so a slow client cannot hold it.
+// endConnLocked ends one connection the broker is closing for its own reason: a pooled or unpooled session
+// gets its notice first (between transactions, restart becomes restartCut when one is open).
 func (b *Broker) endConnLocked(conn net.Conn, n closeNotice) {
 	if s := b.pooled[conn]; s != nil {
 		go s.killWith(&n)

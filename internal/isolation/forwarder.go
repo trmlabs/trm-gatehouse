@@ -11,11 +11,7 @@ import (
 	"time"
 )
 
-// Forwarder is a pair of raw TCP relays (HTTP + MITM) that bridge the
-// container's per-invocation network gateway to agent-vault's loopback
-// listeners. Relaying by loopback dial is load-bearing: it keeps
-// isLoopbackPeer() true for container traffic, preserving the rate-limit
-// exemption without a code change to the limiter.
+// Forwarder is two TCP relays (HTTP, MITM) from the container gateway to loopback; dialing loopback keeps isLoopbackPeer() true for the rate-limit exemption.
 type Forwarder struct {
 	HTTPPort int
 	MITMPort int
@@ -28,10 +24,7 @@ type Forwarder struct {
 	mitmListener net.Listener
 }
 
-// StartForwarder binds two ephemeral listeners on bindIP and relays to
-// 127.0.0.1:{upstreamHTTPPort, upstreamMITMPort}. The caller calls
-// Close on error paths; in the success path syscall.Exec replaces the
-// process and the kernel closes the CLOEXEC listeners.
+// StartForwarder binds two ephemeral listeners on bindIP and relays to loopback upstream ports; callers Close on error paths.
 func StartForwarder(parent context.Context, bindIP net.IP, upstreamHTTPPort, upstreamMITMPort int) (*Forwarder, error) {
 	if bindIP == nil {
 		return nil, errors.New("StartForwarder: bindIP required")

@@ -74,9 +74,7 @@ func TestForwarder_RoundTripsBytes(t *testing.T) {
 			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 			got, err := io.ReadAll(io.LimitReader(c, 1024))
 			if err != nil && err != io.EOF {
-				// ReadAll will block until upstream closes; we close client
-				// after write so upstream echoes, then we expect to read
-				// whatever has arrived. Use a read deadline to bail.
+				// Close the client after write so upstream echoes; the read deadline bounds ReadAll.
 				if !strings.Contains(err.Error(), "i/o timeout") {
 					t.Fatalf("read: %v", err)
 				}
@@ -122,9 +120,7 @@ func TestForwarder_RequiresBindIP(t *testing.T) {
 }
 
 func TestForwarder_UpstreamDownFailsGracefully(t *testing.T) {
-	// No echo server running; the forwarder accepts but the relay
-	// dial to 127.0.0.1:<port> fails and the client conn is closed.
-	// Forwarder itself must not crash.
+	// No echo server: the relay dial fails and the client conn closes; the forwarder must not crash.
 	fwd, err := StartForwarder(context.Background(), net.ParseIP("127.0.0.1"), 1, 2)
 	if err != nil {
 		t.Fatalf("start: %v", err)

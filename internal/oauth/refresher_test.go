@@ -17,9 +17,7 @@ func TestRefresher_Dedup(t *testing.T) {
 	const goroutines = 10
 	results := make([]RefreshResult, goroutines)
 
-	// launched tracks how many goroutines have been scheduled and are
-	// about to call r.Do. The leader's fn waits until all goroutines are
-	// launched so they queue up inside singleflight before the fn returns.
+	// launched counts goroutines about to call r.Do so they all queue inside singleflight before the leader's fn returns.
 	var launched atomic.Int32
 	gate := make(chan struct{})
 
@@ -30,9 +28,7 @@ func TestRefresher_Dedup(t *testing.T) {
 			launched.Add(1)
 			results[idx] = r.Do("same-key", func() RefreshResult {
 				callCount.Add(1)
-				// Block until all goroutines have been launched and had
-				// a chance to enter Do (they'll block on the singleflight
-				// mutex waiting for us to return).
+				// Block until all goroutines have launched and entered Do.
 				for launched.Load() < goroutines {
 					runtime.Gosched()
 				}

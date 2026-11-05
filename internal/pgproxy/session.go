@@ -8,16 +8,12 @@ import (
 	"net"
 )
 
-// sessionPreamble opens the line an in-Pod sidecar sends, inside its TLS
-// stream and before the PostgreSQL startup it authors, to carry the Claude
-// runner session token: "GHSESS1 <token>\n". It is never part of the client's
-// startup packet, and it is eight bytes, the length of every startup frame's
-// fixed header, so a stream without it is read unchanged.
+// sessionPreamble opens the line an in-Pod sidecar sends, inside its TLS stream and before the PostgreSQL
+// startup it authors, to carry the Claude runner session token: "GHSESS1 <token>\n".
 const sessionPreamble = "GHSESS1 "
 
-// attestationPreamble opens the line a shared proxy sends first, carrying its
-// attestation of the agent Pod: "GHATTS1 <attestation>\n". It is also eight
-// bytes, and the Attestor accepts it from a proxy binding alone.
+// attestationPreamble opens the line a shared proxy sends first, carrying its attestation of the agent Pod:
+// "GHATTS1 <attestation>\n".
 const attestationPreamble = "GHATTS1 "
 
 // maxSessionBytes bounds each preamble line before authentication. The
@@ -26,10 +22,8 @@ const maxSessionBytes = 8 * 1024
 
 var errSessionPreamble = errors.New("malformed session preamble")
 
-// readSessionPreamble returns the relayed session token and attestation
-// (each empty when none) and a reader that yields the rest of the stream,
-// including any bytes read while looking for a preamble. An attestation line,
-// when present, comes first. It reads only what it consumes from conn.
+// readSessionPreamble returns the relayed session token and attestation (each empty when none) and a reader
+// that yields the rest of the stream, including any bytes read while looking for a preamble.
 func readSessionPreamble(conn net.Conn) (string, string, io.Reader, error) {
 	head := make([]byte, len(sessionPreamble))
 	if _, err := io.ReadFull(conn, head); err != nil {
@@ -101,9 +95,8 @@ func Session(ctx context.Context) string {
 	return token
 }
 
-// Requester is who stands behind a connection and the decision on its
-// database, as the resolver established it for the audit trail. It holds no
-// credential: the token is identified only by its hash.
+// Requester is who stands behind a connection and the decision on its database, as the resolver established
+// it for the audit trail.
 type Requester struct {
 	// Subject is the verified identity the audit row names: the person, the
 	// agent, or for an Automation the person its run token names, if any.
@@ -134,9 +127,8 @@ func RecordRequester(ctx context.Context, r Requester) {
 	}
 }
 
-// RefusedError is a resolver's authorization refusal: the database exists and
-// the pool is granted it, but this requester may not use it. Outcome is the
-// audit decision code.
+// RefusedError is a resolver's authorization refusal: the database exists and the pool is granted it, but
+// this requester may not use it.
 type RefusedError struct{ Outcome string }
 
 func (e *RefusedError) Error() string { return "not authorized: " + e.Outcome }

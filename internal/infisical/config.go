@@ -46,9 +46,7 @@ func MarshalConfigJSON(c VaultConfig) (string, error) {
 	return string(b), nil
 }
 
-// ParseConfigJSON inverts MarshalConfigJSON. Trims whitespace so a value
-// the Web UI would strip never reaches ListSecrets verbatim and 404s
-// against the scrubbed "see server logs" response.
+// ParseConfigJSON inverts MarshalConfigJSON and trims whitespace the Web UI would strip.
 func ParseConfigJSON(raw string) (VaultConfig, error) {
 	var c VaultConfig
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {

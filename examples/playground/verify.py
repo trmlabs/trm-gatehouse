@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PREFIX = 'agent-vault-playground-'
+PREFIX = 'gatehouse-playground-'
 BASE = 'http://127.0.0.1:8787'
 
 def docker(*args, data=None, check=True):

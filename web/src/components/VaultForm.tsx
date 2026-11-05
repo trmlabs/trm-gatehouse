@@ -51,12 +51,10 @@ export function buildInfisicalConfig(v: VaultFormValues) {
   };
 }
 
-// HashiCorp needs a KV mount + secret path; everything else may be blank.
 export function hashicorpFieldsValid(v: VaultFormValues): boolean {
   return v.kind !== "hashicorp" || (!!v.hcMount.trim() && !!v.hcPath.trim());
 }
 
-// Trimmed HashiCorp KV config block.
 export function buildHashicorpConfig(v: VaultFormValues) {
   return {
     mount: v.hcMount.trim(),
@@ -85,8 +83,7 @@ export default function VaultForm({
   onChange: (patch: Partial<VaultFormValues>) => void;
   infisicalOptionDisabled: boolean;
   hashicorpOptionDisabled?: boolean;
-  // The edit/switch flow can't reconfigure a HashiCorp store (create-only), so
-  // it suppresses the mount/path/version inputs and only offers switch-away.
+  // HashiCorp stores are create-only: edit/switch hides the mount/path/version inputs.
   hideHashicorpFields?: boolean;
   storeTooltip: ReactNode;
   showPolicy?: boolean;

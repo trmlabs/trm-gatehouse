@@ -1,6 +1,4 @@
-// Package oauth implements pure OAuth 2.0 protocol mechanics: token exchange,
-// refresh, PKCE, and singleflight-based refresh deduplication. No database or
-// HTTP handler code — just protocol logic, testable with httptest.
+// Package oauth implements pure OAuth 2.0 mechanics (exchange, refresh, PKCE, singleflight dedup) with no database or HTTP handlers.
 package oauth
 
 import (

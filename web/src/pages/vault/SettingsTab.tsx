@@ -22,7 +22,6 @@ type InfisicalConfig = {
   secret_path?: string;
 };
 
-// Shape of a HashiCorp Vault credential store's config (server stores it untyped).
 type HashicorpConfig = {
   mount?: string;
   secret_path?: string;

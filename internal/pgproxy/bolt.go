@@ -22,13 +22,7 @@ import (
 )
 
 // This file is the broker's Bolt path, for graph databases such as Memgraph.
-// It shares the PostgreSQL listener: a connection whose first bytes after the
-// sidecar's preamble are Bolt's magic is served here, so Bolt needs no port,
-// Service or network policy of its own. Admission is the PostgreSQL path's:
-// the same identity check, catalog grant and tier decision, caps, session
-// ledger and audit trail. The sidecar sends the catalog entry's name as the
-// Bolt principal and the worker's identity proof as the credential; the
-// worker itself only ever sends a placeholder.
+// The sidecar sends the catalog entry's name as the Bolt principal.
 
 // GraphService is a graph database an agent may reach over Bolt.
 type GraphService struct {
@@ -47,10 +41,7 @@ type GraphService struct {
 	// query may call; every other one is refused.
 	Procedures []string
 	Functions  []string
-	// Write is the entry's write access: graph writes run and commit. The
-	// rest of the guard still holds (no file loads, no commits of their own,
-	// only the listed procedures and functions, no system queries). Without
-	// it every transaction is a read the broker rolls back.
+	// Write is the entry's write access: graph writes run and commit.
 	Write bool
 }
 
@@ -60,9 +51,8 @@ func sameGraph(a, b GraphService) bool {
 		a.Write == b.Write
 }
 
-// GraphResolver selects the graph database an authorized agent asks for by
-// name, as DatabaseResolver does for PostgreSQL. A *RefusedError is the
-// authorization model's refusal; any other error means no such entry.
+// GraphResolver selects the graph database an authorized agent asks for by name, as DatabaseResolver does for
+// PostgreSQL.
 type GraphResolver interface {
 	ResolveGraph(ctx context.Context, scope AgentScope, name string) (*GraphService, error)
 }
@@ -76,9 +66,8 @@ type GraphLogins interface {
 	GraphLogin(ctx context.Context, svc *GraphService) (*GraphLogin, error)
 }
 
-// defaultMaxBoltMessageBytes bounds one Bolt message in either direction,
-// such as a RUN with a large parameter list or one large record
-// (AGENT_VAULT_BOLT_MAX_MESSAGE_BYTES).
+// defaultMaxBoltMessageBytes bounds one Bolt message in either direction, such as a RUN with a large
+// parameter list or one large record (AGENT_VAULT_BOLT_MAX_MESSAGE_BYTES).
 const defaultMaxBoltMessageBytes = 64 << 20
 
 // boltUserAgent names the broker to the database.
@@ -184,10 +173,8 @@ func (b *Broker) maxBoltMessage() int {
 	return defaultMaxBoltMessageBytes
 }
 
-// boltAuth reads the client's HELLO, and LOGON on 5.1 and later, and returns
-// the principal (the catalog entry) and credential (the worker's proof) they
-// carry. HELLO on 5.1 and later gets its SUCCESS here, as it must before
-// LOGON.
+// boltAuth reads the client's HELLO, and LOGON on 5.1 and later, and returns the principal (the catalog
+// entry) and credential (the worker's proof) they carry.
 func boltAuth(client *boltPeer, v bolt.Version) (principal, credential, routingAddr string, err error) {
 	hello, _, err := client.readMessage()
 	if err != nil || hello.Tag != bolt.TagHello {
@@ -627,9 +614,7 @@ type boltSession struct {
 
 var errBoltProtocol = errors.New("bolt: protocol violation")
 
-// serve runs requests until the client leaves or either side fails. Every
-// request gets its answer before the next is read, which keeps the broker's
-// own messages (EXPLAIN, BEGIN, ROLLBACK) out of the client's stream.
+// serve runs requests until the client leaves or either side fails.
 func (s *boltSession) serve() {
 	for {
 		raw, err := s.client.read()
@@ -717,10 +702,8 @@ func (s *boltSession) begin(extra map[string]any, statement bool) error {
 	return s.statementDone()
 }
 
-// end closes the client's own transaction, for a COMMIT (commit true) or
-// ROLLBACK message or, with statement true, a RUN of that statement. A read
-// entry's transaction has nothing to commit: COMMIT rolls it back, so nothing
-// it might have changed can persist.
+// end closes the client's own transaction, for a COMMIT (commit true) or ROLLBACK message or, with statement
+// true, a RUN of that statement.
 func (s *boltSession) end(commit, statement bool) error {
 	if !s.explicit {
 		return s.refuse(boltRefusal{"Gatehouse.ClientError.Transaction.Invalid", "protocol", "no transaction is open"}, "")
@@ -756,11 +739,8 @@ func (s *boltSession) statementDone() error {
 	return s.client.send(bolt.Success(map[string]any{"fields": []any{}}))
 }
 
-// transactionStatement recognizes a query that is only BEGIN, COMMIT or
-// ROLLBACK, which some drivers (pymgclient without autocommit) send in place
-// of the Bolt messages. Memgraph cannot plan them, so the broker carries them
-// out as the messages they stand for. Anything more than the bare word,
-// even a comment, is a query like any other.
+// transactionStatement recognizes a query that is only BEGIN, COMMIT or ROLLBACK, which some drivers
+// (pymgclient without autocommit) send in place of the Bolt messages.
 func transactionStatement(query string) byte {
 	word := strings.TrimSpace(query)
 	word = strings.TrimSpace(strings.TrimSuffix(word, ";"))
@@ -846,10 +826,8 @@ func (s *boltSession) callQuiet(raw []byte) (bool, error) {
 	return false, s.client.send(reply)
 }
 
-// transactionExtra builds the BEGIN extra the broker sends from the client's
-// RUN or BEGIN extra: the entry's mode (read unless the entry writes), never
-// the client's, the client's timeout, metadata and bookmarks kept, and no
-// other database or impersonated user.
+// transactionExtra builds the BEGIN extra the broker sends from the client's RUN or BEGIN extra: the entry's
+// mode (read unless the entry writes), never the client's, the client's timeout.
 func (s *boltSession) transactionExtra(extra map[string]any) (map[string]any, string) {
 	out := map[string]any{"mode": "r"}
 	if s.svc.Write {
@@ -930,9 +908,8 @@ func (s *boltSession) run(msg *bolt.Structure) error {
 		return s.refuse(s.guarded(verdict), decision)
 	}
 	if !s.explicit {
-		// An auto-commit query runs in a transaction the broker opens and,
-		// once its result has been read, commits for a write entry or rolls
-		// back for a read entry.
+		// An auto-commit query runs in a transaction the broker opens and, once its result has been read, commits
+		// for a write entry or rolls back for a read entry.
 		ok, err := s.callQuiet(mustEncode(bolt.TagBegin, begin))
 		if err != nil || !ok {
 			return err
@@ -943,10 +920,7 @@ func (s *boltSession) run(msg *bolt.Structure) error {
 	return err
 }
 
-// plan asks the database for query's plan and checks it. It returns the
-// first step that does not read (or "" when all do), or the database's
-// FAILURE when it could not plan the query, which leaves the upstream to be
-// RESET by the client's next RESET.
+// plan asks the database for query's plan and checks it.
 func (s *boltSession) plan(query string, params map[string]any) (string, []byte, error) {
 	if err := s.upstream.send(mustEncodeRun("EXPLAIN "+query, params), mustEncode(bolt.TagPull, map[string]any{"n": int64(-1)})); err != nil {
 		return "", nil, err
@@ -1016,9 +990,6 @@ func mustEncodeRun(query string, params map[string]any) []byte {
 }
 
 // stream relays a PULL or DISCARD: records as they come, then the summary.
-// The last batch of an auto-commit query's result ends the broker's
-// transaction (a commit for a write entry, else a rollback) before the client
-// sees the summary.
 func (s *boltSession) stream(raw []byte) error {
 	if err := s.upstream.send(raw); err != nil {
 		return err
@@ -1073,9 +1044,8 @@ func (s *boltSession) stream(raw []byte) error {
 	}
 }
 
-// route answers ROUTE itself: the one server is the address the client
-// dialed (the sidecar's), for every role, so a neo4j:// URI works against a
-// single database.
+// route answers ROUTE itself: the one server is the address the client dialed (the sidecar's), for every
+// role, so a neo4j:// URI works against a single database.
 func (s *boltSession) route(msg *bolt.Structure) error {
 	addr := s.routingAddr
 	if ctx, err := msg.Map(0); err == nil {

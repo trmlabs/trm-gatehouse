@@ -14,9 +14,7 @@ import (
 const plaintextCatalog = `{"entries":[{"name":"fixture","kind":"postgres","host":"fixture-db.gatehouse.svc.cluster.local","pools":["pool-a"],
 	"postgres":{"database":"appdb","mount":"database","role":"staging.us.fixture.appdb-readonly","sslmode":"disable"}}]}`
 
-// A production build has no way to turn on plaintext databases: the switch
-// is reported and ignored, and sslmode disable is refused even for a cluster
-// Service host.
+// A production build ignores the plaintext-database switch and refuses sslmode disable.
 func TestProductionBuildRefusesPlaintextDatabases(t *testing.T) {
 	httpcatalog.Environment.Store("staging")
 	t.Cleanup(func() { httpcatalog.Environment.Store("") })

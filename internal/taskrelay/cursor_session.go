@@ -16,21 +16,13 @@ import (
 	"time"
 )
 
-// A Cursor worker started with --identity-socket serves one socket per claimed
-// run, at <data dir>/identity/<run>.sock, owned by the worker's user with mode
-// 0600 (Cursor, "OIDC tokens", Self-hosted workers; the path is the worker
-// CLI's). The relay mints the run's token itself, at the moment it connects,
-// so the agent never chooses which token is sent: with no claim there is no
-// socket and no session, and a pool worker holds one claim at a time.
+// A Cursor worker serves one identity socket per claimed run; the relay mints the token itself so the agent never chooses which is sent.
 const (
 	cursorMintTimeout = 3 * time.Second
-	// Refresh this long before expiry; Cursor tokens live five minutes and
-	// each run may mint 30 a minute.
+	// Cursor tokens live five minutes and each run may mint 30 a minute.
 	cursorRefreshBefore = time.Minute
-	// After a failed refresh the token in hand is sent and the next mint
-	// waits this long, inside the minting budget.
-	cursorRetryAfter = 2 * time.Second
-	cursorMaxToken   = 8 << 10
+	cursorRetryAfter    = 2 * time.Second
+	cursorMaxToken      = 8 << 10
 )
 
 type cursorToken struct {
@@ -38,17 +30,12 @@ type cursorToken struct {
 	expires time.Time
 }
 
-// cursorMint is one mint in flight; the connections that need it wait on done
-// and send value, "" when it failed and no token in hand is still valid.
 type cursorMint struct {
 	done  chan struct{}
 	value string
 }
 
-// cursorMinter caches each socket's current token until shortly before it
-// expires, so one run mints a few times an hour however busy it is.
-// Connections that open together share one mint, and a refresh that fails
-// leaves the token in hand to be sent until it expires.
+// cursorMinter caches each socket's token until shortly before expiry; concurrent connections share one mint and a failed refresh sends the token in hand.
 type cursorMinter struct {
 	mu      sync.Mutex
 	tokens  map[string]cursorToken // by socket path and audience
@@ -60,9 +47,7 @@ type cursorMinter struct {
 
 var cursorTokens = &cursorMinter{now: time.Now}
 
-// token returns the claimed run's token for audience, or "" when there is no
-// single claim socket or no valid token could be had: the broker then sees no
-// session.
+// token returns "" when there is no single claim socket or no valid token: the broker then sees no session.
 func (m *cursorMinter) token(log *slog.Logger, dir, audience string) string {
 	socket, sockets := claimSocket(dir)
 	m.sawClaims(log, dir, sockets)
@@ -132,8 +117,6 @@ func (m *cursorMinter) token(log *slog.Logger, dir, audience string) string {
 	return call.value
 }
 
-// sawClaims logs the claim directory holding no socket or several, once each
-// time it changes to that: a connection then carries no session.
 func (m *cursorMinter) sawClaims(log *slog.Logger, dir string, sockets int) {
 	m.mu.Lock()
 	if m.claims == nil {
@@ -151,8 +134,6 @@ func (m *cursorMinter) sawClaims(log *slog.Logger, dir string, sockets int) {
 	}
 }
 
-// claimSocket is the one socket in dir, or "", and how many there are (two
-// standing for two or more).
 func claimSocket(dir string) (string, int) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -179,8 +160,6 @@ var (
 	errMintExpired = errors.New("the token is already expired")
 )
 
-// mintCursorToken asks the claim socket for a token. On failure it returns the
-// socket's HTTP status (0 when there was none) and why.
 func mintCursorToken(socket, audience string) (cursorToken, int, error) {
 	client := &http.Client{Timeout: cursorMintTimeout, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

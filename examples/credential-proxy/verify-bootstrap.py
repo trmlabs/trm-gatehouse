@@ -77,7 +77,6 @@ def main():
                 binary = str(work / 'agent-vault')
                 command(['go', 'build', '-o', binary, '.'], cwd=Path(__file__).resolve().parents[2])
                 stage = 'start disposable Vault'
-                # Create first so cleanup can identify ownership before start fails.
                 command(docker + ['create', '--name', name, '-p', '127.0.0.1::8200',
                                   '--entrypoint', '/bin/vault', VAULT_IMAGE, 'server', '-dev',
                                   '-dev-no-store-token', '-dev-root-token-id=' + root,
@@ -177,8 +176,6 @@ def main():
                 process = None
                 env.pop('VAULT_ROLE_ID')
                 env.pop('VAULT_SECRET_ID')
-                # Model only the trusted launcher's private token sink. Production
-                # workload authentication and admission/drain are separate checks.
                 sink = work / 'broker-token'
                 previous = vault('auth/token/create', {'policies': ['bootstrap'], 'ttl': '2m'})['auth']['client_token']
                 sink.write_text(previous)
@@ -189,7 +186,7 @@ def main():
                 vault('auth/token/revoke', {'token': previous})
                 replacement = vault('auth/token/create', {'policies': ['bootstrap'], 'ttl': '2m'})['auth']['client_token']
                 sink.write_text(replacement)
-                # Updating a file does not update the already captured environment.
+                # Rewriting the file does not change the environment the broker already captured.
                 stop(process)
                 process = None
                 log.flush()

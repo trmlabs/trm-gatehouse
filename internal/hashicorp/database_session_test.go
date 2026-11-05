@@ -119,8 +119,7 @@ func TestDatabaseProviderErrorsDoNotExposeResponseBody(t *testing.T) {
 				w.WriteHeader(503)
 				errs := []string{canary}
 				if phase == "read" || phase == "child-read" {
-					// A credential read reports Vault's messages, so the canary
-					// stands where a database error could echo a password.
+					// The canary stands where a database error could echo a password.
 					errs = []string{
 						`failed to execute query: ERROR: syntax error at or near "'` + canary + `'" (SQLSTATE 42601)`,
 						`CREATE ROLE "v-x" WITH LOGIN PASSWORD '` + canary + `' VALID UNTIL 'soon';`,
@@ -161,8 +160,7 @@ func TestDatabaseProviderErrorsDoNotExposeResponseBody(t *testing.T) {
 	}
 }
 
-// A live session revokes itself with its own child token, so the broker needs
-// no right over other tokens. It never falls back to the accessor.
+// A live session revokes itself with its own child token and never falls back to the accessor.
 func TestDatabaseSessionRevokesItself(t *testing.T) {
 	policy := DatabaseCredentialPolicyName("database", "reader")
 	for _, selfFails := range []bool{false, true} {
@@ -208,9 +206,7 @@ func TestDatabaseSessionRevokesItself(t *testing.T) {
 	}
 }
 
-// Without revoke-accessor in its policy, Vault refuses the accessor revoke.
-// That counts as done: the token's value died with its process, and it expires
-// at its TTL. Any other failure is still an error.
+// Without revoke-accessor Vault refuses the accessor revoke, which counts as done; any other failure is an error.
 func TestDatabaseSessionAccessorRevokeToleratesRefusal(t *testing.T) {
 	t.Parallel()
 	for status, ok := range map[int]bool{403: true, 503: false, 500: false} {
@@ -228,8 +224,7 @@ func TestDatabaseSessionAccessorRevokeToleratesRefusal(t *testing.T) {
 	}
 }
 
-// The lease list is what clears an unknown issuance, so only Vault's own
-// empty-list answer reads as "no leases"; every other reply is an error.
+// Only Vault's own empty-list answer reads as no leases; every other reply is an error.
 func TestListDatabaseLeasesTrustsOnlyVaultsAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -306,9 +301,7 @@ func TestDatabaseLeaseIssued(t *testing.T) {
 	}
 }
 
-// A revocation Vault answers and refuses, or confirms while still listing the
-// lease, is a fault a retry meets again. A timeout, a lost connection or an
-// overloaded Vault is a blip and must not read as one.
+// A revocation Vault refuses, or confirms while still listing the lease, is a fault a retry meets again; a timeout or overload is a blip.
 func TestRevokeDatabaseLeaseConfirmedTellsRefusalFromBlip(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

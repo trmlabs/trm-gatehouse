@@ -10,9 +10,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/store"
 )
 
-// Defaults tuned for the near-real-time tailing UI: batches land inside
-// one ~3s UI poll interval while keeping DB writes coalesced under
-// bursty traffic. Operators can override via BatchSinkConfig.
+// Defaults suit the near-real-time tailing UI; operators can override via BatchSinkConfig.
 const (
 	defaultBufferSize   = 1024
 	defaultBatchSize    = 100
@@ -34,16 +32,11 @@ type BatchSinkConfig struct {
 	FlushEvery   time.Duration
 	ShutdownWait time.Duration
 
-	// OnCommit is invoked (if non-nil) after a batch is successfully
-	// inserted. Reserved for the future broadcaster that will feed an
-	// SSE endpoint — unused today. Callback runs on the worker
-	// goroutine, so implementations must not block.
+	// OnCommit runs on the worker goroutine after a successful insert, so it must not block.
 	OnCommit func(batch []Record)
 }
 
-// BatchSink buffers records in a bounded channel and flushes them to
-// the database in batches. Non-blocking on the hot path: if the buffer is
-// full, the record is dropped and the drop counter is incremented.
+// BatchSink buffers records in a bounded channel and flushes in batches; a full buffer drops the record.
 type BatchSink struct {
 	store   batchStore
 	logger  *slog.Logger
@@ -168,9 +161,7 @@ func (s *BatchSink) run() {
 	}
 }
 
-// commit persists batch and fires the OnCommit hook on success. Errors
-// are logged; we do not retry — losing a small slice of logs is
-// acceptable, but blocking the worker on a failing DB is not.
+// commit persists batch and fires OnCommit; errors are logged, not retried, so a failing DB cannot block the worker.
 func (s *BatchSink) commit(batch []Record) {
 	rows := make([]store.RequestLog, len(batch))
 	for i, r := range batch {

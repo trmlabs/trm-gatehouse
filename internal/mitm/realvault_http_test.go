@@ -33,8 +33,7 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// This fixture starts its own disposable Vault. It never uses VAULT_ADDR or
-// credentials from the caller's environment. Upstreams and SQLite are local.
+// Starts its own disposable Vault; never uses VAULT_ADDR or credentials from the caller's environment.
 func TestRealVault_HTTPAuthorization(t *testing.T) {
 	bin, err := exec.LookPath("vault")
 	if err != nil {
