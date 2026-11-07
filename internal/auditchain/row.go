@@ -110,6 +110,8 @@ type Row struct {
 	Run string `json:"run,omitempty"`
 	// ParentRun is the registering run on a subagent row served as an Automation.
 	ParentRun string `json:"parentRun,omitempty"`
+	// GRPCStatus is the gRPC status code, "0" to "16", a gRPC call's row ended with: the upstream's, or the one the broker sent for a refusal; absent when none was read.
+	GRPCStatus string `json:"grpcStatus,omitempty"`
 	// chain_start: the previous boot and its last persisted checkpoint row,
 	// so a deleted boot or a truncated tail is detectable.
 	PrevBoot          uint64 `json:"prevBoot,omitempty"`
@@ -123,10 +125,10 @@ type Row struct {
 }
 
 // MACVersionCurrent is the MAC input every new row uses.
-const MACVersionCurrent = 14
+const MACVersionCurrent = 15
 
 // macInput encodes every field except MAC with explicit lengths, so no two distinct rows share an input.
-// Older versions only verify rows written before them; a row with a field its version does not cover fails (see v2Only through v14Only).
+// Older versions only verify rows written before them; a row with a field its version does not cover fails (see v2Only through v15Only).
 func (r Row) macInput() []byte {
 	fields := []string{
 		r.Type, r.Replica, strconv.FormatUint(r.Boot, 10), strconv.FormatUint(r.Seq, 10), r.Time, r.Event,
@@ -188,7 +190,11 @@ func (r Row) macInput() []byte {
 		return lengthPrefixed("gatehouse-audit-v13", fields...)
 	}
 	fields = append(fields, r.Run, r.ParentRun)
-	return lengthPrefixed("gatehouse-audit-v14", fields...)
+	if r.MACVersion < 15 {
+		return lengthPrefixed("gatehouse-audit-v14", fields...)
+	}
+	fields = append(fields, r.GRPCStatus)
+	return lengthPrefixed("gatehouse-audit-v15", fields...)
 }
 
 // v2Only reports whether a row sets a field that only the v2 MAC covers.
@@ -238,6 +244,9 @@ func (r Row) v13Only() bool { return r.UpstreamMessage != "" }
 
 // v14Only reports whether a row sets a field that only the v14 MAC covers.
 func (r Row) v14Only() bool { return r.Run != "" || r.ParentRun != "" }
+
+// v15Only reports whether a row sets a field that only the v15 MAC covers.
+func (r Row) v15Only() bool { return r.GRPCStatus != "" }
 
 func (r Row) computeMAC(key []byte) string {
 	h := hmac.New(sha256.New, key)

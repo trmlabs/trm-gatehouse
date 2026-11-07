@@ -128,3 +128,31 @@ func TestCursorRefusals(t *testing.T) {
 		t.Errorf("pool without a session requester: %q", refusal)
 	}
 }
+
+// A session_missing refusal says whether the Pod never had a run token (its first connection racing the session) or lost one mid-run.
+func TestSessionMissingNamesItsGap(t *testing.T) {
+	b := &authorizetest.MemBinder{}
+	ctx := context.Background()
+	if who, refusal := Resolve(ctx, cursorPool, "", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, runs, b); refusal != "session_missing" || who.SessionGap != SessionStartup {
+		t.Fatalf("first connection: %q %+v", refusal, who)
+	}
+	if _, refusal := Resolve(ctx, cursorPool, "alice-1", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, runs, b); refusal != "" {
+		t.Fatalf("her run: %q", refusal)
+	}
+	if who, refusal := Resolve(ctx, cursorPool, "", Claims{Pod: "pod-a", ClaimedRun: "bc-1"}, runs, b); refusal != "session_missing" || who.SessionGap != SessionMidRun {
+		t.Fatalf("after a session: %q %+v", refusal, who)
+	}
+	if who, _ := Resolve(ctx, cursorPool, "", Claims{Pod: "pod-b", ClaimedRun: "bc-1"}, runs, b); who.SessionGap != SessionStartup {
+		t.Fatalf("another Pod: %+v", who)
+	}
+	// A Binder that cannot tell, or a request naming no Pod, leaves the gap unnamed.
+	if who, _ := Resolve(ctx, cursorPool, "", Claims{Pod: ""}, runs, b); who.SessionGap != "" {
+		t.Fatalf("no Pod: %+v", who)
+	}
+	if who, refusal := Resolve(ctx, cursorPool, "", Claims{Pod: "pod-a"}, runs, plainBinder{b}); refusal != "session_missing" || who.SessionGap != "" {
+		t.Fatalf("binder without the read: %q %+v", refusal, who)
+	}
+}
+
+// plainBinder hides every method of its Binder but the pin.
+type plainBinder struct{ Binder }

@@ -31,8 +31,8 @@ var graphqlPermissions = githubapp.Permissions{PullRequests: "write"}
 func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, target, host string, port int, scope *brokercore.ProxyScope, event auditchain.Event,
 	catalog httpcatalog.Catalog, granted []httpcatalog.GitRequest) {
 	a := p.adapter
-	// Every row names one operation: "graphql" until the request is parsed, then the write a mutation makes.
-	event.Operation = "graphql"
+	// A refusal before the body is read names "graphql.unparsed", so it counts as a write attempt.
+	event.Operation = httpcatalog.AuditOperationUnparsed
 	deny := func(status int, outcome string) { p.adapterDeny(w, event, target, status, outcome) }
 	var releases []func()
 	switch {
@@ -40,6 +40,7 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(http.StatusForbidden, "pool")
 		return
 	case r.Method != http.MethodPost:
+		event.Operation = "graphql"
 		deny(http.StatusMethodNotAllowed, "method")
 		return
 	case a.GitTokens == nil:
@@ -102,6 +103,8 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		deny(http.StatusBadRequest, "credential_header")
 		return
 	}
+	// From here the body is read: anything not proven query-only is a possible write.
+	event.Operation = httpcatalog.AuditOperationMutation
 	var sizeLimit int64
 	for _, g := range granted {
 		sizeLimit = max(sizeLimit, g.Entry.MaxRequestBytes)
@@ -124,6 +127,8 @@ func (p *Proxy) forwardGitHubGraphQL(w http.ResponseWriter, r *http.Request, tar
 		if !errors.As(err, &refusal) {
 			refusal = httpcatalog.ErrGraphQLShape
 		}
+		// A refused mutation is a write attempt: its row names a write-shaped operation.
+		event.Operation = req.AuditOperation()
 		deny(refusal.Status, refusal.Outcome)
 		return
 	}

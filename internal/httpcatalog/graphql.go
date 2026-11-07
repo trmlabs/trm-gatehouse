@@ -54,6 +54,8 @@ type GitHubGraphQL struct {
 	Answer []byte
 	// Write is the mutation's operation (pr.comment and so on); empty for a query.
 	Write string
+	// Mutation marks a document that parsed as a mutation; on a refusal it is also set for anything not proven to be a query, such as an unknown key, padding or a parse failure.
+	Mutation bool
 	// Checks marks a request that reads check status; its token also carries checks and statuses read where the repository grants actions.read.
 	Checks bool
 	// Actions marks a request that reads workflow runs; its token also carries actions read where the repository grants it.
@@ -66,10 +68,19 @@ type GitHubGraphQL struct {
 	Code bool
 }
 
-// AuditOperation is the write a mutation makes, or "graphql" for a read, so write alerts match GraphQL and REST alike.
+// AuditOperationMutation names a refused mutation no operation maps, so write alerts count it.
+const AuditOperationMutation = "graphql.mutation"
+
+// AuditOperationUnparsed names a GraphQL request refused before its body was read: neither a proven read nor a write attempt.
+const AuditOperationUnparsed = "graphql.unparsed"
+
+// AuditOperation is the write a mutation makes, "graphql.mutation" for a mutation or anything unproven no operation maps, or "graphql" for a read, so write alerts match GraphQL and REST alike.
 func (g GitHubGraphQL) AuditOperation() string {
-	if g.Write != "" {
+	switch {
+	case g.Write != "":
 		return g.Write
+	case g.Mutation:
+		return AuditOperationMutation
 	}
 	return "graphql"
 }
@@ -152,7 +163,17 @@ var graphqlMutations = map[string]graphqlMutation{
 		contents: "read", flags: map[string]bool{"draft": true, "maintainerCanModify": true}},
 }
 
+// ParseGitHubGraphQL maps a request to the operations it needs; a refusal returns Mutation unless the document parsed and every operation in it is a query, so the caller audits anything unproven as a write.
 func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
+	var query bool
+	out, err := parseGitHubGraphQL(body, &query)
+	if err != nil {
+		return GitHubGraphQL{Mutation: !query}, err
+	}
+	return out, nil
+}
+
+func parseGitHubGraphQL(body []byte, query *bool) (GitHubGraphQL, error) {
 	var req struct {
 		Query         string                     `json:"query"`
 		Variables     map[string]json.RawMessage `json:"variables"`
@@ -172,6 +193,10 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 			return GitHubGraphQL{}, ErrGraphQLLimit
 		}
 		return GitHubGraphQL{}, ErrGraphQLShape
+	}
+	*query = len(doc.Operations) > 0
+	for _, o := range doc.Operations {
+		*query = *query && o.Operation == ast.Query
 	}
 	if len(doc.Operations) != 1 {
 		return GitHubGraphQL{}, ErrGraphQLShape
@@ -243,7 +268,7 @@ func ParseGitHubGraphQL(body []byte) (GitHubGraphQL, error) {
 		return GitHubGraphQL{}, ErrGraphQLLimit
 	}
 
-	out := GitHubGraphQL{Code: c.code, Checks: c.checks, Actions: c.actions}
+	out := GitHubGraphQL{Code: c.code, Checks: c.checks, Actions: c.actions, Mutation: op.Operation == ast.Mutation}
 	ops := c.ops // what repositories reached at any depth need
 	repos := map[string]bool{}
 	switch op.Operation {

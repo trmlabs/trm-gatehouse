@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"sync"
@@ -22,7 +23,7 @@ const (
 	minRSABits     = 2048
 )
 
-// jwks caches one issuer's signing keys by kid for an hour. An unknown kid or stale keys refetch at most every 30 seconds, one fetch at a time; the last good set serves within its hour when a fetch fails.
+// jwks caches one issuer's signing keys by kid for an hour, refreshing in the background after half of it. An unknown kid or stale keys refetch at most every 30 seconds, one fetch at a time; the last good set serves within its hour when a fetch fails.
 type jwks struct {
 	mu        sync.Mutex
 	keys      map[string]crypto.PublicKey
@@ -30,6 +31,24 @@ type jwks struct {
 	attempted time.Time     // last fetch attempt
 	failed    bool          // the last fetch attempt failed
 	inflight  chan struct{} // closed when the fetch in progress ends
+
+	// The zero values keep the defaults: keysMaxAge, refetchBackoff and a fetch of the URL the caller passes.
+	maxAge, backoff time.Duration
+	fetch           func(ctx context.Context) (map[string]crypto.PublicKey, error)
+}
+
+func (c *jwks) age() time.Duration {
+	if c.maxAge > 0 {
+		return c.maxAge
+	}
+	return keysMaxAge
+}
+
+func (c *jwks) gap() time.Duration {
+	if c.backoff > 0 {
+		return c.backoff
+	}
+	return refetchBackoff
 }
 
 func (c *jwks) key(ctx context.Context, kid, url string, client *http.Client, now func() time.Time) crypto.PublicKey {
@@ -41,8 +60,13 @@ func (c *jwks) key(ctx context.Context, kid, url string, client *http.Client, no
 func (c *jwks) lookup(ctx context.Context, kid, url string, client *http.Client, now func() time.Time) (crypto.PublicKey, bool) {
 	c.mu.Lock()
 	t := now()
-	fresh := !c.loaded.IsZero() && t.Sub(c.loaded) < keysMaxAge
+	fresh := !c.loaded.IsZero() && t.Sub(c.loaded) < c.age()
 	if k := c.keys[kid]; k != nil && fresh {
+		// Past half its age the set refreshes in the background, so an issuer outage at rollover finds keys still being served.
+		if t.Sub(c.loaded) >= c.age()/2 && c.inflight == nil && (c.attempted.IsZero() || t.Sub(c.attempted) >= c.gap()) {
+			done := c.begin(t)
+			go c.refresh(context.WithoutCancel(ctx), url, client, t, done)
+		}
 		c.mu.Unlock()
 		return k, true
 	}
@@ -56,19 +80,40 @@ func (c *jwks) lookup(ctx context.Context, kid, url string, client *http.Client,
 		}
 		return c.current(kid, now)
 	}
-	if !c.attempted.IsZero() && t.Sub(c.attempted) < refetchBackoff {
+	if !c.attempted.IsZero() && t.Sub(c.attempted) < c.gap() {
 		defer c.mu.Unlock()
 		if fresh {
 			return c.keys[kid], !c.failed
 		}
 		return nil, false
 	}
+	done := c.begin(t)
+	c.mu.Unlock()
+	// The caller's cancellation must not fail the refresh for everyone else.
+	c.refresh(context.WithoutCancel(ctx), url, client, t, done)
+	return c.current(kid, now)
+}
+
+// begin marks a fetch in progress; the caller holds the lock.
+func (c *jwks) begin(t time.Time) chan struct{} {
 	c.attempted = t
 	done := make(chan struct{})
 	c.inflight = done
-	c.mu.Unlock()
-	// The caller's cancellation must not fail the refresh for everyone else.
-	keys, err := fetchKeys(context.WithoutCancel(ctx), url, client)
+	return done
+}
+
+// refresh fetches the set, stores it on success and releases the waiters.
+func (c *jwks) refresh(ctx context.Context, url string, client *http.Client, t time.Time, done chan struct{}) {
+	var keys map[string]crypto.PublicKey
+	var err error
+	if c.fetch != nil {
+		keys, err = c.fetch(ctx)
+	} else {
+		keys, err = fetchKeys(ctx, url, client)
+	}
+	if err != nil {
+		slog.Warn("signing key fetch failed", "url", url, "err", err)
+	}
 	c.mu.Lock()
 	c.failed = err != nil
 	if err == nil {
@@ -77,14 +122,13 @@ func (c *jwks) lookup(ctx context.Context, kid, url string, client *http.Client,
 	c.inflight = nil
 	close(done)
 	c.mu.Unlock()
-	return c.current(kid, now)
 }
 
 // current returns a key from the last good set while it is within its hour, and whether an absent kid is settled by a fetch that succeeded.
 func (c *jwks) current(kid string, now func() time.Time) (crypto.PublicKey, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.loaded.IsZero() || now().Sub(c.loaded) >= keysMaxAge {
+	if c.loaded.IsZero() || now().Sub(c.loaded) >= c.age() {
 		return nil, false
 	}
 	return c.keys[kid], !c.failed
@@ -95,11 +139,19 @@ func RefuseRedirects(*http.Request, []*http.Request) error {
 	return errors.New("runner JWKS redirect refused")
 }
 
+// noRedirects returns a copy of client that follows no redirect, whatever the supplied client does; nil gets a default.
+func noRedirects(client *http.Client) *http.Client {
+	if client == nil {
+		return &http.Client{Timeout: 5 * time.Second, CheckRedirect: RefuseRedirects}
+	}
+	c := *client
+	c.CheckRedirect = RefuseRedirects
+	return &c
+}
+
 // fetchKeys reads a JWKS: P-256 keys for ES256 and RSA keys of at least 2048 bits for RS256; each verifier accepts only its own kind.
 func fetchKeys(ctx context.Context, url string, client *http.Client) (map[string]crypto.PublicKey, error) {
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second, CheckRedirect: RefuseRedirects}
-	}
+	client = noRedirects(client)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -154,6 +206,10 @@ func fetchKeys(ctx context.Context, url string, client *http.Client) (map[string
 			}
 			keys[k.Kid] = pub
 		}
+	}
+	// A set with no usable key, empty or filtered out, is a failed fetch so the last good set stays.
+	if len(keys) == 0 {
+		return nil, errors.New("runner JWKS has no usable key")
 	}
 	return keys, nil
 }

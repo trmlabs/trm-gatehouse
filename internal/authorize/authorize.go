@@ -50,6 +50,12 @@ const SourceStaticToken = "STATIC_TOKEN"
 // SourceGumloopOIDC is the audit row's Source for an Automation admitted by a Gumloop ID token.
 const SourceGumloopOIDC = "GUMLOOP_OIDC"
 
+// SourceSignedToken is the audit row's Source for an Automation admitted by a signed-token harness's ID token.
+const SourceSignedToken = "SIGNED_TOKEN"
+
+// SourceGoogleOIDC is the audit row's Source for an Automation admitted by a Google ID token.
+const SourceGoogleOIDC = "GOOGLE_OIDC"
+
 // podOwnerPin is how long a Pod stays pinned to the first Cursor run owner it presents.
 // Pod UIDs never repeat, so a day is far past any worker's lifetime.
 const podOwnerPin = 24 * time.Hour
@@ -59,9 +65,45 @@ type Binder interface {
 	BindRunnerSession(ctx context.Context, tokenSHA256, pod string, expires time.Time) (string, error)
 }
 
+// PodSessions is the optional read a Binder offers: whether a Pod holds a live pin from a verified run token.
+type PodSessions interface {
+	PodHasSession(ctx context.Context, pod string) (bool, error)
+}
+
+// Decisions an audit row carries for a session_missing refusal, so the Pod's first connection racing its session is apart from a session that went missing mid-run.
+const (
+	// SessionStartup is no live run token on record for the Pod, usually its first connection racing its session; an expired pin reads the same.
+	SessionStartup = "session_startup"
+	SessionMidRun  = "session_mid_run"
+)
+
+// sessionGapTimeout bounds the lookup that labels a session_missing refusal.
+const sessionGapTimeout = 250 * time.Millisecond
+
+// sessionGap names a session_missing refusal for the audit row; empty when the Binder cannot tell.
+func sessionGap(ctx context.Context, b Binder, pod string) string {
+	ps, ok := b.(PodSessions)
+	if !ok || pod == "" {
+		return ""
+	}
+	// The value is diagnostic only: a slow store leaves it empty rather than hold the refusal, and a client hang-up does not cancel it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionGapTimeout)
+	defer cancel()
+	seen, err := ps.PodHasSession(ctx, pod)
+	switch {
+	case err != nil:
+		return ""
+	case seen:
+		return SessionMidRun
+	}
+	return SessionStartup
+}
+
 // Requester is who stands behind a request.
 type Requester struct {
-	Kind        string // person, agent, workload, automation or none
+	Kind string // person, agent, workload, automation or none
+	// SessionGap is set with a session_missing refusal: SessionStartup or SessionMidRun, empty when unknown.
+	SessionGap  string
 	Subject     string // the person's email, the agent, or the Automation's id
 	TokenSHA256 string
 	// Source and Automation come from the verified Cursor run token, for the audit row.
@@ -138,6 +180,7 @@ func Resolve(ctx context.Context, pool httpcatalog.Pool, session string, claims 
 	case httpcatalog.RequesterSessionJWT, httpcatalog.RequesterCursorOIDC:
 		cursor := requester == httpcatalog.RequesterCursorOIDC
 		if session == "" && cursor {
+			who.SessionGap = sessionGap(ctx, b, pod)
 			return who, "session_missing"
 		}
 		if session == "" {
@@ -250,17 +293,19 @@ func resolveTokenAgent(pool httpcatalog.Pool, session string, claims Claims) (Re
 	if session != "" {
 		return who, "session_unexpected"
 	}
-	if _, ok := pool.StaticToken(); !ok {
-		return who, "automation_unlisted"
-	}
 	a, ok := pool.Automation(claims.TokenAgent)
-	if !ok || !a.HasOwnIdentity() {
+	if !ok || !a.HasOwnIdentity() || !pool.AdmitsToken(a) {
 		return who, "automation_unlisted"
 	}
 	who.Kind, who.Subject, who.AutomationName, who.AutomationOwner = "automation", a.ID, a.Name, a.Owner
 	who.Source, who.Automation = SourceStaticToken, a.ID
-	if claims.TokenSource == SourceGumloopOIDC {
+	switch claims.TokenSource {
+	case SourceGumloopOIDC:
 		who.Source, who.RunPerson = SourceGumloopOIDC, claims.TokenOwner
+	case SourceSignedToken:
+		who.Source = SourceSignedToken
+	case SourceGoogleOIDC:
+		who.Source = SourceGoogleOIDC
 	}
 	who.grant = &a
 	return who, ""

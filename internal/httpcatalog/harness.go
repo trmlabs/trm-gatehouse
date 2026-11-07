@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/Infisical/agent-vault/internal/imagerule"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 // Harness is one agent runtime's profile: how its agents prove who they are, how they reach the broker, and whether access is decided per pool or per person. Every field is required unless marked optional; an incomplete or contradictory entry refuses the whole catalog.
@@ -44,6 +47,29 @@ type HarnessIdentity struct {
 	// ImagePrefix, proxy-attested only, admits any image under this registry path; ImageDigests then holds only the platform's own containers.
 	ImagePrefix string            `json:"imagePrefix,omitempty"`
 	Requester   *HarnessRequester `json:"requester,omitempty"` // optional
+	// Token, signed-token only, is the platform's signed-token rules; see HarnessSignedToken.
+	Token *HarnessSignedToken `json:"token,omitempty"`
+}
+
+// HarnessSignedToken is how the broker checks a platform's signed ID tokens (an OIDC-style JWT), so a new platform is a catalog entry and no new code. Every field is required unless marked optional.
+// Issuer, one of JWKSURL or Discovery, Audiences and Algorithms say whose tokens are accepted and how; MaxLifetimeSeconds bounds exp minus iat; SubjectClaim names the agent (it is matched to an Automation's signedToken.subject) and GroupsClaim, optional, the groups.
+type HarnessSignedToken struct {
+	Issuer     string   `json:"issuer"`
+	JWKSURL    string   `json:"jwksURL,omitempty"`
+	Discovery  bool     `json:"discovery,omitempty"`
+	Audiences  []string `json:"audiences"`
+	Algorithms []string `json:"algorithms"`
+	// MaxLifetimeSeconds is the longest a token may live from iat to exp, and the furthest ahead it may expire.
+	MaxLifetimeSeconds int `json:"maxLifetimeSeconds"`
+	// ClockSkewSeconds, optional (unset is 60; an explicit 0 is no skew), forgives a fast clock for iat and nbf, never for exp.
+	ClockSkewSeconds *int   `json:"clockSkewSeconds,omitempty"`
+	SubjectClaim     string `json:"subjectClaim"`
+	GroupsClaim      string `json:"groupsClaim,omitempty"`
+	// RequiredClaims, optional, are claims whose string value a token must carry exactly, checked together with the subject.
+	RequiredClaims map[string]string `json:"requiredClaims,omitempty"`
+	// KeyMaxAgeSeconds (default 3600) and RefreshBackoffSeconds (default 30), optional, tune the signing-key cache.
+	KeyMaxAgeSeconds      int `json:"keyMaxAgeSeconds,omitempty"`
+	RefreshBackoffSeconds int `json:"refreshBackoffSeconds,omitempty"`
 }
 
 // HarnessRequester is where the person behind a session comes from: "session-jwt", "cursor-oidc", "pod-annotation" (the login a shared proxy attests from the Pod's requester annotation) or "signed-assertion".
@@ -68,6 +94,7 @@ const (
 	IdentitySessionJWT    = "session-jwt"
 	IdentityProxyAttested = "proxy-attested"
 	IdentityStaticToken   = "static-token"
+	IdentitySignedToken   = "signed-token"
 
 	RequesterSessionJWT      = "session-jwt"
 	RequesterCursorOIDC      = "cursor-oidc"
@@ -92,6 +119,7 @@ var (
 	envName        = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	audiencePat    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,252}$`)
 	digestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	claimName      = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_:./-]{0,127}$`)
 )
 
 func (h Harness) validate() error {
@@ -100,6 +128,12 @@ func (h Harness) validate() error {
 	}
 	if h.Identity.Kind == IdentityStaticToken {
 		return h.validateStaticToken()
+	}
+	if h.Identity.Kind == IdentitySignedToken {
+		return h.validateSignedToken()
+	}
+	if h.Identity.Token != nil {
+		return errors.New("identity.token is for signed-token harnesses")
 	}
 	td := h.TrustDomain
 	u, err := url.Parse(td.Issuer)
@@ -220,8 +254,8 @@ func (h Harness) validateStaticToken() error {
 	if h.TrustDomain != (HarnessTrustDomain{}) {
 		return errors.New("a static-token harness has no trustDomain: it is not a Kubernetes identity")
 	}
-	if id.OwnerKind != "" || len(id.Namespaces) != 0 || len(id.ImageDigests) != 0 || id.ImagePrefix != "" || id.Requester != nil {
-		return errors.New("a static-token harness takes no ownerKind, namespaces, images or requester")
+	if id.OwnerKind != "" || len(id.Namespaces) != 0 || len(id.ImageDigests) != 0 || id.ImagePrefix != "" || id.Requester != nil || id.Token != nil {
+		return errors.New("a static-token harness takes no ownerKind, namespaces, images, requester or token")
 	}
 	if h.Path.Kind != PathDirect || h.Path.CrossCluster {
 		return errors.New("a static-token harness reaches the broker directly (path.kind direct, crossCluster false)")
@@ -235,10 +269,133 @@ func (h Harness) validateStaticToken() error {
 	return h.Client.validate()
 }
 
-// sharePool allows a pool that decides per Automation to have its Kubernetes harness plus one static-token harness; any other pool belongs to one harness.
+// validateSignedToken refuses every Kubernetes field, as validateStaticToken does, and checks the token rules: an unproven token is refused at admission, so a rule left open here would be one the broker never makes.
+func (h Harness) validateSignedToken() error {
+	id := h.Identity
+	if h.TrustDomain != (HarnessTrustDomain{}) {
+		return errors.New("a signed-token harness has no trustDomain: it is not a Kubernetes identity")
+	}
+	if id.OwnerKind != "" || len(id.Namespaces) != 0 || len(id.ImageDigests) != 0 || id.ImagePrefix != "" || id.Requester != nil {
+		return errors.New("a signed-token harness takes no ownerKind, namespaces, images or requester")
+	}
+	if h.Path.Kind != PathDirect || h.Path.CrossCluster {
+		return errors.New("a signed-token harness reaches the broker directly (path.kind direct, crossCluster false)")
+	}
+	if h.Authorization.Mode != AuthorizeAutomation {
+		return errors.New("a signed-token harness authorizes the automation: each agent is one listed Automation")
+	}
+	if !idPattern.MatchString(h.Authorization.PoolName) {
+		return errors.New("authorization.poolName is required")
+	}
+	if err := id.Token.validate(); err != nil {
+		return err
+	}
+	return h.Client.validate()
+}
+
+func httpsURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && raw != "" && len(raw) <= 512 && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Fragment == ""
+}
+
+func (t *HarnessSignedToken) validate() error {
+	if t == nil {
+		return errors.New("a signed-token harness needs identity.token")
+	}
+	if !httpsURL(t.Issuer) {
+		return errors.New("identity.token.issuer must be an HTTPS URL")
+	}
+	if slices.Contains([]string{runnerid.GoogleIssuer, runnerid.GumloopIssuer, runnerid.CursorIssuer}, strings.TrimSuffix(t.Issuer, "/")) {
+		return errors.New("identity.token.issuer is verified in code for another platform and cannot be claimed by a harness")
+	}
+	if u, _ := url.Parse(t.Issuer); u.RawQuery != "" {
+		return errors.New("identity.token.issuer must be an HTTPS URL with no query")
+	}
+	if t.Discovery == (t.JWKSURL != "") {
+		return errors.New("identity.token needs exactly one of jwksURL and discovery")
+	}
+	if t.JWKSURL != "" && !httpsURL(t.JWKSURL) {
+		return errors.New("identity.token.jwksURL must be an HTTPS URL")
+	}
+	if len(t.Audiences) == 0 {
+		return errors.New("identity.token.audiences needs at least one audience")
+	}
+	seen := map[string]bool{}
+	for _, a := range t.Audiences {
+		if !audiencePat.MatchString(a) || seen[a] {
+			return fmt.Errorf("identity.token audience %q is invalid or repeated", a)
+		}
+		seen[a] = true
+	}
+	if len(t.Algorithms) == 0 {
+		return errors.New("identity.token.algorithms needs RS256, ES256 or both")
+	}
+	algs := map[string]bool{}
+	for _, a := range t.Algorithms {
+		if (a != "RS256" && a != "ES256") || algs[a] {
+			return fmt.Errorf("identity.token algorithm %q: RS256 or ES256, once each", a)
+		}
+		algs[a] = true
+	}
+	if t.MaxLifetimeSeconds < 1 || t.MaxLifetimeSeconds > MaxSignedTokenLifetimeSeconds {
+		return fmt.Errorf("identity.token.maxLifetimeSeconds must be from 1 to %d", MaxSignedTokenLifetimeSeconds)
+	}
+	if t.ClockSkewSeconds != nil && (*t.ClockSkewSeconds < 0 || *t.ClockSkewSeconds > 300) {
+		return errors.New("identity.token.clockSkewSeconds must be from 0 to 300")
+	}
+	reserved := map[string]bool{"iss": true, "aud": true, "exp": true, "iat": true, "nbf": true}
+	if !claimName.MatchString(t.SubjectClaim) || reserved[t.SubjectClaim] {
+		return errors.New("identity.token.subjectClaim must name a claim that identifies the agent")
+	}
+	if t.GroupsClaim != "" && (!claimName.MatchString(t.GroupsClaim) || reserved[t.GroupsClaim] || t.GroupsClaim == t.SubjectClaim) {
+		return errors.New("identity.token.groupsClaim must name a claim other than the subject claim")
+	}
+	if len(t.RequiredClaims) > 8 {
+		return errors.New("identity.token.requiredClaims takes at most 8 claims")
+	}
+	for name, want := range t.RequiredClaims {
+		if !claimName.MatchString(name) || reserved[name] || name == t.SubjectClaim || name == t.GroupsClaim || want == "" || len(want) > 256 || strings.ContainsAny(want, " \t\r\n") {
+			return fmt.Errorf("identity.token.requiredClaims %q must name a claim other than the reserved, subject and groups claims, with a plain non-empty value", name)
+		}
+	}
+	if t.KeyMaxAgeSeconds != 0 && (t.KeyMaxAgeSeconds < 60 || t.KeyMaxAgeSeconds > 86400) {
+		return errors.New("identity.token.keyMaxAgeSeconds must be from 60 to 86400")
+	}
+	if t.RefreshBackoffSeconds != 0 && (t.RefreshBackoffSeconds < 1 || t.RefreshBackoffSeconds > 3600) {
+		return errors.New("identity.token.refreshBackoffSeconds must be from 1 to 3600")
+	}
+	maxAge, backoff := t.KeyMaxAgeSeconds, t.RefreshBackoffSeconds
+	if maxAge == 0 {
+		maxAge = 3600
+	}
+	if backoff == 0 {
+		backoff = 30
+	}
+	if backoff*2 > maxAge {
+		return errors.New("identity.token.refreshBackoffSeconds must be at most half of keyMaxAgeSeconds (defaults 30 and 3600)")
+	}
+	return nil
+}
+
+// MaxSignedTokenLifetimeSeconds bounds maxLifetimeSeconds so a mistyped value cannot read as a standing credential: a signed token is replayable until it expires.
+const MaxSignedTokenLifetimeSeconds = 24 * 60 * 60
+
+// harnessClass sorts identities by how a pool may combine them: a Kubernetes harness, the one static-token harness, or any number of signed-token ones.
+func harnessClass(h Harness) string {
+	switch h.Identity.Kind {
+	case IdentityStaticToken, IdentitySignedToken:
+		return h.Identity.Kind
+	}
+	return "kubernetes"
+}
+
+// sharePool allows a pool that decides per Automation to have its Kubernetes harness, one static-token harness and any signed-token harnesses; any other pool belongs to one harness.
 func sharePool(a, b Harness) bool {
-	return a.Authorization.Mode == AuthorizeAutomation && b.Authorization.Mode == AuthorizeAutomation &&
-		(a.Identity.Kind == IdentityStaticToken) != (b.Identity.Kind == IdentityStaticToken)
+	if a.Authorization.Mode != AuthorizeAutomation || b.Authorization.Mode != AuthorizeAutomation {
+		return false
+	}
+	ca, cb := harnessClass(a), harnessClass(b)
+	return ca != cb || ca == IdentitySignedToken
 }
 
 // validateHarnesses checks every profile and binds it to its pool; at most one harness uses a static-token identity, since the broker finds a token's pool through it.
@@ -248,6 +405,7 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][
 	}
 	byPool := map[string][]Harness{}
 	static := ""
+	signedIssuers := map[string]string{} // issuer to harness
 	names := map[string]bool{}
 	attested := map[string]string{} // issuer and namespace to harness
 	prefixes := map[string]string{} // harness to image prefix
@@ -274,6 +432,12 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][
 			}
 			static = h.Name
 		}
+		if t := h.Identity.Token; h.Identity.Kind == IdentitySignedToken && t != nil {
+			if other, ok := signedIssuers[t.Issuer]; ok {
+				return nil, fmt.Errorf("harnesses %q and %q both name issuer %q; the broker picks a harness by issuer", other, h.Name, t.Issuer)
+			}
+			signedIssuers[t.Issuer] = h.Name
+		}
 		personPool, person := personIdentities[pool.Identity]
 		if person != (h.Authorization.Mode == AuthorizePerson) || (pool.Identity == IdentityCursorAutomation) != (h.Authorization.Mode == AuthorizeAutomation) {
 			return nil, fmt.Errorf("harness %q authorizes the %s, but pool %q has identity %q", h.Name, h.Authorization.Mode, pool.Name, pool.Identity)
@@ -282,7 +446,7 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][
 		if person && requester != personPool {
 			return nil, fmt.Errorf("harness %q takes its person from %q, but pool %q has identity %q", h.Name, requester, pool.Name, pool.Identity)
 		}
-		if h.Identity.Kind != IdentityStaticToken && pool.Namespace != "" && !contains(h.Identity.Namespaces, pool.Namespace) {
+		if harnessClass(h) == "kubernetes" && pool.Namespace != "" && !contains(h.Identity.Namespaces, pool.Namespace) {
 			return nil, fmt.Errorf("harness %q does not list pool %q's namespace", h.Name, pool.Name)
 		}
 		if h.Identity.ImagePrefix != "" {
@@ -301,6 +465,13 @@ func validateHarnesses(harnesses []Harness, pools map[string]Pool) (map[string][
 			attested[key] = h.Name
 		}
 		byPool[pool.Name] = append(byPool[pool.Name], h)
+	}
+	for issuer, name := range signedIssuers {
+		for _, h := range harnesses {
+			if h.TrustDomain.Issuer != "" && strings.TrimSuffix(h.TrustDomain.Issuer, "/") == strings.TrimSuffix(issuer, "/") {
+				return nil, fmt.Errorf("harness %q names issuer %q, which is harness %q's trustDomain.issuer; the broker would check its tokens as a Kubernetes identity", name, issuer, h.Name)
+			}
+		}
 	}
 	for name := range pools {
 		if _, ok := byPool[name]; !ok {
@@ -388,6 +559,26 @@ func (c Catalog) GumloopAgent(orgID, ownerID string) (Automation, string, bool) 
 	return Automation{}, "", false
 }
 
+// GoogleAgent finds the Automation naming a verified Google service account unique ID and its pool.
+func (c Catalog) GoogleAgent(uniqueID string) (Automation, string, bool) {
+	if uniqueID == "" {
+		return Automation{}, "", false
+	}
+	for id := range c.automations {
+		a := c.automations[id]
+		if a.GoogleServiceAccount == nil || a.GoogleServiceAccount.UniqueID != uniqueID {
+			continue
+		}
+		for _, h := range c.harnesses {
+			if h.Identity.Kind == IdentityStaticToken {
+				return a, h.Authorization.PoolName, true
+			}
+		}
+		return Automation{}, "", false
+	}
+	return Automation{}, "", false
+}
+
 // RequesterKind is where the person behind a session comes from, or "".
 func (p Profile) RequesterKind() string {
 	if p.Identity.Requester != nil {
@@ -433,3 +624,45 @@ func (c Catalog) externalPool(name string) bool {
 
 // Harnesses returns the declared profiles.
 func (c Catalog) Harnesses() []Harness { return append([]Harness(nil), c.harnesses...) }
+
+// SignedTokenHarness is the signed-token harness for a token's issuer; validation allows one harness per issuer.
+func (c Catalog) SignedTokenHarness(issuer string) (Harness, bool) {
+	for _, h := range c.harnesses {
+		if h.Identity.Kind == IdentitySignedToken && h.Identity.Token != nil && h.Identity.Token.Issuer == issuer {
+			return h, true
+		}
+	}
+	return Harness{}, false
+}
+
+// SignedTokenAgent finds the Automation naming a verified subject of a signed-token harness, and that harness's pool.
+func (c Catalog) SignedTokenAgent(harness, subject string) (Automation, string, bool) {
+	id, ok := c.signedAgents[harness+"\x00"+subject]
+	if !ok {
+		return Automation{}, "", false
+	}
+	a, ok := c.automations[id]
+	if !ok {
+		return Automation{}, "", false
+	}
+	for _, h := range c.harnesses {
+		if h.Name == harness && h.Identity.Kind == IdentitySignedToken {
+			return a, h.Authorization.PoolName, true
+		}
+	}
+	return Automation{}, "", false
+}
+
+// AdmitsToken reports whether the pool takes the Automation's own proof: a static-token or Gumloop block needs the pool's static-token harness, a signed-token block the harness it names.
+func (p Pool) AdmitsToken(a Automation) bool {
+	if a.SignedToken != nil {
+		for _, h := range p.signedHarnesses {
+			if h.Name == a.SignedToken.Harness {
+				return true
+			}
+		}
+		return false
+	}
+	_, ok := p.StaticToken()
+	return ok
+}

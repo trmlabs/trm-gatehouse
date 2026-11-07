@@ -326,14 +326,14 @@ func TestGitHubAPIRefusesEverythingElse(t *testing.T) {
 	}
 }
 
-// A GraphQL request no route admits is refused before GitHub sees it, and the refusal names "graphql" so it can be counted apart from other unlisted paths.
+// A GraphQL request no route admits is refused before GitHub sees it, and the refusal names "graphql.unparsed", since a body never read is neither a proven read nor a write attempt.
 func TestGitHubAPIGraphQLRefusalNamesItsOperation(t *testing.T) {
 	f := newAPIFixture(t)
 	if code, _ := f.post(t, "POST", "/graphql", "", `{"query":"{ viewer { login } }"}`); code < 400 {
 		t.Fatalf("GraphQL was not refused: %d", code)
 	}
 	e := f.audit.last()
-	if e.Event != "denied" || e.Status < 400 || e.Operation != "graphql" {
+	if e.Event != "denied" || e.Status < 400 || e.Operation != "graphql.unparsed" {
 		t.Fatalf("audit: %+v", e)
 	}
 	f.mu.Lock()

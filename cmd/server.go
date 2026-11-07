@@ -43,6 +43,7 @@ import (
 	"github.com/Infisical/agent-vault/internal/proxyactivity"
 	"github.com/Infisical/agent-vault/internal/proxycert"
 	"github.com/Infisical/agent-vault/internal/requestlog"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 	"github.com/Infisical/agent-vault/internal/runtimestatus"
 	"github.com/Infisical/agent-vault/internal/server"
 	"github.com/Infisical/agent-vault/internal/session"
@@ -267,7 +268,11 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 	}
 	// Agent tokens are checked against the live catalog; without one the static-token listener would refuse everyone.
 	var agentTokens agenttoken.Verifier
-	oidc, err := gumloopVerifier(os.Getenv)
+	gumloop, err := gumloopVerifier(os.Getenv)
+	if err != nil {
+		return err
+	}
+	google, err := googleVerifier(os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -276,9 +281,13 @@ func attachMITMIfEnabled(srv *server.Server, host string, mitmPort int, masterKe
 			return fmt.Errorf("AGENT_VAULT_STATIC_TOKEN_PORT needs the HTTP catalog")
 		}
 		agentTokens = agenttoken.Static{Catalog: adapter.Catalog}
-		if oidc != nil {
-			agentTokens = agenttoken.Either{Static: agentTokens, OIDC: agenttoken.GumloopOIDC{Catalog: adapter.Catalog, Verifier: oidc}}
+		// A token whose issuer a signed-token harness names is checked by that harness's rules; any other keeps its path.
+		reserved := []string{runnerid.GoogleIssuer, runnerid.GumloopIssuer, runnerid.CursorIssuer}
+		if gumloop != nil {
+			reserved = append(reserved, strings.TrimSuffix(gumloop.Issuer, "/"))
 		}
+		agentTokens = agenttoken.Either{Static: agentTokens, OIDC: agenttoken.SignedByIssuer{
+			Signed: &agenttoken.Signed{Catalog: adapter.Catalog, Client: signedTokenClient()}, Fallback: idTokenVerifier(adapter.Catalog, gumloop, google), Reserved: reserved}}
 	}
 	var extraSANs []string
 	if u, err := url.Parse(srv.BaseURL()); err == nil {

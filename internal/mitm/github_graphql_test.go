@@ -689,6 +689,11 @@ func TestGitHubGraphQLRefusesShapes(t *testing.T) {
 		if code != tc.code || f.audit.last().Outcome != tc.outcome {
 			t.Errorf("%s: %d %q, want %d %q", tc.name, code, f.audit.last().Outcome, tc.code, tc.outcome)
 		}
+		// Refused before the body is read: neither a read nor a write; refused after: never a read.
+		wantOp := map[string]string{"request_shape": "graphql.unparsed", "method": "graphql", "graphql_shape": "graphql.mutation", "placeholder_misplaced": "graphql.mutation", "request_too_large": "graphql.mutation"}[tc.outcome]
+		if wantOp != "" && f.audit.last().Operation != wantOp {
+			t.Errorf("%s: operation %q, want %q", tc.name, f.audit.last().Operation, wantOp)
+		}
 	}
 	c, err := httpcatalog.Parse([]byte(fmt.Sprintf(`{"entries":[{"name":"github-api","host":"example.com","port":%d,"kind":"github-api",
 		"pools":["another-pool"],"git":{"appID":7,"installationID":42,"repos":[{"repo":"example-org/example-repo","access":"write"}]}}]}`, f.port)))
@@ -783,8 +788,8 @@ func TestGitHubGraphQLIsOptIn(t *testing.T) {
 		}
 	}
 	feature := `{"query":"query PullRequest_fields2{WorkflowRun: __type(name: \"WorkflowRun\"){fields(includeDeprecated: true){name}}}"}`
-	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, feature); code != 403 || f.audit.last().Outcome != "unlisted" {
-		t.Errorf("feature detection without graphql: %d %q", code, f.audit.last().Outcome)
+	if code, _ := f.send(t, http.MethodPost, "/graphql", nil, feature); code != 403 || f.audit.last().Outcome != "unlisted" || f.audit.last().Operation != "graphql.unparsed" {
+		t.Errorf("feature detection without graphql: %d %q %q", code, f.audit.last().Outcome, f.audit.last().Operation)
 	}
 	if got := f.relayed(); len(got) != 0 {
 		t.Fatalf("GitHub received GraphQL without the opt-in: %v", got)
@@ -964,7 +969,7 @@ func TestGitHubGraphQLFileListsNeedTheCloneGrant(t *testing.T) {
 	}
 }
 
-// Each GraphQL row names one operation: the write a mutation makes, or "graphql" for a read or a request refused before parsing, so a write alert never matches a read.
+// Each GraphQL row names one operation: the write a mutation makes, "graphql.mutation" for a mutation no operation maps, or "graphql" for a read; a request refused after its body is read but not proven a query counts as a mutation, so a write alert never misses a refused write, and one refused before the body is read is "graphql.unparsed", neither a read nor a write.
 func TestGitHubGraphQLAuditNamesOneOperation(t *testing.T) {
 	f := newGraphQLFixture(t)
 	read := `{"query":"query { repository(owner: \"example-org\", name: \"example-repo\") { pullRequest(number: 12) { title } } }"}`
@@ -978,7 +983,13 @@ func TestGitHubGraphQLAuditNamesOneOperation(t *testing.T) {
 		{"read", read, "graphql", 200},
 		{"labels lookup", labels, "graphql", 200},
 		{"refused comment", graphqlMutation("addComment", "AddCommentInput", map[string]any{"subjectId": personPR, "body": "x"}), "pr.comment", 403},
-		{"refused before parsing", `query { x }`, "graphql", 400},
+		{"refused before parsing", `query { x }`, "graphql.mutation", 400},
+		{"refused unknown key", `{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }","extensions":{}}`, "graphql.mutation", 400},
+		{"refused unmapped query", `{"query":"query { viewer { login } }"}`, "graphql", 403},
+		{"refused merge", graphqlMutation("mergePullRequest", "MergePullRequestInput", map[string]any{"pullRequestId": ownPR}), "graphql.mutation", 403},
+		{"refused approve", graphqlMutation("addPullRequestReview", "AddPullRequestReviewInput", map[string]any{"pullRequestId": ownPR, "event": "APPROVE"}), "graphql.mutation", 403},
+		{"refused branch update", graphqlMutation("updatePullRequestBranch", "UpdatePullRequestBranchInput", map[string]any{"pullRequestId": ownPR}), "graphql.mutation", 403},
+		{"refused title edit", graphqlMutation("updatePullRequest", "UpdatePullRequestInput", map[string]any{"pullRequestId": ownPR, "title": "x"}), "graphql.mutation", 403},
 	} {
 		before := len(f.audit.all())
 		if code, _ := f.send(t, http.MethodPost, "/graphql", nil, tc.body); code != tc.code {

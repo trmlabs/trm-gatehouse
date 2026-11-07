@@ -227,6 +227,8 @@ type Catalog struct {
 	pools       []Pool
 	harnesses   []Harness
 	automations map[string]Automation // by id
+	// signedAgents maps a signed-token harness and subject (joined by NUL) to the Automation id that claims it.
+	signedAgents map[string]string
 }
 
 type Pool struct {
@@ -243,9 +245,10 @@ type Pool struct {
 	// AutomationRunsAsPerson, cursor-session only, serves a Cursor Automation's run as the person its token names, with this pool's entries and that person's groups. Off by default: the run is refused (automation_on_person_pool).
 	AutomationRunsAsPerson bool `json:"automationRunsAsPerson,omitempty"`
 
-	harness       *Harness              // the declared profile naming this pool, if any: its Kubernetes harness, else its static-token one
-	staticHarness *Harness              // the pool's static-token harness, if any
-	automations   map[string]Automation // the catalog's Automations, on a cursor-automation pool
+	harness         *Harness              // the declared profile naming this pool, if any: its Kubernetes harness, else its static-token one
+	staticHarness   *Harness              // the pool's static-token harness, if any
+	signedHarnesses []Harness             // the pool's signed-token harnesses
+	automations     map[string]Automation // the catalog's Automations, on a cursor-automation pool
 }
 
 func (c Catalog) Pool(name string) (Pool, bool) {
@@ -387,10 +390,17 @@ func Parse(data []byte) (Catalog, error) {
 				file.Pools[i].staticHarness = &h
 				continue
 			}
+			if h.Identity.Kind == IdentitySignedToken {
+				file.Pools[i].signedHarnesses = append(file.Pools[i].signedHarnesses, h)
+				continue
+			}
 			file.Pools[i].harness = &h
 		}
 		if file.Pools[i].harness == nil {
 			file.Pools[i].harness = file.Pools[i].staticHarness
+		}
+		if file.Pools[i].harness == nil && len(file.Pools[i].signedHarnesses) > 0 {
+			file.Pools[i].harness = &file.Pools[i].signedHarnesses[0]
 		}
 	}
 	names := map[string]bool{}
@@ -479,12 +489,16 @@ func Parse(data []byte) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
+	signedAgents, err := indexSignedAgents(automations, file.Harnesses)
+	if err != nil {
+		return Catalog{}, err
+	}
 	for i := range file.Pools {
 		if file.Pools[i].Identity == IdentityCursorAutomation {
 			file.Pools[i].automations = automations
 		}
 	}
-	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses, automations: automations}, nil
+	return Catalog{entries: file.Entries, pools: file.Pools, harnesses: file.Harnesses, automations: automations, signedAgents: signedAgents}, nil
 }
 
 func (e *Entry) normalize() error {
@@ -1611,6 +1625,24 @@ func (c Catalog) Match(host string, port int, method, path, pool string) (*Entry
 		return best, ErrPool
 	}
 	return best, nil
+}
+
+// PathPrefix is the longest listed path prefix on host and port that path falls within, or "" when none does.
+func (c Catalog) PathPrefix(host string, port int, path string) string {
+	host = strings.ToLower(host)
+	var best string
+	for i := range c.entries {
+		e := &c.entries[i]
+		if databaseKind(e.Kind) || e.Host != host || e.Port != port {
+			continue
+		}
+		for _, prefix := range e.PathPrefixes {
+			if pathWithin(path, prefix) && len(prefix) > len(best) {
+				best = prefix
+			}
+		}
+	}
+	return best
 }
 
 func (c Catalog) HasHost(host string, port int) bool {

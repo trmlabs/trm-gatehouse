@@ -25,3 +25,11 @@ func (b *MemBinder) BindRunnerSession(_ context.Context, token, pod string, _ ti
 	b.pins[token] = pod
 	return pod, nil
 }
+
+// PodHasSession reports whether a Cursor session was bound for the Pod, as the store's "cursor-pod:" pin does.
+func (b *MemBinder) PodHasSession(_ context.Context, pod string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.pins["cursor-pod:"+pod]
+	return ok, nil
+}

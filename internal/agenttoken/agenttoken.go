@@ -36,7 +36,7 @@ type Session struct {
 	Automation string
 	Pool       string
 	Expires    time.Time
-	// Source is authorize.SourceGumloopOIDC for a Gumloop ID token, "" for a static token.
+	// Source is authorize.SourceGumloopOIDC, SourceGoogleOIDC or SourceSignedToken for an ID token, "" for a static token.
 	Source string
 	// Owner is the verified Gumloop owner id the token names, "" for a static token or a token with none.
 	Owner string

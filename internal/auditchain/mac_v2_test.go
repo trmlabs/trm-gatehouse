@@ -91,9 +91,13 @@ func TestV1InputIsUnchanged(t *testing.T) {
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v13\x00")) {
 		t.Fatal("a v13 row does not use the v13 input")
 	}
-	r.MACVersion = MACVersionCurrent
+	r.MACVersion = 14
 	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v14\x00")) {
-		t.Fatal("a current row does not use the v14 input")
+		t.Fatal("a v14 row does not use the v14 input")
+	}
+	r.MACVersion = MACVersionCurrent
+	if !bytes.HasPrefix(r.macInput(), []byte("gatehouse-audit-v15\x00")) {
+		t.Fatal("a current row does not use the v15 input")
 	}
 }
 
@@ -106,7 +110,7 @@ func authzFixture(t *testing.T) (*fixture, string) {
 		Operation: "pr.open", Database: "examplecore", RequesterDepartment: "Security & IT", Branch: "agent/pool-a/fix",
 		Source: "AUTOMATIONS", Automation: "auto-1", AutomationName: "explorer", AutomationOwner: "owner@example.com",
 		Path: "/example.v1.Reads/ReadRows", Settings: "API_BASE,MODE", GraphQLErrors: "FORBIDDEN@node.commits.nodes.0.commit",
-		PullRequest: 12, Route: "pull-files", GitEntry: "github-git", Cause: "dial_timeout", Match: strings.Repeat("ab", 32), Run: "bc-20", ParentRun: "bc-1", UpstreamMessage: "Update is not a fast forward"}); err != nil {
+		PullRequest: 12, Route: "pull-files", GitEntry: "github-git", Cause: "dial_timeout", Match: strings.Repeat("ab", 32), Run: "bc-20", ParentRun: "bc-1", UpstreamMessage: "Update is not a fast forward", GRPCStatus: "14"}); err != nil {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
@@ -126,7 +130,8 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 		"kid":             {`"kid":"invalid"`, `"kid":"k1"`},
 		"kid hash":        {`"kidSHA256":"0123456789ab"`, `"kidSHA256":"ba9876543210"`},
 		"peer":            {`"peer":"10.0.0.5"`, `"peer":"10.0.0.6"`},
-		"version":         {`"macVersion":14`, `"macVersion":13`},
+		"version":         {`"macVersion":15`, `"macVersion":14`},
+		"grpc status":     {`"grpcStatus":"14"`, `"grpcStatus":"0"`},
 		"operation":       {`"operation":"pr.open"`, `"operation":"pr.read"`},
 		"database":        {`"database":"examplecore"`, `"database":"exampletm2"`},
 		"department":      {`"requesterDepartment":"Security \u0026 IT"`, `"requesterDepartment":"Engineering"`},
@@ -167,26 +172,27 @@ func TestAuthorizationFieldEditsAreDetected(t *testing.T) {
 // A forged v1 row cannot carry authorization fields, and a chain never steps down from v2 to v1.
 func TestV1RowsCannotCarryAuthorizationOrDowngrade(t *testing.T) {
 	for name, forge := range map[string]func(*Row){
-		"v1 row with a decision":    func(r *Row) { r.Decision = "entitled" },
-		"v2 row with a peer":        func(r *Row) { r.MACVersion, r.Peer = 2, "10.0.0.5" },
-		"v2 row with a kid":         func(r *Row) { r.MACVersion, r.Kid = 2, "k1" },
-		"v3 row with a serial":      func(r *Row) { r.MACVersion, r.Serial = 3, "1a" },
-		"v3 row with a notAfter":    func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
-		"v4 row with a target":      func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
-		"v5 row with an operation":  func(r *Row) { r.MACVersion, r.Operation = 5, "pr.open" },
-		"v5 row with a database":    func(r *Row) { r.MACVersion, r.Database = 5, "examplecore" },
-		"v5 row with a department":  func(r *Row) { r.MACVersion, r.RequesterDepartment = 5, "Engineering" },
-		"v6 row with a branch":      func(r *Row) { r.MACVersion, r.Branch = 6, "main" },
-		"v7 row with a source":      func(r *Row) { r.MACVersion, r.Source = 7, "AUTOMATIONS" },
-		"v7 row with an automation": func(r *Row) { r.MACVersion, r.Automation = 7, "auto-1" },
-		"v7 row with a name":        func(r *Row) { r.MACVersion, r.AutomationName = 7, "explorer" },
-		"v7 row with an owner":      func(r *Row) { r.MACVersion, r.AutomationOwner = 7, "owner@example.com" },
-		"v8 row with a path":        func(r *Row) { r.MACVersion, r.Path = 8, "/example.v1.Reads/ReadRows" },
-		"v9 row with settings":      func(r *Row) { r.MACVersion, r.Settings = 9, "API_BASE" },
-		"v11 row with a run":        func(r *Row) { r.MACVersion, r.Run = 11, "bc-20" },
-		"v11 row with a parent run": func(r *Row) { r.MACVersion, r.ParentRun = 11, "bc-1" },
-		"plain downgrade":           func(*Row) {},
-		"unknown version":           func(r *Row) { r.MACVersion = MACVersionCurrent + 1 },
+		"v1 row with a decision":     func(r *Row) { r.Decision = "entitled" },
+		"v2 row with a peer":         func(r *Row) { r.MACVersion, r.Peer = 2, "10.0.0.5" },
+		"v2 row with a kid":          func(r *Row) { r.MACVersion, r.Kid = 2, "k1" },
+		"v3 row with a serial":       func(r *Row) { r.MACVersion, r.Serial = 3, "1a" },
+		"v3 row with a notAfter":     func(r *Row) { r.MACVersion, r.NotAfter = 3, "2026-10-07T00:00:00Z" },
+		"v4 row with a target":       func(r *Row) { r.MACVersion, r.Target = 4, "example.com:443" },
+		"v5 row with an operation":   func(r *Row) { r.MACVersion, r.Operation = 5, "pr.open" },
+		"v5 row with a database":     func(r *Row) { r.MACVersion, r.Database = 5, "examplecore" },
+		"v5 row with a department":   func(r *Row) { r.MACVersion, r.RequesterDepartment = 5, "Engineering" },
+		"v6 row with a branch":       func(r *Row) { r.MACVersion, r.Branch = 6, "main" },
+		"v7 row with a source":       func(r *Row) { r.MACVersion, r.Source = 7, "AUTOMATIONS" },
+		"v7 row with an automation":  func(r *Row) { r.MACVersion, r.Automation = 7, "auto-1" },
+		"v7 row with a name":         func(r *Row) { r.MACVersion, r.AutomationName = 7, "explorer" },
+		"v7 row with an owner":       func(r *Row) { r.MACVersion, r.AutomationOwner = 7, "owner@example.com" },
+		"v8 row with a path":         func(r *Row) { r.MACVersion, r.Path = 8, "/example.v1.Reads/ReadRows" },
+		"v9 row with settings":       func(r *Row) { r.MACVersion, r.Settings = 9, "API_BASE" },
+		"v11 row with a run":         func(r *Row) { r.MACVersion, r.Run = 11, "bc-20" },
+		"v11 row with a parent run":  func(r *Row) { r.MACVersion, r.ParentRun = 11, "bc-1" },
+		"v14 row with a gRPC status": func(r *Row) { r.MACVersion, r.GRPCStatus = 14, "14" },
+		"plain downgrade":            func(*Row) {},
+		"unknown version":            func(r *Row) { r.MACVersion = MACVersionCurrent + 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, out := authzFixture(t)
@@ -291,9 +297,15 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.checkpoint(t)
-	writeMACVersion = MACVersionCurrent
+	writeMACVersion = 14
 	f.restart(t)
 	if err := f.chain.Record(Event{Event: EventDenied, Outcome: "subagent_parent_gone", Run: "bc-20", ParentRun: "bc-1"}); err != nil {
+		t.Fatal(err)
+	}
+	f.checkpoint(t)
+	writeMACVersion = MACVersionCurrent
+	f.restart(t)
+	if err := f.chain.Record(Event{Event: EventHTTPResponse, Outcome: "completed", Status: 200, GRPCStatus: "0"}); err != nil {
 		t.Fatal(err)
 	}
 	f.session(t, 2)
@@ -303,8 +315,8 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	for _, r := range rows(t, out) {
 		versions[r.MACVersion]++
 	}
-	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[6] == 0 || versions[7] == 0 || versions[8] == 0 || versions[9] == 0 || versions[10] == 0 || versions[11] == 0 || versions[12] == 0 || versions[13] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 13 {
-		t.Fatalf("trail versions %v, want v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13 then v14", versions)
+	if versions[2] == 0 || versions[3] == 0 || versions[4] == 0 || versions[5] == 0 || versions[6] == 0 || versions[7] == 0 || versions[8] == 0 || versions[9] == 0 || versions[10] == 0 || versions[11] == 0 || versions[12] == 0 || versions[13] == 0 || versions[14] == 0 || versions[MACVersionCurrent] == 0 || len(versions) != 14 {
+		t.Fatalf("trail versions %v, want v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14 then v15", versions)
 	}
 	if report := verify(t, f.verifier(), out); len(report.Findings) != 0 {
 		t.Fatalf("upgraded trail: %v", kinds(report))
@@ -312,13 +324,13 @@ func TestUpgradeFromV2VerifiesAndNeverStepsDown(t *testing.T) {
 	parsed := rows(t, out)
 	last := parsed[len(parsed)-1]
 	key, _ := f.keys.lookup(last.KeyVersion)
-	for _, older := range []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13} {
+	for _, older := range []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14} {
 		forged := Row{Type: RowType, Replica: last.Replica, Boot: last.Boot, Seq: last.Seq + 1, Time: last.Time,
 			Event: EventSessionOpen, Pool: "claude", KeyVersion: last.KeyVersion, Prev: last.MAC, MACVersion: older}
 		forged.MAC = forged.computeMAC(key)
 		line, _ := json.Marshal(forged)
 		if report := verify(t, f.verifier(), out+string(line)+"\n"); !hasKind(report, FindingEdit) {
-			t.Fatalf("step down from v14 to v%d accepted: %v", older, kinds(report))
+			t.Fatalf("step down from v15 to v%d accepted: %v", older, kinds(report))
 		}
 	}
 }
@@ -547,6 +559,7 @@ func TestPathFieldIsBoundedAndCanonical(t *testing.T) {
 		"/example.v1.Reads/ReadRows":           "/example.v1.Reads/ReadRows",
 		"/storage/v1/b/bucket/o/teams%2Fq.csv": "/storage/v1/b/bucket/o/teams%2Fq.csv",
 		"relative":                             "invalid",
+		"unmatched":                            "unmatched",
 		"/has space":                           "invalid",
 		"/quote\"":                             "invalid",
 		"/back\\slash":                         "invalid",
@@ -645,5 +658,20 @@ func TestMessageFieldIsPrintableAndBounded(t *testing.T) {
 	}
 	if (Event{Event: EventHTTPResponse, UpstreamMessage: "has\nnewline"}).Validate() == nil {
 		t.Error("an unbounded message validated")
+	}
+}
+
+// A gRPC status is a canonical decimal code from 0 to 16, so a row never names an invented one.
+func TestGRPCStatusFieldIsBounded(t *testing.T) {
+	for in, want := range map[string]string{"0": "0", "14": "14", "16": "16", "17": "", "-1": "", "07": "", "x": "", "": ""} {
+		if got := GRPCStatusField(in); got != want {
+			t.Errorf("GRPCStatusField(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if (Event{Event: EventHTTPResponse, GRPCStatus: "14"}).Validate() != nil {
+		t.Error("a valid status was refused")
+	}
+	if (Event{Event: EventHTTPResponse, GRPCStatus: "99"}).Validate() == nil {
+		t.Error("an invalid status was accepted")
 	}
 }

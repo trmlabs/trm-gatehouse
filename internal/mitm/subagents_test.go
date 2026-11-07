@@ -214,6 +214,25 @@ func TestSubagentRouteRefusals(t *testing.T) {
 		if refusal != c.refusal || code != c.status {
 			t.Errorf("%s: %d %q, want %d %q", c.name, code, refusal, c.status, c.refusal)
 		}
+		// A refusal at the method or request shape check records no raw path; one past it records the path.
+		rows := f.audit.all()
+		switch got := rows[len(rows)-1].Path; {
+		case c.refusal == "method" || (c.refusal == "request_shape" && c.name != "not a run id" && c.name != "its own run"):
+			if strings.HasPrefix(got, "/v1/") {
+				t.Errorf("%s: refused row recorded raw path %q", c.name, got)
+			}
+		case c.refusal == "not_automation" || c.name == "its own run":
+			if !strings.HasPrefix(got, "/v1/subagents/") {
+				t.Errorf("%s: row path %q, want the registered path", c.name, got)
+			}
+		}
+		if c.refusal == "session_missing" {
+			// The denied row names the gap, so an HTTP refusal is told apart from a first-connection race.
+			rows := f.audit.all()
+			if d := rows[len(rows)-1].Decision; d != authorize.SessionStartup && d != authorize.SessionMidRun {
+				t.Errorf("%s: denied row decision %q, want a session gap", c.name, d)
+			}
+		}
 	}
 	// Off automation pools the route does not exist and CONNECT is refused like any unlisted host.
 	if code, refusal, _ := f.send(t, "people-pod", "person", "POST", register("bc-21"), ""); code != 0 || refusal != "connect" {

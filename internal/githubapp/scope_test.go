@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -544,5 +546,48 @@ func TestScopeCheckPanicReleasesWaiters(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a panicked check left its installation waiting")
+	}
+}
+
+// An unreadable settings call names its fixed cause in the warning, never a message, so an operator can tell a missing App permission from a network fault.
+func TestScopeSettingsWarningNamesTheCause(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(g *scopeGitHub, m *Minter)
+		want  string
+	}{
+		"forbidden": {func(g *scopeGitHub, _ *Minter) { g.settingsErr = http.StatusForbidden }, "settings unreadable (status 403)"},
+		"not found": {func(g *scopeGitHub, _ *Minter) { g.settingsErr = http.StatusNotFound }, "settings unreadable (status 404)"},
+		"server":    {func(g *scopeGitHub, _ *Minter) { g.settingsErr = http.StatusInternalServerError }, "settings unreadable (status 500)"},
+		"transport": {func(_ *scopeGitHub, m *Minter) {
+			slow := m.Client.Transport
+			m.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/app/installations/42" {
+					return nil, errors.New("connection reset")
+				}
+				return slow.RoundTrip(r)
+			})}
+		}, "settings unreadable (transport)"},
+		"body": {func(_ *scopeGitHub, m *Minter) {
+			slow := m.Client.Transport
+			m.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/app/installations/42" {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("<html>")), Header: http.Header{}, Request: r}, nil
+				}
+				return slow.RoundTrip(r)
+			})}
+		}, "settings unreadable (body decode)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, m := newScopeGitHub(t)
+			var logs bytes.Buffer
+			m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+			tc.setup(g, m)
+			if _, err := m.Token(context.Background(), app, "example-org/example-app", ContentsRead); err != nil {
+				t.Fatalf("a settings warning refused the token: %v", err)
+			}
+			if !strings.Contains(logs.String(), tc.want) || strings.Contains(logs.String(), "connection reset") {
+				t.Fatalf("want %q and no error text, log: %s", tc.want, logs.String())
+			}
+		})
 	}
 }

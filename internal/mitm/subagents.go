@@ -50,6 +50,8 @@ func (p *Proxy) registerSubagent(w http.ResponseWriter, r *http.Request, target 
 		deny(http.StatusBadRequest, "request_shape")
 		return
 	}
+	// The raw path is recorded only once the method and shape check has passed.
+	event.Path = auditPath(r)
 	pool, _ := catalog.Pool(scope.Pool)
 	who, refusal := p.requester(r.Context(), scope, pool, &event)
 	if refusal != "" {

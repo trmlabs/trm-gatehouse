@@ -202,6 +202,10 @@ func TestStaticTokenRemovedBlockEndsAnOpenTunnel(t *testing.T) {
 	if e := f.audit.last(); e.Event != auditchain.EventDenied || e.Decision != "identity_agent_removed" || e.Kid != "agent-1" {
 		t.Fatalf("row %+v", e)
 	}
+	// The refused request on the open tunnel is attributed: its method and catalog path prefix, never the raw path.
+	if e := f.audit.last(); e.Method != "POST" || e.Path != "/v1/chat" {
+		t.Fatalf("a refusal before identity records method %q path %q", e.Method, e.Path)
+	}
 	if f.keys.reads.Load() != reads {
 		t.Error("a key was read after the block was removed")
 	}

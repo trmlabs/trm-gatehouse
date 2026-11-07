@@ -156,3 +156,79 @@ func TestAttributeNamesAGumloopAgentAndNoRunBorrowsItsBlock(t *testing.T) {
 		t.Errorf("a run naming a Gumloop agent was given its block's name: %+v", got)
 	}
 }
+
+func TestSignedTokenAgentIsDecidedForItsBlockAndHarness(t *testing.T) {
+	signed := `{"id":"signed-1","name":"signed-one","owner":"platform-team","entries":["tracker"],"signedToken":{"harness":"platform-a","subject":"sa-1@example"}}`
+	harness := `{"name":"platform-a","identity":{"kind":"signed-token","token":{"issuer":"https://issuer-a.example","jwksURL":"https://issuer-a.example/keys",
+	  "audiences":["gatehouse"],"algorithms":["ES256"],"maxLifetimeSeconds":3600,"subjectClaim":"sub"}},"path":{"kind":"direct"},
+	  "authorization":{"mode":"automation","poolName":"automations"},"client":{"proxyEnv":"EXAMPLE_PROXY","caFileEnv":"EXAMPLE_CA_FILE"}}`
+	build := func(withHarness bool) httpcatalog.Catalog {
+		cursor := `{"name":"cursor","trustDomain":{"issuer":"https://issuer.example","keys":"in-cluster","audience":"gatehouse"},
+		  "identity":{"kind":"session-jwt","ownerKind":"ReplicaSet","namespaces":["cursor"],"imageDigests":["sha256:1111111111111111111111111111111111111111111111111111111111111111"],"requester":{"kind":"cursor-oidc"}},
+		  "path":{"kind":"sidecar"},"authorization":{"mode":"automation","poolName":"automations"},"client":{"proxyEnv":"GATEHOUSE_HTTPS_PROXY","caFileEnv":"GATEHOUSE_CA_FILE"}}`
+		harnesses := cursor
+		if withHarness {
+			harnesses += "," + harness
+		}
+		blocks := `{"id":"auto-1","name":"explorer","owner":"platform-team","entries":["tracker"]}`
+		if withHarness {
+			blocks += "," + signed
+		}
+		c, err := httpcatalog.Parse([]byte(`{"harnesses":[` + harnesses + `],
+		  "pools":[{"name":"automations","namespace":"cursor","serviceAccount":"worker","identity":"cursor-automation"}],
+		  "entries":[{"name":"tracker","host":"api.tracker.example","pathPrefixes":["/v1/"],"methods":["GET"],"header":"Authorization","scheme":"Bearer",
+		  "placeholder":"__vault_KEY__","key":{"mount":"gatehouse","path":"vendors/x","field":"key"},"pools":["automations"]}],
+		  "automations":[` + blocks + `]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	pool, _ := build(true).Pool("automations")
+	who, refusal := Resolve(context.Background(), pool, "", Claims{TokenAgent: "signed-1", TokenSource: SourceSignedToken}, nil, nil)
+	if refusal != "" || who.Kind != "automation" || who.Subject != "signed-1" || who.Source != SourceSignedToken || who.Automation != "signed-1" || who.RunPerson != "" {
+		t.Fatalf("%q %+v", refusal, who)
+	}
+	// A Cursor run token may not name a signed-token block's id, and a Cursor Automation is not reachable by a signed token.
+	if _, refusal := Resolve(context.Background(), pool, "", Claims{TokenAgent: "auto-1", TokenSource: SourceSignedToken}, nil, nil); refusal != "automation_unlisted" {
+		t.Errorf("a block with no identity of its own: %q", refusal)
+	}
+	// A pool whose catalog has no such block or harness refuses it.
+	bare, _ := build(false).Pool("automations")
+	if _, refusal := Resolve(context.Background(), bare, "", Claims{TokenAgent: "signed-1", TokenSource: SourceSignedToken}, nil, nil); refusal != "automation_unlisted" {
+		t.Errorf("a pool without the harness: %q", refusal)
+	}
+}
+
+var googleAgent = `{"id":"gg-1","name":"google-one","owner":"platform-team","entries":["tracker"],"googleServiceAccount":{"email":"worker-one@example-project.iam.gserviceaccount.com","uniqueID":"104857263948571029384"}}`
+
+func TestGoogleAgentIsDecidedForItsBlockAndNamesItsSourceWithNoPerson(t *testing.T) {
+	pool, _ := tokenCatalog(t, true, googleAgent).Pool("automations")
+	who, refusal := Resolve(context.Background(), pool, "", Claims{TokenAgent: "gg-1", TokenSource: SourceGoogleOIDC}, nil, nil)
+	if refusal != "" || who.Kind != "automation" || who.Subject != "gg-1" || who.Source != SourceGoogleOIDC || who.Automation != "gg-1" || who.Audited() != "" {
+		t.Fatalf("%q %+v", refusal, who)
+	}
+	if who, _ = Resolve(context.Background(), pool, "", Claims{TokenAgent: "gg-1", TokenSource: SourceGoogleOIDC, TokenOwner: "owner-7"}, nil, nil); who.Audited() != "" {
+		t.Errorf("a Google block named a person: %q", who.Audited())
+	}
+	bare, _ := tokenCatalog(t, false, googleAgent).Pool("automations")
+	if _, got := Resolve(context.Background(), bare, "", Claims{TokenAgent: "gg-1", TokenSource: SourceGoogleOIDC}, nil, nil); got != "automation_unlisted" {
+		t.Errorf("no static harness: %q", got)
+	}
+}
+
+func TestCursorRunCannotUseAGoogleAgentsBlock(t *testing.T) {
+	pool, _ := tokenCatalog(t, true, googleAgent).Pool("automations")
+	runs := cursorRuns{"run-gg": automationRun("alice@example.com", "bc-1", "gg-1")}
+	if _, got := Resolve(context.Background(), pool, "run-gg", Claims{Pod: "pod-1", ClaimedRun: "bc-1"}, runs, &authorizetest.MemBinder{}); got != "automation_unlisted" {
+		t.Errorf("a run naming a Google agent: %q", got)
+	}
+}
+
+func TestAttributeNamesAGoogleAgent(t *testing.T) {
+	pool, _ := tokenCatalog(t, true, googleAgent).Pool("automations")
+	got := Attribute(context.Background(), pool, "", Claims{TokenAgent: "gg-1", TokenSource: SourceGoogleOIDC}, nil)
+	if got.Source != SourceGoogleOIDC || got.Automation != "gg-1" || got.AutomationName != "google-one" {
+		t.Fatalf("%+v", got)
+	}
+}

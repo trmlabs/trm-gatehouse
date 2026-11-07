@@ -16,6 +16,8 @@ import (
 const (
 	// KindPodToken: a Pod's projected token, checked against the live Pod and source address.
 	KindPodToken = "pod-token"
+	// KindServiceToken: a long-lived service Pod's projected token, checked against the live Pod; no default listener admits it, each must opt in.
+	KindServiceToken = "service-token"
 	// KindTokenReview: a projected token checked by online TokenReview.
 	KindTokenReview = "token-review"
 	// KindProxyAttested: a shared proxy's token plus its attestation of the agent Pod.

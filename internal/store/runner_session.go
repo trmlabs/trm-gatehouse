@@ -28,3 +28,16 @@ func (s *SQLStore) BindRunnerSession(ctx context.Context, tokenSHA256, pod strin
 	}
 	return bound, err
 }
+
+// PodHasSession reports whether a Cursor worker Pod has a live pin to a run owner, which a verified run token sets on its first use.
+func (s *SQLStore) PodHasSession(ctx context.Context, pod string) (bool, error) {
+	if pod == "" {
+		return false, fmt.Errorf("incomplete runner session lookup")
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, s.dialect.Rebind(`SELECT 1 FROM runner_session_binding WHERE token = ? AND expires_ms > `+s.dbNowMs()), "cursor-pod:"+pod).Scan(&one) // #nosec G202 -- constant clock expression
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}

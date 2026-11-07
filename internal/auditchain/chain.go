@@ -104,6 +104,8 @@ type Event struct {
 	Duration        int64 // milliseconds
 	// Run and ParentRun: see Row.
 	Run, ParentRun string
+	// GRPCStatus: see Row; set it with GRPCStatusField.
+	GRPCStatus string
 }
 
 var (
@@ -221,6 +223,9 @@ func (e Event) Validate() error {
 		return ErrInvalidEvent
 	}
 	if e.Path != "" && PathField(e.Path) != e.Path {
+		return ErrInvalidEvent
+	}
+	if e.GRPCStatus != "" && GRPCStatusField(e.GRPCStatus) != e.GRPCStatus {
 		return ErrInvalidEvent
 	}
 	if !settingNameList(e.Settings) {
@@ -432,10 +437,22 @@ func safeSegment(s string) bool {
 // maxPathBytes exceeds the paths HTTP servers commonly accept, so a real path is never cut.
 const maxPathBytes = 8192
 
+// GRPCStatusField returns the decimal gRPC status code for a code from 0 to 16, else "" so no row names an invented status.
+func GRPCStatusField(code string) string {
+	n, err := strconv.Atoi(code)
+	if err != nil || n < 0 || n > 16 || strconv.Itoa(n) != code {
+		return ""
+	}
+	return code
+}
+
+// PathUnmatched is the path a refusal before authentication records when no catalog path prefix matched it.
+const PathUnmatched = "unmatched"
+
 // PathField returns path when it starts with "/" and is printable ASCII without space, quote or backslash, cut to maxPathBytes with "..." when longer, else "invalid".
 func PathField(path string) string {
-	if path == "" {
-		return ""
+	if path == "" || path == PathUnmatched {
+		return path
 	}
 	if !strings.HasPrefix(path, "/") {
 		return "invalid"
@@ -503,7 +520,7 @@ func (c *Chain) Record(e Event) error {
 		Kid: e.Kid, KidSHA256: e.KidSHA256, Peer: e.Peer, Serial: e.Serial, NotAfter: e.NotAfter, DNSNames: e.DNSNames, Target: e.Target,
 		Operation: e.Operation, Database: e.Database, RequesterDepartment: e.RequesterDepartment, Branch: e.Branch,
 		Source: e.Source, Automation: e.Automation, AutomationName: e.AutomationName, AutomationOwner: e.AutomationOwner,
-		Run: e.Run, ParentRun: e.ParentRun, Path: e.Path, Settings: e.Settings, GraphQLErrors: e.GraphQLErrors, Cause: e.Cause, Match: e.Match, UpstreamMessage: e.UpstreamMessage, PullRequest: e.PullRequest, Route: e.Route, GitEntry: e.GitEntry, Method: e.Method, Status: e.Status, Duration: e.Duration})
+		Run: e.Run, ParentRun: e.ParentRun, GRPCStatus: e.GRPCStatus, Path: e.Path, Settings: e.Settings, GraphQLErrors: e.GraphQLErrors, Cause: e.Cause, Match: e.Match, UpstreamMessage: e.UpstreamMessage, PullRequest: e.PullRequest, Route: e.Route, GitEntry: e.GitEntry, Method: e.Method, Status: e.Status, Duration: e.Duration})
 	return err
 }
 

@@ -3,6 +3,7 @@ package authorize
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strconv"
 	"sync"
@@ -38,6 +39,14 @@ type Subagents struct {
 type liveKey struct {
 	pod brokercore.PodRef
 	run string
+}
+
+// PodHasSession forwards to the wrapped Binder when it can tell.
+func (s *Subagents) PodHasSession(ctx context.Context, pod string) (bool, error) {
+	if ps, ok := s.Binder.(PodSessions); ok {
+		return ps.PodHasSession(ctx, pod)
+	}
+	return false, errors.New("binder cannot report Pod sessions")
 }
 
 // DefaultLiveTTL keeps a gone parent's subagents served for only seconds.

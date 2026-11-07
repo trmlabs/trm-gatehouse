@@ -4,6 +4,7 @@ package workloadidentity
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -49,6 +50,10 @@ type Binding struct {
 	ListAgents bool `json:"listAgents,omitempty"`
 	// TrustDomain names the listed trust domain whose tokens this binding admits; empty is the broker's own cluster.
 	TrustDomain string `json:"trustDomain,omitempty"`
+	// Service admits any live Pod of this account in the namespace, with no controller or lifetime rule, and gives it Pool; ImageDigests are required unless AllowUnpinnedImages is set. A service session ends with its token or Config.MaxServiceSessionSeconds, and the Pod re-attests with a fresh token. Pods of a long-lived service roll over by Deployment, so deployments must restrict who may create Pods under the account (admission policy, not shipped here).
+	Service bool `json:"service,omitempty"`
+	// AllowUnpinnedImages is the explicit opt-in for a service binding with no ImageDigests; any Pod of the account is then admitted whatever image it runs.
+	AllowUnpinnedImages bool `json:"allowUnpinnedImages,omitempty"`
 	// Proxy makes this a shared proxy's binding; see ProxyBinding.
 	Proxy *ProxyBinding `json:"proxy,omitempty"`
 }
@@ -67,6 +72,18 @@ type Config struct {
 	TrustDomains []TrustDomain `json:"trustDomains,omitempty"`
 	// MaxSessionSeconds is the ceiling on every pool binding's Pod lifetime and proxy session (default a day, at most 30 days).
 	MaxSessionSeconds int64 `json:"maxSessionSeconds,omitempty"`
+	// MaxServiceSessionSeconds bounds a service binding's session from its token's issue time (default the smaller of an hour and MaxSessionSeconds); a session also ends when its token expires, and with service bindings it must be at least 300 s above the kubelet rotation point (80% of the longest service token lifetime) so rotation never leaves the Pod locked out.
+	MaxServiceSessionSeconds int64 `json:"maxServiceSessionSeconds,omitempty"`
+}
+
+// DefaultServiceSessionLimit is MaxServiceSessionSeconds when unset.
+const DefaultServiceSessionLimit = time.Hour
+
+func (c *Config) serviceSessionLimit() int64 {
+	if c.MaxServiceSessionSeconds == 0 {
+		return min(int64(DefaultServiceSessionLimit/time.Second), c.sessionCeiling())
+	}
+	return c.MaxServiceSessionSeconds
 }
 
 // DefaultSessionCeiling is MaxSessionSeconds when unset.
@@ -188,6 +205,30 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 	if c.MaxTokenLifetimeSeconds < 600 || c.MaxTokenLifetimeSeconds > 3600 {
 		return nil, errors.New("workload identity maxTokenLifetimeSeconds must be between 600 and 3600")
 	}
+	tokenLifetime := func(domain string) int64 {
+		for _, td := range c.TrustDomains {
+			if td.Name == domain {
+				return cmp.Or(td.MaxTokenLifetimeSeconds, 3600)
+			}
+		}
+		return c.MaxTokenLifetimeSeconds
+	}
+	// Any domain may carry a service binding, so the explicit limit may reach the longest lifetime; the rotation floor follows only the domains service bindings name.
+	longest, serviceLongest := c.MaxTokenLifetimeSeconds, int64(0)
+	for _, td := range c.TrustDomains {
+		longest = max(longest, tokenLifetime(td.Name))
+	}
+	for _, b := range c.Bindings {
+		if b.Service {
+			serviceLongest = max(serviceLongest, tokenLifetime(b.TrustDomain))
+		}
+	}
+	if c.MaxServiceSessionSeconds != 0 && (c.MaxServiceSessionSeconds < 60 || c.MaxServiceSessionSeconds > min(ceiling, longest)) {
+		return nil, errors.New("workload identity maxServiceSessionSeconds must be between 60 s and the smaller of maxSessionSeconds and the longest token lifetime")
+	}
+	if serviceLongest != 0 && c.serviceSessionLimit() < min(serviceLongest*4/5+300, serviceLongest) {
+		return nil, errors.New("workload identity service session limit must be at least 300 s above the kubelet rotation point (80% of the longest service token lifetime)")
+	}
 	seen := map[string]bool{}
 	proxyNamespaces := map[string]bool{}
 	catalogBindings := map[string]bool{}
@@ -198,7 +239,25 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 		if observer && (b.AgentID != "" || b.VaultID != "") {
 			return nil, errors.New("observer policy must not contain proxy grants")
 		}
-		if b.Proxy == nil && (len(b.OwnerUIDs) != 0 || b.ContainerName != "" || b.MaxPodSeconds != 0 || b.Pool != "" || len(b.ImageDigests) != 0) {
+		if !b.Service && b.AllowUnpinnedImages {
+			return nil, errors.New("allowUnpinnedImages applies only to service bindings")
+		}
+		if b.Service {
+			if observer || b.Proxy != nil || b.Pool == "" || !pathSegment(b.Pool) || len(b.OwnerUIDs) != 0 || b.PodUID != "" || b.MaxPodSeconds != 0 || b.ContainerName != "" {
+				return nil, errors.New("service binding requires a pool and takes no owner UIDs, Pod UID, Pod lifetime, container or proxy")
+			}
+			if len(b.ImageDigests) == 0 && !b.AllowUnpinnedImages {
+				return nil, errors.New("service binding requires image digests or allowUnpinnedImages")
+			}
+			if len(b.ImageDigests) != 0 && b.AllowUnpinnedImages {
+				return nil, errors.New("service binding sets both allowUnpinnedImages and image digests")
+			}
+			for _, digest := range b.ImageDigests {
+				if !imageDigest.MatchString(digest) {
+					return nil, errors.New("service binding image digest must be sha256: and 64 lowercase hex characters")
+				}
+			}
+		} else if b.Proxy == nil && (len(b.OwnerUIDs) != 0 || b.ContainerName != "" || b.MaxPodSeconds != 0 || b.Pool != "" || len(b.ImageDigests) != 0) {
 			if b.Pool != "" && !pathSegment(b.Pool) {
 				return nil, errors.New("pool binding name must be a lowercase DNS-style name")
 			}
@@ -249,7 +308,7 @@ func newResolver(c Config, s Store, observer bool) (*Resolver, error) {
 				proxyNamespaces[key] = true
 			}
 		}
-		if b.TrustDomain != "" && b.Proxy == nil && (len(b.OwnerUIDs) == 0 || !readsPods(c.TrustDomains, b.TrustDomain)) {
+		if b.TrustDomain != "" && b.Proxy == nil && ((len(b.OwnerUIDs) == 0 && !b.Service) || !readsPods(c.TrustDomains, b.TrustDomain)) {
 			// TokenReview runs only in the broker's own cluster; the pool Pod check only where the broker can read the domain's Pods.
 			return nil, errors.New("a remote trust domain admits proxy bindings, and pool bindings only where the broker reads its Pods")
 		}
@@ -471,7 +530,7 @@ func (r *Resolver) ResolveForProxy(ctx context.Context, token, vaultHint string)
 		return nil, err
 	}
 	deny := brokercore.ErrInvalidSession
-	if len(binding.OwnerUIDs) != 0 || binding.Proxy != nil || binding.TrustDomain != "" || brokercore.AttestationFrom(ctx) != "" {
+	if len(binding.OwnerUIDs) != 0 || binding.Service || binding.Proxy != nil || binding.TrustDomain != "" || brokercore.AttestationFrom(ctx) != "" {
 		// Pool and proxy bindings are admitted only with the connection's peer address; only a proxy binding may present an attestation.
 		return nil, deny
 	}

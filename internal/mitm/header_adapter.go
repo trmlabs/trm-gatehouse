@@ -8,8 +8,11 @@ import (
 	"errors"
 	"github.com/Infisical/agent-vault/internal/authorize"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,6 +112,9 @@ func (p *Proxy) adapterDenyAs(w http.ResponseWriter, event auditchain.Event, tar
 	kind = kind.after(wait)
 	event.Event, event.Outcome, event.Status = auditchain.EventDenied, outcome, status
 	event.Target = auditchain.TargetField(target)
+	if _, ok := w.(*grpcWriter); ok {
+		event.GRPCStatus = strconv.Itoa(grpcStatusFor(status, kind.retryAfter > 0))
+	}
 	if p.adapter.Audit.Record(event) != nil {
 		code, status, kind = refusalFor("audit_unavailable", status)
 	}
@@ -160,7 +166,7 @@ func (p *Proxy) adapterUnauthenticatedDeny(w http.ResponseWriter, r *http.Reques
 
 // adapterIdentityDeny records the identity check that refused as a fixed code in the decision field, plus a signing-key refusal's kid and the connection's peer.
 func (p *Proxy) adapterIdentityDeny(w http.ResponseWriter, r *http.Request, a requestlog.Attempt, status int, outcome, reason string, key *brokercore.KeyDenial, wait time.Duration) {
-	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Decision: reason}
+	event := auditchain.Event{Agent: a.ActorID, PodUID: a.WorkloadID, Method: auditMethod(r.Method), Path: p.unauthenticatedPath(r), Decision: reason}
 	if key != nil {
 		event.Kid, event.KidSHA256, event.Peer = key.Kid, key.KidSHA256, key.Peer
 	}
@@ -202,6 +208,9 @@ func githubAPIOperation(api httpcatalog.GitRequest, path string) string {
 	return ""
 }
 
+// grpcMethodPath is the strict /pkg.Service/Method shape of a gRPC call's path.
+var grpcMethodPath = regexp.MustCompile(`^/[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+/[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
 // auditPath is the path a row records, without its query; empty for a CONNECT and never recorded for a browser-session host.
 func auditPath(r *http.Request) string {
 	if r.Method == http.MethodConnect || r.URL == nil {
@@ -210,9 +219,38 @@ func auditPath(r *http.Request) string {
 	return auditchain.PathField(r.URL.EscapedPath())
 }
 
+// unauthenticatedPrefix is all a refusal before identity records of the path: the catalog path prefix it falls within, or "unmatched", never the raw path, which could carry a vendor secret.
+func unauthenticatedPrefix(catalog httpcatalog.Catalog, host string, port int, r *http.Request) string {
+	if prefix := catalog.PathPrefix(host, port, r.URL.Path); prefix != "" {
+		return auditchain.PathField(prefix)
+	}
+	return auditchain.PathUnmatched
+}
+
+// unauthenticatedPath is the path a refusal before identity records: none for a CONNECT, a browser-session host or a host that cannot be read, else the matched catalog prefix or "unmatched"; the broker has not yet tied the caller to a pool.
+func (p *Proxy) unauthenticatedPath(r *http.Request) string {
+	if r.Method == http.MethodConnect || r.URL == nil || !p.adapter.valid() {
+		return ""
+	}
+	target, ok := r.Context().Value(connectTargetKey{}).(string)
+	if !ok {
+		port := r.URL.Port()
+		if port == "" {
+			port = "80"
+		}
+		target = net.JoinHostPort(r.URL.Hostname(), port)
+	}
+	host, portText, err := net.SplitHostPort(target)
+	port, perr := strconv.Atoi(portText)
+	if err != nil || perr != nil || host == "" || p.adapter.Catalog.Current().BrowserHost(host, port) {
+		return ""
+	}
+	return unauthenticatedPrefix(p.adapter.Catalog.Current(), host, port, r)
+}
+
 func auditMethod(m string) string {
 	switch m {
-	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT":
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE":
 		return m
 	}
 	return ""
@@ -238,14 +276,27 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		attribute()
 		p.adapterDeny(w, event, target, status, outcome)
 	}
+	catalog := a.Catalog.Current()
+	// A web app's paths can carry one-time sign-in links, so rows for a browser-session host name no path.
+	// A refusal before any entry matched records only the catalog prefix, since an unlisted path can carry a vendor secret; matched swaps in the raw path.
+	var rawPath string
+	if !catalog.BrowserHost(host, port) {
+		if rawPath = auditPath(r); rawPath != "" {
+			event.Path = unauthenticatedPrefix(catalog, host, port, r)
+			// A gRPC path of the strict /pkg.Service/Method shape holds no secret, so an unlisted call still names its RPC.
+			if isGRPC(r) && grpcMethodPath.MatchString(rawPath) {
+				event.Path = rawPath
+			}
+		}
+	}
+	matched := func() {
+		if rawPath != "" {
+			event.Path = rawPath
+		}
+	}
 	if scope == nil || scope.AgentID == "" || scope.UserID != "" {
 		deny(http.StatusForbidden, "authentication")
 		return
-	}
-	catalog := a.Catalog.Current()
-	// A web app's paths can carry one-time sign-in links, so rows for a browser-session host name no path.
-	if !catalog.BrowserHost(host, port) {
-		event.Path = auditPath(r)
 	}
 	// A decoy anywhere in the URL or headers is refused before routing, for every entry kind and any host or path.
 	if m, ok := a.decoys().Request(r); ok {
@@ -282,6 +333,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return false
 	}
 	if git, ok, err := catalog.GitMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
+		if err == nil {
+			matched()
+		}
 		event.Operation = gitOperation(git)
 		if err != nil {
 			attribute()
@@ -293,11 +347,17 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	}
 	if r.URL.Path == "/graphql" {
 		if granted, ok := catalog.GitHubAPIRepos(host, port, scope.Pool); ok {
+			if len(granted) > 0 {
+				matched()
+			}
 			p.forwardGitHubGraphQL(w, r, target, host, port, scope, event, catalog, granted)
 			return
 		}
 	}
 	if api, ok, err := catalog.GitHubAPIMatch(host, port, r.Method, r.URL.Path, r.URL.RawQuery, scope.Pool); ok {
+		if err == nil {
+			matched()
+		}
 		event.Operation = githubAPIOperation(api, r.URL.Path)
 		event.Route, event.PullRequest = api.Route, api.PullRequest
 		event.Branch = auditchain.BranchField(api.Branch)
@@ -324,6 +384,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		return
 	}
 	if gcp, ok, err := catalog.GCPMatch(host, port, r.Method, r.URL.Path, scope.Pool); ok {
+		if err == nil {
+			matched()
+		}
 		if err != nil {
 			attribute()
 		}
@@ -335,6 +398,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 	entry, err := catalog.Match(host, port, r.Method, r.URL.Path, scope.Pool)
 	if entry != nil {
 		event.Binding, event.Operation = entry.Name, entry.Operation(r.URL.Path)
+		if err == nil {
+			matched()
+		}
 	}
 	if refused(entry, err) {
 		return
@@ -514,6 +580,11 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		}
 	}
 	ctx := r.Context()
+	var call *grpcCall
+	if isGRPC(r) {
+		call = &grpcCall{status: -1}
+		ctx = withGRPCCall(ctx, call)
+	}
 	if entry.ClientCertificate != nil {
 		cert, outcome := p.clientCertificate(ctx, entry)
 		if outcome != "" {
@@ -555,6 +626,9 @@ func (p *Proxy) forwardCatalog(w http.ResponseWriter, r *http.Request, target, h
 		done := event
 		done.Event, done.Outcome, done.Cause, done.Status = auditchain.EventHTTPResponse, outcome, cause, status
 		done.Duration = time.Since(admittedAt).Milliseconds()
+		if call != nil {
+			done.GRPCStatus = grpcStatusRecord(call, status)
+		}
 		_ = a.Audit.Record(done)
 	}
 	// A client certificate's key signs the handshake in the broker and is sent nowhere, so only a header key is screened.
@@ -643,6 +717,10 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 		w.Header()[name] = append([]string(nil), values...)
 	}
 	w.WriteHeader(resp.StatusCode)
+	if call := grpcCallFromResponse(resp); call != nil && grpc != nil && grpc.failed {
+		// The row records the code the broker sent, not one recomputed or the upstream's own.
+		call.status = grpc.sent
+	}
 	var frames *grpcFrames
 	if grpc != nil && framesSafe(needles) {
 		frames = &grpcFrames{}
@@ -655,6 +733,18 @@ func (p *Proxy) relayResponse(w http.ResponseWriter, resp *http.Response, needle
 	if code := grpcCallStatus(resp); grpc != nil && (code == grpcUnauthenticated || code == grpcPermissionDenied) {
 		// A gRPC server refuses a token in its status, not the HTTP status.
 		rejected(resp)
+	}
+	if call := grpcCallFromResponse(resp); call != nil && grpc != nil && !grpc.failed {
+		switch {
+		case outcome == "completed":
+			call.status = grpcCallStatus(resp)
+		case outcome != "client_gone":
+			call.status = grpcStreamStatus(outcome)
+		}
+	}
+	if call := grpcCallFromResponse(resp); call != nil && grpc != nil && grpc.failed && outcome != "completed" && outcome != "client_gone" {
+		// grpc.fail below overwrites the failed-mode trailer, so the row records that code.
+		call.status = grpcStreamStatus(outcome)
 	}
 	finish(resp.StatusCode, outcome)
 	switch {

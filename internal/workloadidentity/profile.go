@@ -8,6 +8,7 @@ import (
 
 const (
 	IdentityPodToken      = "pod-token"
+	IdentityServiceToken  = "service-token"
 	IdentitySessionJWT    = "session-jwt"
 	IdentityProxyAttested = "proxy-attested"
 )
@@ -22,7 +23,7 @@ type Profile struct {
 	OwnerKind    string
 	Namespaces   []string
 	ImageDigests []string
-	ImagePrefix  string // proxy-attested only: images pulled from under this path
+	ImagePrefix  string // proxy-attested and service-token: images pulled from under this path
 }
 
 // ProfileSource returns the declared profile for a pool, or false when none is declared (the profile is then derived and checks nothing beyond the binding).
@@ -53,6 +54,20 @@ func (r *Resolver) profileAdmits(pool string, d *domain, kind, namespace, ownerK
 		if p.Kind != IdentityProxyAttested {
 			return false
 		}
+	case IdentityServiceToken:
+		// A service Pod has no approved controller, and images are checked only when the profile lists a prefix or digests.
+		if p.Kind != IdentityServiceToken || !slices.Contains(p.Namespaces, namespace) {
+			return false
+		}
+		if (len(p.ImageDigests) != 0 || p.ImagePrefix != "") && len(images) == 0 {
+			return false
+		}
+		for _, image := range images {
+			if (len(p.ImageDigests) != 0 || p.ImagePrefix != "") && !imagerule.Allowed(image, p.ImagePrefix, p.ImageDigests) {
+				return false
+			}
+		}
+		return true
 	default:
 		if p.Kind != IdentityPodToken && p.Kind != IdentitySessionJWT {
 			return false

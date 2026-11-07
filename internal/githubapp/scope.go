@@ -198,7 +198,7 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 		SuspendedAt         *time.Time        `json:"suspended_at"`
 	}
 	if err := m.githubJSON(ctx, client, http.MethodGet, installation, jwt, nil, http.StatusOK, &settings); err != nil {
-		f.settings = append(f.settings, "settings unreadable")
+		f.settings = append(f.settings, "settings unreadable ("+callCause(err)+")")
 	} else {
 		if settings.RepositorySelection == "all" {
 			f.reach = append(f.reach, "installed on all repositories")
@@ -284,6 +284,21 @@ func (m *Minter) verifyScope(ctx context.Context, app App, want Scope) findings 
 	return f
 }
 
+// githubCallError is ErrUnavailable with a fixed cause (transport, status NNN, body); never a message or the bearer.
+type githubCallError struct{ cause string }
+
+func (e *githubCallError) Error() string { return ErrUnavailable.Error() + ": " + e.cause }
+func (e *githubCallError) Unwrap() error { return ErrUnavailable }
+
+// callCause is the fixed cause of a failed githubJSON call, or "unknown".
+func callCause(err error) string {
+	var call *githubCallError
+	if errors.As(err, &call) {
+		return call.cause
+	}
+	return "unknown"
+}
+
 // githubJSON makes one GitHub API call and decodes the reply; any other status or unreadable body is ErrUnavailable, and the bearer never reaches an error.
 func (m *Minter) githubJSON(ctx context.Context, client *http.Client, method, url, bearer string, body []byte, status int, into any) error {
 	var reader io.Reader
@@ -292,7 +307,7 @@ func (m *Minter) githubJSON(ctx context.Context, client *http.Client, method, ur
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return ErrUnavailable
+		return &githubCallError{"request"}
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -302,12 +317,18 @@ func (m *Minter) githubJSON(ctx context.Context, client *http.Client, method, ur
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ErrUnavailable
+		return &githubCallError{"transport"}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != status {
+		return &githubCallError{"status " + strconv.Itoa(resp.StatusCode)}
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || resp.StatusCode != status || json.Unmarshal(data, into) != nil {
-		return ErrUnavailable
+	if err != nil {
+		return &githubCallError{"body read"}
+	}
+	if json.Unmarshal(data, into) != nil {
+		return &githubCallError{"body decode"}
 	}
 	return nil
 }

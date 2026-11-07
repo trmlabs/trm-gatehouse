@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Infisical/agent-vault/internal/agenttoken"
 	"github.com/Infisical/agent-vault/internal/authorize"
 	"github.com/Infisical/agent-vault/internal/brokercore"
 	"github.com/Infisical/agent-vault/internal/entitlement"
+	"github.com/Infisical/agent-vault/internal/httpcatalog"
 	"github.com/Infisical/agent-vault/internal/mitm"
 	"github.com/Infisical/agent-vault/internal/netguard"
 	"github.com/Infisical/agent-vault/internal/runnerid"
@@ -293,4 +295,49 @@ func gumloopVerifier(getenv func(string) string) (*runnerid.GumloopVerifier, err
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: runnerid.RefuseRedirects,
 		Transport: &http.Transport{DialContext: netguard.SafeDialContext(netguard.AllowPrivateFromEnv()), TLSHandshakeTimeout: 5 * time.Second}}
 	return &runnerid.GumloopVerifier{JWKSURL: url, Issuer: issuer, Audience: audience, Client: client}, nil
+}
+
+// signedTokenClient fetches signing keys for signed-token harnesses: five seconds, no redirect, and no connection to a private address unless the environment allows it.
+func signedTokenClient() *http.Client {
+	return &http.Client{Timeout: 5 * time.Second, CheckRedirect: runnerid.RefuseRedirects,
+		Transport: &http.Transport{DialContext: netguard.SafeDialContext(netguard.AllowPrivateFromEnv()), TLSHandshakeTimeout: 5 * time.Second}}
+}
+
+// idTokenVerifier is the ID token verifier for whichever of Gumloop and Google is configured, or nil when neither is.
+func idTokenVerifier(catalog interface{ Current() httpcatalog.Catalog }, gumloop *runnerid.GumloopVerifier, google *runnerid.GoogleVerifier) agenttoken.Verifier {
+	var g, gl agenttoken.Verifier
+	if google != nil {
+		g = agenttoken.GoogleOIDC{Catalog: catalog, Verifier: google}
+	}
+	if gumloop != nil {
+		gl = agenttoken.GumloopOIDC{Catalog: catalog, Verifier: gumloop}
+	}
+	switch {
+	case g == nil && gl == nil:
+		return nil
+	case g == nil:
+		return gl
+	case gl == nil:
+		return g
+	}
+	return agenttoken.ByIssuer{Google: g, Gumloop: gl}
+}
+
+func googleVerifier(getenv func(string) string) (*runnerid.GoogleVerifier, error) {
+	audience, url := getenv("AGENT_VAULT_GOOGLE_AUDIENCE"), getenv("AGENT_VAULT_GOOGLE_JWKS_URL")
+	if audience == "" && url == "" {
+		return nil, nil
+	}
+	if getenv("AGENT_VAULT_STATIC_TOKEN_PORT") == "" {
+		return nil, fmt.Errorf("AGENT_VAULT_GOOGLE_* needs AGENT_VAULT_STATIC_TOKEN_PORT")
+	}
+	if !strings.HasPrefix(url, "https://") {
+		return nil, fmt.Errorf("AGENT_VAULT_GOOGLE_JWKS_URL must be https")
+	}
+	if !audiencePattern.MatchString(audience) {
+		return nil, fmt.Errorf("AGENT_VAULT_GOOGLE_AUDIENCE must be printable with no spaces")
+	}
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: runnerid.RefuseRedirects,
+		Transport: &http.Transport{DialContext: netguard.SafeDialContext(netguard.AllowPrivateFromEnv()), TLSHandshakeTimeout: 5 * time.Second}}
+	return &runnerid.GoogleVerifier{JWKSURL: url, Issuer: runnerid.GoogleIssuer, Audience: audience, Client: client}, nil
 }

@@ -426,6 +426,44 @@ func TestGraphQLAuditOperation(t *testing.T) {
 	}
 }
 
+// A refusal names a write-shaped operation unless the document parsed and holds only queries, so a refused write never reads as a read.
+func TestGraphQLRefusedMutationIsAuditedAsAWrite(t *testing.T) {
+	mutation := func(name, input string, vars map[string]any) string {
+		b, _ := json.Marshal(map[string]any{"query": "mutation($input: " + input + "!) { " + name + "(input: $input) { clientMutationId } }", "variables": map[string]any{"input": vars}})
+		return string(b)
+	}
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		"merge":               {mutation("mergePullRequest", "MergePullRequestInput", map[string]any{"pullRequestId": fixturePR}), AuditOperationMutation},
+		"approve":             {mutation("addPullRequestReview", "AddPullRequestReviewInput", map[string]any{"pullRequestId": fixturePR, "event": "APPROVE"}), AuditOperationMutation},
+		"branch update":       {mutation("updatePullRequestBranch", "UpdatePullRequestBranchInput", map[string]any{"pullRequestId": fixturePR}), AuditOperationMutation},
+		"title edit":          {mutation("updatePullRequest", "UpdatePullRequestInput", map[string]any{"pullRequestId": fixturePR, "title": "x"}), AuditOperationMutation},
+		"mapped, bad input":   {mutation("addComment", "AddCommentInput", map[string]any{"subjectId": fixturePR, "body": 5}), AuditOperationMutation},
+		"two mutations":       {`{"query":"mutation A { x } mutation B { y }"}`, AuditOperationMutation},
+		"unmapped query":      {`{"query":"query { viewer { login } }"}`, "graphql"},
+		"unparseable":         {`{"query":"mutation {"}`, AuditOperationMutation},
+		"unknown key":         {`{"query":"mutation($i: MergePullRequestInput!) { mergePullRequest(input: $i) { clientMutationId } }","extensions":{}}`, AuditOperationMutation},
+		"padded document":     {`{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }` + strings.Repeat(" ", maxGraphQLDocument) + `"}`, AuditOperationMutation},
+		"batched array":       {`[{"query":"query { viewer { login } }"},{"query":"mutation { x }"}]`, AuditOperationMutation},
+		"mutation then query": {`{"query":"query A { viewer { login } } mutation B { x }"}`, AuditOperationMutation},
+		"not JSON":            {`mutation { x }`, AuditOperationMutation},
+		"unknown key, query":  {`{"query":"query { viewer { login } }","extensions":{}}`, AuditOperationMutation},
+	} {
+		req, err := ParseGitHubGraphQL([]byte(tc.body))
+		if err == nil {
+			t.Fatalf("%s: not refused", name)
+		}
+		if got := req.AuditOperation(); got != tc.want {
+			t.Errorf("%s: operation %q, want %q", name, got, tc.want)
+		}
+	}
+	if !GitHubOperationWrites(AuditOperationMutation) {
+		t.Error("the refused-mutation operation is not a write")
+	}
+}
+
 func TestGraphQLMarksFileListsAsCode(t *testing.T) {
 	vars := map[string]any{"owner": "example-org", "repo": "example-repo"}
 	for inner, want := range map[string]bool{

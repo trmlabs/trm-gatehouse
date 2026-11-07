@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Infisical/agent-vault/internal/agenttoken"
 	"github.com/Infisical/agent-vault/internal/entitlement"
+	"github.com/Infisical/agent-vault/internal/runnerid"
 )
 
 func TestRunnerPersonDomains(t *testing.T) {
@@ -231,6 +233,45 @@ func TestGumloopSettings(t *testing.T) {
 		if _, err := gumloopVerifier(env(with)); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+func TestGoogleSettings(t *testing.T) {
+	env := func(values map[string]string) func(string) string { return func(k string) string { return values[k] } }
+	good := map[string]string{"AGENT_VAULT_GOOGLE_AUDIENCE": "gatehouse-broker", "AGENT_VAULT_GOOGLE_JWKS_URL": "https://keys.example/jwks", "AGENT_VAULT_STATIC_TOKEN_PORT": "8443"}
+	v, err := googleVerifier(env(good))
+	if err != nil || v == nil || v.Issuer != "https://accounts.google.com" || v.Audience != "gatehouse-broker" || v.JWKSURL != good["AGENT_VAULT_GOOGLE_JWKS_URL"] {
+		t.Fatalf("set: %+v %v", v, err)
+	}
+	if v, err := googleVerifier(env(nil)); err != nil || v != nil {
+		t.Fatalf("unset: %+v %v", v, err)
+	}
+	for name, with := range map[string]map[string]string{
+		"http url":             {"AGENT_VAULT_GOOGLE_AUDIENCE": "gatehouse-broker", "AGENT_VAULT_GOOGLE_JWKS_URL": "http://keys.example/jwks", "AGENT_VAULT_STATIC_TOKEN_PORT": "8443"},
+		"no url":               {"AGENT_VAULT_GOOGLE_AUDIENCE": "gatehouse-broker", "AGENT_VAULT_STATIC_TOKEN_PORT": "8443"},
+		"no audience":          {"AGENT_VAULT_GOOGLE_JWKS_URL": "https://keys.example/jwks", "AGENT_VAULT_STATIC_TOKEN_PORT": "8443"},
+		"bad audience":         {"AGENT_VAULT_GOOGLE_AUDIENCE": "has space", "AGENT_VAULT_GOOGLE_JWKS_URL": "https://keys.example/jwks", "AGENT_VAULT_STATIC_TOKEN_PORT": "8443"},
+		"no static-token port": {"AGENT_VAULT_GOOGLE_AUDIENCE": "gatehouse-broker", "AGENT_VAULT_GOOGLE_JWKS_URL": "https://keys.example/jwks"},
+	} {
+		if _, err := googleVerifier(env(with)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func TestIDTokenVerifierPicksWhatIsConfigured(t *testing.T) {
+	gl, g := &runnerid.GumloopVerifier{}, &runnerid.GoogleVerifier{}
+	if v := idTokenVerifier(nil, nil, nil); v != nil {
+		t.Errorf("none: %T", v)
+	}
+	if _, ok := idTokenVerifier(nil, gl, nil).(agenttoken.GumloopOIDC); !ok {
+		t.Error("gumloop only")
+	}
+	if _, ok := idTokenVerifier(nil, nil, g).(agenttoken.GoogleOIDC); !ok {
+		t.Error("google only")
+	}
+	if _, ok := idTokenVerifier(nil, gl, g).(agenttoken.ByIssuer); !ok {
+		t.Error("both")
 	}
 }
 

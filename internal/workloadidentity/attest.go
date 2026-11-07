@@ -282,10 +282,11 @@ func (p *livePod) controllerKind() string {
 	return ""
 }
 
+// images returns each container's pulled image reference, so a profile prefix can match its repository.
 func (p *livePod) images() []string {
 	var digests []string
 	for _, s := range append(append([]containerStatus(nil), p.Status.ContainerStatuses...), p.Status.InitContainerStatuses...) {
-		digests = append(digests, s.ImageID[strings.LastIndexByte(s.ImageID, '@')+1:])
+		digests = append(digests, s.ImageID)
 	}
 	return digests
 }
@@ -293,55 +294,8 @@ func (p *livePod) images() []string {
 // deadline returns when the Pod's admission ends, or zero if it is not admissible now; refusedContainer names an unlisted image's container for the log.
 // A remote Pod's address is not compared with the peer, which across clusters is a load balancer (see RemotePods).
 func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, remote bool, now time.Time) (end time.Time, refusedContainer string) {
-	k := c.Kubernetes
-	m := p.Metadata
-	if m.UID != k.Pod.UID || m.Name != k.Pod.Name || m.Namespace != k.Namespace || m.DeletionTimestamp != nil ||
-		p.Spec.ServiceAccountName != k.ServiceAccount.Name || p.Status.Phase != "Running" || p.Status.StartTime == nil {
-		return time.Time{}, ""
-	}
-	// Second check: the connection came from this Pod's own address.
-	addresses := []string{p.Status.PodIP}
-	for _, ip := range p.Status.PodIPs {
-		addresses = append(addresses, ip.IP)
-	}
-	matched := remote
-	for _, a := range addresses {
-		if parsed, err := netip.ParseAddr(a); err == nil && parsed == peer {
-			matched = true
-		}
-	}
-	if !matched {
-		return time.Time{}, ""
-	}
-	// ownerReferences are not proof the controller made the Pod: whoever may create Pods under this account can name an approved controller, so deployments must restrict Pod creation and owner references with admission policy (not shipped here).
-	// blockOwnerDeletion is required, but the boundary does not depend on the plugin that enforces it.
-	owned := false
-	for _, owner := range m.OwnerReferences {
-		if owner.Controller != nil && *owner.Controller && owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion {
-			for _, approved := range b.OwnerUIDs {
-				owned = owned || owner.UID == approved
-			}
-		}
-	}
-	if !owned {
-		return time.Time{}, ""
-	}
-	if container := p.refusedImage(b.ImageDigests); container != "" {
-		return time.Time{}, container
-	}
-	if b.ContainerName != "" {
-		running := 0
-		for _, s := range p.Status.ContainerStatuses {
-			if s.Name == b.ContainerName {
-				if s.State.Running == nil || s.RestartCount != 0 {
-					return time.Time{}, ""
-				}
-				running++
-			}
-		}
-		if running != 1 {
-			return time.Time{}, ""
-		}
+	if ok, refused := p.admits(b, c, peer, remote); !ok {
+		return time.Time{}, refused
 	}
 	end = p.Status.StartTime.Add(time.Duration(b.MaxPodSeconds) * time.Second)
 	if d := p.Spec.ActiveDeadlineSeconds; d != nil {
@@ -355,8 +309,68 @@ func (p *livePod) deadline(b *Binding, c claims, peer netip.Addr, remote bool, n
 	return end, ""
 }
 
-// Attest admits a pool worker: local token verification, then the live Pod must be the peer, Running, owned by an approved controller and inside its deadline.
-// Bindings without approved owners keep the online TokenReview path of ResolveForProxy.
+// admits runs every Pod check except the lifetime: identity, address, controller (pool bindings only), images and container.
+func (p *livePod) admits(b *Binding, c claims, peer netip.Addr, remote bool) (ok bool, refusedContainer string) {
+	k := c.Kubernetes
+	m := p.Metadata
+	if m.UID != k.Pod.UID || m.Name != k.Pod.Name || m.Namespace != k.Namespace || m.DeletionTimestamp != nil ||
+		p.Spec.ServiceAccountName != k.ServiceAccount.Name || p.Status.Phase != "Running" || p.Status.StartTime == nil {
+		return false, ""
+	}
+	// Second check: the connection came from this Pod's own address.
+	addresses := []string{p.Status.PodIP}
+	for _, ip := range p.Status.PodIPs {
+		addresses = append(addresses, ip.IP)
+	}
+	matched := remote
+	for _, a := range addresses {
+		if parsed, err := netip.ParseAddr(a); err == nil && parsed == peer {
+			matched = true
+		}
+	}
+	if !matched {
+		return false, ""
+	}
+	// ownerReferences are not proof the controller made the Pod: whoever may create Pods under this account can name an approved controller, so deployments must restrict Pod creation and owner references with admission policy (not shipped here).
+	// blockOwnerDeletion is required, but the boundary does not depend on the plugin that enforces it.
+	owned := b.Service
+	for _, owner := range m.OwnerReferences {
+		if owner.Controller != nil && *owner.Controller && owner.BlockOwnerDeletion != nil && *owner.BlockOwnerDeletion {
+			for _, approved := range b.OwnerUIDs {
+				owned = owned || owner.UID == approved
+			}
+		}
+	}
+	if !owned {
+		return false, ""
+	}
+	if b.Service && b.AllowUnpinnedImages {
+		// Explicitly unpinned: images are not checked, but a debugger injected into the Pod is still refused.
+		if len(p.Spec.EphemeralContainers) != 0 {
+			return false, "ephemeral:" + p.Spec.EphemeralContainers[0].Name
+		}
+	} else if container := p.refusedImage(b.ImageDigests); container != "" {
+		return false, container
+	}
+	if b.ContainerName != "" {
+		running := 0
+		for _, s := range p.Status.ContainerStatuses {
+			if s.Name == b.ContainerName {
+				if s.State.Running == nil || s.RestartCount != 0 {
+					return false, ""
+				}
+				running++
+			}
+		}
+		if running != 1 {
+			return false, ""
+		}
+	}
+	return true, ""
+}
+
+// Attest admits a pool or service Pod: local token verification, then the live Pod must be the peer and Running; a pool Pod also needs an approved controller and its deadline, a service Pod ends with its token or the service session limit.
+// Bindings with neither approved owners nor Service keep the online TokenReview path of ResolveForProxy.
 func (r *Resolver) Attest(ctx context.Context, token string, peer netip.Addr) (*brokercore.ProxyScope, error) {
 	return r.attest(ctx, token, peer, false)
 }
@@ -397,7 +411,7 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 	if attestation != "" || (d.remote && d.pods == nil) {
 		return nil, brokercore.Denied("attestation_not_proxy")
 	}
-	if len(binding.OwnerUIDs) == 0 {
+	if len(binding.OwnerUIDs) == 0 && !binding.Service {
 		return r.ResolveForProxy(ctx, token, "")
 	}
 	read := r.api
@@ -411,16 +425,37 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 		}
 		return nil, brokercore.Denied("pod_unreadable")
 	}
-	notAfter, refusedContainer := pod.deadline(binding, c, peer, d.remote, r.now())
-	if refusedContainer != "" {
-		r.logger.Warn("workloadidentity: pool Pod refused", "reason", "image_not_allowed", "container", refusedContainer,
-			"namespace", k.Namespace, "pod", k.Pod.Name)
-		return nil, brokercore.Denied("image_not_allowed")
+	var notAfter time.Time
+	var refusedContainer string
+	admitted := false
+	if binding.Service {
+		// A service session ends with its token or the service session limit, whichever is first; the Pod re-attests with a fresh projected token.
+		admitted, refusedContainer = pod.admits(binding, c, peer, d.remote)
+		notAfter = time.Unix(c.Expires, 0)
+		if limit := time.Unix(c.Issued, 0).Add(time.Duration(r.config.serviceSessionLimit()) * time.Second); limit.Before(notAfter) {
+			notAfter = limit
+		}
+	} else {
+		notAfter, refusedContainer = pod.deadline(binding, c, peer, d.remote, r.now())
+		admitted = !notAfter.IsZero()
 	}
-	if notAfter.IsZero() {
+	if refusedContainer != "" {
+		reason := "image_not_allowed"
+		if strings.HasPrefix(refusedContainer, "ephemeral:") {
+			reason = "ephemeral_container"
+		}
+		r.logger.Warn("workloadidentity: pool Pod refused", "reason", reason, "container", refusedContainer,
+			"namespace", k.Namespace, "pod", k.Pod.Name)
+		return nil, brokercore.Denied(reason)
+	}
+	if !admitted {
 		return nil, brokercore.Denied("pod_not_admissible")
 	}
-	if !r.profileAdmits(binding.Pool, d, IdentityPodToken, k.Namespace, pod.controllerKind(), pod.images()) {
+	kind := IdentityPodToken
+	if binding.Service {
+		kind = IdentityServiceToken
+	}
+	if !r.profileAdmits(binding.Pool, d, kind, k.Namespace, pod.controllerKind(), pod.images()) {
 		return nil, brokercore.Denied("catalog_profile")
 	}
 	scope, err := r.grant(ctx, binding, "")
@@ -433,8 +468,13 @@ func (r *Resolver) attest(ctx context.Context, token string, peer netip.Addr, re
 	if ctx.Err() != nil {
 		return nil, unfinished(ctx, brokercore.Denied("deadline"))
 	}
-	scope.WorkloadID, scope.NotAfter, scope.Pool, scope.IdentityKind = k.Pod.UID, notAfter, binding.Pool, brokercore.KindPodToken
-	scope.ClaimedRun = pod.Metadata.Annotations[brokercore.CursorRunAnnotation]
+	scope.WorkloadID, scope.Pool, scope.IdentityKind, scope.NotAfter = k.Pod.UID, binding.Pool, brokercore.KindPodToken, notAfter
+	if binding.Service {
+		// Its annotations are workload-controlled, so a service Pod claims no run.
+		scope.IdentityKind = brokercore.KindServiceToken
+	} else {
+		scope.ClaimedRun = pod.Metadata.Annotations[brokercore.CursorRunAnnotation]
+	}
 	scope.Pod = brokercore.PodRef{Domain: d.name, Namespace: k.Namespace, Name: k.Pod.Name, UID: k.Pod.UID, Container: binding.ContainerName}
 	return scope, nil
 }

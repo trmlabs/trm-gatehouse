@@ -72,6 +72,94 @@ automations:
 
 A block with `ownerID` serves only that owner; a block without it serves any other owner in the organization. One organization and owner pair belongs to one block. A block has `gumloop` or `tokenSHA256`, never both, and neither can be reached by a Cursor run naming its id. Access is the block's `entries`, as for any Automation, and the token lives only as long as Gumloop issues it, so there is nothing to rotate or revoke here beyond removing the block.
 
+## Signed-token platforms: add one by config
+
+A platform that issues signed ID tokens (an OIDC-style JWT with an issuer, a published key set and an audience) joins Gatehouse by a catalog entry. No Go changes, no new environment variables. The platform team adds two blocks in one catalog PR: a harness that says how its tokens are checked, and one Automation block per agent that says which token is that agent.
+
+```yaml
+harnesses:
+  - name: platform-a
+    identity:
+      kind: signed-token
+      token:
+        issuer: https://tokens.platform-a.example
+        jwksURL: https://tokens.platform-a.example/keys   # or discovery: true, never both
+        audiences: [gatehouse]
+        algorithms: [ES256]                                # RS256, ES256 or both
+        maxLifetimeSeconds: 3600
+        subjectClaim: sub
+        groupsClaim: groups                                # optional
+    path: {kind: direct}
+    authorization: {mode: automation, poolName: example-automations}
+    client: {proxyEnv: GATEHOUSE_HTTPS_PROXY, caFileEnv: GATEHOUSE_CA_FILE}
+
+automations:
+  - id: example-agent
+    name: example-agent
+    owner: example-team
+    entries: [example-entry]
+    signedToken:
+      harness: platform-a
+      subject: agent-1@platform-a.example   # the value of subjectClaim in this agent's token
+      groups: [team-a]                      # optional: the token must carry at least one
+```
+
+| Field | Meaning |
+|---|---|
+| `issuer` | The `iss` a token must carry; it may not equal any Kubernetes harness's `trustDomain.issuer`, and a token for a configured Gumloop issuer always goes to the Gumloop verifier (the broker logs an error if a harness names it). One harness per issuer: the broker picks the harness by the token's issuer and then checks the token in full against that harness only. |
+| `jwksURL` or `discovery` | Where the issuer publishes its keys (HTTPS, no redirect), or `discovery: true` to read the `jwks_uri` from the issuer's `/.well-known/openid-configuration`, which must name the same issuer and an HTTPS key URL (no userinfo or fragment, no redirect on either fetch). Exactly one. |
+| `audiences` | A token must name at least one. |
+| `algorithms` | `RS256` and `ES256` only (RSA keys of 2048 bits or more, P-256 for ES256). `none` and HMAC algorithms are refused at load. |
+| `maxLifetimeSeconds` | Required, 1 to 86400. A token is refused when `exp` minus `iat` is longer, or when it expires further ahead than this from now. `exp` and `iat` must both be present. |
+| `clockSkewSeconds` | Optional, 0 to 300 (60 when unset; an explicit 0 means no skew). Forgives a fast clock for `iat`, `nbf` and how far ahead `exp` may be, never for `exp` itself. |
+| `subjectClaim`, `groupsClaim` | The claims that name the agent and, optionally, its groups: a string, or for groups a string or list of strings. The subject is matched to one Automation's `signedToken.subject`; a block's `groups` then gate it. The subject must be assigned by the issuer and unique across every tenant and audience it serves: `audiences` is not a tenant boundary, so a platform that lets a tenant choose its own subject lets that tenant claim another's. |
+| `requiredClaims` | Optional, at most 8: claim name to a plain string a token must carry exactly, checked together with the subject, for example `tenant: example-tenant`. A missing, non-string or different value is refused as `oidc_claim_missing`. Use it when the issuer serves several tenants. |
+| `keyMaxAgeSeconds`, `refreshBackoffSeconds` | Optional key cache settings (3600 and 30 by default); twice the backoff may not exceed the key age, so a cached key set cannot expire before a refetch is allowed. Keys are fetched once and shared by every request; an unknown key id triggers at most one refetch per backoff, and an issuer outage keeps serving the last good keys until their age runs out. |
+
+The harness shares its pool with that pool's other harnesses, and a pool may host any number of signed-token harnesses. The pool's grants and ceiling, and the block's `entries` and `write`, decide access exactly as for any Automation. A signed-token block cannot also set `tokenSHA256`, `gumloop` or `googleServiceAccount`, or `subagents`.
+
+Tokens arrive on the same listener as agent tokens, so the platform's network must reach it over the same private link. The audit row's source is `SIGNED_TOKEN` and its Automation is the block's id.
+
+Everything unproven is refused and recorded with a reason code, never admitted by default: `oidc_signature`, `oidc_key_unknown`, `oidc_keys_unavailable` (the key set could not be fetched), `oidc_issuer`, `oidc_audience`, `oidc_expired`, `oidc_lifetime`, `oidc_not_yet_valid`, `oidc_algorithm`, `oidc_claim_missing` (no `exp`, `iat` or subject, or a `requiredClaims` mismatch), `oidc_subject_unlisted` (no block names the subject), `oidc_group_missing` and `oidc_malformed`.
+
+Not covered: a platform whose token names a person rather than an agent. A signed-token harness authorizes the Automation only. The Cursor and Gumloop verifiers keep their own settings and paths.
+
+## Google service account ID tokens
+
+A workload that runs as a Google service account can prove itself with an ID token Google signs for that account, so it holds no long-lived secret. The static-token listener reads it like a Gumloop ID token: a token shaped like `<agent-id>.<secret>` is checked as above, any other as an ID token, and when both Gumloop and Google are on, the token's `iss` only chooses which verifier checks it. Set `AGENT_VAULT_GOOGLE_AUDIENCE` and `AGENT_VAULT_GOOGLE_JWKS_URL` (https, Google's published signing keys) to turn it on.
+
+The broker checks an RS256 signature (keys cached for an hour and refetched when a token names a new key, with the same outage behavior as the Gumloop keys), that the issuer is exactly `https://accounts.google.com`, that the audience is exactly the configured string, that the token has not expired, expires within an hour plus 60 seconds of clock skew, and is not before its `nbf` or `iat`. The token's `sub`, the service account's numeric unique ID, selects the block. If the token carries an `email`, `email_verified` must be true and the email must be the one the block lists. Any failure is refused with a reason code and an audit row; the row's source is `GOOGLE_OIDC`.
+
+```yaml
+automations:
+  - id: example-google-agent
+    name: example-google-agent
+    owner: example-team
+    entries: [example-entry]
+    googleServiceAccount:
+      email: example-agent@example-project.iam.gserviceaccount.com
+      uniqueID: "<the service account's numeric unique ID>"
+```
+
+`email` is a lower-case service account email: user-managed, the default Compute Engine account or the App Engine account. `uniqueID` is the account's numeric ID, which a deleted and recreated account does not keep. One unique ID and one email belong to one block. A block has `googleServiceAccount`, `gumloop` or `tokenSHA256`, never more than one; none can set `subagents`, a Cursor run cannot name the block's id, and a block with `googleServiceAccount` needs an `owner` that names a team, not an email address. Authorization is the block's `entries`, `write` and `owner`, the pool's grants and ceiling, and no person; the audit row names no run person.
+
+Anyone who can get an ID token for the bound service account is this Automation. That is `iam.serviceAccounts.getOpenIdToken`, granted by Service Account OpenID Connect Identity Token Creator or Service Account Token Creator on the account, its project, folder or organization, to workload identity federation principals allowed to impersonate it, or to anyone who can deploy code that runs as it. The audience limits which service a token is for, not who can mint it. Review who holds those roles before binding an account.
+
+Pick an audience only the broker accepts, never one a cloud workload identity pool also accepts. The audience is what keeps a token minted for the broker apart from a token minted for another service. A token is bearer for up to an hour and carries no `jti`, so lifetime is the replay window; revoking access is removing the block, refused on the next request once every replica loads the new catalog.
+
+| Reason | Meaning |
+|---|---|
+| `oidc_malformed`, `oidc_algorithm`, `oidc_signature`, `oidc_key_unknown` | Not a well-formed token, not RS256, not signed by a published key, or its `kid` is not in the published set |
+| `oidc_keys_unavailable` | The signing keys could not be fetched, or the cached set is over an hour old; retry after the `Retry-After` |
+| `oidc_issuer`, `oidc_audience` | Signed by a published key but issued by another issuer or for another audience |
+| `oidc_expired`, `oidc_lifetime`, `oidc_not_yet_valid` | Past `exp`, expiring more than an hour (plus skew) out, or before `nbf` or `iat` |
+| `oidc_subject_missing` | `sub` is not a numeric unique ID |
+| `oidc_email_malformed`, `oidc_email_unverified` | An `email` that is not plain, or whose `email_verified` is not true |
+| `oidc_service_account_unlisted` | A verified unique ID no block lists |
+| `oidc_email_mismatch` | The unique ID is listed, and the token's `email` is not the block's |
+
+Deploy a broker that reads `googleServiceAccount` to every replica before any catalog uses it. An older broker reading a catalog from Vault drops a block with a field it does not know, so that agent is refused; an older broker started on a catalog file, and a catalog validator pinned to an older commit, refuse the whole catalog.
+
 ## Minting a token
 
 ```bash

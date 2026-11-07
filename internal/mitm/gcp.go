@@ -83,7 +83,13 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 	}
 	// RawPath keeps percent-encoded object names (a/b as a%2Fb) as sent.
 	outURL := &url.URL{Scheme: "https", Host: target, Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery}
-	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(body))
+	ctx := r.Context()
+	var call *grpcCall
+	if isGRPC(r) {
+		call = &grpcCall{status: -1}
+		ctx = withGRPCCall(ctx, call)
+	}
+	out, err := http.NewRequestWithContext(ctx, r.Method, outURL.String(), bytes.NewReader(body))
 	if err != nil {
 		deny(http.StatusBadRequest, "request_shape")
 		return
@@ -113,6 +119,9 @@ func (p *Proxy) forwardGCP(w http.ResponseWriter, r *http.Request, target string
 		done := event
 		done.Event, done.Outcome, done.Cause, done.Status = auditchain.EventHTTPResponse, outcome, cause, status
 		done.Duration = time.Since(admittedAt).Milliseconds()
+		if call != nil {
+			done.GRPCStatus = grpcStatusRecord(call, status)
+		}
 		_ = a.Audit.Record(done)
 	}
 	values := map[string]string{"token": token.Value(), "credential": credential}

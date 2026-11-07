@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/Infisical/agent-vault/internal/imagerule"
 )
@@ -101,9 +102,12 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		if a.harness.Authorization.PoolName == b.harness.Authorization.PoolName && !sharePool(a.harness, b.harness) {
 			return true
 		}
+		if ta, tb := a.harness.Identity.Token, b.harness.Identity.Token; ta != nil && tb != nil && ta.Issuer == tb.Issuer {
+			return true
+		}
 		return a.harness.Identity.Kind == IdentityStaticToken && b.harness.Identity.Kind == IdentityStaticToken
 	}, func(h keptHarness) {
-		drop("harness", h.harness.Name, errors.New("belongs to a pool another harness also names, or is one of two static-token harnesses"))
+		drop("harness", h.harness.Name, errors.New("belongs to a pool another harness also names, or is one of two static-token harnesses, or shares a signed-token issuer"))
 	})
 	harnesses = dropConflicting(harnesses, func(a, b keptHarness) bool {
 		ai, bi := a.harness.Identity, b.harness.Identity
@@ -115,6 +119,22 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 	}, func(h keptHarness) {
 		drop("harness", h.harness.Name, errors.New("claims an image prefix or namespace another harness claims"))
 	})
+	// A signed-token issuer that equals a trust domain's is dropped alone, so the Kubernetes harness keeps serving.
+	trust := map[string]bool{}
+	for _, h := range harnesses {
+		if h.harness.TrustDomain.Issuer != "" {
+			trust[strings.TrimSuffix(h.harness.TrustDomain.Issuer, "/")] = true
+		}
+	}
+	uncolliding := harnesses[:0:0]
+	for _, h := range harnesses {
+		if t := h.harness.Identity.Token; t != nil && trust[strings.TrimSuffix(t.Issuer, "/")] {
+			drop("harness", h.harness.Name, errors.New("names an issuer that is a trustDomain.issuer"))
+			continue
+		}
+		uncolliding = append(uncolliding, h)
+	}
+	harnesses = uncolliding
 	if len(file.Harnesses) > 0 {
 		// Harnesses gate admission once any are listed, so a pool whose harness was dropped goes too.
 		served := make(map[string]bool, len(harnesses))
@@ -184,8 +204,17 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		keptKind[e.entry.Name] = e.entry.Kind
 	}
 	type keptAutomation struct {
-		raw json.RawMessage
-		id  string
+		raw   json.RawMessage
+		id    string
+		block Automation
+	}
+	signedHarnesses := map[string]bool{}
+	hasGroupsClaim := map[string]bool{}
+	for _, h := range harnesses {
+		if h.harness.Identity.Kind == IdentitySignedToken {
+			signedHarnesses[h.harness.Name] = true
+			hasGroupsClaim[h.harness.Name] = h.harness.Identity.Token != nil && h.harness.Identity.Token.GroupsClaim != ""
+		}
 	}
 	var automations []keptAutomation
 	for i, raw := range file.Automations {
@@ -202,14 +231,23 @@ func ParseTolerant(data []byte) (Catalog, []Dropped, error) {
 		if err == nil {
 			err = a.checkWrite(func(entry string) string { return keptKind[entry] })
 		}
+		if err == nil && a.SignedToken != nil && !signedHarnesses[a.SignedToken.Harness] {
+			err = fmt.Errorf("names undefined or dropped signed-token harness %q", a.SignedToken.Harness)
+		}
+		if err == nil && a.SignedToken != nil && len(a.SignedToken.Groups) > 0 && !hasGroupsClaim[a.SignedToken.Harness] {
+			err = fmt.Errorf("lists signedToken groups but harness %q has no groupsClaim", a.SignedToken.Harness)
+		}
 		if err != nil {
 			drop("automation", automationName(a.ID, i), err)
 			continue
 		}
-		automations = append(automations, keptAutomation{raw, a.ID})
+		automations = append(automations, keptAutomation{raw, a.ID, a})
 	}
 	automations = dropDuplicates(automations, func(a keptAutomation) string { return a.id }, func(a keptAutomation) {
 		drop("automation", a.id, errors.New("duplicate automation id"))
+	})
+	automations = dropClaims(automations, func(a keptAutomation) []claim { return append(googleClaims(a.block), signedClaims(a.block)...) }, func(a keptAutomation, c claim) {
+		drop("automation", a.id, errors.New(c.conflict()))
 	})
 
 	if len(entries) == 0 {
@@ -349,6 +387,25 @@ func entryClaims(e Entry) []claim {
 		claims = append(claims, claim{key: "route " + hostKey + prefix})
 	}
 	return claims
+}
+
+// googleClaims mirrors indexAutomations' check that one Google service account unique ID or email belongs to one block.
+func googleClaims(a Automation) []claim {
+	g := a.GoogleServiceAccount
+	if g == nil {
+		return nil
+	}
+	const reason = "names a google service account another automation names"
+	return []claim{{key: "google id " + g.UniqueID, reason: reason}, {key: "google email " + g.Email, reason: reason}}
+}
+
+// signedClaims mirrors indexAutomations' check that one signed-token harness and subject belong to one block.
+func signedClaims(a Automation) []claim {
+	t := a.SignedToken
+	if t == nil {
+		return nil
+	}
+	return []claim{{key: "signed " + t.Harness + "\x00" + t.Subject, reason: "names a signed-token harness and subject another automation names"}}
 }
 
 // dropClaims drops every part holding a claim that conflicts with another claim on the same key, itself included.

@@ -986,3 +986,86 @@ func TestAdapterSlackAuthorizationRefusalNamesTheMethod(t *testing.T) {
 		t.Fatalf("member: %d outcome=%q operation=%q, vendor calls %d", code, row.Outcome, row.Operation, f.calls.Load())
 	}
 }
+
+// A refusal before the caller is authenticated records the method and only the catalog path prefix, OPTIONS and TRACE included.
+func TestAuthenticationRefusalRecordsMethodAndPath(t *testing.T) {
+	f := newAdapterFixture(t)
+	for _, method := range []string{http.MethodGet, http.MethodOptions, http.MethodTrace, http.MethodPost} {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(method, "/v1/chat/completions?token=never-recorded", nil)
+		target := "example.com:" + strconv.Itoa(f.port)
+		r.Host = target
+		f.proxy.forwardCatalog(rec, r, target, "example.com", f.port, true, nil)
+		e := f.audit.last()
+		if e.Event != "denied" || e.Outcome != "authentication" || e.Method != method || e.Path != "/v1/chat" {
+			t.Errorf("%s: row %+v", method, e)
+		}
+	}
+	// A path no entry lists is never recorded, since it could carry a vendor secret.
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/bot123456:SECRET-TOKEN/sendMessage", nil)
+	r.Host = "example.com:" + strconv.Itoa(f.port)
+	f.proxy.forwardCatalog(rec, r, r.Host, "example.com", f.port, true, nil)
+	if e := f.audit.last(); e.Path != "unmatched" {
+		t.Errorf("unlisted path recorded %q, want unmatched", e.Path)
+	}
+}
+
+func TestGRPCMethodPathShape(t *testing.T) {
+	for path, want := range map[string]bool{
+		"/temporal.api.workflowservice.v1.WorkflowService/TerminateWorkflowExecution": true,
+		"/example.v1.Writes/Append":     true,
+		"/bot123456:SECRET/sendMessage": false,
+		"/services/T00/B00/secret":      false,
+		"/Service/Method":               false,
+		"/a.b/c/d":                      false,
+	} {
+		if got := grpcMethodPath.MatchString(path); got != want {
+			t.Errorf("%q: match %v, want %v", path, got, want)
+		}
+	}
+}
+
+// An authenticated row records the path as the agent sent it, a placeholder where a credential would go, and never the query.
+func TestAuthenticatedRowRecordsPathWithPlaceholderAndNoQuery(t *testing.T) {
+	f := newAdapterFixture(t)
+	_, _, _ = f.do(t, "POST", "/v1/chat/__vault_LLM_KEY__/x?token=query-secret", `{}`, nil)
+	for _, e := range f.audit.all() {
+		if e.Path != "/v1/chat/__vault_LLM_KEY__/x" {
+			t.Errorf("%s row path %q, want the path as sent without its query", e.Event, e.Path)
+		}
+		if strings.Contains(e.Path, adapterKeyV1) || strings.Contains(e.Path, "query-secret") {
+			t.Errorf("row path holds a secret: %q", e.Path)
+		}
+	}
+	if len(f.audit.all()) == 0 {
+		t.Fatal("no audit row")
+	}
+}
+
+// Before identity, a plain request's path is recorded; a CONNECT has none and an unreadable host records none.
+func TestUnauthenticatedPath(t *testing.T) {
+	f := newAdapterFixture(t)
+	for name, tc := range map[string]struct {
+		method, target string
+		want           string
+	}{
+		"unlisted host":      {http.MethodGet, "http://api.example.test/v1/x?token=1", "unmatched"},
+		"listed prefix":      {http.MethodPost, "http://example.com:" + strconv.Itoa(f.port) + "/v1/chat/y/bot:SECRET?t=1", "/v1/chat"},
+		"listed host, other": {http.MethodPost, "http://example.com:" + strconv.Itoa(f.port) + "/bot:SECRET/send", "unmatched"},
+		"connect":            {http.MethodConnect, "api.example.test:443", ""},
+	} {
+		r := httptest.NewRequest(tc.method, tc.target, nil)
+		if got := f.proxy.unauthenticatedPath(r); got != tc.want {
+			t.Errorf("%s: path %q, want %q", name, got, tc.want)
+		}
+	}
+	if got := (&Proxy{}).unauthenticatedPath(httptest.NewRequest(http.MethodGet, "http://api.example.test/v1/x", nil)); got != "" {
+		t.Errorf("a proxy with no adapter recorded %q", got)
+	}
+	for method, want := range map[string]string{"OPTIONS": "OPTIONS", "TRACE": "TRACE", "PROPFIND": "", "get": ""} {
+		if got := auditMethod(method); got != want {
+			t.Errorf("auditMethod(%q) = %q, want %q", method, got, want)
+		}
+	}
+}

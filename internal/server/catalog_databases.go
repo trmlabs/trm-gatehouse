@@ -58,6 +58,9 @@ func (r catalogDatabaseResolver) authorize(ctx context.Context, catalog httpcata
 	record := pgproxy.Requester{Kind: who.Kind, Subject: who.Audited(), TokenSHA256: who.TokenSHA256,
 		Source: who.Source, Automation: who.Automation, AutomationName: who.AutomationName, AutomationOwner: who.AutomationOwner,
 		Run: who.Run, ParentRun: who.ParentRun}
+	if refusal == "session_missing" {
+		record.Decision = who.SessionGap
+	}
 	if refusal == "" {
 		decideCtx := ctx
 		if pgproxy.IsRecheck(ctx) {

@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -284,6 +285,9 @@ func TestGRPCUnaryCallGetsTheKeyInjected(t *testing.T) {
 	if len(rows) != 2 || rows[0].Outcome != "admitted" || rows[1].Outcome != "completed" || rows[1].Status != 200 {
 		t.Fatalf("audit rows: %+v", rows)
 	}
+	if rows[0].GRPCStatus != "" || rows[1].GRPCStatus != "0" {
+		t.Fatalf("gRPC status on the admitted row %q and the response row %q, want none and 0", rows[0].GRPCStatus, rows[1].GRPCStatus)
+	}
 	for _, e := range rows {
 		if e.Method != "POST" || e.Path != "/example.v1.Reads/Get" {
 			t.Fatalf("row method %q path %q", e.Method, e.Path)
@@ -342,8 +346,8 @@ func TestGRPCKeyInStreamOrTrailerEndsTheCall(t *testing.T) {
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("leaked stream ended with %v", err)
 	}
-	if last := f.audit.last(); last.Outcome != "secret_echo" {
-		t.Fatalf("stream outcome %q", last.Outcome)
+	if last := f.audit.last(); last.Outcome != "secret_echo" || last.GRPCStatus != "13" {
+		t.Fatalf("stream row: %+v", last)
 	}
 	for _, in := range []string{"trailer-key", "echo-key"} {
 		if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", in); status.Code(err) != codes.Internal {
@@ -363,18 +367,27 @@ func TestGRPCRefusalsAndUpstreamStatuses(t *testing.T) {
 		strings.Join(header.Get(strings.ToLower(RefusalHeader)), "") != "unlisted" {
 		t.Fatalf("unlisted: %v %v", err, header)
 	}
-	if last := f.audit.last(); last.Outcome != "unlisted" || last.Path != "/example.v1.Writes/Append" || last.Method != "POST" {
+	if last := f.audit.last(); last.Outcome != "unlisted" || last.Path != "/example.v1.Writes/Append" || last.Method != "POST" || last.GRPCStatus != "7" {
 		t.Fatalf("unlisted row: %+v", last)
 	}
 	// A request compressed with anything but gzip could not be checked for decoys or placeholders.
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "x", grpc.UseCompressor(testDeflate{}.Name())); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("compressed: %v", err)
 	}
+	if last := f.audit.last(); last.GRPCStatus != "3" {
+		t.Fatalf("compressed row records gRPC status %q, want 3", last.GRPCStatus)
+	}
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "missing"); status.Code(err) != codes.NotFound || status.Convert(err).Message() != "no such row" {
 		t.Fatalf("upstream status: %v", err)
 	}
+	if last := f.audit.last(); last.Outcome != "completed" || last.GRPCStatus != "5" {
+		t.Fatalf("upstream NOT_FOUND row: %+v", last)
+	}
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "stale"); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("stale: %v", err)
+	}
+	if last := f.audit.last(); last.GRPCStatus != "16" {
+		t.Fatalf("stale row records gRPC status %q, want 16", last.GRPCStatus)
 	}
 	f.keys.mu.Lock()
 	invalidated := f.keys.invalidated
@@ -386,6 +399,9 @@ func TestGRPCRefusalsAndUpstreamStatuses(t *testing.T) {
 	if _, _, err := f.unary(t, cc, "/example.v1.Reads/Get", "x"); status.Code(err) != codes.Unavailable ||
 		!strings.Contains(status.Convert(err).Message(), "key_unavailable") {
 		t.Fatalf("key unavailable: %v", err)
+	}
+	if last := f.audit.last(); last.Outcome != "key_unavailable" || last.GRPCStatus != "14" {
+		t.Fatalf("key unavailable row: %+v", last)
 	}
 }
 
@@ -561,7 +577,7 @@ func TestGRPCGoogleEntryStreamsAReadSession(t *testing.T) {
 			t.Errorf("Google saw %s %q, want %q", name, got, value)
 		}
 	}
-	if last := audit.last(); last.Binding != "bq-read" || last.Outcome != "completed" || last.Path != "/google.cloud.bigquery.storage.v1.BigQueryRead/ReadRows" {
+	if last := audit.last(); last.Binding != "bq-read" || last.Outcome != "completed" || last.Path != "/google.cloud.bigquery.storage.v1.BigQueryRead/ReadRows" || last.GRPCStatus != "0" {
 		t.Fatalf("audit row %+v", last)
 	}
 }
@@ -610,5 +626,81 @@ func TestHTTP2TunnelsDrainWithGOAWAY(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Shutdown waited past the last call; an HTTP/2 tunnel stayed open")
+	}
+}
+
+// A status outside 0 to 16 from an upstream is read as none, so its row is still written.
+func TestGRPCCallStatusIgnoresOutOfRangeCodes(t *testing.T) {
+	for in, want := range map[string]int{"0": 0, "16": 16, "17": -1, "99": -1, "-3": -1, "x": -1, "": -1} {
+		resp := &http.Response{Header: http.Header{"Grpc-Status": {in}}, Trailer: http.Header{}}
+		if got := grpcCallStatus(resp); got != want {
+			t.Errorf("status %q read as %d, want %d", in, got, want)
+		}
+	}
+	if got := grpcStatusRecord(&grpcCall{status: -1}, http.StatusOK); got != "" {
+		t.Errorf("a call with no status recorded %q", got)
+	}
+}
+
+// The row records the code the broker sent, so an upstream 503 with Retry-After reads UNAVAILABLE, as the worker saw.
+func TestGRPCWriterRemembersTheCodeItSent(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		retryAfter string
+		httpStatus int
+		want       int
+	}{
+		{"503 with Retry-After", "5", http.StatusServiceUnavailable, 14},
+		{"503 without", "", http.StatusServiceUnavailable, 9},
+		{"refusal", "", http.StatusForbidden, 7},
+	} {
+		rec := httptest.NewRecorder()
+		w := &grpcWriter{ResponseWriter: rec}
+		if tc.retryAfter != "" {
+			w.Header().Set("Retry-After", tc.retryAfter)
+		}
+		w.WriteHeader(tc.httpStatus)
+		call := &grpcCall{status: w.sent}
+		if got, trailer := grpcStatusRecord(call, tc.httpStatus), rec.Result().Header.Get(http.TrailerPrefix+"Grpc-Status"); got != strconv.Itoa(tc.want) || (trailer != "" && trailer != got) {
+			t.Errorf("%s: row %q, trailer %q, want %d", tc.name, got, trailer, tc.want)
+		}
+	}
+}
+
+// An upstream error whose body echoes the key ends the call with INTERNAL, and the row records that code, not the 403 mapping.
+func TestGRPCUpstreamErrorBodyEchoingTheKeyRecordsTheSentStatus(t *testing.T) {
+	cert, vendorRoots := grpcTestCert(t, "err.example.com")
+	vendor := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("denied " + grpcKey))
+	}))
+	vendor.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	vendor.EnableHTTP2 = true
+	vendor.StartTLS()
+	t.Cleanup(vendor.Close)
+	catalog, err := httpcatalog.Parse([]byte(`{"entries":[
+	  {"name":"err","host":"err.example.com","http2":true,"pathPrefixes":["/example.v1.Reads/"],"methods":["POST"],
+	   "header":"Authorization","scheme":"Bearer","placeholder":"__vault_RPC_KEY__",
+	   "key":{"mount":"gatehouse","path":"vendors/rpc","field":"key"},"pools":["pool-agent"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &scopeResolver{scope: &brokercore.ProxyScope{VaultID: "vault-1", AgentID: "agent-uuid-1", Pool: "pool-agent", WorkloadID: "pod-uid-1", VaultRole: "proxy"}}
+	audit := &adapterAudit{}
+	proxyURL, roots, p := setupProxy(t, sessions, &fakeCredProvider{}, func(o *Options) {
+		o.StrictCredentialProxy = true
+		o.HeaderAdapter = &HeaderAdapter{Catalog: catalog, Keys: &adapterKeys{value: grpcKey}, Audit: audit}
+	})
+	p.upstream.TLSClientConfig.RootCAs = vendorRoots
+	p.upstream.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, vendor.Listener.Addr().String())
+	}
+	f := &grpcFixture{proxyURL: proxyURL, roots: roots, proxy: p}
+	_, _, err = f.unary(t, f.client(t, "err.example.com"), "/example.v1.Reads/Get", "x")
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("call ended with %v, want INTERNAL", err)
+	}
+	if last := audit.last(); last.Outcome != "secret_echo" || last.GRPCStatus != "13" {
+		t.Fatalf("row: %+v", last)
 	}
 }

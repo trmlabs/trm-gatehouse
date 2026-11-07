@@ -153,6 +153,7 @@ type grpcWriter struct {
 	http.ResponseWriter
 	wroteHeader bool
 	failed      bool
+	sent        int
 	message     []byte
 }
 
@@ -173,7 +174,8 @@ func (g *grpcWriter) WriteHeader(status int) {
 	h.Set("Content-Type", "application/grpc")
 	g.failed = true
 	g.ResponseWriter.WriteHeader(http.StatusOK)
-	h.Set(http.TrailerPrefix+"Grpc-Status", strconv.Itoa(grpcStatusFor(status, retryAfter != "")))
+	g.sent = grpcStatusFor(status, retryAfter != "")
+	h.Set(http.TrailerPrefix+"Grpc-Status", strconv.Itoa(g.sent))
 	if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
 		h.Set(http.TrailerPrefix+"Grpc-Retry-Pushback-Ms", strconv.Itoa(seconds*1000))
 	}
@@ -231,6 +233,39 @@ func grpcMessage(text string) string {
 	return b.String()
 }
 
+type grpcCallKey struct{}
+
+// grpcCall carries the gRPC status a call's response row records from the relay back to the row's writer.
+type grpcCall struct{ status int }
+
+func withGRPCCall(ctx context.Context, c *grpcCall) context.Context {
+	return context.WithValue(ctx, grpcCallKey{}, c)
+}
+
+func grpcCallFrom(ctx context.Context) *grpcCall {
+	c, _ := ctx.Value(grpcCallKey{}).(*grpcCall)
+	return c
+}
+
+func grpcCallFromResponse(resp *http.Response) *grpcCall {
+	if resp.Request == nil {
+		return nil
+	}
+	return grpcCallFrom(resp.Request.Context())
+}
+
+// grpcStatusRecord is the status a gRPC call's audit row names, or "" when none was sent or read: the call's own, else the one the broker sent for an HTTP error.
+func grpcStatusRecord(c *grpcCall, httpStatus int) string {
+	code := c.status
+	if code < 0 && httpStatus != http.StatusOK {
+		code = grpcStatusFor(httpStatus, false)
+	}
+	if code < 0 {
+		return ""
+	}
+	return strconv.Itoa(code)
+}
+
 // grpcCallStatus is the grpc-status a response ended with, or -1.
 func grpcCallStatus(resp *http.Response) int {
 	v := resp.Trailer.Get("Grpc-Status")
@@ -238,7 +273,7 @@ func grpcCallStatus(resp *http.Response) int {
 		v = resp.Header.Get("Grpc-Status")
 	}
 	code, err := strconv.Atoi(v)
-	if err != nil {
+	if err != nil || code < 0 || code > 16 {
 		return -1
 	}
 	return code

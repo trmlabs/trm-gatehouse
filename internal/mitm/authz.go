@@ -54,8 +54,11 @@ func (p *Proxy) requester(ctx context.Context, scope *brokercore.ProxyScope, poo
 	event.TokenSHA256, event.RequesterKind = who.TokenSHA256, who.Kind
 	event.Source, event.Automation, event.AutomationName, event.AutomationOwner = who.Source, who.Automation, who.AutomationName, who.AutomationOwner
 	event.Run, event.ParentRun = who.Run, who.ParentRun
-	if refusal == "" {
+	switch refusal {
+	case "":
 		event.Requester = who.Audited()
+	case "session_missing":
+		event.Decision = who.SessionGap
 	}
 	return who, refusal
 }

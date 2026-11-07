@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,12 @@ type Automation struct {
 	// Gumloop makes the block an agent proving itself with a Gumloop-signed ID token; it excludes tokenSHA256.
 	Gumloop *GumloopIdentity `json:"gumloop,omitempty"`
 
+	// SignedToken makes the block an agent proving itself with a token a signed-token harness accepts; it excludes tokenSHA256, gumloop and googleServiceAccount.
+	SignedToken *SignedTokenIdentity `json:"signedToken,omitempty"`
+
+	// GoogleServiceAccount makes the block an agent proving itself with a Google ID token; it excludes tokenSHA256, gumloop and signedToken.
+	GoogleServiceAccount *GoogleIdentity `json:"googleServiceAccount,omitempty"`
+
 	expires time.Time
 	hashes  [][32]byte // TokenSHA256 decoded once, at validation
 }
@@ -51,6 +58,19 @@ type Automation struct {
 type GumloopIdentity struct {
 	OrgID   string `json:"orgID"`
 	OwnerID string `json:"ownerID,omitempty"`
+}
+
+// SignedTokenIdentity names the signed-token harness and the subject claim value whose tokens are this Automation. Groups, optional, are the groups a token must carry at least one of.
+type SignedTokenIdentity struct {
+	Harness string   `json:"harness"`
+	Subject string   `json:"subject"`
+	Groups  []string `json:"groups,omitempty"`
+}
+
+// GoogleIdentity is a service account's email and the numeric unique ID a token's sub must equal.
+type GoogleIdentity struct {
+	Email    string `json:"email"`
+	UniqueID string `json:"uniqueID"`
 }
 
 // WriteList is an Automation's write list, and whether its block has the key.
@@ -110,9 +130,15 @@ func (a *Automation) validate() error {
 		return fmt.Errorf("subagents must be from 0 to %d", MaxSubagents)
 	}
 	if a.Subagents > 0 && a.HasOwnIdentity() {
-		return errors.New("subagents is for an Automation reached by a Cursor run token, not one with tokenSHA256 or gumloop")
+		return errors.New("subagents is for an Automation reached by a Cursor run token, not one with tokenSHA256, gumloop, googleServiceAccount or signedToken")
 	}
 	if err := a.validateGumloop(); err != nil {
+		return err
+	}
+	if err := a.validateSignedToken(); err != nil {
+		return err
+	}
+	if err := a.validateGoogle(); err != nil {
 		return err
 	}
 	slices.Sort(a.Write.Names)
@@ -135,6 +161,55 @@ func (a *Automation) validateGumloop() error {
 		return errors.New("gumloop.orgID, and gumloop.ownerID when set, must be short identifiers")
 	}
 	return nil
+}
+
+func (a *Automation) validateSignedToken() error {
+	s := a.SignedToken
+	if s == nil {
+		return nil
+	}
+	if a.HasToken() || a.Gumloop != nil || a.GoogleServiceAccount != nil {
+		return errors.New("signedToken, gumloop and tokenSHA256 are three ways to prove one identity: a block has one")
+	}
+	if !idPattern.MatchString(s.Harness) || s.Subject == "" || len(s.Subject) > 256 || !plainClaimValue(s.Subject) {
+		return errors.New("signedToken.harness must be a harness name and signedToken.subject a plain value")
+	}
+	seen := map[string]bool{}
+	for _, g := range s.Groups {
+		if g == "" || len(g) > 256 || !plainClaimValue(g) || seen[g] {
+			return fmt.Errorf("signedToken group %q is invalid or repeated", g)
+		}
+		seen[g] = true
+	}
+	return nil
+}
+
+// googleEmail is a lower-case service account email: user-managed, the default Compute Engine one, or the App Engine one.
+var googleEmail = regexp.MustCompile(`^([a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam|[0-9]{1,20}-compute@developer|[a-z][a-z0-9-]{4,28}[a-z0-9]@appspot)\.gserviceaccount\.com$`)
+
+// googleUniqueID is a service account's numeric unique ID.
+var googleUniqueID = regexp.MustCompile(`^[0-9]{10,25}$`)
+
+func (a *Automation) validateGoogle() error {
+	g := a.GoogleServiceAccount
+	if g == nil {
+		return nil
+	}
+	if a.HasToken() || a.Gumloop != nil || a.SignedToken != nil {
+		return errors.New("googleServiceAccount, tokenSHA256 and gumloop are ways to prove one identity: a block has one")
+	}
+	if !googleEmail.MatchString(g.Email) || !googleUniqueID.MatchString(g.UniqueID) {
+		return errors.New("googleServiceAccount.email must be a lower-case service account email and googleServiceAccount.uniqueID its numeric unique ID")
+	}
+	if !idPattern.MatchString(a.Owner) {
+		return errors.New("owner of a block with googleServiceAccount must name a team, not an email address")
+	}
+	return nil
+}
+
+// plainClaimValue matches what the verifier accepts from a claim: no space, quote, backslash or control character.
+func plainClaimValue(s string) bool {
+	return !strings.ContainsAny(s, " \"\\") && !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 var tokenHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -198,8 +273,10 @@ var tokenClock = time.Now
 
 func (a Automation) HasToken() bool { return len(a.TokenSHA256) > 0 }
 
-// HasOwnIdentity is true for a static token or Gumloop ID token block, so no Cursor run token may name its id.
-func (a Automation) HasOwnIdentity() bool { return a.HasToken() || a.Gumloop != nil }
+// HasOwnIdentity is true for a static token, Gumloop, Google or signed-token block, so no Cursor run token may name its id.
+func (a Automation) HasOwnIdentity() bool {
+	return a.HasToken() || a.Gumloop != nil || a.GoogleServiceAccount != nil || a.SignedToken != nil
+}
 
 // TokenExpires is when the block's token stops being accepted, or the zero
 // time for none.
@@ -249,7 +326,8 @@ func (a Automation) Writes(entry string) bool {
 
 func indexAutomations(list []Automation, entries map[string]string) (map[string]Automation, error) {
 	index := make(map[string]Automation, len(list))
-	claimed := map[string]string{} // gumloop org and owner: automation id
+	claimed := map[string]string{}       // gumloop org and owner: automation id
+	claimedGoogle := map[string]string{} // google service account unique ID and email: automation id
 	for i := range list {
 		a := &list[i]
 		if err := a.validate(); err != nil {
@@ -273,9 +351,49 @@ func indexAutomations(list []Automation, entries map[string]string) (map[string]
 			}
 			claimed[key] = a.ID
 		}
+		if g := a.GoogleServiceAccount; g != nil {
+			for _, key := range []string{"id\x00" + g.UniqueID, "email\x00" + g.Email} {
+				if other, ok := claimedGoogle[key]; ok {
+					return nil, fmt.Errorf("automations %q and %q name the same google service account", other, a.ID)
+				}
+				claimedGoogle[key] = a.ID
+			}
+		}
 		index[a.ID] = *a
 	}
 	return index, nil
+}
+
+// indexSignedAgents maps each signed-token block's harness and subject to its id, and refuses a block that names no signed-token harness or shares a subject with another.
+func indexSignedAgents(automations map[string]Automation, harnesses []Harness) (map[string]string, error) {
+	signed := map[string]bool{}
+	hasGroupsClaim := map[string]bool{}
+	for _, h := range harnesses {
+		if h.Identity.Kind == IdentitySignedToken {
+			signed[h.Name] = true
+			hasGroupsClaim[h.Name] = h.Identity.Token != nil && h.Identity.Token.GroupsClaim != ""
+		}
+	}
+	out := map[string]string{}
+	for id, a := range automations {
+		s := a.SignedToken
+		if s == nil {
+			continue
+		}
+		if !signed[s.Harness] {
+			return nil, fmt.Errorf("automation %q names signed-token harness %q, which is not declared", id, s.Harness)
+		}
+		if len(s.Groups) > 0 && !hasGroupsClaim[s.Harness] {
+			return nil, fmt.Errorf("automation %q lists signedToken groups but harness %q has no groupsClaim", id, s.Harness)
+		}
+		key := s.Harness + "\x00" + s.Subject
+		if other, ok := out[key]; ok {
+			a, b := min(id, other), max(id, other)
+			return nil, fmt.Errorf("automations %q and %q name the same signedToken harness and subject", a, b)
+		}
+		out[key] = id
+	}
+	return out, nil
 }
 
 func automationName(id string, i int) string {
